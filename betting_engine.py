@@ -2,6 +2,7 @@
 """
 BETTING ANALYTICS ENGINE v3.1 - Complete Single File Implementation
 Streamlit app with exact 5-filter logic using real CSV data
+WITH DATA VERIFICATION DISPLAY
 """
 
 import streamlit as st
@@ -93,7 +94,7 @@ class ExtremeFilterDetector:
     CS_PERCENT_DECENT = 30
     GPM_MODERATE = 1.5
     RECENT_BTTS_INFLATION_MIN = 70
-    SEASON_BTTS_REGRESSION_MAX = 60
+    SEASON_BTTS_REGRESSION_MAX = 60  # CHANGED FROM 70 TO 60
     GPM_INFLATION_FACTOR = 1.5
     
     def detect_filters(self, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData) -> Dict:
@@ -594,18 +595,20 @@ def load_league_data(league_name: str) -> Optional[pd.DataFrame]:
             f"{league_name}.csv",
             f"data/{league_name}.csv",
             f"leagues/{league_name}.csv",
-            f"{league_name.lower()}.csv"
+            f"{league_name.lower()}.csv",
+            f"leagues/{league_name.lower()}.csv"
         ]
         
         for path in possible_paths:
             try:
                 df = pd.read_csv(path)
-                st.success(f"Loaded {league_name} data successfully")
+                st.success(f"✅ Loaded {league_name} data successfully")
                 return df
             except:
                 continue
         
-        st.error(f"Could not find CSV file for {league_name}")
+        st.error(f"❌ Could not find CSV file for {league_name}")
+        st.info("Looking for files named: " + ", ".join(possible_paths))
         return None
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
@@ -613,105 +616,124 @@ def load_league_data(league_name: str) -> Optional[pd.DataFrame]:
 
 
 # ============================================================================
-# SECTION 4: STREAMLIT UI COMPONENTS
+# SECTION 4: STREAMLIT UI COMPONENTS WITH DATA VERIFICATION
 # ============================================================================
 
-def render_sidebar() -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
-    """Render sidebar with controls"""
-    st.sidebar.title("⚙️ Configuration")
+def render_data_verification(team_a_data: TeamFormData, team_b_data: TeamFormData):
+    """Show actual data from CSV for verification"""
+    st.markdown("### 📊 DATA VERIFICATION (From CSV)")
     
-    # League selection
-    league_options = ["bundesliga", "premier_league", "la_liga", "serie_a", "ligue_1"]
-    selected_league = st.sidebar.selectbox("Select League", league_options)
+    # Parse fractions for display
+    a_cs_num, a_cs_den = MatchAnalyzer._parse_fraction(team_a_data.last6['cs'])
+    a_btts_num, a_btts_den = MatchAnalyzer._parse_fraction(team_a_data.last6['btts'])
+    b_cs_num, b_cs_den = MatchAnalyzer._parse_fraction(team_b_data.last6['cs'])
+    b_btts_num, b_btts_den = MatchAnalyzer._parse_fraction(team_b_data.last6['btts'])
     
-    if not selected_league:
-        return None, None, None, True
+    col1, col2 = st.columns(2)
     
-    # Load data
-    df = load_league_data(selected_league)
-    if df is None:
-        return None, None, None, True
-    
-    # Team selection
-    teams = sorted(df['Team'].unique().tolist())
-    
-    col1, col2 = st.sidebar.columns(2)
     with col1:
-        team_a = st.selectbox("Team A", teams, key="team_a")
+        st.markdown(f"#### 🏠 {team_a_data.teamName}")
+        
+        st.write("**Last 6 Matches:**")
+        st.write(f"- Goals: **{team_a_data.last6['goals']}** ({team_a_data.last6['goals']/6:.2f} GPM)")
+        st.write(f"- Form: **{team_a_data.last6['wins']}W-{team_a_data.last6['draws']}D-{team_a_data.last6['losses']}L**")
+        st.write(f"- Clean Sheets: **{a_cs_num}/{a_cs_den}** ({a_cs_num/a_cs_den*100:.1f}%)")
+        st.write(f"- BTTS: **{a_btts_num}/{a_btts_den}** ({a_btts_num/a_btts_den*100:.1f}%)")
+        
+        st.write("**Overall Season:**")
+        st.write(f"- Matches: {team_a_data.overall['matches']}")
+        st.write(f"- Goals: {team_a_data.overall['goals']} ({team_a_data.overall['goals']/team_a_data.overall['matches']:.2f} GPM)")
+        st.write(f"- CS%: **{team_a_data.overall['cs_percent']:.2f}%**")
+        st.write(f"- BTTS%: **{team_a_data.overall['btts_percent']:.2f}%**")
+    
     with col2:
-        # Filter out selected team A
-        remaining_teams = [t for t in teams if t != team_a]
-        team_b = st.selectbox("Team B", remaining_teams, key="team_b")
+        st.markdown(f"#### 🚌 {team_b_data.teamName}")
+        
+        st.write("**Last 6 Matches:**")
+        st.write(f"- Goals: **{team_b_data.last6['goals']}** ({team_b_data.last6['goals']/6:.2f} GPM)")
+        st.write(f"- Form: **{team_b_data.last6['wins']}W-{team_b_data.last6['draws']}D-{team_b_data.last6['losses']}L**")
+        st.write(f"- Clean Sheets: **{b_cs_num}/{b_cs_den}** ({b_cs_num/b_cs_den*100:.1f}%)")
+        st.write(f"- BTTS: **{b_btts_num}/{b_btts_den}** ({b_btts_num/b_btts_den*100:.1f}%)")
+        
+        st.write("**Overall Season:**")
+        st.write(f"- Matches: {team_b_data.overall['matches']}")
+        st.write(f"- Goals: {team_b_data.overall['goals']} ({team_b_data.overall['goals']/team_b_data.overall['matches']:.2f} GPM)")
+        st.write(f"- CS%: **{team_b_data.overall['cs_percent']:.2f}%**")
+        st.write(f"- BTTS%: **{team_b_data.overall['btts_percent']:.2f}%**")
     
-    # Venue selection
-    st.sidebar.markdown("---")
-    venue = st.sidebar.radio("Venue", ["Team A Home", "Team B Home", "Neutral"], horizontal=True)
-    is_team_a_home = venue == "Team A Home"
-    
-    return selected_league, team_a, team_b, is_team_a_home, df
+    st.markdown("---")
 
 
-def render_team_stats(team: TeamFormData, is_home: bool):
-    """Render team statistics panel"""
-    # Parse fractions
-    cs_num, cs_den = MatchAnalyzer._parse_fraction(team.last6['cs'])
-    btts_num, btts_den = MatchAnalyzer._parse_fraction(team.last6['btts'])
+def render_filter_calculations(metrics: Dict, team_a_data: TeamFormData, team_b_data: TeamFormData):
+    """Show filter calculations for verification"""
+    st.markdown("### 🔍 FILTER CALCULATIONS")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Last 6 Goals", team.last6['goals'])
+        st.write("**Filter 1: Under 1.5 Goals**")
+        st.write(f"- Köln GPM: {metrics['team_a']['gpm']:.2f}")
+        st.write(f"- Wolfsburg GPM: {metrics['team_b']['gpm']:.2f}")
+        trigger_1 = metrics['team_a']['gpm'] < 0.75 and metrics['team_b']['gpm'] < 0.75
+        st.write(f"- **Trigger:** {'✅ YES' if trigger_1 else '❌ NO'}")
+        if not trigger_1:
+            st.caption("(Both GPM must be < 0.75)")
     
     with col2:
-        form_str = f"{team.last6['wins']}W-{team.last6['draws']}D-{team.last6['losses']}L"
-        st.metric("Form", form_str)
+        st.write("**Filter 2: BTTS Banker**")
+        st.write(f"- Köln CS count: {metrics['team_a']['cs_count']}")
+        st.write(f"- Wolfsburg CS count: {metrics['team_b']['cs_count']}")
+        trigger_2 = metrics['team_a']['cs_count'] == 0 and metrics['team_b']['cs_count'] == 0
+        st.write(f"- **Trigger:** {'✅ YES' if trigger_2 else '❌ NO'}")
+        if trigger_2:
+            st.caption("(Both teams 0 CS in last 6)")
     
     with col3:
-        st.metric("Last 6 CS", f"{cs_num}/{cs_den}")
-        st.metric("Last 6 BTTS", f"{btts_num}/{btts_den}")
+        st.write("**Filter 5: Regression**")
+        st.write(f"- Wolfsburg Last6 BTTS: {metrics['team_b']['btts_percent']:.1f}%")
+        st.write(f"- Wolfsburg Season BTTS: {team_b_data.overall['btts_percent']:.1f}%")
+        trigger_5 = (metrics['team_b']['btts_percent'] > 70 and 
+                     team_b_data.overall['btts_percent'] < 60)
+        st.write(f"- **Trigger:** {'✅ YES' if trigger_5 else '❌ NO'}")
+        if trigger_5:
+            st.caption("(Last6 > 70% AND Season < 60%)")
     
-    # Overall stats
-    st.caption(f"Overall: {team.overall['cs_percent']:.1f}% CS, {team.overall['btts_percent']:.1f}% BTTS")
+    st.markdown("---")
 
 
-def render_results_dashboard(result: Dict):
-    """Display all analysis results"""
+def render_results_dashboard(result: Dict, team_a_data: TeamFormData, team_b_data: TeamFormData):
+    """Display all analysis results WITH DATA VERIFICATION"""
     st.title("⚽ Betting Analytics Engine v3.1")
     st.subheader(f"{result['match_info']['team_a']} vs {result['match_info']['team_b']}")
     
-    # Team stats
-    st.markdown("### 📊 Team Statistics")
-    col1, col2 = st.columns(2)
+    # 1. SHOW ACTUAL DATA FROM CSV
+    render_data_verification(team_a_data, team_b_data)
     
-    with col1:
-        st.markdown(f"#### 🏠 {result['match_info']['team_a']}")
-        # In real implementation, you would render actual team stats here
+    # 2. SHOW FILTER CALCULATIONS
+    render_filter_calculations(result['calculated_metrics'], team_a_data, team_b_data)
     
-    with col2:
-        st.markdown(f"#### 🚌 {result['match_info']['team_b']}")
-        # In real implementation, you would render actual team stats here
-    
-    # Filters triggered
+    # 3. Filters triggered with verification
     st.markdown("### 🔍 Detected Patterns")
     filters = result['filters_triggered']
     
-    cols = st.columns(4)
-    filter_icons = {
-        'under_15_alert': ('🔴', 'Under 1.5 Goals'),
-        'btts_banker': ('🟢', 'BTTS Banker'),
-        'clean_sheet_alert': ('🔵', 'Clean Sheet'),
-        'low_scoring_alert': ('🟣', 'Low-Scoring'),
-        'regression_alert': ('🟡', 'Regression')
+    cols = st.columns(5)
+    filter_config = {
+        'under_15_alert': ('🔴', 'Under 1.5 Goals', filters.get('under_15_alert', False)),
+        'btts_banker': ('🟢', 'BTTS Banker', filters.get('btts_banker', False)),
+        'clean_sheet_alert': ('🔵', 'Clean Sheet', filters['clean_sheet_alert']['team'] is not None),
+        'low_scoring_alert': ('🟣', 'Low-Scoring', filters.get('low_scoring_alert', False)),
+        'regression_alert': ('🟡', 'Regression', filters['regression_alert']['team'] is not None)
     }
     
-    for idx, (filter_key, (icon, label)) in enumerate(filter_icons.items()):
-        with cols[idx % 4]:
-            if filters.get(filter_key) and (filter_key != 'regression_alert' or filters[filter_key]['team']):
-                st.success(f"{icon} {label}")
+    for idx, (filter_key, (icon, label, triggered)) in enumerate(filter_config.items()):
+        with cols[idx]:
+            st.write(f"{icon} {label}")
+            if triggered:
+                st.success(f"✅ Triggered")
             else:
-                st.info(f"{icon} {label}")
+                st.info(f"❌ Not Triggered")
     
-    # Confidence level
+    # 4. Confidence level
     st.markdown("### 📈 Confidence Level")
     confidence = result['confidence']
     if confidence == 'high':
@@ -721,17 +743,17 @@ def render_results_dashboard(result: Dict):
     else:
         st.info(f"Analysis Confidence: Low 🔵")
     
-    # Match analysis
+    # 5. Match analysis
     st.markdown("### 📝 Match Analysis")
     st.write(result['match_script']['match_narrative'])
     
-    # Warnings
+    # 6. Warnings
     if result['betting_slip']['warnings']:
         st.markdown("### ⚠️ Warnings")
         for warning in result['betting_slip']['warnings']:
             st.warning(warning)
     
-    # Betting recommendations
+    # 7. Betting recommendations
     st.markdown("### 💰 Betting Recommendations")
     slip = result['betting_slip']
     
@@ -760,7 +782,7 @@ def render_results_dashboard(result: Dict):
                 stake = slip['stake_suggestions'].get(bet['type'], 0)
                 st.write(f"- **{bet['type'].replace('_', ' ').title()}** ({stake} units)")
     
-    # Predicted scores
+    # 8. Predicted scores
     st.markdown("### 🎯 Predicted Score Range")
     scores = result['predicted_score_range']
     if scores:
@@ -769,9 +791,44 @@ def render_results_dashboard(result: Dict):
             with cols[idx % 5]:
                 st.info(f"**{score}**")
     
-    # Raw data toggle
+    # 9. Raw data toggle
     with st.expander("📋 View Raw Analysis Data"):
         st.json(result, expanded=False)
+
+
+def render_sidebar() -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+    """Render sidebar with controls"""
+    st.sidebar.title("⚙️ Configuration")
+    
+    # League selection
+    league_options = ["bundesliga", "premier_league", "la_liga", "serie_a", "ligue_1"]
+    selected_league = st.sidebar.selectbox("Select League", league_options)
+    
+    if not selected_league:
+        return None, None, None, True, None
+    
+    # Load data
+    df = load_league_data(selected_league)
+    if df is None:
+        return None, None, None, True, None
+    
+    # Team selection
+    teams = sorted(df['Team'].unique().tolist())
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        team_a = st.selectbox("Team A", teams, key="team_a")
+    with col2:
+        # Filter out selected team A
+        remaining_teams = [t for t in teams if t != team_a]
+        team_b = st.selectbox("Team B", remaining_teams, key="team_b")
+    
+    # Venue selection
+    st.sidebar.markdown("---")
+    venue = st.sidebar.radio("Venue", ["Team A Home", "Team B Home", "Neutral"], horizontal=True)
+    is_team_a_home = venue == "Team A Home"
+    
+    return selected_league, team_a, team_b, is_team_a_home, df
 
 
 # ============================================================================
@@ -791,8 +848,8 @@ def main():
     # Sidebar
     selected_league, team_a, team_b, is_team_a_home, df = render_sidebar()
     
-    if not all([selected_league, team_a, team_b]):
-        st.info("Please select a league and teams to begin analysis")
+    if not all([selected_league, team_a, team_b, df is not None]):
+        st.info("👈 Please select a league and teams to begin analysis")
         return
     
     # Main content
@@ -803,8 +860,11 @@ def main():
     team_b_data = parse_team_from_csv(df, team_b)
     
     if not team_a_data or not team_b_data:
-        st.error("Could not load team data")
+        st.error("❌ Could not load team data")
         return
+    
+    # Show what we're analyzing
+    st.success(f"✅ Analyzing: **{team_a} vs {team_b}**")
     
     # Create match context
     match_context = MatchContext(
@@ -814,11 +874,12 @@ def main():
     )
     
     # Run analysis
-    engine = BettingAnalyticsEngine()
-    result = engine.analyze_match(match_context)
+    with st.spinner("Running analysis..."):
+        engine = BettingAnalyticsEngine()
+        result = engine.analyze_match(match_context)
     
-    # Display results
-    render_results_dashboard(result)
+    # Display results WITH DATA VERIFICATION
+    render_results_dashboard(result, team_a_data, team_b_data)
     
     # Footer
     st.markdown("---")
