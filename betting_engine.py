@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-BETTING ANALYTICS ENGINE v4.2 - FIXED Low-scoring Filter
-Fixed the Low-scoring filter to be MUCH stricter and more accurate
+BETTING ANALYTICS ENGINE v4.3 - RISK-AWARE CLEAN SHEET FIX
+Fixed the Clean Sheet filter to avoid risky bets on high-scoring favorites
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ class MatchContext:
     isTeamAHome: bool = True
 
 # ============================================================================
-# ENGINE CORE CLASSES WITH FIXED LOW-SCORING FILTER
+# ENGINE CORE CLASSES WITH RISK-AWARE CLEAN SHEET FIX
 # ============================================================================
 
 class DataLoader:
@@ -91,7 +91,8 @@ class MatchAnalyzer:
                 'win_percent': (team_a.last6['wins'] / 6) * 100,
                 'loss_percent': (team_a.last6['losses'] / 6) * 100,
                 'season_gpm': a_season_gpm,
-                'scoring_momentum': a_momentum
+                'scoring_momentum': a_momentum,
+                'btts_rate': a_btts_num / 6 if a_btts_den > 0 else 0
             },
             'team_b': {
                 'gpm': team_b.last6['goals'] / 6,
@@ -102,7 +103,8 @@ class MatchAnalyzer:
                 'win_percent': (team_b.last6['wins'] / 6) * 100,
                 'loss_percent': (team_b.last6['losses'] / 6) * 100,
                 'season_gpm': b_season_gpm,
-                'scoring_momentum': b_momentum
+                'scoring_momentum': b_momentum,
+                'btts_rate': b_btts_num / 6 if b_btts_den > 0 else 0
             },
             'averages': {
                 'avg_gpm': (team_a.last6['goals']/6 + team_b.last6['goals']/6) / 2,
@@ -121,8 +123,8 @@ class MatchAnalyzer:
             return int(num.strip()), int(den.strip())
         return 0, 6
 
-class FixedExtremeFilterDetector:
-    """Detect all 5 extreme filters with FIXED Low-scoring filter"""
+class RiskAwareExtremeFilterDetector:
+    """Detect all 5 extreme filters with RISK-AWARE Clean Sheet fix"""
     
     def __init__(self):
         # Filter thresholds
@@ -146,14 +148,18 @@ class FixedExtremeFilterDetector:
         self.LOW_SCORING_GPM_MAX = 1.0  # WAS 1.5 - NOW STRICTER
         self.LOW_SCORING_BTTS_MAX = 50  # Combined BTTS% maximum
         self.LOW_SCORING_INDIVIDUAL_GPM_MAX = 1.2  # No single team > 1.2 GPM
+        
+        # v4.3: RISK-AWARE Clean Sheet thresholds
+        self.HIGH_SCORING_FAVORITE_GPM = 2.0  # Teams scoring >2.0 GPM are risky for clean sheets
+        self.OPPONENT_BTTS_RISK_THRESHOLD = 0.33  # Opponent scoring in >33.3% of matches
     
     def detect_filters(self, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData, league: str) -> Dict:
-        """Detect which extreme filters are triggered with FIXED Low-scoring"""
+        """Detect which extreme filters are triggered with RISK-AWARE Clean Sheet"""
         filters = {
             'under_15_alert': False,
             'btts_banker': False,
             'btts_enhanced': False,
-            'clean_sheet_alert': {'team': None, 'direction': None, 'strength': None},
+            'clean_sheet_alert': {'team': None, 'direction': None, 'strength': None, 'risk_level': 'low'},
             'low_scoring_alert': False,
             'low_scoring_type': None,
             'regression_alert': {'warnings': [], 'defensive_improvements': [], 'scoring_declines': []}
@@ -167,8 +173,8 @@ class FixedExtremeFilterDetector:
         # FILTER 2: BTTS Banker Alert with league-specific thresholds
         filters = self._detect_btts_banker(filters, metrics, league)
         
-        # FILTER 3: Clean Sheet Alert (100% success - enhanced sensitivity)
-        filters = self._detect_clean_sheet(filters, metrics, team_a, team_b)
+        # FILTER 3: Clean Sheet Alert - v4.3 RISK-AWARE version
+        filters = self._detect_clean_sheet_risk_aware(filters, metrics, team_a, team_b)
         
         # FILTER 4: Low-Scoring Alert - FIXED VERSION
         filters = self._detect_low_scoring_fixed(filters, metrics)
@@ -198,27 +204,62 @@ class FixedExtremeFilterDetector:
         
         return filters
     
-    def _detect_clean_sheet(self, filters: Dict, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData) -> Dict:
-        """Detect Clean Sheet opportunities"""
+    def _detect_clean_sheet_risk_aware(self, filters: Dict, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData) -> Dict:
+        """v4.3: Detect Clean Sheet opportunities with RISK ASSESSMENT"""
+        # Check Team A clean sheet opportunity
         a_has_cs_strength = (team_a.overall['cs_percent'] > self.CS_PERCENT_STRONG or 
                             metrics['team_a']['cs_count'] >= 2)
+        
+        # Check Team B clean sheet opportunity
         b_has_cs_strength = (team_b.overall['cs_percent'] > self.CS_PERCENT_STRONG or 
                             metrics['team_b']['cs_count'] >= 2)
         
+        # Team A clean sheet opportunity
         if a_has_cs_strength and metrics['team_b']['gpm'] < self.OPPONENT_GPM_WEAK:
+            risk_level = self._assess_clean_sheet_risk(
+                metrics['team_a']['gpm'],  # Team A's scoring rate
+                metrics['team_b']['btts_rate'],  # Team B's scoring frequency
+                metrics['team_a']['btts_rate']  # Team A's conceding frequency
+            )
+            
             filters['clean_sheet_alert'] = {
                 'team': 'A', 
                 'direction': 'win_to_nil',
-                'strength': 'strong' if team_a.overall['cs_percent'] > 50 or metrics['team_a']['cs_count'] >= 3 else 'moderate'
+                'strength': 'strong' if team_a.overall['cs_percent'] > 50 or metrics['team_a']['cs_count'] >= 3 else 'moderate',
+                'risk_level': risk_level
             }
-        elif b_has_cs_strength and metrics['team_a']['gpm'] < self.OPPONENT_GPM_WEAK:
+        
+        # Team B clean sheet opportunity (only if Team A not already triggered)
+        elif b_has_cs_strength and metrics['team_a']['gpm'] < self.OPPONENT_GPM_WEAK and filters['clean_sheet_alert']['team'] is None:
+            risk_level = self._assess_clean_sheet_risk(
+                metrics['team_b']['gpm'],  # Team B's scoring rate
+                metrics['team_a']['btts_rate'],  # Team A's scoring frequency
+                metrics['team_b']['btts_rate']  # Team B's conceding frequency
+            )
+            
             filters['clean_sheet_alert'] = {
                 'team': 'B', 
                 'direction': 'win_to_nil',
-                'strength': 'strong' if team_b.overall['cs_percent'] > 50 or metrics['team_b']['cs_count'] >= 3 else 'moderate'
+                'strength': 'strong' if team_b.overall['cs_percent'] > 50 or metrics['team_b']['cs_count'] >= 3 else 'moderate',
+                'risk_level': risk_level
             }
         
         return filters
+    
+    def _assess_clean_sheet_risk(self, favorite_gpm: float, opponent_btts_rate: float, favorite_btts_rate: float) -> str:
+        """v4.3: Assess risk level for clean sheet bets"""
+        # HIGH RISK: Favorite scores a lot AND opponent still scores often
+        if (favorite_gpm > self.HIGH_SCORING_FAVORITE_GPM and 
+            opponent_btts_rate > self.OPPONENT_BTTS_RISK_THRESHOLD):
+            return 'high'
+        
+        # MEDIUM RISK: Favorite scores a lot BUT opponent rarely scores
+        elif favorite_gpm > self.HIGH_SCORING_FAVORITE_GPM:
+            return 'medium'
+        
+        # LOW RISK: Favorite doesn't score too much
+        else:
+            return 'low'
     
     def _detect_low_scoring_fixed(self, filters: Dict, metrics: Dict) -> Dict:
         """FIXED: Detect TRUE low-scoring patterns (much stricter)"""
@@ -399,15 +440,15 @@ class CurrentFormAnalyzer:
             
         return analysis
 
-class MatchScriptGenerator:
-    """Generate match script with FIXED Low-scoring filter"""
+class RiskAwareScriptGenerator:
+    """Generate match script with RISK-AWARE Clean Sheet handling"""
     
     def __init__(self, team_a_name: str, team_b_name: str):
         self.team_a_name = team_a_name
         self.team_b_name = team_b_name
     
     def generate_script(self, metrics: Dict, filters: Dict, form_analysis: Dict, is_team_a_home: bool) -> Dict:
-        """Generate complete match script with FIXED Low-scoring"""
+        """Generate complete match script with RISK-AWARE Clean Sheet"""
         script = {
             'primary_bets': [],
             'secondary_bets': [],
@@ -418,7 +459,8 @@ class MatchScriptGenerator:
             'match_narrative': '',
             'warnings': [],
             'triggered_filter': None,
-            'warning_adjustments': {'applied': False, 'changes': []}
+            'warning_adjustments': {'applied': False, 'changes': []},
+            'risk_assessment': {'clean_sheet_risk': None, 'adjusted_bets': False}
         }
         
         # Apply warning adjustments
@@ -429,7 +471,7 @@ class MatchScriptGenerator:
             ('under_15_alert', 1),
             ('btts_banker', 2),
             ('clean_sheet_alert', 3),
-            ('low_scoring_alert', 4)  # Now much more reliable
+            ('low_scoring_alert', 4)
         ]
         
         triggered_filters = []
@@ -453,15 +495,15 @@ class MatchScriptGenerator:
             elif primary_filter == 'btts_banker':
                 script = self._generate_btts_banker_script(script, metrics, filters)
             elif primary_filter == 'clean_sheet_alert':
-                script = self._generate_clean_sheet_script(script, filters)
+                script = self._generate_clean_sheet_script_risk_aware(script, metrics, filters)
             elif primary_filter == 'low_scoring_alert':
                 script = self._generate_low_scoring_script_fixed(script, metrics, filters)
             
             confidence_scores = {
                 'under_15_alert': 95,
                 'btts_banker': 85,
-                'clean_sheet_alert': 85 if filters['clean_sheet_alert']['strength'] == 'strong' else 75,
-                'low_scoring_alert': 90  # HIGHER confidence now - more reliable
+                'clean_sheet_alert': self._get_clean_sheet_confidence(filters),
+                'low_scoring_alert': 90
             }
             script['confidence_score'] = confidence_scores.get(primary_filter, 70)
         
@@ -477,6 +519,67 @@ class MatchScriptGenerator:
             script['confidence_level'] = 'medium'
         else:
             script['confidence_level'] = 'low'
+        
+        return script
+    
+    def _get_clean_sheet_confidence(self, filters: Dict) -> int:
+        """Get confidence score based on clean sheet risk level"""
+        base_confidence = 85 if filters['clean_sheet_alert']['strength'] == 'strong' else 75
+        risk_level = filters['clean_sheet_alert'].get('risk_level', 'low')
+        
+        # Adjust confidence based on risk
+        if risk_level == 'high':
+            return max(60, base_confidence - 25)  # Significant reduction for high risk
+        elif risk_level == 'medium':
+            return max(70, base_confidence - 15)  # Moderate reduction
+        else:
+            return base_confidence  # No reduction for low risk
+    
+    def _generate_clean_sheet_script_risk_aware(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
+        """v4.3: Generate script for Clean Sheet with RISK AWARENESS"""
+        team = filters['clean_sheet_alert']['team']
+        team_name = self.team_a_name if team == 'A' else self.team_b_name
+        risk_level = filters['clean_sheet_alert'].get('risk_level', 'low')
+        strength = filters['clean_sheet_alert']['strength']
+        
+        # Clean sheet bet based on strength
+        if strength == 'strong':
+            clean_sheet_bet = f'{team_name.lower().replace(" ", "_")}_win_to_nil'
+        else:
+            clean_sheet_bet = f'{team_name.lower().replace(" ", "_")}_to_keep_clean_sheet'
+        
+        # v4.3 RISK-AWARE DECISION
+        if risk_level == 'high':
+            # HIGH RISK: Favorite scores a lot AND opponent scores often
+            # Make BTTS/Over primary, clean sheet secondary
+            script['primary_bets'].append('btts_yes')
+            script['primary_bets'].append('over_25_goals')
+            script['secondary_bets'].append(clean_sheet_bet)
+            script['risk_assessment']['clean_sheet_risk'] = 'high'
+            script['risk_assessment']['adjusted_bets'] = True
+            script['match_narrative'] = f'{team_name} strong defense but HIGH RISK clean sheet - both teams likely to score'
+            
+        elif risk_level == 'medium':
+            # MEDIUM RISK: Favorite scores a lot BUT opponent rarely scores
+            # Keep clean sheet primary but reduce confidence
+            script['primary_bets'].append(clean_sheet_bet)
+            script['secondary_bets'].append('btts_no')
+            script['risk_assessment']['clean_sheet_risk'] = 'medium'
+            script['match_narrative'] = f'{team_name} strong defense against weak attack (moderate risk)'
+            
+        else:
+            # LOW RISK: Favorite doesn't score too much
+            # Normal clean sheet bet
+            script['primary_bets'].append(clean_sheet_bet)
+            script['secondary_bets'].append('under_25_goals')
+            script['risk_assessment']['clean_sheet_risk'] = 'low'
+            script['match_narrative'] = f'{team_name} strong defense against weak attack'
+        
+        # Add score predictions based on team
+        if team == 'A':
+            script['predicted_score_range'] = ['1-0', '2-0', '0-0', '3-0']
+        else:
+            script['predicted_score_range'] = ['0-1', '0-2', '0-0', '0-3']
         
         return script
     
@@ -566,25 +669,6 @@ class MatchScriptGenerator:
         else:
             script['predicted_score_range'] = ['1-1', '2-1', '1-2', '2-2']
         
-        return script
-    
-    def _generate_clean_sheet_script(self, script: Dict, filters: Dict) -> Dict:
-        team = filters['clean_sheet_alert']['team']
-        team_name = self.team_a_name if team == 'A' else self.team_b_name
-        
-        if filters['clean_sheet_alert']['strength'] == 'strong':
-            script['primary_bets'].append(f'{team_name.lower().replace(" ", "_")}_win_to_nil')
-        else:
-            script['primary_bets'].append(f'{team_name.lower().replace(" ", "_")}_to_keep_clean_sheet')
-        
-        script['secondary_bets'].append('under_25_goals')
-        
-        if team == 'A':
-            script['predicted_score_range'] = ['1-0', '2-0', '0-0', '3-0']
-        else:
-            script['predicted_score_range'] = ['0-1', '0-2', '0-0', '0-3']
-        
-        script['match_narrative'] = f'{team_name} strong defense against weak attack'
         return script
     
     def _generate_form_based_script(self, script: Dict, metrics: Dict, form_analysis: Dict) -> Dict:
@@ -689,7 +773,8 @@ class BettingSlipGenerator:
             'warnings': script.get('warnings', []),
             'warning_adjustments': script.get('warning_adjustments', {}),
             'confidence': script.get('confidence_level', 'low'),
-            'confidence_score': script.get('confidence_score', 50)
+            'confidence_score': script.get('confidence_score', 50),
+            'risk_assessment': script.get('risk_assessment', {})
         }
         
         if script['confidence_score'] < self.config['min_confidence_score']:
@@ -757,6 +842,11 @@ class BettingSlipGenerator:
                         if 'win' in bet['type'].lower():
                             adjusted_stake *= 0.7
                 
+                # v4.3: Additional risk adjustment for high-risk clean sheets
+                risk_assessment = script.get('risk_assessment', {})
+                if risk_assessment.get('clean_sheet_risk') == 'high' and 'clean' in bet['type'].lower():
+                    adjusted_stake *= 0.5  # Halve stake for high-risk clean sheets
+                
                 slip['stake_suggestions'][bet['type']] = round(adjusted_stake, 1)
         
         if script['predicted_score_range']:
@@ -769,18 +859,18 @@ class BettingSlipGenerator:
 # ============================================================================
 
 class BettingAnalyticsEngine:
-    """Main orchestrator with FIXED Low-scoring filter"""
+    """Main orchestrator with RISK-AWARE Clean Sheet fix"""
     
     def __init__(self):
         self.data_loader = DataLoader()
         self.metrics_calc = MatchAnalyzer()
-        self.filter_detector = FixedExtremeFilterDetector()
+        self.filter_detector = RiskAwareExtremeFilterDetector()
         self.form_analyzer = CurrentFormAnalyzer()
         self.script_generator = None
         self.slip_generator = BettingSlipGenerator()
     
     def analyze_match(self, match_context: MatchContext, league: str) -> Dict:
-        self.script_generator = MatchScriptGenerator(
+        self.script_generator = RiskAwareScriptGenerator(
             match_context.teamA.teamName, 
             match_context.teamB.teamName
         )
@@ -830,7 +920,8 @@ class BettingAnalyticsEngine:
             'predicted_score_range': script['predicted_score_range'],
             'confidence': script['confidence_level'],
             'confidence_score': script['confidence_score'],
-            'warning_adjustments': script.get('warning_adjustments', {})
+            'warning_adjustments': script.get('warning_adjustments', {}),
+            'risk_assessment': script.get('risk_assessment', {})
         }
         
         return result
@@ -927,7 +1018,7 @@ def render_sidebar() -> Tuple[Optional[str], Optional[str], Optional[str], bool,
 
 def render_results_dashboard(result: Dict):
     """Display all analysis results"""
-    st.title("⚽ Betting Analytics Engine v4.2 - FIXED Low-scoring Filter")
+    st.title("⚽ Betting Analytics Engine v4.3 - RISK-AWARE Clean Sheet")
     st.subheader(f"{result['match_info']['team_a']} vs {result['match_info']['team_b']}")
     st.caption(f"League: {result['match_info']['league'].replace('_', ' ').title()} • Venue: {result['match_info']['venue']}")
     
@@ -948,14 +1039,32 @@ def render_results_dashboard(result: Dict):
     with col2:
         st.metric("Confidence Score", f"{score}/100")
     
-    # 2. Warning adjustments if applied
+    # 2. Risk assessment if applied
+    risk_assessment = result.get('risk_assessment', {})
+    if risk_assessment.get('clean_sheet_risk') == 'high':
+        st.markdown("### ⚠️ HIGH RISK CLEAN SHEET ALERT")
+        st.error("""
+        **High-scoring favorite against opponent who still scores often**  
+        - Clean sheet bet downgraded to secondary
+        - BTTS/Over bets prioritized
+        - Stake reduced by 50% for clean sheet bets
+        """)
+    elif risk_assessment.get('clean_sheet_risk') == 'medium':
+        st.markdown("### ⚠️ MEDIUM RISK CLEAN SHEET")
+        st.warning("""
+        **High-scoring favorite but opponent rarely scores**  
+        - Clean sheet bet kept as primary
+        - Confidence reduced by 15 points
+        """)
+    
+    # 3. Warning adjustments if applied
     warning_adj = result.get('warning_adjustments', {})
     if warning_adj.get('applied', False):
         st.markdown("### 🔧 Applied Warning Adjustments")
         for change in warning_adj.get('changes', []):
             st.info(f"• {change.replace('_', ' ').title()}")
     
-    # 3. Filters triggered
+    # 4. Filters triggered
     st.markdown("### 🔍 Detected Patterns")
     filters = result['filters_triggered']
     
@@ -972,21 +1081,30 @@ def render_results_dashboard(result: Dict):
         with cols[idx]:
             st.write(f"{icon} {label}")
             if triggered:
-                st.success(f"✅ Triggered")
+                if filter_key == 'clean_sheet_alert':
+                    risk_level = filters['clean_sheet_alert'].get('risk_level', 'low')
+                    if risk_level == 'high':
+                        st.error(f"✅ Triggered (HIGH RISK)")
+                    elif risk_level == 'medium':
+                        st.warning(f"✅ Triggered (MEDIUM RISK)")
+                    else:
+                        st.success(f"✅ Triggered (LOW RISK)")
+                else:
+                    st.success(f"✅ Triggered")
             else:
                 st.info(f"❌ Not Triggered")
     
-    # 4. Match analysis
+    # 5. Match analysis
     st.markdown("### 📝 Match Analysis")
     st.write(result['match_script']['match_narrative'])
     
-    # 5. Warnings
+    # 6. Warnings
     if result['betting_slip']['warnings']:
         st.markdown("### ⚠️ Warnings")
         for warning in result['betting_slip']['warnings']:
             st.warning(warning)
     
-    # 6. Betting recommendations
+    # 7. Betting recommendations
     st.markdown("### 💰 Betting Recommendations")
     slip = result['betting_slip']
     
@@ -998,7 +1116,12 @@ def render_results_dashboard(result: Dict):
             stake = slip['stake_suggestions'].get(bet['type'], 0)
             col1, col2, col3 = st.columns([3, 1, 2])
             with col1:
-                st.write(f"**{bet['type'].replace('_', ' ').title()}**")
+                bet_display = bet['type'].replace('_', ' ').title()
+                # Highlight risk-adjusted bets
+                if risk_assessment.get('adjusted_bets', False) and bet['priority'] == 'medium' and 'clean' in bet['type'].lower():
+                    st.write(f"**{bet_display}** ⚠️ (Risk-Adjusted)")
+                else:
+                    st.write(f"**{bet_display}**")
             with col2:
                 if stake > 0:
                     st.write(f"**{stake} units**")
@@ -1010,7 +1133,7 @@ def render_results_dashboard(result: Dict):
                 else:
                     st.info(f"Value ({bet['reason']})")
     
-    # 7. Predicted scores
+    # 8. Predicted scores
     st.markdown("### 🎯 Predicted Score Range")
     scores = result['predicted_score_range']
     if scores:
@@ -1019,7 +1142,7 @@ def render_results_dashboard(result: Dict):
             with cols[idx % 5]:
                 st.info(f"**{score}**")
     
-    # 8. Data verification toggle
+    # 9. Data verification toggle
     with st.expander("📊 View Detailed Data & Metrics"):
         st.markdown("#### Calculated Metrics")
         st.json(result['calculated_metrics'], expanded=False)
@@ -1027,9 +1150,9 @@ def render_results_dashboard(result: Dict):
         st.markdown("#### Form Analysis")
         st.json(result['form_analysis'], expanded=False)
         
-        if warning_adj.get('applied', False):
-            st.markdown("#### Warning Adjustments")
-            st.json(warning_adj, expanded=False)
+        if risk_assessment:
+            st.markdown("#### Risk Assessment")
+            st.json(risk_assessment, expanded=False)
 
 # ============================================================================
 # MAIN STREAMLIT APP
@@ -1038,7 +1161,7 @@ def render_results_dashboard(result: Dict):
 def main():
     """Main Streamlit application"""
     st.set_page_config(
-        page_title="Betting Analytics Engine v4.2 - FIXED Low-scoring",
+        page_title="Betting Analytics Engine v4.3 - RISK-AWARE",
         page_icon="⚽",
         layout="wide"
     )
@@ -1046,9 +1169,9 @@ def main():
     st.sidebar.image("https://img.icons8.com/color/96/000000/football.png", width=80)
     st.sidebar.markdown("### 📊 Data Source")
     st.sidebar.markdown("[GitHub Repository](https://github.com/profdue/sportcreed)")
-    st.sidebar.markdown("### 🔬 Version 4.2")
-    st.sidebar.markdown("**FIXED Low-scoring filter**")
-    st.sidebar.markdown("**Stricter thresholds for 100% accuracy**")
+    st.sidebar.markdown("### 🔬 Version 4.3")
+    st.sidebar.markdown("**RISK-AWARE Clean Sheet fix**")
+    st.sidebar.markdown("**Avoids risky bets on high-scoring favorites**")
     
     # Sidebar
     selected_league, team_a, team_b, is_team_a_home, df = render_sidebar()
@@ -1081,7 +1204,7 @@ def main():
     )
     
     # Run analysis
-    with st.spinner("Running analysis with FIXED Low-scoring filter..."):
+    with st.spinner("Running analysis with RISK-AWARE Clean Sheet fix..."):
         engine = BettingAnalyticsEngine()
         result = engine.analyze_match(match_context, selected_league)
     
@@ -1090,7 +1213,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Betting Analytics Engine v4.2 • FIXED Low-scoring filter with stricter thresholds")
+    st.caption("Betting Analytics Engine v4.3 • RISK-AWARE Clean Sheet fix")
     st.caption(f"League: {selected_league} • Teams: {team_a} vs {team_b}")
 
 # ============================================================================
