@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-BETTING ANALYTICS ENGINE - THREE FILTERS ONLY
+BETTING ANALYTICS ENGINE - ATTACK IMBALANCE FOCUS
 1. Under 1.5 Goals Alert
 2. Under 2.5 Goals Alert  
-3. No Draw Candidate (requires manual odds check)
+3. No Draw Candidate (Attack Imbalance > 1.3x)
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ class MatchContext:
     isTeamAHome: bool = True
 
 # ============================================================================
-# DATA LOADER (UNCHANGED)
+# DATA LOADER
 # ============================================================================
 
 class DataLoader:
@@ -62,7 +62,7 @@ class DataLoader:
                 return None
 
 # ============================================================================
-# METRICS CALCULATOR (UNCHANGED)
+# METRICS CALCULATOR
 # ============================================================================
 
 class MatchAnalyzer:
@@ -77,35 +77,46 @@ class MatchAnalyzer:
         b_cs_num, b_cs_den = MatchAnalyzer._parse_fraction(team_b.last6['cs'])
         b_btts_num, b_btts_den = MatchAnalyzer._parse_fraction(team_b.last6['btts'])
         
-        # Season GPM
-        a_season_gpm = team_a.overall['goals'] / max(team_a.overall['matches'], 1)
-        b_season_gpm = team_b.overall['goals'] / max(team_b.overall['matches'], 1)
+        # Calculate attack imbalance
+        a_goals = team_a.last6['goals']
+        b_goals = team_b.last6['goals']
+        
+        if a_goals > b_goals:
+            attack_imbalance = a_goals / max(b_goals, 1)  # Avoid division by zero
+            imbalance_favors = 'A'
+        else:
+            attack_imbalance = b_goals / max(a_goals, 1)
+            imbalance_favors = 'B'
         
         metrics = {
             'team_a': {
-                'gpm': team_a.last6['goals'] / 6,
+                'goals': a_goals,
+                'gpm': a_goals / 6,
                 'cs_percent': (a_cs_num / 6) * 100,
                 'cs_count': a_cs_num,
                 'btts_percent': (a_btts_num / 6) * 100,
                 'btts_count': a_btts_num,
                 'win_percent': (team_a.last6['wins'] / 6) * 100,
-                'loss_percent': (team_a.last6['losses'] / 6) * 100,
-                'season_gpm': a_season_gpm,
             },
             'team_b': {
-                'gpm': team_b.last6['goals'] / 6,
+                'goals': b_goals,
+                'gpm': b_goals / 6,
                 'cs_percent': (b_cs_num / 6) * 100,
                 'cs_count': b_cs_num,
                 'btts_percent': (b_btts_num / 6) * 100,
                 'btts_count': b_btts_num,
                 'win_percent': (team_b.last6['wins'] / 6) * 100,
-                'loss_percent': (team_b.last6['losses'] / 6) * 100,
-                'season_gpm': b_season_gpm,
+            },
+            'imbalance': {
+                'ratio': attack_imbalance,
+                'favors': imbalance_favors,
+                'higher_goals': max(a_goals, b_goals),
+                'lower_goals': min(a_goals, b_goals)
             },
             'averages': {
-                'avg_gpm': (team_a.last6['goals']/6 + team_b.last6['goals']/6) / 2,
-                'avg_cs_percent': ((a_cs_num/6)*100 + (b_cs_num/6)*100) / 2,
+                'avg_gpm': (a_goals/6 + b_goals/6) / 2,
                 'avg_btts_percent': ((a_btts_num/6)*100 + (b_btts_num/6)*100) / 2,
+                'avg_cs_percent': ((a_cs_num/6)*100 + (b_cs_num/6)*100) / 2,
             }
         }
         return metrics
@@ -119,83 +130,97 @@ class MatchAnalyzer:
         return 0, 6
 
 # ============================================================================
-# THREE FILTER DETECTOR
+# ATTACK IMBALANCE FILTER DETECTOR
 # ============================================================================
 
-class ThreeFilterDetector:
-    """Detect ONLY three filters using existing CSV data"""
+class AttackImbalanceDetector:
+    """Detect filters with ATTACK IMBALANCE as main driver"""
     
     def __init__(self):
-        # Filter 1: Under 1.5 Goals (existing proven filter)
+        # Filter 1: Under 1.5 Goals (extreme defensive)
         self.UNDER_15_GPM_THRESHOLD = 0.75
         
-        # Filter 2: Under 2.5 Goals (new, less strict)
-        self.UNDER_25_GPM_THRESHOLD = 1.2
-        self.UNDER_25_BTTS_THRESHOLD = 50  # BTTS% < 50%
+        # Filter 2: Under 2.5 Goals (defensive)
+        self.UNDER_25_GPM_THRESHOLD = 1.5
+        self.UNDER_25_BTTS_THRESHOLD = 50
         
-        # Filter 3: No Draw Candidate (for manual odds checking)
-        self.NO_DRAW_GPM_MIN = 1.3          # Both teams > 1.3 GPM
-        self.NO_DRAW_BTTS_MIN = 60          # Both teams BTTS% > 60%
-        self.NO_DRAW_WIN_DIFF_MIN = 1       # Win difference at least 1
-        self.NO_DRAW_WIN_DIFF_MAX = 3       # Win difference at most 3
+        # Filter 3: No Draw Candidate (Attack Imbalance)
+        self.NO_DRAW_IMBALANCE_MIN = 1.3  # One team scores 30%+ more
+        self.NO_DRAW_BTTS_MIN = 45        # Both teams can score
+        self.NO_DRAW_CS_MAX = 40          # Not both ultra-defensive
         
-        # High-draw leagues to flag
-        self.HIGH_DRAW_LEAGUES = [
-            'paraguay', 'iran', 'peru', 'venezuela', 'ecuador',
-            'bolivia', 'colombia', 'uruguay', 'japan', 'saudi_arabia'
-        ]
+        # High-draw leagues
+        self.HIGH_DRAW_LEAGUES = ['paraguay', 'iran', 'peru']
     
     def detect_filters(self, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData, league: str) -> Dict:
-        """Detect ONLY three filters"""
+        """Detect three filters with attack imbalance focus"""
         filters = {
             'under_15_alert': False,
             'under_25_alert': False,
             'no_draw_candidate': False,
             'high_draw_league_warning': False,
-            'win_difference': team_a.last6['wins'] - team_b.last6['wins']
+            'win_difference': team_a.last6['wins'] - team_b.last6['wins'],
+            'attack_imbalance_ratio': metrics['imbalance']['ratio'],
+            'attack_imbalance_favors': metrics['imbalance']['favors'],
+            'debug_info': {}
         }
         
         # Check if league is high-draw
         if any(high_draw_league in league.lower() for high_draw_league in self.HIGH_DRAW_LEAGUES):
             filters['high_draw_league_warning'] = True
         
-        # FILTER 1: Under 1.5 Goals Alert (keep existing logic)
+        # FILTER 1: Under 1.5 Goals Alert
         if (metrics['team_a']['gpm'] < self.UNDER_15_GPM_THRESHOLD and 
             metrics['team_b']['gpm'] < self.UNDER_15_GPM_THRESHOLD):
             filters['under_15_alert'] = True
+            filters['debug_info']['under_15'] = f"Both GPM < {self.UNDER_15_GPM_THRESHOLD}"
         
-        # FILTER 2: Under 2.5 Goals Alert (new)
-        if (metrics['team_a']['gpm'] < self.UNDER_25_GPM_THRESHOLD and 
-            metrics['team_b']['gpm'] < self.UNDER_25_GPM_THRESHOLD and
-            metrics['team_a']['btts_percent'] < self.UNDER_25_BTTS_THRESHOLD and
-            metrics['team_b']['btts_percent'] < self.UNDER_25_BTTS_THRESHOLD):
+        # FILTER 2: Under 2.5 Goals Alert
+        elif (metrics['team_a']['gpm'] < self.UNDER_25_GPM_THRESHOLD and 
+              metrics['team_b']['gpm'] < self.UNDER_25_GPM_THRESHOLD and
+              metrics['team_a']['btts_percent'] < self.UNDER_25_BTTS_THRESHOLD and
+              metrics['team_b']['btts_percent'] < self.UNDER_25_BTTS_THRESHOLD):
             filters['under_25_alert'] = True
+            filters['debug_info']['under_25'] = f"Both GPM < {self.UNDER_25_GPM_THRESHOLD} & BTTS < {self.UNDER_25_BTTS_THRESHOLD}%"
         
-        # FILTER 3: No Draw Candidate (for manual odds checking)
-        abs_win_diff = abs(filters['win_difference'])
-        
-        if (metrics['team_a']['gpm'] > self.NO_DRAW_GPM_MIN and
-            metrics['team_b']['gpm'] > self.NO_DRAW_GPM_MIN and
-            metrics['team_a']['btts_percent'] > self.NO_DRAW_BTTS_MIN and
-            metrics['team_b']['btts_percent'] > self.NO_DRAW_BTTS_MIN and
-            self.NO_DRAW_WIN_DIFF_MIN <= abs_win_diff <= self.NO_DRAW_WIN_DIFF_MAX):
-            filters['no_draw_candidate'] = True
+        # FILTER 3: No Draw Candidate (ATTACK IMBALANCE DRIVER)
+        else:
+            # Check attack imbalance condition
+            imbalance_ok = metrics['imbalance']['ratio'] >= self.NO_DRAW_IMBALANCE_MIN
+            
+            # Check BTTS condition
+            btts_ok = metrics['averages']['avg_btts_percent'] >= self.NO_DRAW_BTTS_MIN
+            
+            # Check CS condition (not both ultra-defensive)
+            cs_ok = (metrics['team_a']['cs_percent'] < self.NO_DRAW_CS_MAX or 
+                    metrics['team_b']['cs_percent'] < self.NO_DRAW_CS_MAX)
+            
+            filters['debug_info']['no_draw_check'] = {
+                'imbalance': f"{metrics['imbalance']['ratio']:.2f} {'≥' if imbalance_ok else '<'} {self.NO_DRAW_IMBALANCE_MIN}",
+                'btts': f"{metrics['averages']['avg_btts_percent']:.1f}% {'≥' if btts_ok else '<'} {self.NO_DRAW_BTTS_MIN}%",
+                'cs': f"CS%: A={metrics['team_a']['cs_percent']:.1f}%, B={metrics['team_b']['cs_percent']:.1f}% {'✓' if cs_ok else '✗'}",
+                'all_conditions': imbalance_ok and btts_ok and cs_ok
+            }
+            
+            if imbalance_ok and btts_ok and cs_ok:
+                filters['no_draw_candidate'] = True
+                filters['debug_info']['no_draw'] = f"Attack imbalance {metrics['imbalance']['ratio']:.2f}x, avg BTTS {metrics['averages']['avg_btts_percent']:.1f}%"
         
         return filters
 
 # ============================================================================
-# SIMPLIFIED SCRIPT GENERATOR
+# SCRIPT GENERATOR
 # ============================================================================
 
-class ThreeFilterScriptGenerator:
-    """Generate scripts for ONLY three filters"""
+class AttackImbalanceScriptGenerator:
+    """Generate scripts for attack imbalance strategy"""
     
     def __init__(self, team_a_name: str, team_b_name: str):
         self.team_a_name = team_a_name
         self.team_b_name = team_b_name
     
     def generate_script(self, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
-        """Generate script for three filters only"""
+        """Generate script with attack imbalance focus"""
         script = {
             'primary_bets': [],
             'secondary_bets': [],
@@ -205,23 +230,24 @@ class ThreeFilterScriptGenerator:
             'match_narrative': '',
             'triggered_filter': None,
             'manual_check_required': False,
-            'odds_to_check': {}
+            'odds_to_check': {},
+            'attack_imbalance_analysis': {}
         }
         
-        # Determine which filter triggered (in priority order)
+        # Determine which filter triggered
         if filters['under_15_alert']:
-            script = self._generate_under_15_script(script, metrics)
+            script = self._generate_under_15_script(script, metrics, filters)
             script['confidence_score'] = 85
             script['triggered_filter'] = 'under_15'
         
         elif filters['under_25_alert']:
-            script = self._generate_under_25_script(script, metrics)
+            script = self._generate_under_25_script(script, metrics, filters)
             script['confidence_score'] = 75
             script['triggered_filter'] = 'under_25'
         
         elif filters['no_draw_candidate']:
             script = self._generate_no_draw_script(script, metrics, filters, is_team_a_home)
-            script['confidence_score'] = 70
+            script['confidence_score'] = self._calculate_no_draw_confidence(metrics, filters)
             script['triggered_filter'] = 'no_draw'
             script['manual_check_required'] = True
             script['odds_to_check'] = {
@@ -231,13 +257,19 @@ class ThreeFilterScriptGenerator:
             }
         
         else:
-            script['match_narrative'] = 'No strong filter triggered. Consider skipping.'
+            script['match_narrative'] = self._generate_no_filter_narrative(metrics, filters)
             script['confidence_score'] = 40
             script['triggered_filter'] = 'none'
         
-        # Add high-draw league warning if applicable
-        if filters['high_draw_league_warning']:
-            script['match_narrative'] += ' WARNING: League has high draw rate.'
+        # Add attack imbalance analysis
+        script['attack_imbalance_analysis'] = {
+            'ratio': metrics['imbalance']['ratio'],
+            'favors': filters['attack_imbalance_favors'],
+            'higher_scorer': metrics['imbalance']['higher_goals'],
+            'lower_scorer': metrics['imbalance']['lower_goals'],
+            'btts_avg': metrics['averages']['avg_btts_percent'],
+            'cs_avg': metrics['averages']['avg_cs_percent']
+        }
         
         # Set confidence level
         if script['confidence_score'] >= 80:
@@ -249,74 +281,133 @@ class ThreeFilterScriptGenerator:
         
         return script
     
-    def _generate_under_15_script(self, script: Dict, metrics: Dict) -> Dict:
+    def _calculate_no_draw_confidence(self, metrics: Dict, filters: Dict) -> int:
+        """Calculate confidence for No Draw based on attack imbalance strength"""
+        base_confidence = 70
+        
+        # Boost for stronger imbalance
+        imbalance = metrics['imbalance']['ratio']
+        if imbalance > 1.8:
+            base_confidence += 15
+        elif imbalance > 1.5:
+            base_confidence += 10
+        elif imbalance > 1.3:
+            base_confidence += 5
+        
+        # Boost for higher BTTS%
+        btts_avg = metrics['averages']['avg_btts_percent']
+        if btts_avg > 70:
+            base_confidence += 10
+        elif btts_avg > 55:
+            base_confidence += 5
+        
+        return min(base_confidence, 85)
+    
+    def _generate_under_15_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
         script['primary_bets'].append('under_15_goals')
         script['secondary_bets'].append('btts_no')
         script['predicted_score_range'] = ['0-0', '1-0', '0-1']
-        script['match_narrative'] = 'Both attacks extremely weak - very low scoring expected'
+        script['match_narrative'] = f'EXTREME low-scoring pattern: Both teams < {0.75} GPM'
         return script
     
-    def _generate_under_25_script(self, script: Dict, metrics: Dict) -> Dict:
+    def _generate_under_25_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
         script['primary_bets'].append('under_25_goals')
         script['secondary_bets'].append('btts_no')
-        
-        # More varied score predictions for Under 2.5
         script['predicted_score_range'] = ['0-0', '1-0', '0-1', '1-1', '2-0', '0-2']
-        script['match_narrative'] = 'Both teams low-scoring with solid defenses'
+        script['match_narrative'] = 'Both teams defensive with low scoring rates'
         return script
     
     def _generate_no_draw_script(self, script: Dict, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
-        win_diff = filters['win_difference']
-        
-        # Determine which team is favorite based on win difference
-        if win_diff > 0:
-            favorite_name = self.team_a_name
-            underdog_name = self.team_b_name
-            script['predicted_score_range'] = ['2-1', '3-1', '2-0', '3-2', '1-0']
+        # Determine which team has attack advantage
+        if filters['attack_imbalance_favors'] == 'A':
+            stronger_name = self.team_a_name
+            weaker_name = self.team_b_name
+            stronger_goals = metrics['team_a']['goals']
+            weaker_goals = metrics['team_b']['goals']
         else:
-            favorite_name = self.team_b_name
-            underdog_name = self.team_a_name
-            script['predicted_score_range'] = ['1-2', '1-3', '0-2', '2-3', '0-1']
+            stronger_name = self.team_b_name
+            weaker_name = self.team_a_name
+            stronger_goals = metrics['team_b']['goals']
+            weaker_goals = metrics['team_a']['goals']
         
-        # For No Draw, primary is "Double Chance" (1X for home or 12 for neutral)
-        if win_diff > 0:  # Team A is favorite
+        imbalance_ratio = metrics['imbalance']['ratio']
+        
+        # Generate predictions based on imbalance strength
+        if imbalance_ratio > 1.8:
+            # Strong imbalance
+            if filters['attack_imbalance_favors'] == 'A':
+                script['predicted_score_range'] = ['2-0', '3-0', '2-1', '3-1', '1-0']
+            else:
+                script['predicted_score_range'] = ['0-2', '0-3', '1-2', '1-3', '0-1']
+        else:
+            # Moderate imbalance
+            if filters['attack_imbalance_favors'] == 'A':
+                script['predicted_score_range'] = ['2-1', '1-0', '2-0', '3-2', '1-1']
+            else:
+                script['predicted_score_range'] = ['1-2', '0-1', '0-2', '2-3', '1-1']
+        
+        # Betting recommendations
+        if filters['attack_imbalance_favors'] == 'A':
             if is_team_a_home:
                 script['primary_bets'].append('double_chance_1x')
             else:
                 script['primary_bets'].append('double_chance_12')
-        else:  # Team B is favorite
+        else:
             if not is_team_a_home:
                 script['primary_bets'].append('double_chance_x2')
             else:
                 script['primary_bets'].append('double_chance_12')
         
-        # Secondary bets that support No Draw theory
+        # Supportive bets
         script['secondary_bets'].append('btts_yes')
-        script['secondary_bets'].append('over_25_goals')
+        if metrics['averages']['avg_gpm'] > 2.5:
+            script['secondary_bets'].append('over_25_goals')
         
+        # Narrative
         script['match_narrative'] = (
-            f'High-scoring match with both teams leaking goals. '
-            f'{favorite_name} has better form but both teams likely to score. '
-            f'MANUAL CHECK REQUIRED: Verify odds (favorite 1.35-1.75, draw >3.60)'
+            f'ATTACK IMBALANCE DETECTED: {stronger_name} scores {imbalance_ratio:.1f}x more than {weaker_name} '
+            f'({stronger_goals} vs {weaker_goals} goals in last 6). '
+            f'Both teams score regularly (avg BTTS: {metrics["averages"]["avg_btts_percent"]:.1f}%). '
+            f'MANUAL CHECK REQUIRED: Verify odds match No Draw strategy.'
         )
         
         return script
+    
+    def _generate_no_filter_narrative(self, metrics: Dict, filters: Dict) -> str:
+        imbalance = metrics['imbalance']['ratio']
+        btts_avg = metrics['averages']['avg_btts_percent']
+        
+        reasons = []
+        
+        if imbalance < 1.3:
+            reasons.append(f'attack imbalance too low ({imbalance:.2f}x, need ≥1.3x)')
+        
+        if btts_avg < 45:
+            reasons.append(f'BTTS% too low ({btts_avg:.1f}%, need ≥45%)')
+        
+        if metrics['team_a']['cs_percent'] >= 40 and metrics['team_b']['cs_percent'] >= 40:
+            reasons.append('both teams keep clean sheets too often')
+        
+        if reasons:
+            return f'No strong pattern: ' + ', '.join(reasons)
+        else:
+            return 'Match patterns unclear. Consider skipping.'
 
 # ============================================================================
-# SIMPLIFIED MAIN ENGINE
+# MAIN ENGINE
 # ============================================================================
 
-class SimplifiedBettingEngine:
-    """Main orchestrator for three filters only"""
+class AttackImbalanceEngine:
+    """Main orchestrator for attack imbalance strategy"""
     
     def __init__(self):
         self.data_loader = DataLoader()
         self.metrics_calc = MatchAnalyzer()
-        self.filter_detector = ThreeFilterDetector()
+        self.filter_detector = AttackImbalanceDetector()
         self.script_generator = None
     
     def analyze_match(self, match_context: MatchContext, league: str) -> Dict:
-        self.script_generator = ThreeFilterScriptGenerator(
+        self.script_generator = AttackImbalanceScriptGenerator(
             match_context.teamA.teamName, 
             match_context.teamB.teamName
         )
@@ -349,7 +440,8 @@ class SimplifiedBettingEngine:
             'match_script': script,
             'predicted_score_range': script['predicted_score_range'],
             'confidence': script['confidence_level'],
-            'confidence_score': script['confidence_score']
+            'confidence_score': script['confidence_score'],
+            'attack_imbalance': script['attack_imbalance_analysis']
         }
         
         return result
@@ -374,8 +466,6 @@ def parse_team_from_csv(df: pd.DataFrame, team_name: str) -> Optional[TeamFormDa
         
         # Calculate overall btts matches from percentage
         overall_matches = int(row['Overall Matches'])
-        overall_cs_count = int((row['Overall CS%'] / 100) * overall_matches)
-        overall_btts_count = int((row['Overall BTTS%'] / 100) * overall_matches)
         
         return TeamFormData(
             teamName=team_name,
@@ -394,9 +484,7 @@ def parse_team_from_csv(df: pd.DataFrame, team_name: str) -> Optional[TeamFormDa
                 'draws': int(row['Overall D']),
                 'losses': int(row['Overall L']),
                 'cs_percent': float(row['Overall CS%']),
-                'btts_percent': float(row['Overall BTTS%']),
-                'cs_count': overall_cs_count,
-                'btts_count': overall_btts_count
+                'btts_percent': float(row['Overall BTTS%'])
             }
         )
     except Exception as e:
@@ -404,15 +492,15 @@ def parse_team_from_csv(df: pd.DataFrame, team_name: str) -> Optional[TeamFormDa
         return None
 
 # ============================================================================
-# SIMPLIFIED UI
+# UI
 # ============================================================================
 
-def render_simplified_dashboard(result: Dict):
-    """Display only three filter results"""
-    st.title("⚽ Three-Filter Analyzer")
+def render_attack_imbalance_dashboard(result: Dict):
+    """Display attack imbalance focused results"""
+    st.title("⚽ Attack Imbalance Analyzer")
     st.subheader(f"{result['match_info']['team_a']} vs {result['match_info']['team_b']}")
     
-    # Confidence display
+    # Confidence
     confidence = result['confidence']
     score = result['confidence_score']
     
@@ -423,6 +511,24 @@ def render_simplified_dashboard(result: Dict):
     else:
         st.info(f"Confidence: Low 🔵 ({score}/100)")
     
+    # Attack Imbalance Analysis
+    imbalance = result['attack_imbalance']
+    st.markdown("### ⚡ Attack Imbalance Analysis")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
+    with col2:
+        st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
+    with col3:
+        st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
+    
+    # Which team has attack advantage
+    if imbalance['favors'] == 'A':
+        st.info(f"**Attack Advantage**: {result['match_info']['team_a']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
+    else:
+        st.info(f"**Attack Advantage**: {result['match_info']['team_b']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
+    
     # Three filter indicators
     st.markdown("### 🔍 Triggered Filters")
     filters = result['filters_triggered']
@@ -431,20 +537,26 @@ def render_simplified_dashboard(result: Dict):
     with cols[0]:
         if filters['under_15_alert']:
             st.error("UNDER 1.5 GOALS ✅")
+            st.caption(filters.get('debug_info', {}).get('under_15', ''))
         else:
             st.info("UNDER 1.5 GOALS ❌")
     
     with cols[1]:
         if filters['under_25_alert']:
             st.error("UNDER 2.5 GOALS ✅")
+            st.caption(filters.get('debug_info', {}).get('under_25', ''))
         else:
             st.info("UNDER 2.5 GOALS ❌")
     
     with cols[2]:
         if filters['no_draw_candidate']:
             st.warning("NO DRAW CANDIDATE ✅")
+            st.caption(filters.get('debug_info', {}).get('no_draw', ''))
         else:
             st.info("NO DRAW CANDIDATE ❌")
+            debug = filters.get('debug_info', {}).get('no_draw_check', {})
+            if debug:
+                st.caption(f"Imbalance: {debug.get('imbalance', '')}, BTTS: {debug.get('btts', '')}")
     
     # High-draw league warning
     if filters['high_draw_league_warning']:
@@ -455,7 +567,7 @@ def render_simplified_dashboard(result: Dict):
     script = result['match_script']
     
     if script['triggered_filter'] == 'none':
-        st.info("No strong filter triggered. Consider skipping this match.")
+        st.info(script['match_narrative'])
     else:
         st.write(script['match_narrative'])
         
@@ -490,14 +602,29 @@ def render_simplified_dashboard(result: Dict):
         for idx, score in enumerate(scores):
             with score_cols[idx]:
                 st.info(f"**{score}**")
+    
+    # Debug info expander
+    with st.expander("🔍 View Detailed Analysis"):
+        st.write("**Debug Info:**")
+        st.json(filters.get('debug_info', {}), expanded=False)
+        
+        st.write("**Metrics:**")
+        st.json({
+            'team_a_gpm': result['calculated_metrics']['team_a']['gpm'],
+            'team_b_gpm': result['calculated_metrics']['team_b']['gpm'],
+            'team_a_btts': result['calculated_metrics']['team_a']['btts_percent'],
+            'team_b_btts': result['calculated_metrics']['team_b']['btts_percent'],
+            'team_a_cs': result['calculated_metrics']['team_a']['cs_percent'],
+            'team_b_cs': result['calculated_metrics']['team_b']['cs_percent']
+        }, expanded=False)
 
 # ============================================================================
-# MODIFIED MAIN FUNCTION
+# MAIN FUNCTION
 # ============================================================================
 
 def main():
     st.set_page_config(
-        page_title="Three-Filter Betting Analyzer",
+        page_title="Attack Imbalance Analyzer",
         page_icon="⚽",
         layout="wide"
     )
@@ -550,16 +677,16 @@ def main():
     )
     
     # Run analysis
-    with st.spinner("Analyzing with three filters..."):
-        engine = SimplifiedBettingEngine()
+    with st.spinner("Analyzing attack imbalance..."):
+        engine = AttackImbalanceEngine()
         result = engine.analyze_match(match_context, selected_league)
     
     # Display results
-    render_simplified_dashboard(result)
+    render_attack_imbalance_dashboard(result)
     
     # Footer
     st.markdown("---")
-    st.caption("Three-Filter Analyzer: Under 1.5 • Under 2.5 • No Draw Candidate")
+    st.caption("Attack Imbalance Analyzer: Based on real match patterns")
 
 # ============================================================================
 # RUN THE APP
