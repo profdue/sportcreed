@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-BETTING ANALYTICS ENGINE - ATTACK IMBALANCE FOCUS
-1. Under 1.5 Goals Alert
-2. Under 2.5 Goals Alert  
-3. No Draw Candidate (Attack Imbalance > 1.3x)
+HIGH-CERTAINTY NO DRAW ANALYZER
+Three filters only:
+1. Under 1.5 Goals (High certainty defensive)
+2. Under 2.5 Goals (Good certainty defensive)
+3. No Draw Candidate (Tiered certainty system)
 """
 
 import streamlit as st
@@ -130,38 +131,52 @@ class MatchAnalyzer:
         return 0, 6
 
 # ============================================================================
-# ATTACK IMBALANCE FILTER DETECTOR
+# HIGH-CERTAINTY NO DRAW DETECTOR
 # ============================================================================
 
-class AttackImbalanceDetector:
-    """Detect filters with ATTACK IMBALANCE as main driver"""
+class HighCertaintyNoDrawDetector:
+    """Detect only HIGH-CERTAINTY No Draw patterns"""
     
     def __init__(self):
-        # Filter 1: Under 1.5 Goals (extreme defensive)
+        # Filter 1: Under 1.5 Goals (extreme defensive - keep as is)
         self.UNDER_15_GPM_THRESHOLD = 0.75
         
-        # Filter 2: Under 2.5 Goals (defensive)
+        # Filter 2: Under 2.5 Goals (defensive - keep as is)
         self.UNDER_25_GPM_THRESHOLD = 1.5
         self.UNDER_25_BTTS_THRESHOLD = 50
         
-        # Filter 3: No Draw Candidate (Attack Imbalance)
-        self.NO_DRAW_IMBALANCE_MIN = 1.3  # One team scores 30%+ more
-        self.NO_DRAW_BTTS_MIN = 45        # Both teams can score
-        self.NO_DRAW_CS_MAX = 40          # Not both ultra-defensive
+        # Filter 3: HIGH-CERTAINTY No Draw Candidate
+        # TIER 1: Maximum certainty (BET)
+        self.NO_DRAW_TIER1_IMBALANCE = 1.4      # One team scores 40%+ more
+        self.NO_DRAW_TIER1_COMBINED_GPM = 3.0   # High scoring environment
+        self.NO_DRAW_TIER1_BTTS_AVG = 60        # Both teams score regularly
+        self.NO_DRAW_TIER1_CS_MAX = 30          # Not defensive teams
         
-        # High-draw leagues
+        # TIER 2: Good certainty (CHECK ODDS)
+        self.NO_DRAW_TIER2_IMBALANCE = 1.3      # One team scores 30%+ more
+        self.NO_DRAW_TIER2_COMBINED_GPM = 2.8   # Decent scoring
+        self.NO_DRAW_TIER2_BTTS_AVG = 55        # Good scoring rate
+        self.NO_DRAW_TIER2_CS_MAX = 35          # Moderate defense
+        
+        # Special exception: Extreme high-scoring
+        self.EXTREME_SCORING_GPM = 4.0          # If combined > 4.0 GPM
+        self.EXTREME_SCORING_IMBALANCE = 1.25   # Allow slightly lower imbalance
+        
+        # High-draw leagues (always be cautious)
         self.HIGH_DRAW_LEAGUES = ['paraguay', 'iran', 'peru']
     
     def detect_filters(self, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData, league: str) -> Dict:
-        """Detect three filters with attack imbalance focus"""
+        """Detect filters with HIGH-CERTAINTY focus"""
         filters = {
             'under_15_alert': False,
             'under_25_alert': False,
             'no_draw_candidate': False,
+            'no_draw_tier': 'none',  # 'tier1', 'tier2', or 'none'
             'high_draw_league_warning': False,
             'win_difference': team_a.last6['wins'] - team_b.last6['wins'],
             'attack_imbalance_ratio': metrics['imbalance']['ratio'],
             'attack_imbalance_favors': metrics['imbalance']['favors'],
+            'combined_gpm': metrics['averages']['avg_gpm'] * 2,
             'debug_info': {}
         }
         
@@ -183,44 +198,77 @@ class AttackImbalanceDetector:
             filters['under_25_alert'] = True
             filters['debug_info']['under_25'] = f"Both GPM < {self.UNDER_25_GPM_THRESHOLD} & BTTS < {self.UNDER_25_BTTS_THRESHOLD}%"
         
-        # FILTER 3: No Draw Candidate (ATTACK IMBALANCE DRIVER)
+        # FILTER 3: HIGH-CERTAINTY No Draw Candidate
         else:
-            # Check attack imbalance condition
-            imbalance_ok = metrics['imbalance']['ratio'] >= self.NO_DRAW_IMBALANCE_MIN
+            # Calculate key metrics
+            imbalance = metrics['imbalance']['ratio']
+            combined_gpm = filters['combined_gpm']
+            btts_avg = metrics['averages']['avg_btts_percent']
+            cs_avg = metrics['averages']['avg_cs_percent']
             
-            # Check BTTS condition
-            btts_ok = metrics['averages']['avg_btts_percent'] >= self.NO_DRAW_BTTS_MIN
+            # Check for EXTREME high-scoring exception first
+            extreme_scoring = False
+            if combined_gpm >= self.EXTREME_SCORING_GPM:
+                if imbalance >= self.EXTREME_SCORING_IMBALANCE:
+                    extreme_scoring = True
+                    filters['debug_info']['extreme_scoring'] = f"Combined GPM {combined_gpm:.2f} ≥ {self.EXTREME_SCORING_GPM}, imbalance {imbalance:.2f} ≥ {self.EXTREME_SCORING_IMBALANCE}"
             
-            # Check CS condition (not both ultra-defensive)
-            cs_ok = (metrics['team_a']['cs_percent'] < self.NO_DRAW_CS_MAX or 
-                    metrics['team_b']['cs_percent'] < self.NO_DRAW_CS_MAX)
+            # Check TIER 1: Maximum certainty
+            tier1_ok = (
+                imbalance >= self.NO_DRAW_TIER1_IMBALANCE and
+                combined_gpm >= self.NO_DRAW_TIER1_COMBINED_GPM and
+                btts_avg >= self.NO_DRAW_TIER1_BTTS_AVG and
+                cs_avg < self.NO_DRAW_TIER1_CS_MAX
+            )
             
+            # Check TIER 2: Good certainty
+            tier2_ok = (
+                (imbalance >= self.NO_DRAW_TIER2_IMBALANCE or extreme_scoring) and
+                combined_gpm >= self.NO_DRAW_TIER2_COMBINED_GPM and
+                btts_avg >= self.NO_DRAW_TIER2_BTTS_AVG and
+                cs_avg < self.NO_DRAW_TIER2_CS_MAX
+            )
+            
+            # Store debug info
             filters['debug_info']['no_draw_check'] = {
-                'imbalance': f"{metrics['imbalance']['ratio']:.2f} {'≥' if imbalance_ok else '<'} {self.NO_DRAW_IMBALANCE_MIN}",
-                'btts': f"{metrics['averages']['avg_btts_percent']:.1f}% {'≥' if btts_ok else '<'} {self.NO_DRAW_BTTS_MIN}%",
-                'cs': f"CS%: A={metrics['team_a']['cs_percent']:.1f}%, B={metrics['team_b']['cs_percent']:.1f}% {'✓' if cs_ok else '✗'}",
-                'all_conditions': imbalance_ok and btts_ok and cs_ok
+                'imbalance': f"{imbalance:.2f}x",
+                'combined_gpm': f"{combined_gpm:.2f}",
+                'btts_avg': f"{btts_avg:.1f}%",
+                'cs_avg': f"{cs_avg:.1f}%",
+                'tier1': tier1_ok,
+                'tier2': tier2_ok,
+                'extreme_scoring': extreme_scoring
             }
             
-            if imbalance_ok and btts_ok and cs_ok:
+            # Set result
+            if tier1_ok:
                 filters['no_draw_candidate'] = True
-                filters['debug_info']['no_draw'] = f"Attack imbalance {metrics['imbalance']['ratio']:.2f}x, avg BTTS {metrics['averages']['avg_btts_percent']:.1f}%"
+                filters['no_draw_tier'] = 'tier1'
+                filters['debug_info']['no_draw'] = f"TIER 1: imbalance {imbalance:.2f}x ≥ {self.NO_DRAW_TIER1_IMBALANCE}, GPM {combined_gpm:.2f} ≥ {self.NO_DRAW_TIER1_COMBINED_GPM}"
+            
+            elif tier2_ok:
+                filters['no_draw_candidate'] = True
+                filters['no_draw_tier'] = 'tier2'
+                if extreme_scoring:
+                    filters['debug_info']['no_draw'] = f"TIER 2 (Extreme Scoring): GPM {combined_gpm:.2f} ≥ {self.EXTREME_SCORING_GPM}, imbalance {imbalance:.2f}x ≥ {self.EXTREME_SCORING_IMBALANCE}"
+                else:
+                    filters['debug_info']['no_draw'] = f"TIER 2: imbalance {imbalance:.2f}x ≥ {self.NO_DRAW_TIER2_IMBALANCE}, GPM {combined_gpm:.2f} ≥ {self.NO_DRAW_TIER2_COMBINED_GPM}"
         
         return filters
 
 # ============================================================================
-# SCRIPT GENERATOR
+# TIERED SCRIPT GENERATOR
 # ============================================================================
 
-class AttackImbalanceScriptGenerator:
-    """Generate scripts for attack imbalance strategy"""
+class TieredScriptGenerator:
+    """Generate scripts with tiered certainty levels"""
     
     def __init__(self, team_a_name: str, team_b_name: str):
         self.team_a_name = team_a_name
         self.team_b_name = team_b_name
     
     def generate_script(self, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
-        """Generate script with attack imbalance focus"""
+        """Generate script with tiered certainty"""
         script = {
             'primary_bets': [],
             'secondary_bets': [],
@@ -231,6 +279,7 @@ class AttackImbalanceScriptGenerator:
             'triggered_filter': None,
             'manual_check_required': False,
             'odds_to_check': {},
+            'certainty_tier': 'none',
             'attack_imbalance_analysis': {}
         }
         
@@ -239,27 +288,42 @@ class AttackImbalanceScriptGenerator:
             script = self._generate_under_15_script(script, metrics, filters)
             script['confidence_score'] = 85
             script['triggered_filter'] = 'under_15'
+            script['certainty_tier'] = 'high'
         
         elif filters['under_25_alert']:
             script = self._generate_under_25_script(script, metrics, filters)
             script['confidence_score'] = 75
             script['triggered_filter'] = 'under_25'
+            script['certainty_tier'] = 'medium'
         
         elif filters['no_draw_candidate']:
-            script = self._generate_no_draw_script(script, metrics, filters, is_team_a_home)
-            script['confidence_score'] = self._calculate_no_draw_confidence(metrics, filters)
+            tier = filters['no_draw_tier']
+            script = self._generate_no_draw_script(script, metrics, filters, is_team_a_home, tier)
+            script['confidence_score'] = self._calculate_tiered_confidence(tier, metrics, filters)
             script['triggered_filter'] = 'no_draw'
-            script['manual_check_required'] = True
-            script['odds_to_check'] = {
-                'favorite_range': '1.35-1.75',
-                'draw_min': '3.60',
-                'check_instructions': 'Skip if favorite odds outside range or draw odds ≤ 3.60'
-            }
+            script['certainty_tier'] = tier
+            
+            # Tier-based manual check requirements
+            if tier == 'tier1':
+                script['manual_check_required'] = True  # Still check odds, but high confidence
+                script['odds_to_check'] = {
+                    'favorite_range': '1.35-1.75',
+                    'draw_min': '3.60',
+                    'check_instructions': 'High certainty - odds should match'
+                }
+            else:  # tier2
+                script['manual_check_required'] = True
+                script['odds_to_check'] = {
+                    'favorite_range': '1.35-1.75',
+                    'draw_min': '3.80',  # Stricter for tier2
+                    'check_instructions': 'Good certainty - be strict with odds'
+                }
         
         else:
             script['match_narrative'] = self._generate_no_filter_narrative(metrics, filters)
             script['confidence_score'] = 40
             script['triggered_filter'] = 'none'
+            script['certainty_tier'] = 'none'
         
         # Add attack imbalance analysis
         script['attack_imbalance_analysis'] = {
@@ -267,6 +331,7 @@ class AttackImbalanceScriptGenerator:
             'favors': filters['attack_imbalance_favors'],
             'higher_scorer': metrics['imbalance']['higher_goals'],
             'lower_scorer': metrics['imbalance']['lower_goals'],
+            'combined_gpm': filters['combined_gpm'],
             'btts_avg': metrics['averages']['avg_btts_percent'],
             'cs_avg': metrics['averages']['avg_cs_percent']
         }
@@ -281,43 +346,49 @@ class AttackImbalanceScriptGenerator:
         
         return script
     
-    def _calculate_no_draw_confidence(self, metrics: Dict, filters: Dict) -> int:
-        """Calculate confidence for No Draw based on attack imbalance strength"""
-        base_confidence = 70
+    def _calculate_tiered_confidence(self, tier: str, metrics: Dict, filters: Dict) -> int:
+        """Calculate confidence based on tier"""
+        if tier == 'tier1':
+            base = 85
+            
+            # Boost for stronger imbalance
+            imbalance = metrics['imbalance']['ratio']
+            if imbalance > 1.6:
+                base += 10
+            elif imbalance > 1.4:
+                base += 5
+            
+            # Boost for higher scoring
+            if filters['combined_gpm'] > 3.5:
+                base += 5
+                
+            return min(base, 95)
         
-        # Boost for stronger imbalance
-        imbalance = metrics['imbalance']['ratio']
-        if imbalance > 1.8:
-            base_confidence += 15
-        elif imbalance > 1.5:
-            base_confidence += 10
-        elif imbalance > 1.3:
-            base_confidence += 5
-        
-        # Boost for higher BTTS%
-        btts_avg = metrics['averages']['avg_btts_percent']
-        if btts_avg > 70:
-            base_confidence += 10
-        elif btts_avg > 55:
-            base_confidence += 5
-        
-        return min(base_confidence, 85)
+        else:  # tier2
+            base = 75
+            
+            # Check if it's extreme scoring exception
+            if filters.get('debug_info', {}).get('no_draw_check', {}).get('extreme_scoring', False):
+                base += 5  # Extra confidence for extreme scoring
+            
+            return min(base, 85)
     
     def _generate_under_15_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
         script['primary_bets'].append('under_15_goals')
         script['secondary_bets'].append('btts_no')
         script['predicted_score_range'] = ['0-0', '1-0', '0-1']
-        script['match_narrative'] = f'EXTREME low-scoring pattern: Both teams < {0.75} GPM'
+        script['match_narrative'] = f'HIGH CERTAINTY: Extreme low-scoring pattern (both < 0.75 GPM)'
         return script
     
     def _generate_under_25_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
         script['primary_bets'].append('under_25_goals')
         script['secondary_bets'].append('btts_no')
         script['predicted_score_range'] = ['0-0', '1-0', '0-1', '1-1', '2-0', '0-2']
-        script['match_narrative'] = 'Both teams defensive with low scoring rates'
+        script['match_narrative'] = 'Good certainty: Defensive match with low scoring expected'
         return script
     
-    def _generate_no_draw_script(self, script: Dict, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
+    def _generate_no_draw_script(self, script: Dict, metrics: Dict, filters: Dict, 
+                                 is_team_a_home: bool, tier: str) -> Dict:
         # Determine which team has attack advantage
         if filters['attack_imbalance_favors'] == 'A':
             stronger_name = self.team_a_name
@@ -330,21 +401,33 @@ class AttackImbalanceScriptGenerator:
             stronger_goals = metrics['team_b']['goals']
             weaker_goals = metrics['team_a']['goals']
         
-        imbalance_ratio = metrics['imbalance']['ratio']
+        imbalance = metrics['imbalance']['ratio']
+        combined_gpm = filters['combined_gpm']
         
-        # Generate predictions based on imbalance strength
-        if imbalance_ratio > 1.8:
-            # Strong imbalance
+        # Tier-specific predictions
+        if tier == 'tier1':
+            # High certainty - more decisive scores
             if filters['attack_imbalance_favors'] == 'A':
                 script['predicted_score_range'] = ['2-0', '3-0', '2-1', '3-1', '1-0']
             else:
                 script['predicted_score_range'] = ['0-2', '0-3', '1-2', '1-3', '0-1']
-        else:
-            # Moderate imbalance
+            
+            certainty_word = "HIGH CERTAINTY"
+            confidence_word = "strongly"
+            
+        else:  # tier2
+            # Good certainty - competitive but still no draw
             if filters['attack_imbalance_favors'] == 'A':
-                script['predicted_score_range'] = ['2-1', '1-0', '2-0', '3-2', '1-1']
+                script['predicted_score_range'] = ['2-1', '1-0', '2-0', '3-2']
             else:
-                script['predicted_score_range'] = ['1-2', '0-1', '0-2', '2-3', '1-1']
+                script['predicted_score_range'] = ['1-2', '0-1', '0-2', '2-3']
+            
+            certainty_word = "GOOD CERTAINTY"
+            confidence_word = "likely"
+            
+            # Add extreme scoring note if applicable
+            if filters.get('debug_info', {}).get('no_draw_check', {}).get('extreme_scoring', False):
+                certainty_word = "GOOD CERTAINTY (Extreme Scoring)"
         
         # Betting recommendations
         if filters['attack_imbalance_favors'] == 'A':
@@ -358,56 +441,68 @@ class AttackImbalanceScriptGenerator:
             else:
                 script['primary_bets'].append('double_chance_12')
         
-        # Supportive bets
+        # Supportive bets based on scoring level
         script['secondary_bets'].append('btts_yes')
-        if metrics['averages']['avg_gpm'] > 2.5:
+        if combined_gpm > 3.0:
             script['secondary_bets'].append('over_25_goals')
+        if combined_gpm > 3.5:
+            script['secondary_bets'].append('over_35_goals')
         
         # Narrative
-        script['match_narrative'] = (
-            f'ATTACK IMBALANCE DETECTED: {stronger_name} scores {imbalance_ratio:.1f}x more than {weaker_name} '
-            f'({stronger_goals} vs {weaker_goals} goals in last 6). '
-            f'Both teams score regularly (avg BTTS: {metrics["averages"]["avg_btts_percent"]:.1f}%). '
-            f'MANUAL CHECK REQUIRED: Verify odds match No Draw strategy.'
-        )
+        if tier == 'tier1':
+            script['match_narrative'] = (
+                f'🎯 {certainty_word} NO DRAW: {stronger_name} scores {imbalance:.1f}x more than {weaker_name} '
+                f'({stronger_goals} vs {weaker_goals} goals). '
+                f'High-scoring environment ({combined_gpm:.1f} GPM combined). '
+                f'Both teams score regularly (avg BTTS: {metrics["averages"]["avg_btts_percent"]:.1f}%). '
+                f'Odds should {confidence_word} match No Draw criteria.'
+            )
+        else:
+            script['match_narrative'] = (
+                f'✅ {certainty_word} NO DRAW: Clear attack advantage ({imbalance:.1f}x) '
+                f'in high-scoring match ({combined_gpm:.1f} GPM combined). '
+                f'Both teams have scoring capability. '
+                f'MANUAL CHECK: Verify odds strictly match criteria.'
+            )
         
         return script
     
     def _generate_no_filter_narrative(self, metrics: Dict, filters: Dict) -> str:
         imbalance = metrics['imbalance']['ratio']
+        combined_gpm = filters['combined_gpm']
         btts_avg = metrics['averages']['avg_btts_percent']
         
         reasons = []
         
         if imbalance < 1.3:
-            reasons.append(f'attack imbalance too low ({imbalance:.2f}x, need ≥1.3x)')
+            reasons.append(f'insufficient attack imbalance ({imbalance:.2f}x)')
         
-        if btts_avg < 45:
-            reasons.append(f'BTTS% too low ({btts_avg:.1f}%, need ≥45%)')
+        if combined_gpm < 2.8:
+            reasons.append(f'low scoring potential ({combined_gpm:.1f} GPM)')
         
-        if metrics['team_a']['cs_percent'] >= 40 and metrics['team_b']['cs_percent'] >= 40:
-            reasons.append('both teams keep clean sheets too often')
+        if btts_avg < 55:
+            reasons.append(f'low scoring consistency (BTTS: {btts_avg:.1f}%)')
         
         if reasons:
-            return f'No strong pattern: ' + ', '.join(reasons)
+            return f'❌ Not enough certainty for No Draw: ' + ', '.join(reasons)
         else:
-            return 'Match patterns unclear. Consider skipping.'
+            return 'Patterns unclear. No high-certainty signal detected.'
 
 # ============================================================================
 # MAIN ENGINE
 # ============================================================================
 
-class AttackImbalanceEngine:
-    """Main orchestrator for attack imbalance strategy"""
+class HighCertaintyEngine:
+    """Main orchestrator for high-certainty strategy"""
     
     def __init__(self):
         self.data_loader = DataLoader()
         self.metrics_calc = MatchAnalyzer()
-        self.filter_detector = AttackImbalanceDetector()
+        self.filter_detector = HighCertaintyNoDrawDetector()
         self.script_generator = None
     
     def analyze_match(self, match_context: MatchContext, league: str) -> Dict:
-        self.script_generator = AttackImbalanceScriptGenerator(
+        self.script_generator = TieredScriptGenerator(
             match_context.teamA.teamName, 
             match_context.teamB.teamName
         )
@@ -441,6 +536,7 @@ class AttackImbalanceEngine:
             'predicted_score_range': script['predicted_score_range'],
             'confidence': script['confidence_level'],
             'confidence_score': script['confidence_score'],
+            'certainty_tier': script['certainty_tier'],
             'attack_imbalance': script['attack_imbalance_analysis']
         }
         
@@ -495,10 +591,17 @@ def parse_team_from_csv(df: pd.DataFrame, team_name: str) -> Optional[TeamFormDa
 # UI
 # ============================================================================
 
-def render_attack_imbalance_dashboard(result: Dict):
-    """Display attack imbalance focused results"""
-    st.title("⚽ Attack Imbalance Analyzer")
+def render_high_certainty_dashboard(result: Dict):
+    """Display high-certainty focused results"""
+    st.title("🎯 High-Certainty No Draw Analyzer")
     st.subheader(f"{result['match_info']['team_a']} vs {result['match_info']['team_b']}")
+    
+    # Certainty tier badge
+    tier = result['certainty_tier']
+    if tier == 'tier1':
+        st.success("🏆 MAXIMUM CERTAINTY TIER")
+    elif tier == 'tier2':
+        st.warning("✅ GOOD CERTAINTY TIER")
     
     # Confidence
     confidence = result['confidence']
@@ -515,21 +618,23 @@ def render_attack_imbalance_dashboard(result: Dict):
     imbalance = result['attack_imbalance']
     st.markdown("### ⚡ Attack Imbalance Analysis")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
     with col2:
-        st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
+        st.metric("Combined GPM", f"{imbalance['combined_gpm']:.1f}")
     with col3:
+        st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
+    with col4:
         st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
     
-    # Which team has attack advantage
+    # Attack advantage
     if imbalance['favors'] == 'A':
         st.info(f"**Attack Advantage**: {result['match_info']['team_a']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
     else:
         st.info(f"**Attack Advantage**: {result['match_info']['team_b']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
     
-    # Three filter indicators
+    # Three filter indicators with tier info
     st.markdown("### 🔍 Triggered Filters")
     filters = result['filters_triggered']
     
@@ -537,30 +642,44 @@ def render_attack_imbalance_dashboard(result: Dict):
     with cols[0]:
         if filters['under_15_alert']:
             st.error("UNDER 1.5 GOALS ✅")
-            st.caption(filters.get('debug_info', {}).get('under_15', ''))
+            st.caption("High certainty defensive match")
         else:
             st.info("UNDER 1.5 GOALS ❌")
     
     with cols[1]:
         if filters['under_25_alert']:
             st.error("UNDER 2.5 GOALS ✅")
-            st.caption(filters.get('debug_info', {}).get('under_25', ''))
+            st.caption("Good certainty low-scoring")
         else:
             st.info("UNDER 2.5 GOALS ❌")
     
     with cols[2]:
         if filters['no_draw_candidate']:
-            st.warning("NO DRAW CANDIDATE ✅")
-            st.caption(filters.get('debug_info', {}).get('no_draw', ''))
+            if filters['no_draw_tier'] == 'tier1':
+                st.success("NO DRAW TIER 1 ✅")
+                st.caption("Maximum certainty")
+            else:
+                st.warning("NO DRAW TIER 2 ✅")
+                st.caption("Good certainty")
+            
+            debug = filters.get('debug_info', {}).get('no_draw', '')
+            if debug:
+                st.caption(debug)
         else:
-            st.info("NO DRAW CANDIDATE ❌")
+            st.info("NO DRAW ❌")
             debug = filters.get('debug_info', {}).get('no_draw_check', {})
             if debug:
-                st.caption(f"Imbalance: {debug.get('imbalance', '')}, BTTS: {debug.get('btts', '')}")
+                reasons = []
+                if not debug.get('tier1', False) and not debug.get('tier2', False):
+                    reasons.append("Criteria not met")
+                if debug.get('imbalance'):
+                    reasons.append(f"Imbalance: {debug['imbalance']}")
+                if reasons:
+                    st.caption(", ".join(reasons))
     
     # High-draw league warning
     if filters['high_draw_league_warning']:
-        st.error("⚠️ HIGH-DRAW LEAGUE: Be extra cautious")
+        st.error("⚠️ HIGH-DRAW LEAGUE: Extra caution required")
     
     # Betting recommendations
     st.markdown("### 📋 Recommendations")
@@ -569,6 +688,12 @@ def render_attack_imbalance_dashboard(result: Dict):
     if script['triggered_filter'] == 'none':
         st.info(script['match_narrative'])
     else:
+        # Show certainty level
+        if script['certainty_tier'] == 'tier1':
+            st.success("🎯 MAXIMUM CERTAINTY BET")
+        elif script['certainty_tier'] == 'tier2':
+            st.warning("✅ GOOD CERTAINTY BET")
+        
         st.write(script['match_narrative'])
         
         # Show primary bets
@@ -585,14 +710,22 @@ def render_attack_imbalance_dashboard(result: Dict):
                 bet_display = bet.replace('_', ' ').title()
                 st.write(f"• {bet_display}")
         
-        # Manual check for No Draw
+        # Manual check requirements
         if script['manual_check_required']:
-            st.markdown("### ⚠️ MANUAL ODDS CHECK REQUIRED")
+            st.markdown("### ⚠️ ODDS VERIFICATION REQUIRED")
             odds = script['odds_to_check']
-            st.error(f"**Verify these odds before betting:**")
+            
+            if script['certainty_tier'] == 'tier1':
+                st.warning(f"**Verify these odds:**")
+            else:
+                st.error(f"**STRICTLY verify these odds:**")
+            
             st.write(f"• Favorite odds must be: {odds['favorite_range']}")
             st.write(f"• Draw odds must be >: {odds['draw_min']}")
             st.write(f"• {odds['check_instructions']}")
+            
+            if script['certainty_tier'] == 'tier2':
+                st.info("**Tier 2 Note**: Be extra strict with odds. Skip if borderline.")
     
     # Predicted scores
     if script['predicted_score_range']:
@@ -601,22 +734,13 @@ def render_attack_imbalance_dashboard(result: Dict):
         score_cols = st.columns(min(5, len(scores)))
         for idx, score in enumerate(scores):
             with score_cols[idx]:
-                st.info(f"**{score}**")
+                st.success(f"**{score}**")
     
     # Debug info expander
     with st.expander("🔍 View Detailed Analysis"):
-        st.write("**Debug Info:**")
-        st.json(filters.get('debug_info', {}), expanded=False)
-        
-        st.write("**Metrics:**")
-        st.json({
-            'team_a_gpm': result['calculated_metrics']['team_a']['gpm'],
-            'team_b_gpm': result['calculated_metrics']['team_b']['gpm'],
-            'team_a_btts': result['calculated_metrics']['team_a']['btts_percent'],
-            'team_b_btts': result['calculated_metrics']['team_b']['btts_percent'],
-            'team_a_cs': result['calculated_metrics']['team_a']['cs_percent'],
-            'team_b_cs': result['calculated_metrics']['team_b']['cs_percent']
-        }, expanded=False)
+        if filters.get('debug_info'):
+            st.write("**Filter Analysis:**")
+            st.json(filters['debug_info'], expanded=False)
 
 # ============================================================================
 # MAIN FUNCTION
@@ -624,12 +748,13 @@ def render_attack_imbalance_dashboard(result: Dict):
 
 def main():
     st.set_page_config(
-        page_title="Attack Imbalance Analyzer",
-        page_icon="⚽",
+        page_title="High-Certainty No Draw Analyzer",
+        page_icon="🎯",
         layout="wide"
     )
     
-    st.sidebar.title("⚙️ Configuration")
+    st.sidebar.title("⚙️ High-Certainty Configuration")
+    st.sidebar.markdown("**Strategy**: Maximum accuracy over quantity")
     
     # League selection
     league_options = [
@@ -677,16 +802,16 @@ def main():
     )
     
     # Run analysis
-    with st.spinner("Analyzing attack imbalance..."):
-        engine = AttackImbalanceEngine()
+    with st.spinner("Analyzing for high-certainty patterns..."):
+        engine = HighCertaintyEngine()
         result = engine.analyze_match(match_context, selected_league)
     
     # Display results
-    render_attack_imbalance_dashboard(result)
+    render_high_certainty_dashboard(result)
     
     # Footer
     st.markdown("---")
-    st.caption("Attack Imbalance Analyzer: Based on real match patterns")
+    st.caption("High-Certainty No Draw Analyzer • Tier 1: Max certainty • Tier 2: Good certainty")
 
 # ============================================================================
 # RUN THE APP
