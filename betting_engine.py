@@ -6,7 +6,117 @@ BETTING ANALYTICS ENGINE - THREE FILTERS ONLY
 3. No Draw Candidate (requires manual odds check)
 """
 
-# ... (keep imports and DataLoader class unchanged)
+import streamlit as st
+import pandas as pd
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass
+import requests
+import io
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+@dataclass
+class TeamFormData:
+    """Team statistics data structure"""
+    teamName: str
+    last6: Dict[str, Any]  # Last 6 matches stats
+    overall: Dict[str, Any]  # Overall season stats
+
+@dataclass
+class MatchContext:
+    """Complete match context"""
+    teamA: TeamFormData
+    teamB: TeamFormData
+    isTeamAHome: bool = True
+
+# ============================================================================
+# DATA LOADER (UNCHANGED)
+# ============================================================================
+
+class DataLoader:
+    """Load data from GitHub repository"""
+    
+    @staticmethod
+    def load_from_github(league_name: str) -> Optional[pd.DataFrame]:
+        """Load CSV data from GitHub repository"""
+        try:
+            base_url = "https://raw.githubusercontent.com/profdue/sportcreed/main/leagues"
+            url = f"{base_url}/{league_name}.csv"
+            
+            response = requests.get(url)
+            response.raise_for_status()
+            
+            df = pd.read_csv(io.StringIO(response.text))
+            st.success(f"✅ Loaded {league_name} data from GitHub")
+            return df
+        except Exception as e:
+            st.error(f"❌ Error loading {league_name}: {str(e)}")
+            try:
+                df = pd.read_csv(f"{league_name}.csv")
+                st.success(f"✅ Loaded {league_name} data locally")
+                return df
+            except:
+                st.error(f"❌ Could not load {league_name} data")
+                return None
+
+# ============================================================================
+# METRICS CALCULATOR (UNCHANGED)
+# ============================================================================
+
+class MatchAnalyzer:
+    """Calculate all metrics from raw data"""
+    
+    @staticmethod
+    def calculate_metrics(team_a: TeamFormData, team_b: TeamFormData) -> Dict:
+        """Calculate all derived metrics needed for decision making"""
+        # Parse fractions
+        a_cs_num, a_cs_den = MatchAnalyzer._parse_fraction(team_a.last6['cs'])
+        a_btts_num, a_btts_den = MatchAnalyzer._parse_fraction(team_a.last6['btts'])
+        b_cs_num, b_cs_den = MatchAnalyzer._parse_fraction(team_b.last6['cs'])
+        b_btts_num, b_btts_den = MatchAnalyzer._parse_fraction(team_b.last6['btts'])
+        
+        # Season GPM
+        a_season_gpm = team_a.overall['goals'] / max(team_a.overall['matches'], 1)
+        b_season_gpm = team_b.overall['goals'] / max(team_b.overall['matches'], 1)
+        
+        metrics = {
+            'team_a': {
+                'gpm': team_a.last6['goals'] / 6,
+                'cs_percent': (a_cs_num / 6) * 100,
+                'cs_count': a_cs_num,
+                'btts_percent': (a_btts_num / 6) * 100,
+                'btts_count': a_btts_num,
+                'win_percent': (team_a.last6['wins'] / 6) * 100,
+                'loss_percent': (team_a.last6['losses'] / 6) * 100,
+                'season_gpm': a_season_gpm,
+            },
+            'team_b': {
+                'gpm': team_b.last6['goals'] / 6,
+                'cs_percent': (b_cs_num / 6) * 100,
+                'cs_count': b_cs_num,
+                'btts_percent': (b_btts_num / 6) * 100,
+                'btts_count': b_btts_num,
+                'win_percent': (team_b.last6['wins'] / 6) * 100,
+                'loss_percent': (team_b.last6['losses'] / 6) * 100,
+                'season_gpm': b_season_gpm,
+            },
+            'averages': {
+                'avg_gpm': (team_a.last6['goals']/6 + team_b.last6['goals']/6) / 2,
+                'avg_cs_percent': ((a_cs_num/6)*100 + (b_cs_num/6)*100) / 2,
+                'avg_btts_percent': ((a_btts_num/6)*100 + (b_btts_num/6)*100) / 2,
+            }
+        }
+        return metrics
+    
+    @staticmethod
+    def _parse_fraction(frac_str: str) -> Tuple[int, int]:
+        """Parse '4/6' -> (4, 6)"""
+        if isinstance(frac_str, str) and '/' in frac_str:
+            num, den = frac_str.split('/')
+            return int(num.strip()), int(den.strip())
+        return 0, 6
 
 # ============================================================================
 # THREE FILTER DETECTOR
@@ -110,7 +220,7 @@ class ThreeFilterScriptGenerator:
             script['triggered_filter'] = 'under_25'
         
         elif filters['no_draw_candidate']:
-            script = self._generate_no_draw_script(script, metrics, filters)
+            script = self._generate_no_draw_script(script, metrics, filters, is_team_a_home)
             script['confidence_score'] = 70
             script['triggered_filter'] = 'no_draw'
             script['manual_check_required'] = True
@@ -155,7 +265,7 @@ class ThreeFilterScriptGenerator:
         script['match_narrative'] = 'Both teams low-scoring with solid defenses'
         return script
     
-    def _generate_no_draw_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
+    def _generate_no_draw_script(self, script: Dict, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
         win_diff = filters['win_difference']
         
         # Determine which team is favorite based on win difference
@@ -243,6 +353,55 @@ class SimplifiedBettingEngine:
         }
         
         return result
+
+# ============================================================================
+# DATA PARSING FUNCTION
+# ============================================================================
+
+def parse_team_from_csv(df: pd.DataFrame, team_name: str) -> Optional[TeamFormData]:
+    """Convert CSV row to TeamFormData for your specific CSV format"""
+    try:
+        row = df[df['Team'] == team_name].iloc[0]
+        
+        # Parse fractions
+        def parse_frac(field_name):
+            value = row[field_name]
+            if pd.isna(value):
+                return "0/6"
+            if isinstance(value, str) and '/' in value:
+                return value
+            return "0/6"
+        
+        # Calculate overall btts matches from percentage
+        overall_matches = int(row['Overall Matches'])
+        overall_cs_count = int((row['Overall CS%'] / 100) * overall_matches)
+        overall_btts_count = int((row['Overall BTTS%'] / 100) * overall_matches)
+        
+        return TeamFormData(
+            teamName=team_name,
+            last6={
+                'goals': int(row['Last 6 Goals']),
+                'wins': int(row['Form W']),
+                'draws': int(row['Form D']),
+                'losses': int(row['Form L']),
+                'cs': parse_frac('Last 6 CS'),
+                'btts': parse_frac('Last 6 BTTS')
+            },
+            overall={
+                'matches': overall_matches,
+                'goals': int(row['Overall Goals']),
+                'wins': int(row['Overall W']),
+                'draws': int(row['Overall D']),
+                'losses': int(row['Overall L']),
+                'cs_percent': float(row['Overall CS%']),
+                'btts_percent': float(row['Overall BTTS%']),
+                'cs_count': overall_cs_count,
+                'btts_count': overall_btts_count
+            }
+        )
+    except Exception as e:
+        st.error(f"Error parsing data for {team_name}: {str(e)}")
+        return None
 
 # ============================================================================
 # SIMPLIFIED UI
@@ -403,11 +562,8 @@ def main():
     st.caption("Three-Filter Analyzer: Under 1.5 • Under 2.5 • No Draw Candidate")
 
 # ============================================================================
-# KEEP EXISTING HELPER CLASSES
+# RUN THE APP
 # ============================================================================
-
-# Keep DataLoader, MatchAnalyzer, parse_team_from_csv unchanged
-# Remove BettingSlipGenerator, RiskAwareExtremeFilterDetector, etc.
 
 if __name__ == "__main__":
     main()
