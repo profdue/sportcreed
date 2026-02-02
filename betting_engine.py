@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-HIGH-CERTAINTY NO DRAW ANALYZER
+HIGH-CERTAINTY NO DRAW ANALYZER WITH BAYERN PROTECTION
 Three filters only:
 1. Under 1.5 Goals (High certainty defensive)
 2. Under 2.5 Goals (Good certainty defensive)
-3. No Draw Candidate (Tiered certainty system)
+3. No Draw Candidate (Tiered system with auto-reject for strong favorites)
 """
 
 import streamlit as st
@@ -131,13 +131,26 @@ class MatchAnalyzer:
         return 0, 6
 
 # ============================================================================
-# HIGH-CERTAINTY NO DRAW DETECTOR
+# HIGH-CERTAINTY NO DRAW DETECTOR WITH BAYERN PROTECTION
 # ============================================================================
 
 class HighCertaintyNoDrawDetector:
-    """Detect only HIGH-CERTAINTY No Draw patterns"""
+    """Detect only HIGH-CERTAINTY No Draw patterns with Bayern protection"""
     
     def __init__(self):
+        # BAYERN PROTECTION: Auto-reject thresholds
+        self.AUTO_REJECT_WIN_DIFF = 4          # Win difference ≥ 4 → too one-sided
+        self.AUTO_REJECT_GPM_DIFF = 1.5        # GPM difference ≥ 1.5 → scoring dominance
+        self.AUTO_REJECT_GOAL_DIFF = 10        # Goal difference ≥ 10 in last 6 → too dominant
+        
+        # Trap teams that attract public money (customize this list)
+        self.TRAP_TEAMS = [
+            'bayern', 'real madrid', 'barcelona', 'psg', 'man city', 
+            'liverpool', 'dortmund', 'juventus', 'milan', 'inter',
+            'atletico madrid', 'chelsea', 'man united', 'arsenal',
+            'napoli', 'roma', 'lyon', 'marseille', 'benfica', 'porto'
+        ]
+        
         # Filter 1: Under 1.5 Goals (extreme defensive - keep as is)
         self.UNDER_15_GPM_THRESHOLD = 0.75
         
@@ -166,13 +179,16 @@ class HighCertaintyNoDrawDetector:
         self.HIGH_DRAW_LEAGUES = ['paraguay', 'iran', 'peru']
     
     def detect_filters(self, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData, league: str) -> Dict:
-        """Detect filters with HIGH-CERTAINTY focus"""
+        """Detect filters with HIGH-CERTAINTY focus and Bayern protection"""
         filters = {
             'under_15_alert': False,
             'under_25_alert': False,
             'no_draw_candidate': False,
             'no_draw_tier': 'none',  # 'tier1', 'tier2', or 'none'
             'high_draw_league_warning': False,
+            'auto_rejected': False,
+            'auto_reject_reasons': [],
+            'trap_team_warning': False,
             'win_difference': team_a.last6['wins'] - team_b.last6['wins'],
             'attack_imbalance_ratio': metrics['imbalance']['ratio'],
             'attack_imbalance_favors': metrics['imbalance']['favors'],
@@ -180,9 +196,50 @@ class HighCertaintyNoDrawDetector:
             'debug_info': {}
         }
         
-        # Check if league is high-draw
+        # ===== BAYERN PROTECTION: AUTO-REJECT CHECKS =====
+        auto_reject_reasons = []
+        
+        # 1. Check win difference (too one-sided)
+        win_diff = abs(filters['win_difference'])
+        if win_diff >= self.AUTO_REJECT_WIN_DIFF:
+            auto_reject_reasons.append(f"Win difference too large ({win_diff} ≥ {self.AUTO_REJECT_WIN_DIFF})")
+        
+        # 2. Check GPM difference (scoring dominance)
+        gpm_diff = abs(metrics['team_a']['gpm'] - metrics['team_b']['gpm'])
+        if gpm_diff >= self.AUTO_REJECT_GPM_DIFF:
+            auto_reject_reasons.append(f"Scoring dominance ({gpm_diff:.2f} GPM diff ≥ {self.AUTO_REJECT_GPM_DIFF})")
+        
+        # 3. Check goal difference in last 6
+        goal_diff = abs(metrics['team_a']['goals'] - metrics['team_b']['goals'])
+        if goal_diff >= self.AUTO_REJECT_GOAL_DIFF:
+            auto_reject_reasons.append(f"Goal dominance ({goal_diff} goals diff ≥ {self.AUTO_REJECT_GOAL_DIFF})")
+        
+        # 4. Check for trap teams
+        team_a_lower = team_a.teamName.lower()
+        team_b_lower = team_b.teamName.lower()
+        
+        trap_team_found = None
+        for trap_team in self.TRAP_TEAMS:
+            if trap_team in team_a_lower or trap_team in team_b_lower:
+                trap_team_found = trap_team
+                break
+        
+        if trap_team_found:
+            filters['trap_team_warning'] = True
+            auto_reject_reasons.append(f"Trap team detected: {trap_team_found.title()}")
+        
+        # 5. Check if league is high-draw
         if any(high_draw_league in league.lower() for high_draw_league in self.HIGH_DRAW_LEAGUES):
             filters['high_draw_league_warning'] = True
+        
+        # If auto-rejected, skip all further analysis
+        if auto_reject_reasons:
+            filters['auto_rejected'] = True
+            filters['auto_reject_reasons'] = auto_reject_reasons
+            filters['debug_info']['auto_reject'] = auto_reject_reasons
+            return filters
+        
+        # ===== REGULAR FILTER ANALYSIS (only if not auto-rejected) =====
         
         # FILTER 1: Under 1.5 Goals Alert
         if (metrics['team_a']['gpm'] < self.UNDER_15_GPM_THRESHOLD and 
@@ -257,18 +314,18 @@ class HighCertaintyNoDrawDetector:
         return filters
 
 # ============================================================================
-# TIERED SCRIPT GENERATOR
+# TIERED SCRIPT GENERATOR WITH AUTO-REJECT HANDLING
 # ============================================================================
 
 class TieredScriptGenerator:
-    """Generate scripts with tiered certainty levels"""
+    """Generate scripts with tiered certainty levels and auto-reject handling"""
     
     def __init__(self, team_a_name: str, team_b_name: str):
         self.team_a_name = team_a_name
         self.team_b_name = team_b_name
     
     def generate_script(self, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
-        """Generate script with tiered certainty"""
+        """Generate script with tiered certainty and auto-reject handling"""
         script = {
             'primary_bets': [],
             'secondary_bets': [],
@@ -280,8 +337,25 @@ class TieredScriptGenerator:
             'manual_check_required': False,
             'odds_to_check': {},
             'certainty_tier': 'none',
-            'attack_imbalance_analysis': {}
+            'attack_imbalance_analysis': {},
+            'auto_rejected': False,
+            'auto_reject_reasons': [],
+            'trap_team_warning': False
         }
+        
+        # Check if auto-rejected
+        if filters.get('auto_rejected', False):
+            script['auto_rejected'] = True
+            script['auto_reject_reasons'] = filters.get('auto_reject_reasons', [])
+            script['trap_team_warning'] = filters.get('trap_team_warning', False)
+            script['match_narrative'] = self._generate_auto_reject_narrative(filters)
+            script['confidence_score'] = 0
+            script['triggered_filter'] = 'auto_reject'
+            return script
+        
+        # Check for trap team warning (but not auto-rejected)
+        if filters.get('trap_team_warning', False):
+            script['trap_team_warning'] = True
         
         # Determine which filter triggered
         if filters['under_15_alert']:
@@ -305,18 +379,18 @@ class TieredScriptGenerator:
             
             # Tier-based manual check requirements
             if tier == 'tier1':
-                script['manual_check_required'] = True  # Still check odds, but high confidence
+                script['manual_check_required'] = True
                 script['odds_to_check'] = {
-                    'favorite_range': '1.35-1.75',
-                    'draw_min': '3.60',
-                    'check_instructions': 'High certainty - odds should match'
+                    'favorite_range': '1.50-1.75',  # TIGHTER: Was 1.35-1.75
+                    'draw_min': '3.80',  # Stricter
+                    'check_instructions': 'Maximum certainty - but still verify odds strictly'
                 }
             else:  # tier2
                 script['manual_check_required'] = True
                 script['odds_to_check'] = {
-                    'favorite_range': '1.35-1.75',
-                    'draw_min': '3.80',  # Stricter for tier2
-                    'check_instructions': 'Good certainty - be strict with odds'
+                    'favorite_range': '1.50-1.70',  # EVEN TIGHTER for tier2
+                    'draw_min': '4.00',  # Higher threshold
+                    'check_instructions': 'Good certainty - be EXTRA strict with odds'
                 }
         
         else:
@@ -345,6 +419,28 @@ class TieredScriptGenerator:
             script['confidence_level'] = 'low'
         
         return script
+    
+    def _generate_auto_reject_narrative(self, filters: Dict) -> str:
+        """Generate narrative for auto-rejected matches"""
+        reasons = filters.get('auto_reject_reasons', [])
+        
+        narrative = "🚫 **AUTO-REJECTED: ULTRA-STRONG FAVORITE DETECTED**\n\n"
+        narrative += "**Reasons for rejection:**\n"
+        
+        for reason in reasons:
+            narrative += f"• {reason}\n"
+        
+        narrative += "\n**Recommendation:**\n"
+        narrative += "• **DO NOT BET** on No Draw for this match\n"
+        narrative += "• Even if form suggests No Draw, odds will be too low (<1.50)\n"
+        narrative += "• Public heavily on favorite → higher draw risk\n"
+        narrative += "• Classic trap match - SKIP\n"
+        
+        if filters.get('trap_team_warning', False):
+            narrative += "\n⚠️ **TRAP TEAM WARNING:** Known public team detected\n"
+            narrative += "Casual bettors heavily on this team → bookmakers protect with draw value"
+        
+        return narrative
     
     def _calculate_tiered_confidence(self, tier: str, metrics: Dict, filters: Dict) -> int:
         """Calculate confidence based on tier"""
@@ -493,7 +589,7 @@ class TieredScriptGenerator:
 # ============================================================================
 
 class HighCertaintyEngine:
-    """Main orchestrator for high-certainty strategy"""
+    """Main orchestrator for high-certainty strategy with Bayern protection"""
     
     def __init__(self):
         self.data_loader = DataLoader()
@@ -537,6 +633,9 @@ class HighCertaintyEngine:
             'confidence': script['confidence_level'],
             'confidence_score': script['confidence_score'],
             'certainty_tier': script['certainty_tier'],
+            'auto_rejected': script['auto_rejected'],
+            'auto_reject_reasons': script['auto_reject_reasons'],
+            'trap_team_warning': script['trap_team_warning'],
             'attack_imbalance': script['attack_imbalance_analysis']
         }
         
@@ -596,6 +695,48 @@ def render_high_certainty_dashboard(result: Dict):
     st.title("🎯 High-Certainty No Draw Analyzer")
     st.subheader(f"{result['match_info']['team_a']} vs {result['match_info']['team_b']}")
     
+    # Check if auto-rejected
+    if result['auto_rejected']:
+        st.error("🚫 AUTO-REJECTED: ULTRA-STRONG FAVORITE DETECTED")
+        
+        st.markdown("### ⚠️ REJECTION REASONS")
+        for reason in result['auto_reject_reasons']:
+            st.write(f"• {reason}")
+        
+        if result['trap_team_warning']:
+            st.warning("⚠️ TRAP TEAM DETECTED: Known public team")
+        
+        st.markdown("### 📋 RECOMMENDATION")
+        st.error("**DO NOT BET ON NO DRAW FOR THIS MATCH**")
+        st.write("""
+        • Odds will be too low (<1.50 for favorite)
+        • Public heavily on favorite → higher draw risk
+        • Classic trap match - SKIP entirely
+        • Even if form suggests No Draw, market says otherwise
+        """)
+        
+        # Still show analysis for information
+        st.markdown("---")
+        st.markdown("### 📊 Analysis (For Reference Only)")
+        
+        # Attack Imbalance Analysis
+        imbalance = result['attack_imbalance']
+        st.markdown("#### ⚡ Attack Imbalance Analysis")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
+        with col2:
+            st.metric("Combined GPM", f"{imbalance['combined_gpm']:.1f}")
+        with col3:
+            st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
+        with col4:
+            st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
+        
+        return
+    
+    # Regular analysis (not auto-rejected)
+    
     # Certainty tier badge
     tier = result['certainty_tier']
     if tier == 'tier1':
@@ -613,6 +754,10 @@ def render_high_certainty_dashboard(result: Dict):
         st.warning(f"Confidence: Medium 🟡 ({score}/100)")
     else:
         st.info(f"Confidence: Low 🔵 ({score}/100)")
+    
+    # Trap team warning (but not auto-rejected)
+    if result['trap_team_warning']:
+        st.warning("⚠️ TRAP TEAM DETECTED: Be extra cautious with odds check")
     
     # Attack Imbalance Analysis
     imbalance = result['attack_imbalance']
@@ -724,7 +869,9 @@ def render_high_certainty_dashboard(result: Dict):
             st.write(f"• Draw odds must be >: {odds['draw_min']}")
             st.write(f"• {odds['check_instructions']}")
             
-            if script['certainty_tier'] == 'tier2':
+            if result['trap_team_warning']:
+                st.error("**TRAP TEAM WARNING**: Be EXTRA strict with odds. Consider skipping.")
+            elif script['certainty_tier'] == 'tier2':
                 st.info("**Tier 2 Note**: Be extra strict with odds. Skip if borderline.")
     
     # Predicted scores
@@ -755,6 +902,7 @@ def main():
     
     st.sidebar.title("⚙️ High-Certainty Configuration")
     st.sidebar.markdown("**Strategy**: Maximum accuracy over quantity")
+    st.sidebar.markdown("**Bayern Protection**: Auto-rejects ultra-strong favorites")
     
     # League selection
     league_options = [
@@ -811,7 +959,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("High-Certainty No Draw Analyzer • Tier 1: Max certainty • Tier 2: Good certainty")
+    st.caption("High-Certainty No Draw Analyzer • Auto-rejects ultra-strong favorites • Tiered certainty system")
 
 # ============================================================================
 # RUN THE APP
