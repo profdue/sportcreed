@@ -1,980 +1,544 @@
-#!/usr/bin/env python3
-"""
-HIGH-CERTAINTY NO DRAW ANALYZER WITH BAYERN PROTECTION
-Three filters only:
-1. Under 1.5 Goals (High certainty defensive)
-2. Under 2.5 Goals (Good certainty defensive)
-3. No Draw Candidate (Tiered system with auto-reject for strong favorites)
-"""
-
 import streamlit as st
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
-import requests
-import io
+import numpy as np
+import math
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
 
-# ============================================================================
-# DATA STRUCTURES
-# ============================================================================
+# Page config
+st.set_page_config(
+    page_title="Football xG Predictor",
+    page_icon="⚽",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-@dataclass
-class TeamFormData:
-    """Team statistics data structure"""
-    teamName: str
-    last6: Dict[str, Any]  # Last 6 matches stats
-    overall: Dict[str, Any]  # Overall season stats
+# Title and description
+st.title("⚽ Football Match Predictor")
+st.markdown("""
+    Predict match outcomes using Expected Goals (xG) regression analysis.
+    This model adjusts for team over/underperformance and calculates probabilities using Poisson distribution.
+""")
 
-@dataclass
-class MatchContext:
-    """Complete match context"""
-    teamA: TeamFormData
-    teamB: TeamFormData
-    isTeamAHome: bool = True
+# Constants
+MAX_GOALS = 8
+REG_BASE_FACTOR = 0.75
+REG_MATCH_THRESHOLD = 5
 
-# ============================================================================
-# DATA LOADER
-# ============================================================================
+# Initialize session state
+if 'factorial_cache' not in st.session_state:
+    st.session_state.factorial_cache = {}
 
-class DataLoader:
-    """Load data from GitHub repository"""
-    
-    @staticmethod
-    def load_from_github(league_name: str) -> Optional[pd.DataFrame]:
-        """Load CSV data from GitHub repository"""
-        try:
-            base_url = "https://raw.githubusercontent.com/profdue/sportcreed/main/leagues"
-            url = f"{base_url}/{league_name}.csv"
-            
-            response = requests.get(url)
-            response.raise_for_status()
-            
-            df = pd.read_csv(io.StringIO(response.text))
-            st.success(f"✅ Loaded {league_name} data from GitHub")
-            return df
-        except Exception as e:
-            st.error(f"❌ Error loading {league_name}: {str(e)}")
-            try:
-                df = pd.read_csv(f"{league_name}.csv")
-                st.success(f"✅ Loaded {league_name} data locally")
-                return df
-            except:
-                st.error(f"❌ Could not load {league_name} data")
-                return None
+def factorial_cache(n):
+    """Cache factorial calculations for performance"""
+    if n not in st.session_state.factorial_cache:
+        st.session_state.factorial_cache[n] = math.factorial(n)
+    return st.session_state.factorial_cache[n]
 
-# ============================================================================
-# METRICS CALCULATOR
-# ============================================================================
+def poisson_pmf(k, lam):
+    """Calculate Poisson probability manually"""
+    if lam <= 0 or k < 0:
+        return 0
+    return (math.exp(-lam) * (lam ** k)) / factorial_cache(k)
 
-class MatchAnalyzer:
-    """Calculate all metrics from raw data"""
-    
-    @staticmethod
-    def calculate_metrics(team_a: TeamFormData, team_b: TeamFormData) -> Dict:
-        """Calculate all derived metrics needed for decision making"""
-        # Parse fractions
-        a_cs_num, a_cs_den = MatchAnalyzer._parse_fraction(team_a.last6['cs'])
-        a_btts_num, a_btts_den = MatchAnalyzer._parse_fraction(team_a.last6['btts'])
-        b_cs_num, b_cs_den = MatchAnalyzer._parse_fraction(team_b.last6['cs'])
-        b_btts_num, b_btts_den = MatchAnalyzer._parse_fraction(team_b.last6['btts'])
-        
-        # Calculate attack imbalance
-        a_goals = team_a.last6['goals']
-        b_goals = team_b.last6['goals']
-        
-        if a_goals > b_goals:
-            attack_imbalance = a_goals / max(b_goals, 1)  # Avoid division by zero
-            imbalance_favors = 'A'
-        else:
-            attack_imbalance = b_goals / max(a_goals, 1)
-            imbalance_favors = 'B'
-        
-        metrics = {
-            'team_a': {
-                'goals': a_goals,
-                'gpm': a_goals / 6,
-                'cs_percent': (a_cs_num / 6) * 100,
-                'cs_count': a_cs_num,
-                'btts_percent': (a_btts_num / 6) * 100,
-                'btts_count': a_btts_num,
-                'win_percent': (team_a.last6['wins'] / 6) * 100,
-            },
-            'team_b': {
-                'goals': b_goals,
-                'gpm': b_goals / 6,
-                'cs_percent': (b_cs_num / 6) * 100,
-                'cs_count': b_cs_num,
-                'btts_percent': (b_btts_num / 6) * 100,
-                'btts_count': b_btts_num,
-                'win_percent': (team_b.last6['wins'] / 6) * 100,
-            },
-            'imbalance': {
-                'ratio': attack_imbalance,
-                'favors': imbalance_favors,
-                'higher_goals': max(a_goals, b_goals),
-                'lower_goals': min(a_goals, b_goals)
-            },
-            'averages': {
-                'avg_gpm': (a_goals/6 + b_goals/6) / 2,
-                'avg_btts_percent': ((a_btts_num/6)*100 + (b_btts_num/6)*100) / 2,
-                'avg_cs_percent': ((a_cs_num/6)*100 + (b_cs_num/6)*100) / 2,
-            }
-        }
-        return metrics
-    
-    @staticmethod
-    def _parse_fraction(frac_str: str) -> Tuple[int, int]:
-        """Parse '4/6' -> (4, 6)"""
-        if isinstance(frac_str, str) and '/' in frac_str:
-            num, den = frac_str.split('/')
-            return int(num.strip()), int(den.strip())
-        return 0, 6
-
-# ============================================================================
-# HIGH-CERTAINTY NO DRAW DETECTOR WITH BAYERN PROTECTION
-# ============================================================================
-
-class HighCertaintyNoDrawDetector:
-    """Detect only HIGH-CERTAINTY No Draw patterns with Bayern protection"""
-    
-    def __init__(self):
-        # BAYERN PROTECTION: Auto-reject thresholds
-        self.AUTO_REJECT_WIN_DIFF = 4          # Win difference ≥ 4 → too one-sided
-        self.AUTO_REJECT_GPM_DIFF = 1.5        # GPM difference ≥ 1.5 → scoring dominance
-        self.AUTO_REJECT_GOAL_DIFF = 10        # Goal difference ≥ 10 in last 6 → too dominant
-        
-        # Trap teams that attract public money (customize this list)
-        self.TRAP_TEAMS = [
-            'bayern', 'real madrid', 'barcelona', 'psg', 'man city', 
-            'liverpool', 'dortmund', 'juventus', 'milan', 'inter',
-            'atletico madrid', 'chelsea', 'man united', 'arsenal',
-            'napoli', 'roma', 'lyon', 'marseille', 'benfica', 'porto'
-        ]
-        
-        # Filter 1: Under 1.5 Goals (extreme defensive - keep as is)
-        self.UNDER_15_GPM_THRESHOLD = 0.75
-        
-        # Filter 2: Under 2.5 Goals (defensive - keep as is)
-        self.UNDER_25_GPM_THRESHOLD = 1.5
-        self.UNDER_25_BTTS_THRESHOLD = 50
-        
-        # Filter 3: HIGH-CERTAINTY No Draw Candidate
-        # TIER 1: Maximum certainty (BET)
-        self.NO_DRAW_TIER1_IMBALANCE = 1.4      # One team scores 40%+ more
-        self.NO_DRAW_TIER1_COMBINED_GPM = 3.0   # High scoring environment
-        self.NO_DRAW_TIER1_BTTS_AVG = 60        # Both teams score regularly
-        self.NO_DRAW_TIER1_CS_MAX = 30          # Not defensive teams
-        
-        # TIER 2: Good certainty (CHECK ODDS)
-        self.NO_DRAW_TIER2_IMBALANCE = 1.3      # One team scores 30%+ more
-        self.NO_DRAW_TIER2_COMBINED_GPM = 2.8   # Decent scoring
-        self.NO_DRAW_TIER2_BTTS_AVG = 55        # Good scoring rate
-        self.NO_DRAW_TIER2_CS_MAX = 35          # Moderate defense
-        
-        # Special exception: Extreme high-scoring
-        self.EXTREME_SCORING_GPM = 4.0          # If combined > 4.0 GPM
-        self.EXTREME_SCORING_IMBALANCE = 1.25   # Allow slightly lower imbalance
-        
-        # High-draw leagues (always be cautious)
-        self.HIGH_DRAW_LEAGUES = ['paraguay', 'iran', 'peru']
-    
-    def detect_filters(self, metrics: Dict, team_a: TeamFormData, team_b: TeamFormData, league: str) -> Dict:
-        """Detect filters with HIGH-CERTAINTY focus and Bayern protection"""
-        filters = {
-            'under_15_alert': False,
-            'under_25_alert': False,
-            'no_draw_candidate': False,
-            'no_draw_tier': 'none',  # 'tier1', 'tier2', or 'none'
-            'high_draw_league_warning': False,
-            'auto_rejected': False,
-            'auto_reject_reasons': [],
-            'trap_team_warning': False,
-            'win_difference': team_a.last6['wins'] - team_b.last6['wins'],
-            'attack_imbalance_ratio': metrics['imbalance']['ratio'],
-            'attack_imbalance_favors': metrics['imbalance']['favors'],
-            'combined_gpm': metrics['averages']['avg_gpm'] * 2,
-            'debug_info': {}
-        }
-        
-        # ===== BAYERN PROTECTION: AUTO-REJECT CHECKS =====
-        auto_reject_reasons = []
-        
-        # 1. Check win difference (too one-sided)
-        win_diff = abs(filters['win_difference'])
-        if win_diff >= self.AUTO_REJECT_WIN_DIFF:
-            auto_reject_reasons.append(f"Win difference too large ({win_diff} ≥ {self.AUTO_REJECT_WIN_DIFF})")
-        
-        # 2. Check GPM difference (scoring dominance)
-        gpm_diff = abs(metrics['team_a']['gpm'] - metrics['team_b']['gpm'])
-        if gpm_diff >= self.AUTO_REJECT_GPM_DIFF:
-            auto_reject_reasons.append(f"Scoring dominance ({gpm_diff:.2f} GPM diff ≥ {self.AUTO_REJECT_GPM_DIFF})")
-        
-        # 3. Check goal difference in last 6
-        goal_diff = abs(metrics['team_a']['goals'] - metrics['team_b']['goals'])
-        if goal_diff >= self.AUTO_REJECT_GOAL_DIFF:
-            auto_reject_reasons.append(f"Goal dominance ({goal_diff} goals diff ≥ {self.AUTO_REJECT_GOAL_DIFF})")
-        
-        # 4. Check for trap teams
-        team_a_lower = team_a.teamName.lower()
-        team_b_lower = team_b.teamName.lower()
-        
-        trap_team_found = None
-        for trap_team in self.TRAP_TEAMS:
-            if trap_team in team_a_lower or trap_team in team_b_lower:
-                trap_team_found = trap_team
-                break
-        
-        if trap_team_found:
-            filters['trap_team_warning'] = True
-            auto_reject_reasons.append(f"Trap team detected: {trap_team_found.title()}")
-        
-        # 5. Check if league is high-draw
-        if any(high_draw_league in league.lower() for high_draw_league in self.HIGH_DRAW_LEAGUES):
-            filters['high_draw_league_warning'] = True
-        
-        # If auto-rejected, skip all further analysis
-        if auto_reject_reasons:
-            filters['auto_rejected'] = True
-            filters['auto_reject_reasons'] = auto_reject_reasons
-            filters['debug_info']['auto_reject'] = auto_reject_reasons
-            return filters
-        
-        # ===== REGULAR FILTER ANALYSIS (only if not auto-rejected) =====
-        
-        # FILTER 1: Under 1.5 Goals Alert
-        if (metrics['team_a']['gpm'] < self.UNDER_15_GPM_THRESHOLD and 
-            metrics['team_b']['gpm'] < self.UNDER_15_GPM_THRESHOLD):
-            filters['under_15_alert'] = True
-            filters['debug_info']['under_15'] = f"Both GPM < {self.UNDER_15_GPM_THRESHOLD}"
-        
-        # FILTER 2: Under 2.5 Goals Alert
-        elif (metrics['team_a']['gpm'] < self.UNDER_25_GPM_THRESHOLD and 
-              metrics['team_b']['gpm'] < self.UNDER_25_GPM_THRESHOLD and
-              metrics['team_a']['btts_percent'] < self.UNDER_25_BTTS_THRESHOLD and
-              metrics['team_b']['btts_percent'] < self.UNDER_25_BTTS_THRESHOLD):
-            filters['under_25_alert'] = True
-            filters['debug_info']['under_25'] = f"Both GPM < {self.UNDER_25_GPM_THRESHOLD} & BTTS < {self.UNDER_25_BTTS_THRESHOLD}%"
-        
-        # FILTER 3: HIGH-CERTAINTY No Draw Candidate
-        else:
-            # Calculate key metrics
-            imbalance = metrics['imbalance']['ratio']
-            combined_gpm = filters['combined_gpm']
-            btts_avg = metrics['averages']['avg_btts_percent']
-            cs_avg = metrics['averages']['avg_cs_percent']
-            
-            # Check for EXTREME high-scoring exception first
-            extreme_scoring = False
-            if combined_gpm >= self.EXTREME_SCORING_GPM:
-                if imbalance >= self.EXTREME_SCORING_IMBALANCE:
-                    extreme_scoring = True
-                    filters['debug_info']['extreme_scoring'] = f"Combined GPM {combined_gpm:.2f} ≥ {self.EXTREME_SCORING_GPM}, imbalance {imbalance:.2f} ≥ {self.EXTREME_SCORING_IMBALANCE}"
-            
-            # Check TIER 1: Maximum certainty
-            tier1_ok = (
-                imbalance >= self.NO_DRAW_TIER1_IMBALANCE and
-                combined_gpm >= self.NO_DRAW_TIER1_COMBINED_GPM and
-                btts_avg >= self.NO_DRAW_TIER1_BTTS_AVG and
-                cs_avg < self.NO_DRAW_TIER1_CS_MAX
-            )
-            
-            # Check TIER 2: Good certainty
-            tier2_ok = (
-                (imbalance >= self.NO_DRAW_TIER2_IMBALANCE or extreme_scoring) and
-                combined_gpm >= self.NO_DRAW_TIER2_COMBINED_GPM and
-                btts_avg >= self.NO_DRAW_TIER2_BTTS_AVG and
-                cs_avg < self.NO_DRAW_TIER2_CS_MAX
-            )
-            
-            # Store debug info
-            filters['debug_info']['no_draw_check'] = {
-                'imbalance': f"{imbalance:.2f}x",
-                'combined_gpm': f"{combined_gpm:.2f}",
-                'btts_avg': f"{btts_avg:.1f}%",
-                'cs_avg': f"{cs_avg:.1f}%",
-                'tier1': tier1_ok,
-                'tier2': tier2_ok,
-                'extreme_scoring': extreme_scoring
-            }
-            
-            # Set result
-            if tier1_ok:
-                filters['no_draw_candidate'] = True
-                filters['no_draw_tier'] = 'tier1'
-                filters['debug_info']['no_draw'] = f"TIER 1: imbalance {imbalance:.2f}x ≥ {self.NO_DRAW_TIER1_IMBALANCE}, GPM {combined_gpm:.2f} ≥ {self.NO_DRAW_TIER1_COMBINED_GPM}"
-            
-            elif tier2_ok:
-                filters['no_draw_candidate'] = True
-                filters['no_draw_tier'] = 'tier2'
-                if extreme_scoring:
-                    filters['debug_info']['no_draw'] = f"TIER 2 (Extreme Scoring): GPM {combined_gpm:.2f} ≥ {self.EXTREME_SCORING_GPM}, imbalance {imbalance:.2f}x ≥ {self.EXTREME_SCORING_IMBALANCE}"
-                else:
-                    filters['debug_info']['no_draw'] = f"TIER 2: imbalance {imbalance:.2f}x ≥ {self.NO_DRAW_TIER2_IMBALANCE}, GPM {combined_gpm:.2f} ≥ {self.NO_DRAW_TIER2_COMBINED_GPM}"
-        
-        return filters
-
-# ============================================================================
-# TIERED SCRIPT GENERATOR WITH AUTO-REJECT HANDLING
-# ============================================================================
-
-class TieredScriptGenerator:
-    """Generate scripts with tiered certainty levels and auto-reject handling"""
-    
-    def __init__(self, team_a_name: str, team_b_name: str):
-        self.team_a_name = team_a_name
-        self.team_b_name = team_b_name
-    
-    def generate_script(self, metrics: Dict, filters: Dict, is_team_a_home: bool) -> Dict:
-        """Generate script with tiered certainty and auto-reject handling"""
-        script = {
-            'primary_bets': [],
-            'secondary_bets': [],
-            'predicted_score_range': [],
-            'confidence_score': 0,
-            'confidence_level': 'low',
-            'match_narrative': '',
-            'triggered_filter': None,
-            'manual_check_required': False,
-            'odds_to_check': {},
-            'certainty_tier': 'none',
-            'attack_imbalance_analysis': {},
-            'auto_rejected': False,
-            'auto_reject_reasons': [],
-            'trap_team_warning': False
-        }
-        
-        # ===== ALWAYS CALCULATE ATTACK IMBALANCE (even for auto-rejected) =====
-        script['attack_imbalance_analysis'] = {
-            'ratio': metrics['imbalance']['ratio'],
-            'favors': filters.get('attack_imbalance_favors', 'A'),
-            'higher_scorer': metrics['imbalance']['higher_goals'],
-            'lower_scorer': metrics['imbalance']['lower_goals'],
-            'combined_gpm': filters.get('combined_gpm', 0),
-            'btts_avg': metrics['averages']['avg_btts_percent'],
-            'cs_avg': metrics['averages']['avg_cs_percent']
-        }
-        
-        # Check if auto-rejected
-        if filters.get('auto_rejected', False):
-            script['auto_rejected'] = True
-            script['auto_reject_reasons'] = filters.get('auto_reject_reasons', [])
-            script['trap_team_warning'] = filters.get('trap_team_warning', False)
-            script['match_narrative'] = self._generate_auto_reject_narrative(filters)
-            script['confidence_score'] = 0
-            script['triggered_filter'] = 'auto_reject'
-            return script
-        
-        # Check for trap team warning (but not auto-rejected)
-        if filters.get('trap_team_warning', False):
-            script['trap_team_warning'] = True
-        
-        # Determine which filter triggered
-        if filters['under_15_alert']:
-            script = self._generate_under_15_script(script, metrics, filters)
-            script['confidence_score'] = 85
-            script['triggered_filter'] = 'under_15'
-            script['certainty_tier'] = 'high'
-        
-        elif filters['under_25_alert']:
-            script = self._generate_under_25_script(script, metrics, filters)
-            script['confidence_score'] = 75
-            script['triggered_filter'] = 'under_25'
-            script['certainty_tier'] = 'medium'
-        
-        elif filters['no_draw_candidate']:
-            tier = filters['no_draw_tier']
-            script = self._generate_no_draw_script(script, metrics, filters, is_team_a_home, tier)
-            script['confidence_score'] = self._calculate_tiered_confidence(tier, metrics, filters)
-            script['triggered_filter'] = 'no_draw'
-            script['certainty_tier'] = tier
-            
-            # Tier-based manual check requirements
-            if tier == 'tier1':
-                script['manual_check_required'] = True
-                script['odds_to_check'] = {
-                    'favorite_range': '1.50-1.75',  # TIGHTER: Was 1.35-1.75
-                    'draw_min': '3.80',  # Stricter
-                    'check_instructions': 'Maximum certainty - but still verify odds strictly'
-                }
-            else:  # tier2
-                script['manual_check_required'] = True
-                script['odds_to_check'] = {
-                    'favorite_range': '1.50-1.70',  # EVEN TIGHTER for tier2
-                    'draw_min': '4.00',  # Higher threshold
-                    'check_instructions': 'Good certainty - be EXTRA strict with odds'
-                }
-        
-        else:
-            script['match_narrative'] = self._generate_no_filter_narrative(metrics, filters)
-            script['confidence_score'] = 40
-            script['triggered_filter'] = 'none'
-            script['certainty_tier'] = 'none'
-        
-        # Set confidence level
-        if script['confidence_score'] >= 80:
-            script['confidence_level'] = 'high'
-        elif script['confidence_score'] >= 65:
-            script['confidence_level'] = 'medium'
-        else:
-            script['confidence_level'] = 'low'
-        
-        return script
-    
-    def _generate_auto_reject_narrative(self, filters: Dict) -> str:
-        """Generate narrative for auto-rejected matches"""
-        reasons = filters.get('auto_reject_reasons', [])
-        
-        narrative = "🚫 **AUTO-REJECTED: ULTRA-STRONG FAVORITE DETECTED**\n\n"
-        narrative += "**Reasons for rejection:**\n"
-        
-        for reason in reasons:
-            narrative += f"• {reason}\n"
-        
-        narrative += "\n**Recommendation:**\n"
-        narrative += "• **DO NOT BET** on No Draw for this match\n"
-        narrative += "• Even if form suggests No Draw, odds will be too low (<1.50)\n"
-        narrative += "• Public heavily on favorite → higher draw risk\n"
-        narrative += "• Classic trap match - SKIP\n"
-        
-        if filters.get('trap_team_warning', False):
-            narrative += "\n⚠️ **TRAP TEAM WARNING:** Known public team detected\n"
-            narrative += "Casual bettors heavily on this team → bookmakers protect with draw value"
-        
-        return narrative
-    
-    def _calculate_tiered_confidence(self, tier: str, metrics: Dict, filters: Dict) -> int:
-        """Calculate confidence based on tier"""
-        if tier == 'tier1':
-            base = 85
-            
-            # Boost for stronger imbalance
-            imbalance = metrics['imbalance']['ratio']
-            if imbalance > 1.6:
-                base += 10
-            elif imbalance > 1.4:
-                base += 5
-            
-            # Boost for higher scoring
-            if filters['combined_gpm'] > 3.5:
-                base += 5
-                
-            return min(base, 95)
-        
-        else:  # tier2
-            base = 75
-            
-            # Check if it's extreme scoring exception
-            if filters.get('debug_info', {}).get('no_draw_check', {}).get('extreme_scoring', False):
-                base += 5  # Extra confidence for extreme scoring
-            
-            return min(base, 85)
-    
-    def _generate_under_15_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
-        script['primary_bets'].append('under_15_goals')
-        script['secondary_bets'].append('btts_no')
-        script['predicted_score_range'] = ['0-0', '1-0', '0-1']
-        script['match_narrative'] = f'HIGH CERTAINTY: Extreme low-scoring pattern (both < 0.75 GPM)'
-        return script
-    
-    def _generate_under_25_script(self, script: Dict, metrics: Dict, filters: Dict) -> Dict:
-        script['primary_bets'].append('under_25_goals')
-        script['secondary_bets'].append('btts_no')
-        script['predicted_score_range'] = ['0-0', '1-0', '0-1', '1-1', '2-0', '0-2']
-        script['match_narrative'] = 'Good certainty: Defensive match with low scoring expected'
-        return script
-    
-    def _generate_no_draw_script(self, script: Dict, metrics: Dict, filters: Dict, 
-                                 is_team_a_home: bool, tier: str) -> Dict:
-        # Determine which team has attack advantage
-        if filters['attack_imbalance_favors'] == 'A':
-            stronger_name = self.team_a_name
-            weaker_name = self.team_b_name
-            stronger_goals = metrics['team_a']['goals']
-            weaker_goals = metrics['team_b']['goals']
-        else:
-            stronger_name = self.team_b_name
-            weaker_name = self.team_a_name
-            stronger_goals = metrics['team_b']['goals']
-            weaker_goals = metrics['team_a']['goals']
-        
-        imbalance = metrics['imbalance']['ratio']
-        combined_gpm = filters['combined_gpm']
-        
-        # Tier-specific predictions
-        if tier == 'tier1':
-            # High certainty - more decisive scores
-            if filters['attack_imbalance_favors'] == 'A':
-                script['predicted_score_range'] = ['2-0', '3-0', '2-1', '3-1', '1-0']
-            else:
-                script['predicted_score_range'] = ['0-2', '0-3', '1-2', '1-3', '0-1']
-            
-            certainty_word = "HIGH CERTAINTY"
-            confidence_word = "strongly"
-            
-        else:  # tier2
-            # Good certainty - competitive but still no draw
-            if filters['attack_imbalance_favors'] == 'A':
-                script['predicted_score_range'] = ['2-1', '1-0', '2-0', '3-2']
-            else:
-                script['predicted_score_range'] = ['1-2', '0-1', '0-2', '2-3']
-            
-            certainty_word = "GOOD CERTAINTY"
-            confidence_word = "likely"
-            
-            # Add extreme scoring note if applicable
-            if filters.get('debug_info', {}).get('no_draw_check', {}).get('extreme_scoring', False):
-                certainty_word = "GOOD CERTAINTY (Extreme Scoring)"
-        
-        # Betting recommendations
-        if filters['attack_imbalance_favors'] == 'A':
-            if is_team_a_home:
-                script['primary_bets'].append('double_chance_1x')
-            else:
-                script['primary_bets'].append('double_chance_12')
-        else:
-            if not is_team_a_home:
-                script['primary_bets'].append('double_chance_x2')
-            else:
-                script['primary_bets'].append('double_chance_12')
-        
-        # Supportive bets based on scoring level
-        script['secondary_bets'].append('btts_yes')
-        if combined_gpm > 3.0:
-            script['secondary_bets'].append('over_25_goals')
-        if combined_gpm > 3.5:
-            script['secondary_bets'].append('over_35_goals')
-        
-        # Narrative
-        if tier == 'tier1':
-            script['match_narrative'] = (
-                f'🎯 {certainty_word} NO DRAW: {stronger_name} scores {imbalance:.1f}x more than {weaker_name} '
-                f'({stronger_goals} vs {weaker_goals} goals). '
-                f'High-scoring environment ({combined_gpm:.1f} GPM combined). '
-                f'Both teams score regularly (avg BTTS: {metrics["averages"]["avg_btts_percent"]:.1f}%). '
-                f'Odds should {confidence_word} match No Draw criteria.'
-            )
-        else:
-            script['match_narrative'] = (
-                f'✅ {certainty_word} NO DRAW: Clear attack advantage ({imbalance:.1f}x) '
-                f'in high-scoring match ({combined_gpm:.1f} GPM combined). '
-                f'Both teams have scoring capability. '
-                f'MANUAL CHECK: Verify odds strictly match criteria.'
-            )
-        
-        return script
-    
-    def _generate_no_filter_narrative(self, metrics: Dict, filters: Dict) -> str:
-        imbalance = metrics['imbalance']['ratio']
-        combined_gpm = filters['combined_gpm']
-        btts_avg = metrics['averages']['avg_btts_percent']
-        
-        reasons = []
-        
-        if imbalance < 1.3:
-            reasons.append(f'insufficient attack imbalance ({imbalance:.2f}x)')
-        
-        if combined_gpm < 2.8:
-            reasons.append(f'low scoring potential ({combined_gpm:.1f} GPM)')
-        
-        if btts_avg < 55:
-            reasons.append(f'low scoring consistency (BTTS: {btts_avg:.1f}%)')
-        
-        if reasons:
-            return f'❌ Not enough certainty for No Draw: ' + ', '.join(reasons)
-        else:
-            return 'Patterns unclear. No high-certainty signal detected.'
-
-# ============================================================================
-# MAIN ENGINE
-# ============================================================================
-
-class HighCertaintyEngine:
-    """Main orchestrator for high-certainty strategy with Bayern protection"""
-    
-    def __init__(self):
-        self.data_loader = DataLoader()
-        self.metrics_calc = MatchAnalyzer()
-        self.filter_detector = HighCertaintyNoDrawDetector()
-        self.script_generator = None
-    
-    def analyze_match(self, match_context: MatchContext, league: str) -> Dict:
-        self.script_generator = TieredScriptGenerator(
-            match_context.teamA.teamName, 
-            match_context.teamB.teamName
-        )
-        
-        # ALWAYS calculate metrics first
-        metrics = self.metrics_calc.calculate_metrics(
-            match_context.teamA, 
-            match_context.teamB
-        )
-        
-        # Then detect filters (which may auto-reject)
-        filters = self.filter_detector.detect_filters(
-            metrics, 
-            match_context.teamA, 
-            match_context.teamB,
-            league
-        )
-        
-        # Always generate script (even for auto-rejected matches)
-        script = self.script_generator.generate_script(
-            metrics, filters, match_context.isTeamAHome
-        )
-        
-        # Build result - ensure attack_imbalance is always included
-        result = {
-            'match_info': {
-                'team_a': match_context.teamA.teamName,
-                'team_b': match_context.teamB.teamName,
-                'venue': 'home' if match_context.isTeamAHome else 'away',
-                'league': league
-            },
-            'calculated_metrics': metrics,  # Always include metrics
-            'filters_triggered': filters,
-            'match_script': script,
-            'predicted_score_range': script['predicted_score_range'],
-            'confidence': script['confidence_level'],
-            'confidence_score': script['confidence_score'],
-            'certainty_tier': script['certainty_tier'],
-            'auto_rejected': script['auto_rejected'],
-            'auto_reject_reasons': script['auto_reject_reasons'],
-            'trap_team_warning': script['trap_team_warning'],
-            'attack_imbalance': script['attack_imbalance_analysis']  # Always include this
-        }
-        
-        return result
-
-# ============================================================================
-# DATA PARSING FUNCTION
-# ============================================================================
-
-def parse_team_from_csv(df: pd.DataFrame, team_name: str) -> Optional[TeamFormData]:
-    """Convert CSV row to TeamFormData for your specific CSV format"""
+@st.cache_data(ttl=3600)
+def load_league_data(league_name):
+    """Load league data from CSV with caching"""
     try:
-        row = df[df['Team'] == team_name].iloc[0]
+        file_path = f"leagues/{league_name}.csv"
+        df = pd.read_csv(file_path)
         
-        # Parse fractions
-        def parse_frac(field_name):
-            value = row[field_name]
-            if pd.isna(value):
-                return "0/6"
-            if isinstance(value, str) and '/' in value:
-                return value
-            return "0/6"
+        # Basic validation
+        required_cols = ['team', 'venue', 'matches', 'xg', 'xga', 'goals_vs_xg']
         
-        # Calculate overall btts matches from percentage
-        overall_matches = int(row['Overall Matches'])
-        
-        return TeamFormData(
-            teamName=team_name,
-            last6={
-                'goals': int(row['Last 6 Goals']),
-                'wins': int(row['Form W']),
-                'draws': int(row['Form D']),
-                'losses': int(row['Form L']),
-                'cs': parse_frac('Last 6 CS'),
-                'btts': parse_frac('Last 6 BTTS')
-            },
-            overall={
-                'matches': overall_matches,
-                'goals': int(row['Overall Goals']),
-                'wins': int(row['Overall W']),
-                'draws': int(row['Overall D']),
-                'losses': int(row['Overall L']),
-                'cs_percent': float(row['Overall CS%']),
-                'btts_percent': float(row['Overall BTTS%'])
-            }
-        )
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            st.error(f"CSV missing required columns: {missing_cols}")
+            return None
+            
+        return df
+    except FileNotFoundError:
+        st.error(f"⚠️ League file not found: leagues/{league_name}.csv")
+        return None
     except Exception as e:
-        st.error(f"Error parsing data for {team_name}: {str(e)}")
+        st.error(f"❌ Error loading data: {str(e)}")
         return None
 
-# ============================================================================
-# UI
-# ============================================================================
+def prepare_team_data(df):
+    """Prepare home and away stats from the data"""
+    home_data = df[df['venue'] == 'home'].copy()
+    away_data = df[df['venue'] == 'away'].copy()
+    
+    home_stats = home_data.set_index('team')
+    away_stats = away_data.set_index('team')
+    
+    return home_stats, away_stats
 
-def render_high_certainty_dashboard(result: Dict):
-    """Display high-certainty focused results"""
-    st.title("🎯 High-Certainty No Draw Analyzer")
-    st.subheader(f"{result['match_info']['team_a']} vs {result['match_info']['team_b']}")
+def calculate_regression_factors(home_team_stats, away_team_stats, regression_factor):
+    """Calculate attack regression factors"""
+    home_matches = home_team_stats['matches']
+    away_matches = away_team_stats['matches']
     
-    # Check if auto-rejected
-    if result['auto_rejected']:
-        st.error("🚫 AUTO-REJECTED: ULTRA-STRONG FAVORITE DETECTED")
-        
-        st.markdown("### ⚠️ REJECTION REASONS")
-        for reason in result['auto_reject_reasons']:
-            st.write(f"• {reason}")
-        
-        if result['trap_team_warning']:
-            st.warning("⚠️ TRAP TEAM DETECTED: Known public team")
-        
-        st.markdown("### 📋 RECOMMENDATION")
-        st.error("**DO NOT BET ON NO DRAW FOR THIS MATCH**")
-        st.write("""
-        • Odds will be too low (<1.50 for favorite)
-        • Public heavily on favorite → higher draw risk
-        • Classic trap match - SKIP entirely
-        • Even if form suggests No Draw, market says otherwise
-        """)
-        
-        # Still show analysis for information
-        if 'attack_imbalance' in result and result['attack_imbalance']:
-            st.markdown("---")
-            st.markdown("### 📊 Analysis (For Reference Only)")
-            
-            # Attack Imbalance Analysis
-            imbalance = result['attack_imbalance']
-            st.markdown("#### ⚡ Attack Imbalance Analysis")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
-            with col2:
-                st.metric("Combined GPM", f"{imbalance['combined_gpm']:.1f}")
-            with col3:
-                st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
-            with col4:
-                st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
-            
-            # Attack advantage
-            if imbalance['favors'] == 'A':
-                st.info(f"**Attack Advantage**: {result['match_info']['team_a']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
-            else:
-                st.info(f"**Attack Advantage**: {result['match_info']['team_b']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
-        
-        return
-    
-    # Regular analysis (not auto-rejected)
-    
-    # Certainty tier badge
-    tier = result['certainty_tier']
-    if tier == 'tier1':
-        st.success("🏆 MAXIMUM CERTAINTY TIER")
-    elif tier == 'tier2':
-        st.warning("✅ GOOD CERTAINTY TIER")
-    
-    # Confidence
-    confidence = result['confidence']
-    score = result['confidence_score']
-    
-    if confidence == 'high':
-        st.success(f"Confidence: High 🟢 ({score}/100)")
-    elif confidence == 'medium':
-        st.warning(f"Confidence: Medium 🟡 ({score}/100)")
+    if home_matches >= REG_MATCH_THRESHOLD:
+        home_attack_reg = (home_team_stats['goals_vs_xg'] / home_matches) * regression_factor
     else:
-        st.info(f"Confidence: Low 🔵 ({score}/100)")
+        home_attack_reg = 0
     
-    # Trap team warning (but not auto-rejected)
-    if result['trap_team_warning']:
-        st.warning("⚠️ TRAP TEAM DETECTED: Be extra cautious with odds check")
+    if away_matches >= REG_MATCH_THRESHOLD:
+        away_attack_reg = (away_team_stats['goals_vs_xg'] / away_matches) * regression_factor
+    else:
+        away_attack_reg = 0
     
-    # Attack Imbalance Analysis
-    imbalance = result['attack_imbalance']
-    st.markdown("### ⚡ Attack Imbalance Analysis")
+    return home_attack_reg, away_attack_reg
+
+def calculate_expected_goals(home_stats, away_stats, home_attack_reg, away_attack_reg):
+    """Calculate expected goals for both teams"""
+    away_xga_per_match = away_stats['xga'] / max(away_stats['matches'], 1)
+    home_expected = away_xga_per_match * (1 + home_attack_reg)
     
-    col1, col2, col3, col4 = st.columns(4)
+    home_xga_per_match = home_stats['xga'] / max(home_stats['matches'], 1)
+    away_expected = home_xga_per_match * (1 + away_attack_reg)
+    
+    home_expected = max(home_expected, 0.1)
+    away_expected = max(away_expected, 0.1)
+    
+    return home_expected, away_expected
+
+def create_probability_matrix(home_lam, away_lam, max_goals=MAX_GOALS):
+    """Create probability matrix for all score combinations"""
+    prob_matrix = np.zeros((max_goals + 1, max_goals + 1))
+    
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            prob_home = poisson_pmf(i, home_lam)
+            prob_away = poisson_pmf(j, away_lam)
+            prob_matrix[i, j] = prob_home * prob_away
+    
+    return prob_matrix
+
+def calculate_outcome_probabilities(prob_matrix):
+    """Calculate home win, draw, and away win probabilities"""
+    home_win = np.sum(np.triu(prob_matrix, k=1))
+    draw = np.sum(np.diag(prob_matrix))
+    away_win = np.sum(np.tril(prob_matrix, k=-1))
+    
+    total = home_win + draw + away_win
+    if total > 0:
+        home_win /= total
+        draw /= total
+        away_win /= total
+    
+    return home_win, draw, away_win
+
+def calculate_betting_markets(prob_matrix):
+    """Calculate betting market probabilities"""
+    over_25 = 0
+    under_25 = 0
+    
+    for i in range(prob_matrix.shape[0]):
+        for j in range(prob_matrix.shape[1]):
+            total_goals = i + j
+            prob = prob_matrix[i, j]
+            
+            if total_goals > 2.5:
+                over_25 += prob
+            else:
+                under_25 += prob
+    
+    btts_yes = 0
+    btts_no = 0
+    
+    for i in range(prob_matrix.shape[0]):
+        for j in range(prob_matrix.shape[1]):
+            prob = prob_matrix[i, j]
+            
+            if i >= 1 and j >= 1:
+                btts_yes += prob
+            else:
+                btts_no += prob
+    
+    return over_25, under_25, btts_yes, btts_no
+
+def get_risk_flags(home_stats, away_stats, home_xg, away_xg):
+    """Generate risk flags and warnings"""
+    flags = []
+    
+    home_perf = home_stats['goals_vs_xg'] / max(home_stats['matches'], 1)
+    away_perf = away_stats['goals_vs_xg'] / max(away_stats['matches'], 1)
+    
+    if abs(home_perf) > 0.3:
+        flags.append(f"⚠️ Home team {'over' if home_perf < 0 else 'under'}performing by {abs(home_perf):.2f} goals/match")
+    
+    if abs(away_perf) > 0.3:
+        flags.append(f"⚠️ Away team {'over' if away_perf < 0 else 'under'}performing by {abs(away_perf):.2f} goals/match")
+    
+    if 'wins' in home_stats and 'wins' in away_stats:
+        home_win_rate = home_stats['wins'] / max(home_stats['matches'], 1)
+        away_win_rate = away_stats['wins'] / max(away_stats['matches'], 1)
+        
+        if abs(home_win_rate - away_win_rate) > 0.3:
+            flags.append(f"⚠️ Significant form disparity: {home_win_rate:.0%} vs {away_win_rate:.0%} win rate")
+    
+    total_xg = home_xg + away_xg
+    if total_xg > 3.0:
+        flags.append("⚡ High-scoring match expected (Total xG > 3.0)")
+    elif total_xg < 2.0:
+        flags.append("🛡️ Low-scoring match expected (Total xG < 2.0)")
+    
+    if home_stats['matches'] < 5:
+        flags.append("📊 Small sample size for home team home stats")
+    if away_stats['matches'] < 5:
+        flags.append("📊 Small sample size for away team away stats")
+    
+    return flags
+
+def get_betting_suggestions(home_win_prob, draw_prob, away_win_prob, over_25_prob, under_25_prob, btts_yes_prob):
+    """Generate betting suggestions based on probabilities"""
+    suggestions = []
+    threshold = 0.55
+    
+    if home_win_prob > threshold:
+        suggestions.append(f"✅ Home Win ({(home_win_prob*100):.1f}%)")
+    if away_win_prob > threshold:
+        suggestions.append(f"✅ Away Win ({(away_win_prob*100):.1f}%)")
+    if draw_prob > threshold:
+        suggestions.append(f"✅ Draw ({(draw_prob*100):.1f}%)")
+    
+    home_draw_prob = home_win_prob + draw_prob
+    away_draw_prob = away_win_prob + draw_prob
+    if home_draw_prob > threshold:
+        suggestions.append(f"✅ Home Win or Draw ({(home_draw_prob*100):.1f}%)")
+    if away_draw_prob > threshold:
+        suggestions.append(f"✅ Away Win or Draw ({(away_draw_prob*100):.1f}%)")
+    
+    if over_25_prob > threshold:
+        suggestions.append(f"✅ Over 2.5 Goals ({(over_25_prob*100):.1f}%)")
+    if under_25_prob > threshold:
+        suggestions.append(f"✅ Under 2.5 Goals ({(under_25_prob*100):.1f}%)")
+    
+    if btts_yes_prob > threshold:
+        suggestions.append(f"✅ Both Teams to Score ({(btts_yes_prob*100):.1f}%)")
+    elif btts_yes_prob < (1 - threshold):
+        suggestions.append(f"❌ Both Teams NOT to Score ({((1-btts_yes_prob)*100):.1f}%)")
+    
+    return suggestions
+
+# ========== SIDEBAR CONTROLS ==========
+with st.sidebar:
+    st.header("⚙️ Match Settings")
+    
+    leagues = ["Bundesliga", "Premier League", "La Liga", "Serie A", "Ligue 1", "Eredivisie"]
+    selected_league = st.selectbox("Select League", leagues)
+    
+    df = load_league_data(selected_league.lower().replace(" ", "_"))
+    
+    if df is not None:
+        home_stats_df, away_stats_df = prepare_team_data(df)
+        
+        available_home_teams = sorted(home_stats_df.index.unique())
+        available_away_teams = sorted(away_stats_df.index.unique())
+        common_teams = sorted(list(set(available_home_teams) & set(available_away_teams)))
+        
+        if len(common_teams) == 0:
+            st.error("❌ No teams with both home and away data available")
+        else:
+            home_team = st.selectbox("Home Team", common_teams)
+            away_team = st.selectbox("Away Team", [t for t in common_teams if t != home_team])
+            
+            regression_factor = st.slider(
+                "Regression Factor",
+                min_value=0.0,
+                max_value=2.0,
+                value=REG_BASE_FACTOR,
+                step=0.05,
+                help="Adjust how much to regress team performance to mean (higher = more regression)"
+            )
+            
+            calculate_btn = st.button("🎯 Calculate Predictions", type="primary", use_container_width=True)
+            
+            st.divider()
+            st.subheader("📊 Display Options")
+            show_matrix = st.checkbox("Show Score Probability Matrix", value=False)
+
+# ========== MAIN CONTENT ==========
+if df is None:
+    st.warning("📁 Please add league CSV files to the 'leagues' folder")
+    st.info("""
+    **Your CSV format should include:**
+    ```
+    team,venue,matches,xg,xga,goals_vs_xg
+    Team Name,home,10,25.5,12.3,-2.1
+    Team Name,away,10,22.8,15.4,0.5
+    ```
+    """)
+    st.stop()
+
+if 'calculate_btn' not in locals() or not calculate_btn:
+    st.info("👈 Select teams and click 'Calculate Predictions' to start")
+    
+    with st.expander("📋 Preview of Loaded Data"):
+        st.dataframe(df.head(10))
+    st.stop()
+
+try:
+    home_stats = home_stats_df.loc[home_team]
+    away_stats = away_stats_df.loc[away_team]
+except KeyError as e:
+    st.error(f"❌ Team data not found: {e}")
+    st.stop()
+
+# ========== DATA PROCESSING ==========
+st.header(f"📊 {home_team} vs {away_team}")
+
+col1, col2, col3 = st.columns([1, 1, 2])
+
+with col1:
+    st.subheader(f"🏠 {home_team} (Home)")
+    st.metric("Matches", int(home_stats['matches']))
+    if 'wins' in home_stats:
+        st.metric("Wins", int(home_stats['wins']))
+    st.metric("xG/match", f"{home_stats['xg']/max(home_stats['matches'], 1):.2f}")
+    st.metric("xGA/match", f"{home_stats['xga']/max(home_stats['matches'], 1):.2f}")
+    if 'gf' in home_stats and 'ga' in home_stats:
+        st.metric("GF-GA", f"{home_stats['gf']}-{home_stats['ga']}")
+
+with col2:
+    st.subheader(f"✈️ {away_team} (Away)")
+    st.metric("Matches", int(away_stats['matches']))
+    if 'wins' in away_stats:
+        st.metric("Wins", int(away_stats['wins']))
+    st.metric("xG/match", f"{away_stats['xg']/max(away_stats['matches'], 1):.2f}")
+    st.metric("xGA/match", f"{away_stats['xga']/max(away_stats['matches'], 1):.2f}")
+    if 'gf' in away_stats and 'ga' in away_stats:
+        st.metric("GF-GA", f"{away_stats['gf']}-{away_stats['ga']}")
+
+with col3:
+    home_attack_reg, away_attack_reg = calculate_regression_factors(
+        home_stats, away_stats, regression_factor
+    )
+    
+    home_xg, away_xg = calculate_expected_goals(
+        home_stats, away_stats, home_attack_reg, away_attack_reg
+    )
+    
+    st.subheader("🎯 Expected Goals")
+    
+    xg_data = pd.DataFrame({
+        'Team': [home_team, away_team],
+        'Expected Goals': [home_xg, away_xg]
+    })
+    
+    st.bar_chart(xg_data.set_index('Team'))
+    
+    col_xg1, col_xg2, col_xg3 = st.columns(3)
+    with col_xg1:
+        st.metric("Home xG", f"{home_xg:.2f}")
+    with col_xg2:
+        st.metric("Away xG", f"{away_xg:.2f}")
+    with col_xg3:
+        total_xg = home_xg + away_xg
+        st.metric("Total xG", f"{total_xg:.2f}")
+    
+    if total_xg > 2.6:
+        st.success(f"📈 Over bias: Total xG = {total_xg:.2f} > 2.6")
+    elif total_xg < 2.3:
+        st.info(f"📉 Under bias: Total xG = {total_xg:.2f} < 2.3")
+
+# ========== PROBABILITY CALCULATIONS ==========
+st.divider()
+st.header("📈 Probability Calculations")
+
+prob_matrix = create_probability_matrix(home_xg, away_xg)
+home_win_prob, draw_prob, away_win_prob = calculate_outcome_probabilities(prob_matrix)
+over_25_prob, under_25_prob, btts_yes_prob, btts_no_prob = calculate_betting_markets(prob_matrix)
+
+# ========== SCORE PROBABILITIES ==========
+with st.expander("🎯 Most Likely Scores", expanded=True):
+    score_probs = []
+    for i in range(min(6, prob_matrix.shape[0])):
+        for j in range(min(6, prob_matrix.shape[1])):
+            prob = prob_matrix[i, j]
+            if prob > 0.001:
+                score_probs.append(((i, j), prob))
+    
+    score_probs.sort(key=lambda x: x[1], reverse=True)
+    
+    cols = st.columns(5)
+    for idx, ((home_goals, away_goals), prob) in enumerate(score_probs[:5]):
+        with cols[idx]:
+            st.metric(
+                label=f"{home_goals}-{away_goals}",
+                value=f"{prob*100:.1f}%",
+                delta="Most Likely" if idx == 0 else None
+            )
+    
+    if score_probs:
+        most_likely_score, most_likely_prob = score_probs[0]
+        st.success(f"**Most Likely Score:** {most_likely_score[0]}-{most_likely_score[1]} ({(most_likely_prob*100):.1f}%)")
+
+# ========== OUTCOME PROBABILITIES ==========
+with st.expander("📊 Match Outcome Probabilities", expanded=True):
+    col1, col2, col3 = st.columns(3)
+    
     with col1:
-        st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
+        st.metric("Home Win", f"{home_win_prob*100:.1f}%")
+        st.progress(home_win_prob)
+    
     with col2:
-        st.metric("Combined GPM", f"{imbalance['combined_gpm']:.1f}")
+        st.metric("Draw", f"{draw_prob*100:.1f}%")
+        st.progress(draw_prob)
+    
     with col3:
-        st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
-    with col4:
-        st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
+        st.metric("Away Win", f"{away_win_prob*100:.1f}%")
+        st.progress(away_win_prob)
     
-    # Attack advantage
-    if imbalance['favors'] == 'A':
-        st.info(f"**Attack Advantage**: {result['match_info']['team_a']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
-    else:
-        st.info(f"**Attack Advantage**: {result['match_info']['team_b']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
+    outcome_data = pd.DataFrame({
+        'Outcome': ['Home Win', 'Draw', 'Away Win'],
+        'Probability': [home_win_prob, draw_prob, away_win_prob]
+    })
     
-    # Three filter indicators with tier info
-    st.markdown("### 🔍 Triggered Filters")
-    filters = result['filters_triggered']
-    
-    cols = st.columns(3)
-    with cols[0]:
-        if filters['under_15_alert']:
-            st.error("UNDER 1.5 GOALS ✅")
-            st.caption("High certainty defensive match")
-        else:
-            st.info("UNDER 1.5 GOALS ❌")
-    
-    with cols[1]:
-        if filters['under_25_alert']:
-            st.error("UNDER 2.5 GOALS ✅")
-            st.caption("Good certainty low-scoring")
-        else:
-            st.info("UNDER 2.5 GOALS ❌")
-    
-    with cols[2]:
-        if filters['no_draw_candidate']:
-            if filters['no_draw_tier'] == 'tier1':
-                st.success("NO DRAW TIER 1 ✅")
-                st.caption("Maximum certainty")
-            else:
-                st.warning("NO DRAW TIER 2 ✅")
-                st.caption("Good certainty")
-            
-            debug = filters.get('debug_info', {}).get('no_draw', '')
-            if debug:
-                st.caption(debug)
-        else:
-            st.info("NO DRAW ❌")
-            debug = filters.get('debug_info', {}).get('no_draw_check', {})
-            if debug:
-                reasons = []
-                if not debug.get('tier1', False) and not debug.get('tier2', False):
-                    reasons.append("Criteria not met")
-                if debug.get('imbalance'):
-                    reasons.append(f"Imbalance: {debug['imbalance']}")
-                if reasons:
-                    st.caption(", ".join(reasons))
-    
-    # High-draw league warning
-    if filters['high_draw_league_warning']:
-        st.error("⚠️ HIGH-DRAW LEAGUE: Extra caution required")
-    
-    # Betting recommendations
-    st.markdown("### 📋 Recommendations")
-    script = result['match_script']
-    
-    if script['triggered_filter'] == 'none':
-        st.info(script['match_narrative'])
-    else:
-        # Show certainty level
-        if script['certainty_tier'] == 'tier1':
-            st.success("🎯 MAXIMUM CERTAINTY BET")
-        elif script['certainty_tier'] == 'tier2':
-            st.warning("✅ GOOD CERTAINTY BET")
-        
-        st.write(script['match_narrative'])
-        
-        # Show primary bets
-        if script['primary_bets']:
-            st.markdown("**Primary Bets:**")
-            for bet in script['primary_bets']:
-                bet_display = bet.replace('_', ' ').title()
-                st.write(f"• {bet_display}")
-        
-        # Show secondary bets
-        if script['secondary_bets']:
-            st.markdown("**Secondary Bets:**")
-            for bet in script['secondary_bets']:
-                bet_display = bet.replace('_', ' ').title()
-                st.write(f"• {bet_display}")
-        
-        # Manual check requirements
-        if script['manual_check_required']:
-            st.markdown("### ⚠️ ODDS VERIFICATION REQUIRED")
-            odds = script['odds_to_check']
-            
-            if script['certainty_tier'] == 'tier1':
-                st.warning(f"**Verify these odds:**")
-            else:
-                st.error(f"**STRICTLY verify these odds:**")
-            
-            st.write(f"• Favorite odds must be: {odds['favorite_range']}")
-            st.write(f"• Draw odds must be >: {odds['draw_min']}")
-            st.write(f"• {odds['check_instructions']}")
-            
-            if result['trap_team_warning']:
-                st.error("**TRAP TEAM WARNING**: Be EXTRA strict with odds. Consider skipping.")
-            elif script['certainty_tier'] == 'tier2':
-                st.info("**Tier 2 Note**: Be extra strict with odds. Skip if borderline.")
-    
-    # Predicted scores
-    if script['predicted_score_range']:
-        st.markdown("### 🎯 Most Likely Scores")
-        scores = script['predicted_score_range'][:5]
-        score_cols = st.columns(min(5, len(scores)))
-        for idx, score in enumerate(scores):
-            with score_cols[idx]:
-                st.success(f"**{score}**")
-    
-    # Debug info expander
-    with st.expander("🔍 View Detailed Analysis"):
-        if filters.get('debug_info'):
-            st.write("**Filter Analysis:**")
-            st.json(filters['debug_info'], expanded=False)
+    st.bar_chart(outcome_data.set_index('Outcome'))
 
-# ============================================================================
-# MAIN FUNCTION
-# ============================================================================
-
-def main():
-    st.set_page_config(
-        page_title="High-Certainty No Draw Analyzer",
-        page_icon="🎯",
-        layout="wide"
-    )
+# ========== BETTING MARKETS ==========
+with st.expander("💰 Betting Markets", expanded=True):
+    col1, col2 = st.columns(2)
     
-    st.sidebar.title("⚙️ High-Certainty Configuration")
-    st.sidebar.markdown("**Strategy**: Maximum accuracy over quantity")
-    st.sidebar.markdown("**Bayern Protection**: Auto-rejects ultra-strong favorites")
-    
-    # League selection
-    league_options = [
-        "bundesliga", "premier_league", "laliga", "serie_a", 
-        "ligue_1", "eredivisie", "championship"
-    ]
-    selected_league = st.sidebar.selectbox("Select League", league_options)
-    
-    if not selected_league:
-        st.info("👈 Please select a league")
-        return
-    
-    # Load data
-    data_loader = DataLoader()
-    df = data_loader.load_from_github(selected_league)
-    if df is None:
-        return
-    
-    # Team selection
-    teams = sorted(df['Team'].unique().tolist())
-    col1, col2 = st.sidebar.columns(2)
     with col1:
-        team_a = st.selectbox("Team A", teams, key="team_a")
+        st.subheader("Over/Under 2.5 Goals")
+        st.metric("Over 2.5", f"{over_25_prob*100:.1f}%")
+        st.progress(over_25_prob)
+        st.metric("Under 2.5", f"{under_25_prob*100:.1f}%")
+        st.progress(under_25_prob)
+    
     with col2:
-        remaining_teams = [t for t in teams if t != team_a]
-        team_b = st.selectbox("Team B", remaining_teams, key="team_b")
-    
-    # Venue selection
-    venue = st.sidebar.radio("Venue", ["Team A Home", "Team B Home", "Neutral"], horizontal=True)
-    is_team_a_home = venue == "Team A Home"
-    
-    # Parse team data
-    team_a_data = parse_team_from_csv(df, team_a)
-    team_b_data = parse_team_from_csv(df, team_b)
-    
-    if not team_a_data or not team_b_data:
-        st.error("❌ Could not load team data")
-        return
-    
-    # Create match context
-    match_context = MatchContext(
-        teamA=team_a_data,
-        teamB=team_b_data,
-        isTeamAHome=is_team_a_home
+        st.subheader("Both Teams to Score")
+        st.metric("Yes", f"{btts_yes_prob*100:.1f}%")
+        st.progress(btts_yes_prob)
+        st.metric("No", f"{btts_no_prob*100:.1f}%")
+        st.progress(btts_no_prob)
+
+# ========== BETTING SUGGESTIONS ==========
+with st.expander("💡 Betting Suggestions", expanded=True):
+    suggestions = get_betting_suggestions(
+        home_win_prob, draw_prob, away_win_prob,
+        over_25_prob, under_25_prob, btts_yes_prob
     )
     
-    # Run analysis
-    with st.spinner("Analyzing for high-certainty patterns..."):
-        engine = HighCertaintyEngine()
-        result = engine.analyze_match(match_context, selected_league)
+    if suggestions:
+        st.success("**Value Bets Found:**")
+        for suggestion in suggestions:
+            st.write(suggestion)
+    else:
+        st.info("No strong value bets identified (all probabilities < 55%)")
     
-    # Display results
-    render_high_certainty_dashboard(result)
+    st.subheader("Double Chance")
+    col_dc1, col_dc2 = st.columns(2)
+    with col_dc1:
+        home_draw_prob = home_win_prob + draw_prob
+        st.metric("Home Win or Draw", f"{home_draw_prob*100:.1f}%")
+    with col_dc2:
+        away_draw_prob = away_win_prob + draw_prob
+        st.metric("Away Win or Draw", f"{away_draw_prob*100:.1f}%")
+
+# ========== RISK FLAGS ==========
+with st.expander("⚠️ Risk Flags & Warnings", expanded=False):
+    flags = get_risk_flags(home_stats, away_stats, home_xg, away_xg)
     
-    # Footer
-    st.markdown("---")
-    st.caption("High-Certainty No Draw Analyzer • Auto-rejects ultra-strong favorites • Tiered certainty system")
+    if flags:
+        for flag in flags:
+            st.warning(flag)
+    else:
+        st.success("No significant risk flags identified")
 
-# ============================================================================
-# RUN THE APP
-# ============================================================================
+# ========== EXPORT ==========
+st.divider()
+st.header("📤 Export & Share")
 
-if __name__ == "__main__":
-    main()
+summary = f"""
+⚽ PREDICTION SUMMARY: {home_team} vs {away_team}
+League: {selected_league}
+
+📊 Expected Goals:
+• {home_team} xG: {home_xg:.2f}
+• {away_team} xG: {away_xg:.2f}
+• Total xG: {home_xg + away_xg:.2f}
+
+📈 Most Likely Score: {score_probs[0][0][0] if score_probs else 'N/A'}-{score_probs[0][0][1] if score_probs else 'N/A'} ({(score_probs[0][1]*100 if score_probs else 0):.1f}%)
+
+🏆 Outcome Probabilities:
+• {home_team} Win: {home_win_prob*100:.1f}%
+• Draw: {draw_prob*100:.1f}%
+• {away_team} Win: {away_win_prob*100:.1f}%
+
+💰 Betting Markets:
+• Over 2.5 Goals: {over_25_prob*100:.1f}%
+• Under 2.5 Goals: {under_25_prob*100:.1f}%
+• Both Teams to Score: {btts_yes_prob*100:.1f}%
+
+📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+Regression Factor: {regression_factor}
+"""
+
+st.code(summary, language="text")
+
+col_export1, col_export2 = st.columns(2)
+
+with col_export1:
+    st.download_button(
+        label="📥 Download Summary",
+        data=summary,
+        file_name=f"prediction_{home_team}_vs_{away_team}.txt",
+        mime="text/plain"
+    )
+
+with col_export2:
+    export_data = {
+        'Metric': [
+            'Home Team', 'Away Team', 'League', 'Home xG', 'Away xG', 'Total xG',
+            'Home Win %', 'Draw %', 'Away Win %',
+            'Over 2.5 %', 'Under 2.5 %', 'BTTS Yes %', 'BTTS No %',
+            'Most Likely Score', 'Regression Factor'
+        ],
+        'Value': [
+            home_team, away_team, selected_league,
+            f"{home_xg:.2f}", f"{away_xg:.2f}", f"{home_xg+away_xg:.2f}",
+            f"{home_win_prob*100:.1f}", f"{draw_prob*100:.1f}", f"{away_win_prob*100:.1f}",
+            f"{over_25_prob*100:.1f}", f"{under_25_prob*100:.1f}",
+            f"{btts_yes_prob*100:.1f}", f"{btts_no_prob*100:.1f}",
+            f"{score_probs[0][0][0] if score_probs else 'N/A'}-{score_probs[0][0][1] if score_probs else 'N/A'}",
+            f"{regression_factor}"
+        ]
+    }
+    
+    df_export = pd.DataFrame(export_data)
+    csv = df_export.to_csv(index=False)
+    
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv,
+        file_name=f"prediction_data_{home_team}_vs_{away_team}.csv",
+        mime="text/csv"
+    )
+
+# ========== PROBABILITY MATRIX ==========
+if show_matrix:
+    with st.expander("🔢 Detailed Probability Matrix", expanded=False):
+        matrix_data = []
+        for i in range(6):
+            row = []
+            for j in range(6):
+                row.append(f"{prob_matrix[i, j]*100:.2f}%")
+            matrix_data.append(row)
+        
+        matrix_df = pd.DataFrame(
+            matrix_data,
+            columns=[f'Away {i}' for i in range(6)],
+            index=[f'Home {i}' for i in range(6)]
+        )
+        
+        st.dataframe(matrix_df, use_container_width=True)
+
+# ========== FOOTER ==========
+st.divider()
+st.caption(f"⚡ Predictions calculated using xG regression model | Regression factor: {regression_factor} | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
