@@ -343,6 +343,17 @@ class TieredScriptGenerator:
             'trap_team_warning': False
         }
         
+        # ===== ALWAYS CALCULATE ATTACK IMBALANCE (even for auto-rejected) =====
+        script['attack_imbalance_analysis'] = {
+            'ratio': metrics['imbalance']['ratio'],
+            'favors': filters.get('attack_imbalance_favors', 'A'),
+            'higher_scorer': metrics['imbalance']['higher_goals'],
+            'lower_scorer': metrics['imbalance']['lower_goals'],
+            'combined_gpm': filters.get('combined_gpm', 0),
+            'btts_avg': metrics['averages']['avg_btts_percent'],
+            'cs_avg': metrics['averages']['avg_cs_percent']
+        }
+        
         # Check if auto-rejected
         if filters.get('auto_rejected', False):
             script['auto_rejected'] = True
@@ -398,17 +409,6 @@ class TieredScriptGenerator:
             script['confidence_score'] = 40
             script['triggered_filter'] = 'none'
             script['certainty_tier'] = 'none'
-        
-        # Add attack imbalance analysis
-        script['attack_imbalance_analysis'] = {
-            'ratio': metrics['imbalance']['ratio'],
-            'favors': filters['attack_imbalance_favors'],
-            'higher_scorer': metrics['imbalance']['higher_goals'],
-            'lower_scorer': metrics['imbalance']['lower_goals'],
-            'combined_gpm': filters['combined_gpm'],
-            'btts_avg': metrics['averages']['avg_btts_percent'],
-            'cs_avg': metrics['averages']['avg_cs_percent']
-        }
         
         # Set confidence level
         if script['confidence_score'] >= 80:
@@ -603,11 +603,13 @@ class HighCertaintyEngine:
             match_context.teamB.teamName
         )
         
+        # ALWAYS calculate metrics first
         metrics = self.metrics_calc.calculate_metrics(
             match_context.teamA, 
             match_context.teamB
         )
         
+        # Then detect filters (which may auto-reject)
         filters = self.filter_detector.detect_filters(
             metrics, 
             match_context.teamA, 
@@ -615,10 +617,12 @@ class HighCertaintyEngine:
             league
         )
         
+        # Always generate script (even for auto-rejected matches)
         script = self.script_generator.generate_script(
             metrics, filters, match_context.isTeamAHome
         )
         
+        # Build result - ensure attack_imbalance is always included
         result = {
             'match_info': {
                 'team_a': match_context.teamA.teamName,
@@ -626,7 +630,7 @@ class HighCertaintyEngine:
                 'venue': 'home' if match_context.isTeamAHome else 'away',
                 'league': league
             },
-            'calculated_metrics': metrics,
+            'calculated_metrics': metrics,  # Always include metrics
             'filters_triggered': filters,
             'match_script': script,
             'predicted_score_range': script['predicted_score_range'],
@@ -636,7 +640,7 @@ class HighCertaintyEngine:
             'auto_rejected': script['auto_rejected'],
             'auto_reject_reasons': script['auto_reject_reasons'],
             'trap_team_warning': script['trap_team_warning'],
-            'attack_imbalance': script['attack_imbalance_analysis']
+            'attack_imbalance': script['attack_imbalance_analysis']  # Always include this
         }
         
         return result
@@ -716,22 +720,29 @@ def render_high_certainty_dashboard(result: Dict):
         """)
         
         # Still show analysis for information
-        st.markdown("---")
-        st.markdown("### 📊 Analysis (For Reference Only)")
-        
-        # Attack Imbalance Analysis
-        imbalance = result['attack_imbalance']
-        st.markdown("#### ⚡ Attack Imbalance Analysis")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
-        with col2:
-            st.metric("Combined GPM", f"{imbalance['combined_gpm']:.1f}")
-        with col3:
-            st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
-        with col4:
-            st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
+        if 'attack_imbalance' in result and result['attack_imbalance']:
+            st.markdown("---")
+            st.markdown("### 📊 Analysis (For Reference Only)")
+            
+            # Attack Imbalance Analysis
+            imbalance = result['attack_imbalance']
+            st.markdown("#### ⚡ Attack Imbalance Analysis")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Imbalance Ratio", f"{imbalance['ratio']:.2f}x")
+            with col2:
+                st.metric("Combined GPM", f"{imbalance['combined_gpm']:.1f}")
+            with col3:
+                st.metric("Avg BTTS%", f"{imbalance['btts_avg']:.1f}%")
+            with col4:
+                st.metric("Avg CS%", f"{imbalance['cs_avg']:.1f}%")
+            
+            # Attack advantage
+            if imbalance['favors'] == 'A':
+                st.info(f"**Attack Advantage**: {result['match_info']['team_a']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
+            else:
+                st.info(f"**Attack Advantage**: {result['match_info']['team_b']} ({imbalance['higher_scorer']} vs {imbalance['lower_scorer']} goals)")
         
         return
     
