@@ -1,6 +1,5 @@
-# betting_engine.py - Complete self-contained version
+# betting_engine.py - Completely dependency-free version (only streamlit needed)
 import streamlit as st
-import json
 from datetime import datetime
 from typing import Dict, List, Tuple
 import math
@@ -33,12 +32,12 @@ class NoDrawFilter:
     """Implements the No-Draw Edge Filter v2.0 system"""
     
     def __init__(self):
-        self.results = {}
+        pass
         
     def evaluate(self, match_data: Dict) -> Dict:
         """Evaluate a match using the v2.0 filter system"""
         
-        # Extract parameters
+        # Extract parameters with defaults
         forebet_pred = match_data.get('forebet_prediction', '')
         draw_prob = match_data.get('draw_probability', 0)
         draw_odds = match_data.get('draw_odds', 0)
@@ -125,7 +124,7 @@ class NoDrawFilter:
         total_score = tier1_count + tier2_count + tier3_count
         
         # Weighted score for more accurate confidence
-        weighted_score = (tier1_count * 2) + (tier2_count * 1.5) + (tier3_count * 1)
+        weighted_score = (tier1_count * 2.0) + (tier2_count * 1.5) + (tier3_count * 1.0)
         
         results['details'] = {
             'tier1_count': tier1_count,
@@ -191,6 +190,14 @@ def main():
         padding: 1rem;
         text-align: center;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 0.5rem 2rem;
+        font-weight: bold;
+        width: 100%;
     }
     </style>
     """, unsafe_allow_html=True)
