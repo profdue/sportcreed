@@ -1,6 +1,5 @@
-# betting_engine_v5_final.py - NO-DRAW EDGE FILTER v5.0
-# Complete Final Version | 45 Matches | 73.3% Win Rate
-# Core Strategy: Fade Forebet X → Bet Double Chance 12
+# grokbet_v4.py - GROKBET LOGIC v4.0
+# Based on 121+ matches | 68.12% win rate | 4-column filter system
 
 import streamlit as st
 import json
@@ -8,61 +7,28 @@ import os
 from datetime import datetime
 
 st.set_page_config(
-    page_title="No-Draw Edge Filter v5.0",
+    page_title="GrokBet v4.0",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # ============================================================================
-# FINAL CALIBRATION - Based on 45 Real Matches
+# GROKBET v4.0 - Based on 121+ Real Matches
 # ============================================================================
 
 PERFORMANCE = {
-    "total": 45,
-    "draws": 12,
-    "no_draw": 33,
-    "win_rate": 73.3,
-    "by_draw_prob": {
-        "35-57%": {"no_draw": 73, "sample": 33, "points": 30},
-        "<35%": {"no_draw": 80, "sample": 6, "points": 25},
-        ">57%": {"no_draw": 67, "sample": 6, "points": 20}
-    },
-    "by_coefficient": {
-        "≥3.00": {"no_draw": 78, "sample": 12, "points": 30},
-        "2.20-2.99": {"no_draw": 73, "sample": 21, "points": 25},
-        "<2.20": {"no_draw": 62, "sample": 12, "points": 15}
-    },
-    "by_avg_goals": {
-        "<2.40": {"no_draw": 76, "sample": 17, "points": 25},
-        "2.40-2.80": {"no_draw": 67, "sample": 12, "points": 15},
-        ">2.80": {"no_draw": 78, "sample": 9, "points": 25}
-    },
-    "by_league": {
-        "youth_lower": {"no_draw": 76, "sample": 28, "points": 20},
-        "top_tier": {"no_draw": 70, "sample": 10, "points": 10},
-        "other": {"no_draw": 71, "sample": 7, "points": 15}
-    }
+    "total_matches": 121,
+    "raw_forebet_wins": 59,
+    "raw_forebet_rate": 48.8,
+    "v4_qualifiers": 69,
+    "v4_wins": 47,
+    "v4_win_rate": 68.12,
+    "improvement": 19.36
 }
 
-# League classifications
-YOUTH_LOWER_LEAGUES = [
-    "U19", "U21", "U23", "Youth", "Academy", "Primavera", "Reserves",
-    "Championship", "League One", "League Two", "Scottish Championship",
-    "Serie B", "Ligue 2", "Segunda Division", "2. Bundesliga",
-    "Women", "Vietnam", "Indonesia", "Iran", "Jordan", "Egypt", 
-    "Honduras", "Brazilian", "Ie2", "Sc2", "BrC", "Turkey 2"
-]
-
-TOP_TIER_LEAGUES = [
-    "EPL", "Premier League", "Bundesliga", "La Liga", "Serie A",
-    "Ligue 1", "Eredivisie", "Primeira Liga", "MLS"
-]
-
-ALL_LEAGUES = sorted(YOUTH_LOWER_LEAGUES + TOP_TIER_LEAGUES + ["Other"])
-
-class NoDrawFilterV5:
-    """Final v5.0 - Complete implementation of your proven logic"""
+class GrokBetV4:
+    """GrokBet Logic v4.0 - 4-column filter system"""
     
     def __init__(self):
         self.match_history = []
@@ -70,8 +36,8 @@ class NoDrawFilterV5:
     
     def load_history(self):
         try:
-            if os.path.exists("match_history_v5_final.json"):
-                with open("match_history_v5_final.json", "r") as f:
+            if os.path.exists("grokbet_history.json"):
+                with open("grokbet_history.json", "r") as f:
                     self.match_history = json.load(f)
         except:
             self.match_history = []
@@ -82,145 +48,160 @@ class NoDrawFilterV5:
             **match_data,
             "actual_result": result
         })
-        with open("match_history_v5_final.json", "w") as f:
+        with open("grokbet_history.json", "w") as f:
             json.dump(self.match_history, f, indent=2)
     
     def evaluate(self, match_data):
-        """Final evaluation based on all 45 matches"""
+        """Apply v4.0 4-filter system"""
         
-        draw_prob = match_data.get('draw_probability', 0)
-        coefficient = match_data.get('coefficient', 0)
+        pred = match_data.get('forebet_pred', '')
+        prob_home = match_data.get('prob_home', 0)
+        prob_draw = match_data.get('prob_draw', 0)
+        prob_away = match_data.get('prob_away', 0)
+        coef = match_data.get('coefficient', 0)
         avg_goals = match_data.get('avg_goals', 0)
-        home_prob = match_data.get('home_probability', 0)
-        away_prob = match_data.get('away_probability', 0)
-        league = match_data.get('league', '')
         
-        # Step 1: Entry Condition - Must be X
-        if match_data.get('forebet_pred') != 'X':
+        # ================================================================
+        # RULE 1: Pred = 1 (Home Win)
+        # ================================================================
+        if pred == '1':
+            # All filters must pass
+            if prob_home >= 48 and coef >= 1.45 and avg_goals >= 2.5:
+                return {
+                    "valid": True,
+                    "decision": "BET HOME WIN (1)",
+                    "strength": "STRONG",
+                    "expected": "68-72%",
+                    "reasons": [
+                        f"✅ Pred = 1 (Home Win)",
+                        f"✅ Prob Home = {prob_home}% ≥ 48%",
+                        f"✅ Coef. = {coef} ≥ 1.45",
+                        f"✅ Avg Goals = {avg_goals} ≥ 2.5"
+                    ],
+                    "warnings": [],
+                    "filters_passed": 4,
+                    "filters_total": 4
+                }
+            else:
+                failures = []
+                if prob_home < 48:
+                    failures.append(f"Prob Home {prob_home}% < 48%")
+                if coef < 1.45:
+                    failures.append(f"Coef. {coef} < 1.45")
+                if avg_goals < 2.5:
+                    failures.append(f"Avg Goals {avg_goals} < 2.5")
+                return {
+                    "valid": False,
+                    "decision": "SKIP",
+                    "strength": "INVALID",
+                    "expected": None,
+                    "reasons": [],
+                    "warnings": failures,
+                    "filters_passed": 4 - len(failures),
+                    "filters_total": 4
+                }
+        
+        # ================================================================
+        # RULE 2: Pred = 2 (Away Win)
+        # ================================================================
+        elif pred == '2':
+            # All filters must pass
+            if prob_away >= 48 and coef >= 1.45 and avg_goals >= 2.5:
+                return {
+                    "valid": True,
+                    "decision": "BET AWAY WIN (2)",
+                    "strength": "STRONG",
+                    "expected": "68-72%",
+                    "reasons": [
+                        f"✅ Pred = 2 (Away Win)",
+                        f"✅ Prob Away = {prob_away}% ≥ 48%",
+                        f"✅ Coef. = {coef} ≥ 1.45",
+                        f"✅ Avg Goals = {avg_goals} ≥ 2.5"
+                    ],
+                    "warnings": [],
+                    "filters_passed": 4,
+                    "filters_total": 4
+                }
+            else:
+                failures = []
+                if prob_away < 48:
+                    failures.append(f"Prob Away {prob_away}% < 48%")
+                if coef < 1.45:
+                    failures.append(f"Coef. {coef} < 1.45")
+                if avg_goals < 2.5:
+                    failures.append(f"Avg Goals {avg_goals} < 2.5")
+                return {
+                    "valid": False,
+                    "decision": "SKIP",
+                    "strength": "INVALID",
+                    "expected": None,
+                    "reasons": [],
+                    "warnings": failures,
+                    "filters_passed": 4 - len(failures),
+                    "filters_total": 4
+                }
+        
+        # ================================================================
+        # RULE 3: Pred = X (Draw) → Flip to 12 (No Draw)
+        # ================================================================
+        elif pred == 'X':
+            # All filters must pass
+            if prob_draw <= 42 and coef >= 2.80 and avg_goals >= 2.5:
+                return {
+                    "valid": True,
+                    "decision": "BET DOUBLE CHANCE 12 (No Draw)",
+                    "strength": "STRONG",
+                    "expected": "65-71%",
+                    "reasons": [
+                        f"✅ Pred = X (Draw) → Flipping to 12",
+                        f"✅ Prob Draw = {prob_draw}% ≤ 42% (low confidence)",
+                        f"✅ Draw Coef. = {coef} ≥ 2.80 (good value)",
+                        f"✅ Avg Goals = {avg_goals} ≥ 2.5 (goals break draws)"
+                    ],
+                    "warnings": [],
+                    "filters_passed": 4,
+                    "filters_total": 4
+                }
+            else:
+                failures = []
+                if prob_draw > 42:
+                    failures.append(f"Prob Draw {prob_draw}% > 42% (too confident in draw)")
+                if coef < 2.80:
+                    failures.append(f"Coef. {coef} < 2.80 (poor value)")
+                if avg_goals < 2.5:
+                    failures.append(f"Avg Goals {avg_goals} < 2.5")
+                return {
+                    "valid": False,
+                    "decision": "SKIP",
+                    "strength": "INVALID",
+                    "expected": None,
+                    "reasons": [],
+                    "warnings": failures,
+                    "filters_passed": 4 - len(failures),
+                    "filters_total": 4
+                }
+        
+        else:
             return {
                 "valid": False,
-                "decision": "INVALID",
-                "reason": "Forebet prediction is not X",
-                "recommendation": "Skip"
+                "decision": "SKIP",
+                "strength": "INVALID",
+                "expected": None,
+                "reasons": [],
+                "warnings": ["Invalid prediction"],
+                "filters_passed": 0,
+                "filters_total": 4
             }
-        
-        # Step 2: Filter Checklist with Points
-        points = 0
-        reasons = []
-        warnings = []
-        
-        # Filter 1: Draw Probability (35-57% is sweet spot)
-        if 35 <= draw_prob <= 57:
-            points += 30
-            reasons.append(f"🎯 Draw {draw_prob}% (35-57% sweet spot) +30")
-        elif draw_prob < 35:
-            points += 25
-            reasons.append(f"✅ Draw {draw_prob}% <35% +25")
-        else:  # >57%
-            points += 20
-            reasons.append(f"📊 Draw {draw_prob}% >57% +20")
-            warnings.append(f"Draw {draw_prob}% >57% - slightly less reliable")
-        
-        # Filter 2: Coefficient on X (≥2.20 is threshold)
-        if coefficient >= 3.00:
-            points += 30
-            reasons.append(f"📈 Coef. {coefficient} ≥3.00 (very strong) +30")
-        elif coefficient >= 2.20:
-            points += 25
-            reasons.append(f"📈 Coef. {coefficient} ≥2.20 (strong) +25")
-        elif coefficient >= 2.00:
-            points += 15
-            reasons.append(f"⚠️ Coef. {coefficient} (borderline) +15")
-            warnings.append(f"Low coefficient - Forebet more confident in draw")
-        else:
-            warnings.append(f"Coef. {coefficient} <2.00 - high draw risk")
-        
-        # Filter 3: Avg Goals (Forebet Coef. column)
-        if avg_goals > 0:
-            if avg_goals < 2.40:
-                points += 25
-                reasons.append(f"⚽ Avg Goals {avg_goals} <2.40 (low goals fade) +25")
-            elif avg_goals > 2.80:
-                points += 25
-                reasons.append(f"⚽ Avg Goals {avg_goals} >2.80 (goals break draws) +25")
-            elif avg_goals >= 2.40:
-                points += 15
-                reasons.append(f"📊 Avg Goals {avg_goals} (moderate) +15")
-            
-            # Special warning for extremely low goals
-            if avg_goals < 1.8:
-                warnings.append(f"🚨 EXTREMELY LOW GOALS ({avg_goals}) - 0-0 draw risk")
-        
-        # Filter 4: League Type
-        is_youth_lower = any(l in league for l in YOUTH_LOWER_LEAGUES)
-        is_top_tier = any(l in league for l in TOP_TIER_LEAGUES)
-        
-        if is_youth_lower:
-            points += 20
-            reasons.append(f"🏆 Youth/Lower division ({league}) +20")
-        elif is_top_tier:
-            points += 10
-            reasons.append(f"⭐ Top tier ({league}) +10")
-            warnings.append("Top tier leagues - less data, proceed with caution")
-        else:
-            points += 15
-            reasons.append(f"📌 Other league +15")
-        
-        # Filter 5: Balance Check (Neither team >55%)
-        max_prob = max(home_prob, away_prob)
-        if max_prob <= 55:
-            points += 10
-            reasons.append(f"⚖️ Balanced match (max {max_prob}% ≤55%) +10")
-        
-        # Final Score & Decision
-        if points >= 85:
-            strength = "🏆 VERY STRONG FADE"
-            expected = "85-92%"
-            recommendation = "BET DOUBLE CHANCE 12"
-            action = "Full stake"
-        elif points >= 70:
-            strength = "✅ STRONG FADE"
-            expected = "78-85%"
-            recommendation = "BET DOUBLE CHANCE 12"
-            action = "Normal stake"
-        elif points >= 55:
-            strength = "⚠️ MODERATE FADE"
-            expected = "70-78%"
-            recommendation = "Double Chance 12 (cautious)"
-            action = "Small stake or skip"
-        else:
-            strength = "❌ WEAK SIGNAL"
-            expected = "60-70%"
-            recommendation = "SKIP"
-            action = "Do not bet"
-        
-        return {
-            "valid": True,
-            "points": points,
-            "strength": strength,
-            "expected": expected,
-            "recommendation": recommendation,
-            "action": action,
-            "reasons": reasons,
-            "warnings": warnings,
-            "details": {
-                "draw_prob": draw_prob,
-                "coefficient": coefficient,
-                "avg_goals": avg_goals,
-                "league_type": "youth_lower" if is_youth_lower else "top_tier" if is_top_tier else "other",
-                "balance": max_prob <= 55
-            }
-        }
     
     def get_stats(self):
         if not self.match_history:
             return None
         total = len(self.match_history)
-        correct = sum(1 for m in self.match_history if m.get('actual_result') == 'No-Draw')
+        correct = sum(1 for m in self.match_history if m.get('actual_result') == 'Win')
         return {
             "total": total,
             "correct": correct,
-            "hit_rate": (correct / total * 100) if total > 0 else 0
+            "win_rate": (correct / total * 100) if total > 0 else 0
         }
 
 def main():
@@ -256,6 +237,7 @@ def main():
         font-size: 0.8rem;
         font-weight: bold;
         margin-top: 0.5rem;
+        margin-right: 0.5rem;
     }
     .input-card {
         background: #1e293b;
@@ -264,24 +246,12 @@ def main():
         border: 1px solid #334155;
         margin-bottom: 1rem;
     }
-    .points-badge {
-        background: #0f172a;
+    .result-card {
+        background: #1e293b;
         border-radius: 12px;
-        padding: 0.75rem 1.5rem;
-        text-align: center;
-        display: inline-block;
-    }
-    .points-number {
-        font-size: 2rem;
-        font-weight: bold;
-        color: #fbbf24;
-    }
-    .verdict-very-strong {
-        background: linear-gradient(135deg, #1e293b 0%, #2d3a4a 100%);
-        border-left: 4px solid #fbbf24;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
+        padding: 1.5rem;
+        border: 1px solid #334155;
+        margin-top: 1rem;
     }
     .verdict-strong {
         background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
@@ -290,14 +260,7 @@ def main():
         border-radius: 8px;
         margin: 1rem 0;
     }
-    .verdict-moderate {
-        background: linear-gradient(135deg, #1e293b 0%, #3a2e1e 100%);
-        border-left: 4px solid #f59e0b;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-    }
-    .verdict-weak {
+    .verdict-skip {
         background: #1e293b;
         border-left: 4px solid #ef4444;
         padding: 1rem;
@@ -318,14 +281,19 @@ def main():
         letter-spacing: 0.5px;
         text-transform: uppercase;
     }
-    .checklist-box {
+    .rule-card {
         background: #1e293b;
         border-radius: 12px;
         padding: 1rem;
         border: 1px solid #334155;
+        margin-bottom: 1rem;
     }
-    .checklist-item {
-        margin-bottom: 0.5rem;
+    .filter-pass {
+        color: #10b981;
+        font-family: monospace;
+    }
+    .filter-fail {
+        color: #ef4444;
         font-family: monospace;
     }
     hr {
@@ -335,15 +303,19 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    filter_engine = NoDrawFilterV5()
-    stats = filter_engine.get_stats()
+    grokbet = GrokBetV4()
+    stats = grokbet.get_stats()
     
     # Header
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 No-Draw Edge Filter v5.0</h1>
-        <p>Fade Forebet X → Bet Double Chance 12 | 45 Matches | 73.3% Win Rate</p>
-        <div class="badge">📊 Core Strategy: When Forebet predicts X, the winner emerges 73.3% of the time</div>
+        <h1>🎯 GrokBet v4.0</h1>
+        <p>4-Filter System | 121+ Matches Analyzed | 68.12% Win Rate</p>
+        <div>
+            <span class="badge">📊 Raw Forebet: 48.8%</span>
+            <span class="badge">🏆 v4.0: 68.12%</span>
+            <span class="badge">📈 +19.36% Improvement</span>
+        </div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -358,113 +330,78 @@ def main():
             # Row 1: Core inputs
             col1, col2, col3 = st.columns(3)
             with col1:
-                forebet_pred = st.selectbox("Pred", ["X", "1", "2"])
+                forebet_pred = st.selectbox("Pred (Circled)", ["1", "X", "2"])
             with col2:
-                draw_prob = st.number_input("Draw %", 0.0, 100.0, 40.0, 1.0)
+                prob_home = st.number_input("Prob % Home", 0.0, 100.0, 45.0, 1.0)
             with col3:
-                coefficient = st.number_input("Coef.", 0.0, 5.0, 2.50, 0.05, format="%.2f")
+                prob_draw = st.number_input("Prob % Draw", 0.0, 100.0, 30.0, 1.0)
             
-            # Row 2: Secondary inputs
+            # Row 2: More inputs
             col4, col5, col6 = st.columns(3)
             with col4:
-                avg_goals = st.number_input("Avg Goals", 0.0, 5.0, 2.50, 0.05, format="%.2f")
+                prob_away = st.number_input("Prob % Away", 0.0, 100.0, 25.0, 1.0)
             with col5:
-                home_prob = st.number_input("Home %", 0.0, 100.0, 35.0, 1.0)
+                coefficient = st.number_input("Coef. (Odds)", 0.0, 10.0, 2.00, 0.05, format="%.2f")
             with col6:
-                away_prob = st.number_input("Away %", 0.0, 100.0, 35.0, 1.0)
-            
-            # Row 3: League
-            league = st.selectbox("League", ALL_LEAGUES)
+                avg_goals = st.number_input("Avg Goals", 0.0, 5.0, 2.50, 0.05, format="%.2f")
             
             st.markdown('</div>', unsafe_allow_html=True)
             
-            analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
+            analyze = st.button("🔍 ANALYZE WITH GROKBET v4.0", use_container_width=True, type="primary")
             
             if analyze:
                 match_data = {
                     'forebet_pred': forebet_pred,
-                    'draw_probability': draw_prob,
+                    'prob_home': prob_home,
+                    'prob_draw': prob_draw,
+                    'prob_away': prob_away,
                     'coefficient': coefficient,
-                    'avg_goals': avg_goals,
-                    'home_probability': home_prob,
-                    'away_probability': away_prob,
-                    'league': league
+                    'avg_goals': avg_goals
                 }
                 
-                result = filter_engine.evaluate(match_data)
+                result = grokbet.evaluate(match_data)
                 
-                if not result['valid']:
-                    st.error(f"❌ {result['reason']}")
-                else:
-                    # Points display
+                if result['valid']:
                     st.markdown(f"""
-                    <div style="text-align: center; margin: 1rem 0;">
-                        <div class="points-badge">
-                            <div style="font-size: 0.7rem; color: #94a3b8;">TOTAL SCORE</div>
-                            <div class="points-number">{result['points']}/100</div>
-                        </div>
+                    <div class="verdict-strong">
+                        <h2 style="margin: 0; color: #10b981;">✅ QUALIFIED BET</h2>
+                        <p style="margin: 0.5rem 0; font-size: 1.2rem;">🎯 {result['decision']}</p>
+                        <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Verdict card
-                    if result['points'] >= 85:
-                        st.markdown(f"""
-                        <div class="verdict-very-strong">
-                            <h2 style="margin: 0; color: #fbbf24;">{result['strength']}</h2>
-                            <p style="margin: 0.5rem 0; font-size: 1.2rem;">🎯 {result['recommendation']}</p>
-                            <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']} | {result['action']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    elif result['points'] >= 70:
-                        st.markdown(f"""
-                        <div class="verdict-strong">
-                            <h2 style="margin: 0; color: #10b981;">{result['strength']}</h2>
-                            <p style="margin: 0.5rem 0; font-size: 1.2rem;">✅ {result['recommendation']}</p>
-                            <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']} | {result['action']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    elif result['points'] >= 55:
-                        st.markdown(f"""
-                        <div class="verdict-moderate">
-                            <h2 style="margin: 0; color: #f59e0b;">{result['strength']}</h2>
-                            <p style="margin: 0.5rem 0; font-size: 1.2rem;">⚠️ {result['recommendation']}</p>
-                            <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']} | {result['action']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"""
-                        <div class="verdict-weak">
-                            <h2 style="margin: 0; color: #ef4444;">{result['strength']}</h2>
-                            <p style="margin: 0.5rem 0; font-size: 1.2rem;">❌ {result['recommendation']}</p>
-                            <p style="margin: 0; color: #94a3b8;">{result['action']}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    # Show filters passed
+                    st.markdown("##### ✅ All 4 Filters Passed")
+                    for reason in result['reasons']:
+                        st.success(reason)
                     
-                    # Reasons
-                    if result['reasons']:
-                        st.markdown("##### ✅ Filters Passed")
-                        for r in result['reasons']:
-                            st.success(r)
+                else:
+                    st.markdown(f"""
+                    <div class="verdict-skip">
+                        <h2 style="margin: 0; color: #ef4444;">❌ SKIP THIS MATCH</h2>
+                        <p style="margin: 0.5rem 0;">{result['decision']}</p>
+                        <p style="margin: 0; color: #94a3b8;">Filters Passed: {result['filters_passed']}/{result['filters_total']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
-                    # Warnings
                     if result['warnings']:
-                        st.markdown("##### ⚠️ Considerations")
+                        st.markdown("##### ❌ Failed Filters")
                         for w in result['warnings']:
-                            st.warning(w)
-                    
-                    # Save buttons
-                    st.markdown("---")
-                    col_s1, col_s2, _ = st.columns([1, 1, 2])
-                    with col_s1:
-                        if st.button("✅ WIN (No-Draw)", use_container_width=True):
-                            filter_engine.save_match(match_data, "No-Draw")
-                            st.success("Saved!")
-                            st.rerun()
-                    with col_s2:
-                        if st.button("❌ LOSS (Draw)", use_container_width=True):
-                            filter_engine.save_match(match_data, "Draw")
-                            st.warning("Saved!")
-                            st.rerun()
+                            st.error(w)
+                
+                # Save buttons (only if match was analyzed)
+                st.markdown("---")
+                col_s1, col_s2, _ = st.columns([1, 1, 2])
+                with col_s1:
+                    if st.button("✅ Save as WIN", use_container_width=True):
+                        grokbet.save_match(match_data, "Win")
+                        st.success("Saved as WIN!")
+                        st.rerun()
+                with col_s2:
+                    if st.button("❌ Save as LOSS", use_container_width=True):
+                        grokbet.save_match(match_data, "Loss")
+                        st.warning("Saved as LOSS!")
+                        st.rerun()
     
     with col_right:
         # Stats
@@ -473,106 +410,134 @@ def main():
             st.markdown(f"""
             <div class="stat-box">
                 <div style="display: flex; justify-content: space-around;">
-                    <div><span style="color: #94a3b8;">Matches</span><br><span style="font-size: 1.5rem; font-weight: bold;">{stats['total']}</span></div>
+                    <div><span style="color: #94a3b8;">Bets</span><br><span style="font-size: 1.5rem; font-weight: bold;">{stats['total']}</span></div>
                     <div><span style="color: #94a3b8;">Wins</span><br><span style="font-size: 1.5rem; font-weight: bold; color: #10b981;">{stats['correct']}</span></div>
-                    <div><span style="color: #94a3b8;">Win Rate</span><br><span style="font-size: 1.5rem; font-weight: bold; color: #fbbf24;">{stats['hit_rate']:.1f}%</span></div>
+                    <div><span style="color: #94a3b8;">Win Rate</span><br><span style="font-size: 1.5rem; font-weight: bold; color: #fbbf24;">{stats['win_rate']:.1f}%</span></div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
         
-        # 3-Second Checklist
-        st.markdown('<div class="section-title">⚡ 3-SECOND CHECKLIST</div>', unsafe_allow_html=True)
+        # Decision Rules
+        st.markdown('<div class="section-title">📋 GROKBET v4.0 RULES</div>', unsafe_allow_html=True)
+        
+        # Rule 1
         st.markdown("""
-        <div class="checklist-box">
-            <div class="checklist-item">☐ <strong>Forebet = X</strong></div>
-            <div class="checklist-item">☐ <strong>Draw % 35-57%</strong> (sweet spot)</div>
-            <div class="checklist-item">☐ <strong>Coef. ≥ 2.20</strong> (≥3.00 = stronger)</div>
-            <div class="checklist-item">☐ <strong>Avg Goals &lt;2.40 OR &gt;2.80</strong></div>
-            <div class="checklist-item">☐ <strong>Youth/Lower division</strong></div>
-            <hr>
-            <div style="text-align: center; color: #fbbf24; font-weight: bold;">
-                → BET DOUBLE CHANCE 12
-            </div>
-            <div style="text-align: center; color: #94a3b8; font-size: 0.8rem; margin-top: 0.5rem;">
-                Expected: 73-85% win rate
-            </div>
+        <div class="rule-card">
+            <strong style="color: #fbbf24;">PRED = 1 (Home Win)</strong><br>
+            <span class="filter-pass">✓ Prob Home ≥ 48%</span><br>
+            <span class="filter-pass">✓ Coef. ≥ 1.45</span><br>
+            <span class="filter-pass">✓ Avg Goals ≥ 2.5</span><br>
+            <span style="color: #94a3b8;">→ Bet HOME WIN (68-72%)</span>
         </div>
         """, unsafe_allow_html=True)
         
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        # Points Guide
-        st.markdown('<div class="section-title">📊 POINTS GUIDE</div>', unsafe_allow_html=True)
+        # Rule 2
         st.markdown("""
-        <div class="checklist-box">
-            <div style="margin-bottom: 0.5rem;">🏆 <strong>85+ points</strong> → Very Strong (85-92%)</div>
-            <div style="margin-bottom: 0.5rem;">✅ <strong>70-84 points</strong> → Strong (78-85%)</div>
-            <div style="margin-bottom: 0.5rem;">⚠️ <strong>55-69 points</strong> → Moderate (70-78%)</div>
-            <div>❌ <strong>&lt;55 points</strong> → Skip (60-70%)</div>
+        <div class="rule-card">
+            <strong style="color: #fbbf24;">PRED = 2 (Away Win)</strong><br>
+            <span class="filter-pass">✓ Prob Away ≥ 48%</span><br>
+            <span class="filter-pass">✓ Coef. ≥ 1.45</span><br>
+            <span class="filter-pass">✓ Avg Goals ≥ 2.5</span><br>
+            <span style="color: #94a3b8;">→ Bet AWAY WIN (68-72%)</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Rule 3
+        st.markdown("""
+        <div class="rule-card">
+            <strong style="color: #fbbf24;">PRED = X (Draw) → FLIP</strong><br>
+            <span class="filter-pass">✓ Prob Draw ≤ 42% (low confidence)</span><br>
+            <span class="filter-pass">✓ Draw Coef. ≥ 2.80 (good value)</span><br>
+            <span class="filter-pass">✓ Avg Goals ≥ 2.5</span><br>
+            <span style="color: #94a3b8;">→ Bet DOUBLE CHANCE 12 (65-71%)</span>
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Filter Reference
-        st.markdown('<div class="section-title">📋 FILTER REFERENCE</div>', unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="checklist-box">
-            <div style="margin-bottom: 0.3rem;"><strong>Draw %:</strong> 35-57% = +30</div>
-            <div style="margin-bottom: 0.3rem;"><strong>Coef.:</strong> ≥3.00 = +30 | ≥2.20 = +25</div>
-            <div style="margin-bottom: 0.3rem;"><strong>Avg Goals:</strong> &lt;2.40 OR &gt;2.80 = +25</div>
-            <div style="margin-bottom: 0.3rem;"><strong>League:</strong> Youth/Lower = +20</div>
-            <div><strong>Balance:</strong> Neither >55% = +10</div>
+        # Quick Reference Table
+        st.markdown('<div class="section-title">⚡ QUICK REFERENCE</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="rule-card">
+            <table style="width: 100%; border-collapse: collapse;">
+                <tr style="border-bottom: 1px solid #334155;">
+                    <th style="text-align: left; padding: 4px 0;">Pred</th>
+                    <th style="text-align: left; padding: 4px 0;">Bet</th>
+                    <th style="text-align: left; padding: 4px 0;">Key Filters</th>
+                </tr>
+                <tr>
+                    <td style="padding: 4px 0;">1</td>
+                    <td style="padding: 4px 0;">Home Win</td>
+                    <td style="padding: 4px 0;">Prob≥48%, Coef≥1.45, xG≥2.5</td>
+                </tr>
+                <tr>
+                    <td style="padding: 4px 0;">2</td>
+                    <td style="padding: 4px 0;">Away Win</td>
+                    <td style="padding: 4px 0;">Prob≥48%, Coef≥1.45, xG≥2.5</td>
+                </tr>
+                <tr>
+                    <td style="padding: 4px 0;">X</td>
+                    <td style="padding: 4px 0;">12 (No Draw)</td>
+                    <td style="padding: 4px 0;">Prob≤42%, Coef≥2.80, xG≥2.5</td>
+                </tr>
+            </table>
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Performance by Category
-        st.markdown('<div class="section-title">📈 BY COEFFICIENT</div>', unsafe_allow_html=True)
+        # Performance Stats
+        st.markdown('<div class="section-title">📈 V4.0 PERFORMANCE</div>', unsafe_allow_html=True)
         st.markdown(f"""
-        <div class="checklist-box">
-            <div style="margin-bottom: 0.3rem;">📈 ≥3.00: {PERFORMANCE['by_coefficient']['≥3.00']['no_draw']}% ({PERFORMANCE['by_coefficient']['≥3.00']['sample']} matches)</div>
-            <div style="margin-bottom: 0.3rem;">📊 2.20-2.99: {PERFORMANCE['by_coefficient']['2.20-2.99']['no_draw']}%</div>
-            <div>⚠️ &lt;2.20: {PERFORMANCE['by_coefficient']['<2.20']['no_draw']}%</div>
+        <div class="rule-card">
+            <div style="margin-bottom: 0.5rem;">📊 Total Matches Analyzed: <strong>{PERFORMANCE['total_matches']}</strong></div>
+            <div style="margin-bottom: 0.5rem;">🎯 Raw Forebet: <strong>{PERFORMANCE['raw_forebet_rate']}%</strong></div>
+            <div style="margin-bottom: 0.5rem;">🏆 v4.0 Qualifiers: <strong>{PERFORMANCE['v4_qualifiers']}</strong> ({PERFORMANCE['v4_qualifiers']/PERFORMANCE['total_matches']*100:.0f}% of matches)</div>
+            <div style="margin-bottom: 0.5rem;">✅ v4.0 Wins: <strong>{PERFORMANCE['v4_wins']}</strong></div>
+            <div style="margin-bottom: 0.5rem;">📈 v4.0 Win Rate: <strong style="color: #10b981;">{PERFORMANCE['v4_win_rate']}%</strong></div>
+            <div>🚀 Improvement: <strong style="color: #fbbf24;">+{PERFORMANCE['improvement']}%</strong></div>
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        st.markdown('<div class="section-title">📈 BY AVG GOALS</div>', unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="checklist-box">
-            <div style="margin-bottom: 0.3rem;">⚽ &lt;2.40: {PERFORMANCE['by_avg_goals']['<2.40']['no_draw']}% (low goals fade)</div>
-            <div style="margin-bottom: 0.3rem;">⚽ &gt;2.80: {PERFORMANCE['by_avg_goals']['>2.80']['no_draw']}% (goals break draws)</div>
-            <div>📊 2.40-2.80: {PERFORMANCE['by_avg_goals']['2.40-2.80']['no_draw']}%</div>
+        # Why This Works
+        st.markdown('<div class="section-title">💡 WHY THIS WORKS</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="rule-card">
+            <div style="margin-bottom: 0.5rem;">1️⃣ <strong>High-confidence 1/2 calls</strong> (Prob≥48%) → ~57-60% raw</div>
+            <div style="margin-bottom: 0.5rem;">2️⃣ <strong>Add Coef. filter</strong> (≥1.45) → avoids short odds traps</div>
+            <div style="margin-bottom: 0.5rem;">3️⃣ <strong>Avg Goals ≥2.5</strong> → goals break draws, create winners</div>
+            <div style="margin-bottom: 0.5rem;">4️⃣ <strong>Flip low-confidence X</strong> (Prob≤42%) → draws fail 71% of time</div>
+            <div><strong>Result:</strong> 68.12% win rate across 69 qualifying bets</div>
         </div>
         """, unsafe_allow_html=True)
         
         # Recent matches
-        if filter_engine.match_history:
+        if grokbet.match_history:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<div class="section-title">📜 RECENT RESULTS</div>', unsafe_allow_html=True)
-            recent = filter_engine.match_history[-5:]
+            recent = grokbet.match_history[-5:]
             for m in reversed(recent):
-                result_color = "#10b981" if m.get('actual_result') == 'No-Draw' else "#ef4444"
-                result_icon = "✅" if m.get('actual_result') == 'No-Draw' else "❌"
+                result_color = "#10b981" if m.get('actual_result') == 'Win' else "#ef4444"
+                result_icon = "✅" if m.get('actual_result') == 'Win' else "❌"
                 st.markdown(f"""
                 <div style="background: #0f172a; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem;">
                     <div style="display: flex; justify-content: space-between;">
-                        <span style="color: #94a3b8;">{m.get('league', '?')}</span>
+                        <span style="color: #94a3b8;">Pred {m.get('forebet_pred', '?')}</span>
                         <span style="color: {result_color};">{result_icon} {m.get('actual_result', '?')}</span>
                     </div>
                     <div style="font-size: 0.7rem; color: #64748b;">
-                        Draw {m.get('draw_probability', '?')}% | Coef {m.get('coefficient', '?')} | xG {m.get('avg_goals', '?')}
+                        Prob: {m.get('prob_home', '?')}/{m.get('prob_draw', '?')}/{m.get('prob_away', '?')} | 
+                        Coef {m.get('coefficient', '?')} | xG {m.get('avg_goals', '?')}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
     
     # Footer
     st.markdown("---")
-    st.caption("🎯 **No-Draw Edge Filter v5.0** | 45 matches | 73.3% win rate | Core: Fade Forebet X → Double Chance 12 | Data-backed final version")
+    st.caption("🎯 **GrokBet v4.0** | 4-Filter System | 121+ matches | 68.12% win rate | +19.36% over raw Forebet | Data-driven from your screenshots")
 
 if __name__ == "__main__":
     main()
