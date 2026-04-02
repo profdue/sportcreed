@@ -1,5 +1,5 @@
-# grokbet_consensus.py - GROKBET CONSENSUS LOGIC - FINAL SYSTEM
-# Combines Forebet + SoccerVista | 280+ matches | 76-80% win rate
+# grokbet_consensus_v2.py - GROKBET CONSENSUS LOGIC v2.0
+# Final Locked Version | Clean, Mechanical, Data-Driven
 
 import streamlit as st
 import json
@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 st.set_page_config(
-    page_title="GrokBet Consensus",
+    page_title="GrokBet Consensus v2.0",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -19,18 +19,14 @@ st.set_page_config(
 
 PERFORMANCE = {
     "total_matches": 280,
-    "strong_consensus_qualifiers": 112,
-    "strong_consensus_wins": 86,
     "strong_consensus_rate": 76.8,
-    "medium_consensus_qualifiers": 84,
-    "medium_consensus_wins": 63,
     "medium_consensus_rate": 75.0,
     "forebet_only_rate": 68.7,
     "soccervista_only_rate": 72.5
 }
 
-class GrokBetConsensus:
-    """Complete Consensus System - Forebet + SoccerVista"""
+class GrokBetConsensusV2:
+    """GrokBet Consensus v2.0 - Final Locked Version"""
     
     def __init__(self):
         self.match_history = []
@@ -38,8 +34,8 @@ class GrokBetConsensus:
     
     def load_history(self):
         try:
-            if os.path.exists("grokbet_consensus_history.json"):
-                with open("grokbet_consensus_history.json", "r") as f:
+            if os.path.exists("grokbet_consensus_v2.json"):
+                with open("grokbet_consensus_v2.json", "r") as f:
                     self.match_history = json.load(f)
         except:
             self.match_history = []
@@ -50,28 +46,22 @@ class GrokBetConsensus:
             **match_data,
             "actual_result": result
         })
-        with open("grokbet_consensus_history.json", "w") as f:
+        with open("grokbet_consensus_v2.json", "w") as f:
             json.dump(self.match_history, f, indent=2)
     
     def analyze_form(self, form_sequence):
-        """Analyze SoccerVista form sequence"""
+        """Analyze form sequence (last 6 matches)"""
         if not form_sequence:
             return {"wins": 0, "strength": "unknown"}
         
-        # Count wins (W or green squares)
         wins = sum(1 for r in form_sequence if r.upper() in ['W', 'WIN'])
-        losses = sum(1 for r in form_sequence if r.upper() in ['L', 'LOSS'])
-        draws = sum(1 for r in form_sequence if r.upper() in ['D', 'DRAW'])
-        
         return {
             "wins": wins,
-            "losses": losses,
-            "draws": draws,
             "strength": "good" if wins >= 3 else "mixed" if wins == 2 else "poor"
         }
     
     def evaluate_1x2(self, match_data):
-        """Evaluate 1X2/12 with Forebet + SoccerVista consensus"""
+        """v2.0 1X2/12 Evaluation with refined rules"""
         
         # Forebet inputs
         fb_pred = match_data.get('fb_pred', '')
@@ -82,129 +72,115 @@ class GrokBetConsensus:
         # SoccerVista inputs
         sv_pred = match_data.get('sv_pred', '')
         sv_odds = match_data.get('sv_odds', 0)
+        sv_draw_odds = match_data.get('sv_draw_odds', 0)
         sv_form_home = match_data.get('sv_form_home', [])
         sv_form_away = match_data.get('sv_form_away', [])
         
         # ================================================================
-        # RULE 1: Forebet 1 or 2
+        # RULE: Home Win (1)
         # ================================================================
-        if fb_pred in ['1', '2']:
+        if fb_pred == '1':
             # Forebet filters
-            fb_passes = (fb_prob >= 48 and fb_coef >= 1.45 and fb_avg_goals >= 2.5)
-            
-            if not fb_passes:
+            if not (fb_prob >= 48 and fb_coef >= 1.45):
                 return {"valid": False, "reason": "Forebet filters failed", "consensus": "none"}
             
             # SoccerVista consensus
-            sv_passes = (sv_pred == fb_pred and sv_odds >= 1.45)
+            sv_passes = (sv_pred == '1' and sv_odds >= 1.45)
             
             # Form analysis
-            if fb_pred == '1':
-                form = self.analyze_form(sv_form_home)
-                form_passes = form['wins'] >= 3
-            else:  # fb_pred == '2'
-                form = self.analyze_form(sv_form_away)
-                form_passes = form['wins'] >= 3
+            home_form = self.analyze_form(sv_form_home)
+            form_passes = home_form['wins'] >= 3
             
-            # Determine consensus level
             if sv_passes and form_passes:
-                consensus = "STRONG"
-                expected = "76-80%"
-                bet = f"{fb_pred} (Home Win)" if fb_pred == '1' else f"{fb_pred} (Away Win)"
-                reasons = [
-                    f"✅ Forebet: Pred {fb_pred}, Prob {fb_prob}% ≥48%, Coef {fb_coef} ≥1.45, xG {fb_avg_goals} ≥2.5",
-                    f"✅ SoccerVista: Same prediction {sv_pred}, Odds {sv_odds} ≥1.45",
-                    f"✅ Form: {form['wins']} wins in last 6 (≥3)"
-                ]
+                # No stake reduction for home wins
                 return {
                     "valid": True,
-                    "bet": bet,
-                    "consensus": consensus,
-                    "expected": expected,
-                    "reasons": reasons,
-                    "warnings": []
-                }
-            elif sv_passes or form_passes:
-                consensus = "MEDIUM"
-                expected = "74-78%"
-                bet = f"{fb_pred} (Home Win)" if fb_pred == '1' else f"{fb_pred} (Away Win)"
-                reasons = [f"✅ Forebet: Pred {fb_pred}, Prob {fb_prob}% ≥48%, Coef {fb_coef} ≥1.45, xG {fb_avg_goals} ≥2.5"]
-                if sv_passes:
-                    reasons.append(f"✅ SoccerVista: Same prediction {sv_pred}, Odds {sv_odds} ≥1.45")
-                if form_passes:
-                    reasons.append(f"✅ Form: {form['wins']} wins in last 6 (≥3)")
-                if not sv_passes:
-                    reasons.append(f"⚠️ SoccerVista: Prediction mismatch or odds {sv_odds} <1.45")
-                if not form_passes:
-                    reasons.append(f"⚠️ Form: Only {form['wins']} wins in last 6 (<3)")
-                return {
-                    "valid": True,
-                    "bet": bet,
-                    "consensus": consensus,
-                    "expected": expected,
-                    "reasons": reasons,
-                    "warnings": ["Medium consensus - lower stake recommended"] if not sv_passes or not form_passes else []
+                    "bet": "HOME WIN (1)",
+                    "consensus": "STRONG",
+                    "stake": "0.75-1%",
+                    "expected": "76-80%",
+                    "reasons": [
+                        f"✅ Forebet: Pred 1, Prob {fb_prob}% ≥48%, Coef {fb_coef} ≥1.45",
+                        f"✅ SoccerVista: Same prediction, Odds {sv_odds} ≥1.45",
+                        f"✅ Form: Home team {home_form['wins']} wins in last 6 (≥3)"
+                    ]
                 }
             else:
                 return {"valid": False, "reason": "SoccerVista consensus failed", "consensus": "none"}
         
         # ================================================================
-        # RULE 2: Forebet X (Draw) → Flip to 12
+        # RULE: Away Win (2) with High Goals Stake Reduction
+        # ================================================================
+        elif fb_pred == '2':
+            # Forebet filters
+            if not (fb_prob >= 48 and fb_coef >= 1.45):
+                return {"valid": False, "reason": "Forebet filters failed", "consensus": "none"}
+            
+            # SoccerVista consensus
+            sv_passes = (sv_pred == '2' and sv_odds >= 1.45)
+            
+            # Form analysis
+            away_form = self.analyze_form(sv_form_away)
+            form_passes = away_form['wins'] >= 3
+            
+            if sv_passes and form_passes:
+                # v2.0 refinement: High goals reduce stake for away wins
+                if fb_avg_goals >= 3.0:
+                    stake = "0.5% max (high goals volatility)"
+                    note = "⚠️ High goals (>3.0) - stake reduced to 0.5%"
+                else:
+                    stake = "0.75-1%"
+                    note = ""
+                
+                return {
+                    "valid": True,
+                    "bet": "AWAY WIN (2)",
+                    "consensus": "STRONG",
+                    "stake": stake,
+                    "expected": "76-80%",
+                    "reasons": [
+                        f"✅ Forebet: Pred 2, Prob {fb_prob}% ≥48%, Coef {fb_coef} ≥1.45",
+                        f"✅ SoccerVista: Same prediction, Odds {sv_odds} ≥1.45",
+                        f"✅ Form: Away team {away_form['wins']} wins in last 6 (≥3)",
+                        note
+                    ] if note else [
+                        f"✅ Forebet: Pred 2, Prob {fb_prob}% ≥48%, Coef {fb_coef} ≥1.45",
+                        f"✅ SoccerVista: Same prediction, Odds {sv_odds} ≥1.45",
+                        f"✅ Form: Away team {away_form['wins']} wins in last 6 (≥3)"
+                    ]
+                }
+            else:
+                return {"valid": False, "reason": "SoccerVista consensus failed", "consensus": "none"}
+        
+        # ================================================================
+        # RULE: X (Draw) → Flip to 12
         # ================================================================
         elif fb_pred == 'X':
             # Forebet filters for flip
-            fb_passes = (fb_prob <= 42 and fb_coef >= 2.80 and fb_avg_goals >= 2.5)
-            
-            if not fb_passes:
+            if not (fb_prob <= 42 and fb_coef >= 2.80):
                 return {"valid": False, "reason": "Forebet filters failed for X flip", "consensus": "none"}
             
-            # SoccerVista: At least one team has mixed/streaky form (≤2 wins)
+            # SoccerVista: Draw odds check
+            sv_passes = (sv_draw_odds >= 2.80)
+            
+            # Form: At least one team has mixed form (≤2 wins)
             home_form = self.analyze_form(sv_form_home)
             away_form = self.analyze_form(sv_form_away)
             form_passes = (home_form['wins'] <= 2 or away_form['wins'] <= 2)
             
-            # Draw odds check
-            sv_draw_odds = match_data.get('sv_draw_odds', 0)
-            sv_passes = (sv_draw_odds >= 2.80)
-            
-            # Determine consensus level
             if sv_passes and form_passes:
-                consensus = "STRONG"
-                expected = "75-79%"
-                bet = "DOUBLE CHANCE 12 (No Draw)"
-                reasons = [
-                    f"✅ Forebet: Pred X, Prob {fb_prob}% ≤42%, Coef {fb_coef} ≥2.80, xG {fb_avg_goals} ≥2.5",
-                    f"✅ SoccerVista: Draw odds {sv_draw_odds} ≥2.80",
-                    f"✅ Form: Mixed form (Home {home_form['wins']} wins, Away {away_form['wins']} wins)"
-                ]
+                # High goals actually help 12 bets - no reduction
                 return {
                     "valid": True,
-                    "bet": bet,
-                    "consensus": consensus,
-                    "expected": expected,
-                    "reasons": reasons,
-                    "warnings": []
-                }
-            elif sv_passes or form_passes:
-                consensus = "MEDIUM"
-                expected = "70-75%"
-                bet = "DOUBLE CHANCE 12 (No Draw)"
-                reasons = [f"✅ Forebet: Pred X, Prob {fb_prob}% ≤42%, Coef {fb_coef} ≥2.80, xG {fb_avg_goals} ≥2.5"]
-                if sv_passes:
-                    reasons.append(f"✅ SoccerVista: Draw odds {sv_draw_odds} ≥2.80")
-                if form_passes:
-                    reasons.append(f"✅ Form: Mixed form (Home {home_form['wins']} wins, Away {away_form['wins']} wins)")
-                if not sv_passes:
-                    reasons.append(f"⚠️ SoccerVista: Draw odds {sv_draw_odds} <2.80")
-                if not form_passes:
-                    reasons.append(f"⚠️ Form: Both teams have strong form ({home_form['wins']} and {away_form['wins']} wins)")
-                return {
-                    "valid": True,
-                    "bet": bet,
-                    "consensus": consensus,
-                    "expected": expected,
-                    "reasons": reasons,
-                    "warnings": ["Medium consensus - lower stake recommended"] if not sv_passes or not form_passes else []
+                    "bet": "DOUBLE CHANCE 12 (No Draw)",
+                    "consensus": "STRONG",
+                    "stake": "0.75-1%",
+                    "expected": "75-79%",
+                    "reasons": [
+                        f"✅ Forebet: Pred X, Prob {fb_prob}% ≤42%, Coef {fb_coef} ≥2.80",
+                        f"✅ SoccerVista: Draw odds {sv_draw_odds} ≥2.80",
+                        f"✅ Form: Mixed form (Home {home_form['wins']} wins, Away {away_form['wins']} wins)"
+                    ]
                 }
             else:
                 return {"valid": False, "reason": "SoccerVista consensus failed for X flip", "consensus": "none"}
@@ -213,31 +189,26 @@ class GrokBetConsensus:
             return {"valid": False, "reason": "Invalid Forebet prediction", "consensus": "none"}
     
     def evaluate_ou(self, match_data):
-        """Evaluate Over/Under 2.5 with Forebet + SoccerVista consensus"""
+        """v2.0 Over/Under 2.5 Evaluation (unchanged)"""
         
-        # Forebet inputs
         fb_avg_goals = match_data.get('fb_avg_goals', 0)
         fb_correct_score_total = match_data.get('fb_correct_score_total', 0)
-        
-        # SoccerVista inputs
         sv_ou_pred = match_data.get('sv_ou_pred', '')
         sv_form_home = match_data.get('sv_form_home', [])
         sv_form_away = match_data.get('sv_form_away', [])
         
-        # Combined wins for O/U analysis
         home_form = self.analyze_form(sv_form_home)
         away_form = self.analyze_form(sv_form_away)
         total_wins = home_form['wins'] + away_form['wins']
         
-        # ================================================================
-        # OVER 2.5 RULE
-        # ================================================================
+        # OVER 2.5
         if fb_avg_goals >= 2.80 and fb_correct_score_total >= 3:
             if sv_ou_pred == 'O' and total_wins >= 7:
                 return {
                     "valid": True,
                     "bet": "OVER 2.5 GOALS",
                     "consensus": "STRONG",
+                    "stake": "0.5-0.75%",
                     "expected": "72-76%",
                     "reasons": [
                         f"✅ Forebet: Avg Goals {fb_avg_goals} ≥2.80, implied {fb_correct_score_total}+ goals",
@@ -245,25 +216,15 @@ class GrokBetConsensus:
                         f"✅ Form: Combined {total_wins} wins in last 6 (≥7)"
                     ]
                 }
-            elif sv_ou_pred == 'O' or total_wins >= 7:
-                return {
-                    "valid": True,
-                    "bet": "OVER 2.5 GOALS",
-                    "consensus": "MEDIUM",
-                    "expected": "68-72%",
-                    "reasons": [f"✅ Forebet: Avg Goals {fb_avg_goals} ≥2.80, implied {fb_correct_score_total}+ goals"],
-                    "warnings": ["Partial consensus - one condition missing"]
-                }
         
-        # ================================================================
-        # UNDER 2.5 RULE
-        # ================================================================
+        # UNDER 2.5
         elif fb_avg_goals <= 2.20 and fb_correct_score_total <= 2:
             if sv_ou_pred == 'U' and (home_form['wins'] <= 2 or away_form['wins'] <= 2):
                 return {
                     "valid": True,
                     "bet": "UNDER 2.5 GOALS",
                     "consensus": "STRONG",
+                    "stake": "0.5-0.75%",
                     "expected": "68-72%",
                     "reasons": [
                         f"✅ Forebet: Avg Goals {fb_avg_goals} ≤2.20, implied {fb_correct_score_total} or fewer goals",
@@ -271,17 +232,7 @@ class GrokBetConsensus:
                         f"✅ Form: At least one team has ≤2 wins in last 6"
                     ]
                 }
-            elif sv_ou_pred == 'U' or (home_form['wins'] <= 2 or away_form['wins'] <= 2):
-                return {
-                    "valid": True,
-                    "bet": "UNDER 2.5 GOALS",
-                    "consensus": "MEDIUM",
-                    "expected": "64-68%",
-                    "reasons": [f"✅ Forebet: Avg Goals {fb_avg_goals} ≤2.20, implied {fb_correct_score_total} or fewer goals"],
-                    "warnings": ["Partial consensus - one condition missing"]
-                }
         
-        # Grey zone
         return {"valid": False, "reason": f"Grey zone: avg_goals={fb_avg_goals}", "consensus": "none"}
     
     def get_stats(self):
@@ -331,11 +282,6 @@ def main():
         margin-top: 0.5rem;
         margin-right: 0.5rem;
     }
-    .system-tab {
-        display: flex;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
-    }
     .input-card {
         background: #1e293b;
         border-radius: 12px;
@@ -343,23 +289,9 @@ def main():
         border: 1px solid #334155;
         margin-bottom: 1rem;
     }
-    .result-card {
-        background: #1e293b;
-        border-radius: 12px;
-        padding: 1.5rem;
-        border: 1px solid #334155;
-        margin-top: 1rem;
-    }
     .verdict-strong {
         background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #fbbf24;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-    }
-    .verdict-medium {
-        background: linear-gradient(135deg, #1e293b 0%, #3a2e1e 100%);
-        border-left: 4px solid #f59e0b;
         padding: 1rem;
         border-radius: 8px;
         margin: 1rem 0;
@@ -392,6 +324,14 @@ def main():
         border: 1px solid #334155;
         margin-bottom: 1rem;
     }
+    .stake-highlight {
+        background: #fbbf24;
+        color: #0f172a;
+        padding: 0.25rem 0.5rem;
+        border-radius: 8px;
+        font-weight: bold;
+        display: inline-block;
+    }
     hr {
         margin: 1rem 0;
         border-color: #334155;
@@ -402,34 +342,30 @@ def main():
     # Header
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet Consensus Logic</h1>
-        <p>Forebet + SoccerVista | 280+ Matches | 76-80% Win Rate on Strong Consensus</p>
+        <h1>🎯 GrokBet Consensus Logic v2.0</h1>
+        <p>Final Locked Version | Forebet + SoccerVista | 280+ Matches</p>
         <div>
             <span class="badge">🏆 Strong Consensus: 76.8%</span>
-            <span class="badge">📊 Medium Consensus: 75.0%</span>
-            <span class="badge">⚡ Forebet Only: 68.7%</span>
-            <span class="badge">⭐ SoccerVista Only: 72.5%</span>
+            <span class="badge">⚡ Away Win High Goals: 0.5% max stake</span>
+            <span class="badge">📊 Max 4 bets per day</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
     # System selector
     bet_type = st.radio(
-        "Select Bet Type",
-        ["🎯 1X2 / 12 (No Draw)", "⚽ Over/Under 2.5"],
+        "Select System",
+        ["🎯 1X2 / 12 (Primary)", "⚽ Over/Under 2.5 (Secondary)"],
         horizontal=True
     )
     
-    consensus = GrokBetConsensus()
+    consensus = GrokBetConsensusV2()
     stats = consensus.get_stats()
     
     col_left, col_right = st.columns([3, 2])
     
     with col_left:
         if "1X2" in bet_type:
-            # ================================================================
-            # 1X2 / 12 SYSTEM
-            # ================================================================
             st.markdown('<div class="section-title">📊 FOREBET + SOCCERVISTA DATA</div>', unsafe_allow_html=True)
             
             with st.container():
@@ -464,10 +400,9 @@ def main():
                 
                 st.markdown('</div>', unsafe_allow_html=True)
                 
-                analyze = st.button("🔍 ANALYZE 1X2 CONSENSUS", use_container_width=True, type="primary")
+                analyze = st.button("🔍 ANALYZE v2.0 CONSENSUS", use_container_width=True, type="primary")
                 
                 if analyze:
-                    # Parse form
                     home_form_list = [f.strip().upper() for f in form_home if f.strip()]
                     away_form_list = [f.strip().upper() for f in form_away if f.strip()]
                     
@@ -486,35 +421,23 @@ def main():
                     result = consensus.evaluate_1x2(match_data)
                     
                     if result['valid']:
-                        if result['consensus'] == "STRONG":
-                            st.markdown(f"""
-                            <div class="verdict-strong">
-                                <h2 style="margin: 0; color: #fbbf24;">🏆 STRONG CONSENSUS</h2>
-                                <p style="margin: 0.5rem 0; font-size: 1.2rem;">🎯 {result['bet']}</p>
-                                <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""
-                            <div class="verdict-medium">
-                                <h2 style="margin: 0; color: #f59e0b;">⚠️ MEDIUM CONSENSUS</h2>
-                                <p style="margin: 0.5rem 0; font-size: 1.2rem;">🎯 {result['bet']}</p>
-                                <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class="verdict-strong">
+                            <h2 style="margin: 0; color: #fbbf24;">🏆 STRONG CONSENSUS</h2>
+                            <p style="margin: 0.5rem 0; font-size: 1.2rem;">🎯 {result['bet']}</p>
+                            <p style="margin: 0.5rem 0;"><span class="stake-highlight">💰 Stake: {result['stake']}</span></p>
+                            <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
                         
                         for reason in result['reasons']:
-                            st.success(reason)
+                            if reason and "⚠️" in reason:
+                                st.warning(reason)
+                            elif reason:
+                                st.success(reason)
                         
-                        if result.get('warnings'):
-                            for warning in result['warnings']:
-                                st.warning(warning)
-                        
-                        # Stake recommendation
-                        if result['consensus'] == "STRONG":
-                            st.info("💰 **Stake: 0.5-1% of bankroll**")
-                        else:
-                            st.info("💰 **Stake: 0.25-0.5% of bankroll**")
+                        if fb_pred == '2' and fb_avg_goals >= 3.0:
+                            st.info("📌 **Note:** Stake reduced to 0.5% due to high goals (>3.0) volatility")
                         
                     else:
                         st.markdown(f"""
@@ -538,10 +461,8 @@ def main():
                             st.rerun()
         
         else:
-            # ================================================================
-            # OVER/UNDER 2.5 SYSTEM
-            # ================================================================
-            st.markdown('<div class="section-title">📊 FOREBET + SOCCERVISTA DATA</div>', unsafe_allow_html=True)
+            # Over/Under 2.5 System
+            st.markdown('<div class="section-title">📊 OVER/UNDER 2.5 DATA</div>', unsafe_allow_html=True)
             
             with st.container():
                 st.markdown('<div class="input-card">', unsafe_allow_html=True)
@@ -563,9 +484,9 @@ def main():
                 st.markdown("##### Form (last 6 matches)")
                 col5, col6 = st.columns(2)
                 with col5:
-                    form_home = st.text_input("Home Team Form (e.g., WWDLWW)", "WWDLWW", key="ou_form_home")
+                    form_home = st.text_input("Home Team Form", "WWDLWW", key="ou_form_home")
                 with col6:
-                    form_away = st.text_input("Away Team Form (e.g., LLDWLL)", "LLDWLL", key="ou_form_away")
+                    form_away = st.text_input("Away Team Form", "LLDWLL", key="ou_form_away")
                 
                 st.markdown('</div>', unsafe_allow_html=True)
                 
@@ -586,40 +507,22 @@ def main():
                     result = consensus.evaluate_ou(match_data)
                     
                     if result['valid']:
-                        if result.get('consensus') == "STRONG":
-                            st.markdown(f"""
-                            <div class="verdict-strong">
-                                <h2 style="margin: 0; color: #fbbf24;">🏆 STRONG CONSENSUS</h2>
-                                <p style="margin: 0.5rem 0; font-size: 1.2rem;">⚽ {result['bet']}</p>
-                                <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""
-                            <div class="verdict-medium">
-                                <h2 style="margin: 0; color: #f59e0b;">⚠️ MEDIUM CONSENSUS</h2>
-                                <p style="margin: 0.5rem 0; font-size: 1.2rem;">⚽ {result['bet']}</p>
-                                <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class="verdict-strong">
+                            <h2 style="margin: 0; color: #fbbf24;">🏆 STRONG CONSENSUS</h2>
+                            <p style="margin: 0.5rem 0; font-size: 1.2rem;">⚽ {result['bet']}</p>
+                            <p style="margin: 0.5rem 0;"><span class="stake-highlight">💰 Stake: {result['stake']}</span></p>
+                            <p style="margin: 0; color: #94a3b8;">Projected Win Rate: {result['expected']}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
                         
                         for reason in result['reasons']:
                             st.success(reason)
-                        
-                        if result.get('warnings'):
-                            for warning in result['warnings']:
-                                st.warning(warning)
-                        
-                        if result.get('consensus') == "STRONG":
-                            st.info("💰 **Stake: 0.5-1% of bankroll**")
-                        else:
-                            st.info("💰 **Stake: 0.25-0.5% of bankroll**")
-                        
                     else:
                         st.markdown(f"""
                         <div class="verdict-skip">
                             <h2 style="margin: 0; color: #ef4444;">❌ SKIP THIS MATCH</h2>
-                            <p style="margin: 0.5rem 0;">{result.get('reason', 'Grey zone - no clear consensus')}</p>
+                            <p style="margin: 0.5rem 0;">{result.get('reason', 'Grey zone')}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     
@@ -650,22 +553,27 @@ def main():
             """, unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
         
-        st.markdown('<div class="section-title">📋 CONSENSUS RULES</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">📋 v2.0 FINAL RULES</div>', unsafe_allow_html=True)
         
         st.markdown("""
         <div class="rule-card">
-            <strong style="color: #fbbf24;">1 or 2 (Home/Away Win)</strong><br>
-            <span class="filter-pass">✓ Forebet: Prob ≥48%, Coef ≥1.45, Avg Goals ≥2.5</span><br>
-            <span class="filter-pass">✓ SoccerVista: Same prediction, Odds ≥1.45</span><br>
-            <span class="filter-pass">✓ Form: Predicted team has ≥3 wins in last 6</span><br>
-            <span style="color: #94a3b8;">→ Bet 1 or 2 (Strong Consensus: 76-80%)</span>
+            <strong style="color: #fbbf24;">HOME WIN (1)</strong><br>
+            <span class="filter-pass">✓ Forebet: Prob1 ≥48%, Coef ≥1.45</span><br>
+            <span class="filter-pass">✓ SoccerVista: Odds1 ≥1.45, Home ≥3 wins in last 6</span><br>
+            <span style="color: #94a3b8;">→ Stake: 0.75-1%</span>
         </div>
         <div class="rule-card">
-            <strong style="color: #fbbf24;">X (Draw) → Flip to 12</strong><br>
-            <span class="filter-pass">✓ Forebet: Prob ≤42%, Draw Coef ≥2.80, Avg Goals ≥2.5</span><br>
-            <span class="filter-pass">✓ SoccerVista: Draw odds ≥2.80</span><br>
-            <span class="filter-pass">✓ Form: At least one team has ≤2 wins (mixed form)</span><br>
-            <span style="color: #94a3b8;">→ Bet Double Chance 12 (75-79%)</span>
+            <strong style="color: #fbbf24;">AWAY WIN (2)</strong><br>
+            <span class="filter-pass">✓ Forebet: Prob2 ≥48%, Coef ≥1.45</span><br>
+            <span class="filter-pass">✓ SoccerVista: Odds2 ≥1.45, Away ≥3 wins in last 6</span><br>
+            <span class="filter-pass">⚠️ If Avg Goals ≥3.0 → Stake capped at 0.5%</span>
+            <span style="color: #94a3b8;">→ Stake: 0.75-1% (0.5% if high goals)</span>
+        </div>
+        <div class="rule-card">
+            <strong style="color: #fbbf24;">X → 12 (NO DRAW)</strong><br>
+            <span class="filter-pass">✓ Forebet: ProbX ≤42%, Coef ≥2.80</span><br>
+            <span class="filter-pass">✓ SoccerVista: Draw odds ≥2.80, Mixed form (≤2 wins)</span><br>
+            <span style="color: #94a3b8;">→ Stake: 0.75-1%</span>
         </div>
         """, unsafe_allow_html=True)
         
@@ -674,11 +582,11 @@ def main():
         st.markdown('<div class="section-title">💰 BANKROLL RULES</div>', unsafe_allow_html=True)
         st.markdown("""
         <div class="rule-card">
-            <div>📊 <strong>Strong Consensus:</strong> 0.5-1% of bankroll</div>
-            <div>📈 <strong>Medium Consensus:</strong> 0.25-0.5% of bankroll</div>
+            <div>🏆 <strong>Strong Consensus:</strong> 0.75-1% of bankroll</div>
+            <div>⚠️ <strong>Away Win + High Goals (≥3.0):</strong> 0.5% max</div>
+            <div>📊 <strong>Over/Under:</strong> 0.5-0.75%</div>
             <div>🎯 <strong>Maximum bets per day:</strong> 4</div>
             <div>⚡ <strong>Maximum daily exposure:</strong> 2% of bankroll</div>
-            <div>📝 <strong>Track every bet</strong> in spreadsheet</div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -687,9 +595,8 @@ def main():
         st.markdown('<div class="section-title">📊 PERFORMANCE (280+ MATCHES)</div>', unsafe_allow_html=True)
         st.markdown(f"""
         <div class="rule-card">
-            <div style="margin-bottom: 0.5rem;">🏆 <strong>Strong Consensus:</strong> {PERFORMANCE['strong_consensus_rate']}% ({PERFORMANCE['strong_consensus_qualifiers']} bets)</div>
-            <div style="margin-bottom: 0.5rem;">⚠️ <strong>Medium Consensus:</strong> {PERFORMANCE['medium_consensus_rate']}% ({PERFORMANCE['medium_consensus_qualifiers']} bets)</div>
-            <div style="margin-bottom: 0.5rem;">📊 <strong>Forebet Only:</strong> {PERFORMANCE['forebet_only_rate']}%</div>
+            <div>🏆 <strong>Strong Consensus:</strong> {PERFORMANCE['strong_consensus_rate']}%</div>
+            <div>📊 <strong>Forebet Only:</strong> {PERFORMANCE['forebet_only_rate']}%</div>
             <div>⭐ <strong>SoccerVista Only:</strong> {PERFORMANCE['soccervista_only_rate']}%</div>
         </div>
         """, unsafe_allow_html=True)
@@ -705,15 +612,14 @@ def main():
                 st.markdown(f"""
                 <div style="background: #0f172a; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem;">
                     <div style="display: flex; justify-content: space-between;">
-                        <span style="color: #94a3b8;">{m.get('fb_pred', '?')} vs {m.get('sv_pred', '?')}</span>
+                        <span style="color: #94a3b8;">Pred {m.get('fb_pred', '?')}</span>
                         <span style="color: {result_color};">{result_icon} {m.get('actual_result', '?')}</span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
     
-    # Footer
     st.markdown("---")
-    st.caption("🎯 **GrokBet Consensus Logic** | Forebet + SoccerVista | 280+ matches | 76-80% win rate on Strong Consensus | Built from your data")
+    st.caption("🎯 **GrokBet Consensus v2.0** | Final Locked Version | 280+ matches | 76-80% win rate | Stake reduced for high-goal away wins")
 
 if __name__ == "__main__":
     main()
