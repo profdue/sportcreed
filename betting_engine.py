@@ -1,8 +1,12 @@
-# grokbet_consensus_v2.1_final.py
-# GROKBET CONSENSUS v2.1 (FINAL LOCKED)
-# - Strong Consensus 1/2 (Both sites agree)
-# - Draw Contrarian 12 (Either site shows X + 4 conditions)
-# - Over/Under 2.5 (Secondary)
+# grokbet_consensus_v2.1_final_locked.py
+# GROKBET CONSENSUS v2.1 (FULLY LOCKED - NO FURTHER CHANGES)
+# 
+# Systems included:
+# 1. Strong Consensus 1/2 - Both sites agree on winner
+# 2. Draw Contrarian 12 - Either site shows X + conditions (with form fallback)
+# 3. Over/Under 2.5 - Secondary system
+#
+# Last updated: Final version - Ready for live use
 
 import streamlit as st
 import json
@@ -122,7 +126,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# GROKBET CONSENSUS V2.1 CLASS
+# GROKBET CONSENSUS V2.1 - FINAL LOCKED CLASS
 # ============================================================================
 
 class GrokBetConsensusV21:
@@ -134,8 +138,8 @@ class GrokBetConsensusV21:
     
     def load_history(self):
         try:
-            if os.path.exists("grokbet_v21.json"):
-                with open("grokbet_v21.json", "r") as f:
+            if os.path.exists("grokbet_v21_final.json"):
+                with open("grokbet_v21_final.json", "r") as f:
                     self.match_history = json.load(f)
         except:
             self.match_history = []
@@ -146,105 +150,20 @@ class GrokBetConsensusV21:
             **match_data,
             "actual_result": result
         })
-        with open("grokbet_v21.json", "w") as f:
+        with open("grokbet_v21_final.json", "w") as f:
             json.dump(self.match_history, f, indent=2)
     
     def analyze_form(self, form_sequence):
         """Count wins in form sequence (W = Win)"""
-        if not form_sequence:
-            return {"wins": 0}
+        if not form_sequence or form_sequence.strip() == "":
+            return {"wins": None, "available": False}
         form_upper = form_sequence.upper()
-        return {"wins": form_upper.count('W')}
+        wins = form_upper.count('W')
+        return {"wins": wins, "available": True}
     
-    def evaluate_draw_contrarian(self, match_data):
-        """
-        Draw Contrarian v2.1 - Triggered by EITHER site showing X
-        Conditions: 
-        1. Draw odds ≥2.80 (from either site)
-        2. Low confidence (Forebet Prob ≤42% OR weak form)
-        3. Avg Goals ≥2.5
-        4. Mixed form (one team ≤2 wins in last 6)
-        """
-        
-        fb_pred = match_data.get('fb_pred', '')
-        fb_prob = match_data.get('fb_prob', 0)
-        fb_coef = match_data.get('fb_coef', 0)
-        fb_avg_goals = match_data.get('fb_avg_goals', 0)
-        
-        sv_pred = match_data.get('sv_pred', '')
-        sv_draw_odds = match_data.get('sv_draw_odds', 0)
-        sv_form_home = match_data.get('sv_form_home', '')
-        sv_form_away = match_data.get('sv_form_away', '')
-        
-        home_form = self.analyze_form(sv_form_home)
-        away_form = self.analyze_form(sv_form_away)
-        
-        # Check if EITHER site shows X
-        fb_shows_x = (fb_pred == 'X')
-        sv_shows_x = (sv_pred == 'X')
-        
-        if not (fb_shows_x or sv_shows_x):
-            return {"valid": False, "reason": "No draw prediction from either site"}
-        
-        # Condition 1: Draw odds ≥2.80
-        fb_odds_ok = (fb_coef >= 2.80) if fb_shows_x else False
-        sv_odds_ok = (sv_draw_odds >= 2.80) if sv_shows_x else False
-        
-        if not (fb_odds_ok or sv_odds_ok):
-            return {"valid": False, "reason": f"Draw odds too low (FB Coef={fb_coef}, SV Draw Odds={sv_draw_odds})"}
-        
-        # Condition 2: Low confidence
-        fb_confidence_ok = (fb_prob <= 42) if fb_shows_x else True  # If FB doesn't show X, ignore
-        sv_confidence_ok = (home_form['wins'] <= 2 or away_form['wins'] <= 2)  # Mixed form
-        
-        if fb_shows_x and not fb_confidence_ok:
-            return {"valid": False, "reason": f"Forebet confidence too high (Prob={fb_prob}% >42%)"}
-        
-        if not sv_confidence_ok:
-            return {"valid": False, "reason": f"Both teams in strong form (Home {home_form['wins']} wins, Away {away_form['wins']} wins)"}
-        
-        # Condition 3: Avg Goals ≥2.5
-        if fb_avg_goals < 2.5:
-            return {"valid": False, "reason": f"Avg Goals {fb_avg_goals} <2.5 (low scoring = draw risk)"}
-        
-        # Determine stake based on conditions
-        both_show_x = (fb_shows_x and sv_shows_x)
-        high_goals = (fb_avg_goals >= 3.5)
-        
-        if both_show_x:
-            stake = "1.0%"
-            stake_reason = "Both sites show X + all conditions"
-        elif high_goals:
-            stake = "0.5%"
-            stake_reason = "High volatility (Avg Goals ≥3.5)"
-        else:
-            stake = "0.75%"
-            stake_reason = "Standard Draw Contrarian"
-        
-        # Build reasons list
-        reasons = []
-        if fb_shows_x:
-            reasons.append(f"Forebet shows X (Prob {fb_prob}%, Coef {fb_coef})")
-        if sv_shows_x:
-            reasons.append(f"SoccerVista shows X (Draw odds {sv_draw_odds})")
-        reasons.append(f"Draw odds ≥2.80 ✓")
-        reasons.append(f"Mixed form (Home {home_form['wins']} wins, Away {away_form['wins']} wins) ✓")
-        reasons.append(f"Avg Goals {fb_avg_goals} ≥2.5 ✓")
-        if both_show_x:
-            reasons.append("🏆 BOTH SITES AGREE ON X - Extra strong signal")
-        if high_goals:
-            reasons.append("⚠️ Very high goals - stake reduced to 0.5%")
-        
-        return {
-            "valid": True,
-            "bet": "DOUBLE CHANCE 12 (No Draw)",
-            "stake": stake,
-            "stake_reason": stake_reason,
-            "expected": "77-82%",
-            "reasons": reasons,
-            "both_show_x": both_show_x,
-            "high_goals": high_goals
-        }
+    # ================================================================
+    # SYSTEM 1: STRONG CONSENSUS 1 or 2
+    # ================================================================
     
     def evaluate_strong_consensus(self, match_data):
         """
@@ -289,12 +208,13 @@ class GrokBetConsensusV21:
         if sv_odds < 1.45:
             return {"valid": False, "reason": f"SoccerVista Odds {sv_odds} <1.45"}
         
-        # Form check
-        if fb_pred == '1' and home_form['wins'] < 3:
-            return {"valid": False, "reason": f"Home team only {home_form['wins']} wins in last 6 (need ≥3)"}
-        
-        if fb_pred == '2' and away_form['wins'] < 3:
-            return {"valid": False, "reason": f"Away team only {away_form['wins']} wins in last 6 (need ≥3)"}
+        # Form check (only if available)
+        if fb_pred == '1':
+            if home_form['available'] and home_form['wins'] < 3:
+                return {"valid": False, "reason": f"Home team only {home_form['wins']} wins in last 6 (need ≥3)"}
+        else:  # fb_pred == '2'
+            if away_form['available'] and away_form['wins'] < 3:
+                return {"valid": False, "reason": f"Away team only {away_form['wins']} wins in last 6 (need ≥3)"}
         
         # Determine stake
         if fb_pred == '2' and fb_avg_goals >= 3.0:
@@ -308,9 +228,13 @@ class GrokBetConsensusV21:
         
         reasons = [
             f"Forebet: Pred {fb_pred}, Prob {fb_prob}% ≥48, Coef {fb_coef} ≥1.45",
-            f"SoccerVista: Pred {sv_pred}, Odds {sv_odds} ≥1.45",
-            f"Form: {'Home' if fb_pred == '1' else 'Away'} has {home_form['wins'] if fb_pred == '1' else away_form['wins']} wins in last 6 (≥3)"
+            f"SoccerVista: Pred {sv_pred}, Odds {sv_odds} ≥1.45"
         ]
+        
+        if fb_pred == '1' and home_form['available']:
+            reasons.append(f"Form: Home has {home_form['wins']} wins in last 6 (≥3)")
+        elif fb_pred == '2' and away_form['available']:
+            reasons.append(f"Form: Away has {away_form['wins']} wins in last 6 (≥3)")
         
         if fb_pred == '2' and fb_avg_goals >= 3.0:
             reasons.append(f"⚠️ High goals ({fb_avg_goals}) - stake capped at 0.5%")
@@ -323,6 +247,123 @@ class GrokBetConsensusV21:
             "expected": "76-80%",
             "reasons": reasons
         }
+    
+    # ================================================================
+    # SYSTEM 2: DRAW CONTRARIAN 12 (WITH FORM FALLBACK)
+    # ================================================================
+    
+    def evaluate_draw_contrarian(self, match_data):
+        """
+        Draw Contrarian v2.1 - Final with form fallback
+        
+        Conditions:
+        1. Draw odds attractive: FB Coef ≥2.80 OR SV Draw odds ≥2.80
+        2. Low confidence: FB Prob ≤42% (if available)
+        3. Expected goals: FB Avg Goals ≥2.5
+        4. Form check (flexible):
+           - If form available for BOTH teams AND both have ≥3 wins → SKIP
+           - Otherwise → PASS
+        """
+        
+        home_team = match_data.get('home_team', 'Home')
+        away_team = match_data.get('away_team', 'Away')
+        
+        fb_pred = match_data.get('fb_pred', '')
+        fb_prob = match_data.get('fb_prob', 0)
+        fb_coef = match_data.get('fb_coef', 0)
+        fb_avg_goals = match_data.get('fb_avg_goals', 0)
+        
+        sv_pred = match_data.get('sv_pred', '')
+        sv_draw_odds = match_data.get('sv_draw_odds', 0)
+        sv_form_home = match_data.get('sv_form_home', '')
+        sv_form_away = match_data.get('sv_form_away', '')
+        
+        home_form = self.analyze_form(sv_form_home)
+        away_form = self.analyze_form(sv_form_away)
+        
+        # Check if EITHER site shows X
+        fb_shows_x = (fb_pred == 'X')
+        sv_shows_x = (sv_pred == 'X')
+        
+        if not (fb_shows_x or sv_shows_x):
+            return {"valid": False, "reason": "No draw prediction from either site"}
+        
+        # Condition 1: Draw odds ≥2.80
+        fb_odds_ok = (fb_coef >= 2.80) if fb_shows_x else False
+        sv_odds_ok = (sv_draw_odds >= 2.80) if sv_shows_x else False
+        
+        if not (fb_odds_ok or sv_odds_ok):
+            odds_values = []
+            if fb_shows_x:
+                odds_values.append(f"FB Coef={fb_coef}")
+            if sv_shows_x:
+                odds_values.append(f"SV Draw Odds={sv_draw_odds}")
+            return {"valid": False, "reason": f"Draw odds too low ({', '.join(odds_values)})"}
+        
+        # Condition 2: Low confidence (Forebet Prob ≤42% if available)
+        if fb_shows_x and fb_prob > 42:
+            return {"valid": False, "reason": f"Forebet confidence too high (Prob={fb_prob}% >42%)"}
+        
+        # Condition 3: Expected goals ≥2.5
+        if fb_avg_goals < 2.5:
+            return {"valid": False, "reason": f"Avg Goals {fb_avg_goals} <2.5 (low scoring = draw risk)"}
+        
+        # Condition 4: Form check (flexible with fallback)
+        # Skip ONLY if form available for BOTH teams AND both have ≥3 wins
+        form_available_both = home_form['available'] and away_form['available']
+        both_strong_form = form_available_both and home_form['wins'] >= 3 and away_form['wins'] >= 3
+        
+        if both_strong_form:
+            return {"valid": False, "reason": f"Both teams in strong form (Home {home_form['wins']} wins, Away {away_form['wins']} wins) - draw more likely"}
+        
+        # Determine stake
+        both_show_x = (fb_shows_x and sv_shows_x)
+        high_goals = (fb_avg_goals >= 3.5)
+        
+        if both_show_x:
+            stake = "1.0%"
+            stake_reason = "Both sites show X + all conditions"
+        elif high_goals:
+            stake = "0.5%"
+            stake_reason = "High volatility (Avg Goals ≥3.5)"
+        else:
+            stake = "0.75%"
+            stake_reason = "Standard Draw Contrarian"
+        
+        # Build reasons list
+        reasons = []
+        if fb_shows_x:
+            reasons.append(f"Forebet shows X (Prob {fb_prob}%, Coef {fb_coef})")
+        if sv_shows_x:
+            reasons.append(f"SoccerVista shows X (Draw odds {sv_draw_odds})")
+        reasons.append(f"Draw odds ≥2.80 ✓")
+        reasons.append(f"Avg Goals {fb_avg_goals} ≥2.5 ✓")
+        
+        # Form status explanation
+        if not form_available_both:
+            reasons.append(f"Form data missing/partial - proceeding (neutral)")
+        elif home_form['wins'] < 3 or away_form['wins'] < 3:
+            reasons.append(f"Mixed/weak form (Home {home_form['wins'] if home_form['available'] else '?'} wins, Away {away_form['wins'] if away_form['available'] else '?'} wins) ✓")
+        
+        if both_show_x:
+            reasons.append("🏆 BOTH SITES AGREE ON X - Extra strong signal")
+        if high_goals:
+            reasons.append("⚠️ Very high goals - stake reduced to 0.5%")
+        
+        return {
+            "valid": True,
+            "bet": f"DOUBLE CHANCE 12 (No Draw) - {home_team} or {away_team}",
+            "stake": stake,
+            "stake_reason": stake_reason,
+            "expected": "77-82%",
+            "reasons": reasons,
+            "both_show_x": both_show_x,
+            "high_goals": high_goals
+        }
+    
+    # ================================================================
+    # SYSTEM 3: OVER/UNDER 2.5
+    # ================================================================
     
     def evaluate_ou(self, match_data):
         """
@@ -337,11 +378,11 @@ class GrokBetConsensusV21:
         
         home_form = self.analyze_form(sv_form_home)
         away_form = self.analyze_form(sv_form_away)
-        total_wins = home_form['wins'] + away_form['wins']
+        total_wins = (home_form['wins'] if home_form['available'] else 0) + (away_form['wins'] if away_form['available'] else 0)
         
         # Grey zone
         if 2.3 <= fb_avg_goals <= 2.7:
-            return {"valid": False, "reason": f"Grey zone: Avg Goals = {fb_avg_goals}"}
+            return {"valid": False, "reason": f"Grey zone: Avg Goals = {fb_avg_goals} (2.3-2.7 range)"}
         
         # OVER 2.5
         if fb_avg_goals >= 2.80 and fb_correct_total >= 3:
@@ -373,7 +414,7 @@ class GrokBetConsensusV21:
         
         # UNDER 2.5
         if fb_avg_goals <= 2.20 and fb_correct_total <= 2:
-            if sv_ou_pred == 'U' and (home_form['wins'] <= 2 or away_form['wins'] <= 2):
+            if sv_ou_pred == 'U':
                 return {
                     "valid": True,
                     "bet": "UNDER 2.5 GOALS",
@@ -382,8 +423,7 @@ class GrokBetConsensusV21:
                     "reasons": [
                         f"Avg Goals {fb_avg_goals} ≤2.20",
                         f"Implied {fb_correct_total} goals",
-                        f"SV says U",
-                        f"Mixed form present"
+                        f"SV says U"
                     ]
                 }
         
@@ -405,7 +445,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet Consensus v2.1</h1>
-        <p>Final Locked System | Strong Consensus 1/2 + Draw Contrarian 12 + Over/Under 2.5</p>
+        <p>FULLY LOCKED | Strong Consensus 1/2 + Draw Contrarian 12 + Over/Under 2.5</p>
         <div>
             <span class="badge">🏆 Strong Consensus: 76-80%</span>
             <span class="badge">🃏 Draw Contrarian: 77-82%</span>
@@ -474,13 +514,13 @@ def main():
         
         st.markdown("---")
         
-        # Row 4: Form
-        st.markdown("**Form (last 6 matches - use W/L/D)**")
+        # Row 4: Form (optional - leave blank if missing)
+        st.markdown("**Form (last 6 matches - use W/L/D) - Leave blank if not available**")
         col14, col15 = st.columns(2)
         with col14:
-            form_home = st.text_input(f"{home_team} Form", "LLDLWW")
+            form_home = st.text_input(f"{home_team} Form (optional)", "LLDLWW", help="Example: WWDLWW. Leave blank if no data.")
         with col15:
-            form_away = st.text_input(f"{away_team} Form", "WLLWWW")
+            form_away = st.text_input(f"{away_team} Form (optional)", "WLLWWW", help="Example: LLDWLL. Leave blank if no data.")
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -500,8 +540,8 @@ def main():
                 'sv_odds': sv_odds,
                 'sv_draw_odds': sv_draw_odds,
                 'sv_ou_pred': sv_ou_pred,
-                'sv_form_home': form_home.upper(),
-                'sv_form_away': form_away.upper()
+                'sv_form_home': form_home.upper().strip() if form_home else "",
+                'sv_form_away': form_away.upper().strip() if form_away else ""
             }
             
             st.markdown("---")
@@ -630,7 +670,7 @@ def main():
                     st.rerun()
     
     # ================================================================
-    # SIDEBAR / RIGHT COLUMN - STATS AND REFERENCE
+    # RIGHT COLUMN - STATS AND REFERENCE
     # ================================================================
     
     st.markdown("---")
@@ -644,20 +684,21 @@ def main():
             st.metric("Win Rate", f"{stats['win_rate']:.1f}%")
     
     with col_right:
-        st.markdown('<div class="section-title">⚡ QUICK REFERENCE</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">⚡ QUICK REFERENCE (v2.1 FINAL)</div>', unsafe_allow_html=True)
         st.markdown("""
         <div style="background: #1e293b; border-radius: 8px; padding: 0.75rem;">
             <div><strong>🎯 STRONG CONSENSUS 1/2:</strong> Both sites agree | Prob ≥48% | Coef ≥1.45 | Form ≥3 wins</div>
-            <div style="margin-top: 0.5rem;"><strong>🃏 DRAW CONTRARIAN 12:</strong> Either site shows X | Draw odds ≥2.80 | Mixed form | xG ≥2.5</div>
+            <div style="margin-top: 0.5rem;"><strong>🃏 DRAW CONTRARIAN 12:</strong> Either site shows X | Draw odds ≥2.80 | xG ≥2.5 | Form: skip only if BOTH have ≥3 wins</div>
             <div style="margin-top: 0.5rem;"><strong>⚽ OVER/UNDER:</strong> Over: xG ≥2.80 + SV "O" | Under: xG ≤2.20 + SV "U" | Grey 2.3-2.7 = SKIP</div>
             <div style="margin-top: 0.5rem;"><strong>💰 STAKE RULES:</strong> 0.75-1% (normal) | 0.5% (away + high goals OR xG≥3.5) | 1.0% (both sites show X)</div>
             <div style="margin-top: 0.5rem;"><strong>📊 MAX BETS:</strong> 4 per day | 2% daily exposure</div>
+            <div style="margin-top: 0.5rem;"><strong>📝 FORM:</strong> Leave blank if not available - system handles missing data</div>
         </div>
         """, unsafe_allow_html=True)
     
     # Footer
     st.markdown("---")
-    st.caption("🎯 **GrokBet Consensus v2.1** | Final Locked | Strong Consensus + Draw Contrarian + Over/Under | Built from 280+ matches")
+    st.caption("🎯 **GrokBet Consensus v2.1** | FULLY LOCKED | Strong Consensus + Draw Contrarian (with form fallback) + Over/Under | Built from 280+ matches")
 
 if __name__ == "__main__":
     main()
