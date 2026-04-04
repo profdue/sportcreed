@@ -9,8 +9,9 @@
 # - No standard Poisson (everyone copies that)
 # - Built only from SportyBet screenshot data
 # - Clear "NO" rules for BTTS/Over
+# - BTTS Yes AND BTTS No both evaluated
+# - Under 2.5 odds input included
 # - Stake scales by edge (3%/5%/8% thresholds)
-# - Clean, decisive output
 
 import streamlit as st
 import math
@@ -26,7 +27,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - CLEAN & MINIMAL (same as v2.5)
+# CUSTOM CSS - CLEAN & MINIMAL
 # ============================================================================
 
 st.markdown("""
@@ -102,14 +103,6 @@ st.markdown("""
         margin: 0.75rem 0;
         border-color: #334155;
     }
-    .section-title {
-        color: #fbbf24;
-        font-size: 0.8rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-        letter-spacing: 0.5px;
-        text-transform: uppercase;
-    }
     .efficiency-badge {
         font-family: monospace;
         font-size: 1.1rem;
@@ -122,8 +115,7 @@ st.markdown("""
 # CONSTANTS & FORMULAS - v3.0 UNIQUE LOGIC
 # ============================================================================
 
-# Default conversion % if missing
-DEFAULT_CONV = 0.10  # 10%
+DEFAULT_CONV = 0.10  # 10% default if missing
 
 def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
     """
@@ -153,14 +145,16 @@ def get_stake_by_edge(edge):
 
 def check_btts_trigger(home_xg, away_xg, home_conv, away_conv):
     """
-    BTTS only triggered if:
+    BTTS Yes only triggered if:
     - both xG ≥ 1.25
     - both conversion ≥ 11%
+    
+    BTTS No is the opposite structural play
     """
-    if home_xg >= 1.25 and away_xg >= 1.25:
-        if home_conv >= 11 and away_conv >= 11:
-            return True, "BTTS Yes"
-    return False, "No BTTS"
+    btts_yes_trigger = (home_xg >= 1.25 and away_xg >= 1.25 and home_conv >= 11 and away_conv >= 11)
+    btts_no_trigger = (home_xg < 1.0 or away_xg < 1.0 or home_conv < 9 or away_conv < 9)
+    
+    return btts_yes_trigger, btts_no_trigger
 
 def check_over_trigger(total_xg, home_conv, away_conv):
     """
@@ -169,7 +163,7 @@ def check_over_trigger(total_xg, home_conv, away_conv):
     """
     if total_xg >= 2.8 and home_conv >= 11 and away_conv >= 11:
         return True, "Over 2.5"
-    return False, "Under 2.5 likely"
+    return False, None
 
 def check_under_trigger(total_xg, home_scored, away_scored):
     """
@@ -177,14 +171,18 @@ def check_under_trigger(total_xg, home_scored, away_scored):
     - Total xG ≤ 2.7 OR one team scored avg ≤ 0.8
     """
     if total_xg <= 2.7 or home_scored <= 0.8 or away_scored <= 0.8:
-        return True, "Under 2.5"
+        return True, "Under 2.5 likely"
     return False, None
 
-def calculate_implied_prob(odds):
-    """Convert decimal odds to implied probability"""
-    if odds <= 0:
-        return 0
-    return 1.0 / odds
+def calculate_simple_btts_prob(home_xg, away_xg):
+    """Simple BTTS probability from xG (capped)"""
+    home_factor = min(0.9, home_xg / 1.5)
+    away_factor = min(0.9, away_xg / 1.5)
+    return home_factor * away_factor
+
+def calculate_simple_over_prob(total_xg):
+    """Simple Over 2.5 probability from total xG (capped)"""
+    return min(0.65, total_xg / 4.5)
 
 def normalize_probs(home_prob, draw_prob, away_prob):
     """Normalize probabilities to sum to 1.0"""
@@ -229,14 +227,14 @@ class GrokBetV30:
         away_conceded = data['away_conceded']
         home_form = data['home_form']
         away_form = data['away_form']
-        home_conv = data.get('home_conv', 10)  # Default 10% if missing
+        home_conv = data.get('home_conv', 10)
         away_conv = data.get('away_conv', 10)
         h2h_home = data.get('h2h_home', 0)
         h2h_away = data.get('h2h_away', 0)
         home_gd = data.get('home_gd', 0)
         away_gd = data.get('away_gd', 0)
         
-        # Calculate xG from scored/conceded (SportyBet method)
+        # Calculate xG from scored/conceded
         home_xg = (home_scored + away_conceded) / 2
         away_xg = (away_scored + home_conceded) / 2
         total_xg = home_xg + away_xg
@@ -247,21 +245,19 @@ class GrokBetV30:
         efficiency_gap = home_efficiency - away_efficiency
         
         # ========== STEP 2: 1X2 PROBABILITIES FROM EFFICIENCY GAP ==========
-        # Convert efficiency gap to win probability
-        # Gap > 0 → Home stronger. Scale: gap of ±0.5 = ~20% swing
         base_home = 0.34
         base_away = 0.33
         base_draw = 0.33
         
         # Adjust by efficiency gap (capped at ±0.25 swing)
-        gap_adj = efficiency_gap * 0.4  # ±0.2 gap gives ±8% adjustment
+        gap_adj = efficiency_gap * 0.4
         gap_adj = max(-0.15, min(0.15, gap_adj))
         
         raw_home = base_home + gap_adj
         raw_away = base_away - gap_adj
         raw_draw = base_draw
         
-        # H2H adjustment (gap≥3 = +6%, gap≥4 = +8%)
+        # H2H adjustment
         h2h_gap = abs(h2h_home - h2h_away)
         if h2h_gap >= 4:
             h2h_adj = 0.08
@@ -277,7 +273,7 @@ class GrokBetV30:
             raw_away += h2h_adj
             raw_draw -= h2h_adj / 2
         
-        # GD adjustment (small)
+        # GD adjustment
         gd_adj = ((home_gd - away_gd) / 50) * 0.05
         raw_home += gd_adj
         raw_away -= gd_adj
@@ -295,7 +291,6 @@ class GrokBetV30:
             imp_draw = (1/odds['draw']) / total_implied
             imp_away = (1/odds['away']) / total_implied
             
-            # Home win edge
             home_edge = home_prob - imp_home
             stake_pct, is_valid = get_stake_by_edge(home_edge)
             if is_valid:
@@ -307,7 +302,6 @@ class GrokBetV30:
                     "type": "1X2"
                 })
             
-            # Away win edge
             away_edge = away_prob - imp_away
             stake_pct, is_valid = get_stake_by_edge(away_edge)
             if is_valid:
@@ -321,12 +315,10 @@ class GrokBetV30:
         
         # Over 2.5 check
         over_triggered, over_msg = check_over_trigger(total_xg, home_conv, away_conv)
-        under_triggered, under_msg = check_under_trigger(total_xg, home_scored, away_scored)
         
         if odds.get('over', 0) > 0 and over_triggered:
             imp_over = 1 / odds['over']
-            # Simple over probability from xG
-            over_prob = min(0.65, total_xg / 4.5)
+            over_prob = calculate_simple_over_prob(total_xg)
             over_edge = over_prob - imp_over
             stake_pct, is_valid = get_stake_by_edge(over_edge)
             if is_valid:
@@ -337,35 +329,53 @@ class GrokBetV30:
                     "stake": stake_pct,
                     "type": "O/U"
                 })
-        elif under_triggered and odds.get('over', 0) > 0:
-            # Under edge
-            imp_under = 1 / odds.get('under', 2.0) if odds.get('under', 0) > 0 else 0.5
-            under_prob = 1 - min(0.65, total_xg / 4.5)
+        
+        # Under 2.5 check (uses actual entered odds)
+        under_triggered, under_msg = check_under_trigger(total_xg, home_scored, away_scored)
+        
+        if odds.get('under', 0) > 0 and under_triggered:
+            imp_under = 1 / odds['under']
+            under_prob = 1 - calculate_simple_over_prob(total_xg)
             under_edge = under_prob - imp_under
             stake_pct, is_valid = get_stake_by_edge(under_edge)
             if is_valid:
                 markets.append({
                     "name": "Under 2.5 Goals",
-                    "odds": odds.get('under', 2.0),
+                    "odds": odds['under'],
                     "edge": under_edge,
                     "stake": stake_pct,
                     "type": "O/U"
                 })
         
-        # BTTS check
-        btts_triggered, btts_msg = check_btts_trigger(home_xg, away_xg, home_conv, away_conv)
+        # BTTS Yes and BTTS No checks
+        btts_yes_trigger, btts_no_trigger = check_btts_trigger(home_xg, away_xg, home_conv, away_conv)
         
-        if odds.get('btts', 0) > 0 and btts_triggered:
-            imp_btts = 1 / odds['btts']
-            # Simple BTTS probability from xG
-            btts_prob = (min(0.9, home_xg / 1.5) * min(0.9, away_xg / 1.5))
-            btts_edge = btts_prob - imp_btts
-            stake_pct, is_valid = get_stake_by_edge(btts_edge)
+        # BTTS Yes
+        if odds.get('btts_yes', 0) > 0 and btts_yes_trigger:
+            imp_btts_yes = 1 / odds['btts_yes']
+            btts_yes_prob = calculate_simple_btts_prob(home_xg, away_xg)
+            btts_yes_edge = btts_yes_prob - imp_btts_yes
+            stake_pct, is_valid = get_stake_by_edge(btts_yes_edge)
             if is_valid:
                 markets.append({
                     "name": "BTTS Yes",
-                    "odds": odds['btts'],
-                    "edge": btts_edge,
+                    "odds": odds['btts_yes'],
+                    "edge": btts_yes_edge,
+                    "stake": stake_pct,
+                    "type": "BTTS"
+                })
+        
+        # BTTS No
+        if odds.get('btts_no', 0) > 0 and btts_no_trigger:
+            imp_btts_no = 1 / odds['btts_no']
+            btts_no_prob = 1 - calculate_simple_btts_prob(home_xg, away_xg)
+            btts_no_edge = btts_no_prob - imp_btts_no
+            stake_pct, is_valid = get_stake_by_edge(btts_no_edge)
+            if is_valid:
+                markets.append({
+                    "name": "BTTS No",
+                    "odds": odds['btts_no'],
+                    "edge": btts_no_edge,
                     "stake": stake_pct,
                     "type": "BTTS"
                 })
@@ -390,8 +400,8 @@ class GrokBetV30:
             "home_prob": home_prob,
             "draw_prob": draw_prob,
             "away_prob": away_prob,
-            "btts_triggered": btts_triggered,
-            "btts_msg": btts_msg,
+            "btts_yes_trigger": btts_yes_trigger,
+            "btts_no_trigger": btts_no_trigger,
             "over_triggered": over_triggered,
             "under_triggered": under_triggered,
             "markets": markets,
@@ -406,7 +416,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet v3.0</h1>
-        <p>Screenshot Value Filter | Efficiency Gap | Clean & Decisive</p>
+        <p>Screenshot Value Filter | Efficiency Gap | BTTS Yes + No | Clean & Decisive</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -417,9 +427,9 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            home_team = st.text_input("Home Team", "Oviedo")
+            home_team = st.text_input("Home Team", "Kovalivka")
         with col2:
-            away_team = st.text_input("Away Team", "Sevilla")
+            away_team = st.text_input("Away Team", "Metalist 1925 Kharkiv")
         
         st.markdown("---")
         
@@ -429,11 +439,11 @@ def main():
         with col4:
             home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 1.70, 0.05)
         with col5:
-            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 1.30, 0.05)
+            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 1.10, 0.05)
         with col6:
-            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 1.70, 0.05)
+            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 0.60, 0.05)
         
-        # xG display (calculated automatically)
+        # xG display
         home_xg_display = (home_scored + away_conceded) / 2
         away_xg_display = (away_scored + home_conceded) / 2
         st.caption(f"xG: {home_team} {home_xg_display:.2f} | {away_team} {away_xg_display:.2f} | Total: {home_xg_display + away_xg_display:.2f}")
@@ -442,15 +452,15 @@ def main():
         
         col7, col8 = st.columns(2)
         with col7:
-            home_form = st.number_input(f"{home_team} Form %", 0, 100, 27)
+            home_form = st.number_input(f"{home_team} Form %", 0, 100, 47)
         with col8:
-            away_form = st.number_input(f"{away_team} Form %", 0, 100, 33)
+            away_form = st.number_input(f"{away_team} Form %", 0, 100, 80)
         
         col9, col10, col11 = st.columns(3)
         with col9:
-            h2h_home = st.number_input("H2H Home Wins", 0, 10, 3)
+            h2h_home = st.number_input("H2H Home Wins", 0, 10, 1)
         with col10:
-            h2h_draws = st.number_input("H2H Draws", 0, 10, 0)
+            h2h_draws = st.number_input("H2H Draws", 0, 10, 2)
         with col11:
             h2h_away = st.number_input("H2H Away Wins", 0, 10, 2)
         
@@ -458,36 +468,38 @@ def main():
         
         col12, col13 = st.columns(2)
         with col12:
-            home_gd = st.number_input(f"{home_team} GD", -50, 50, -28)
+            home_gd = st.number_input(f"{home_team} GD", -50, 50, 11)
         with col13:
-            away_gd = st.number_input(f"{away_team} GD", -50, 50, -12)
+            away_gd = st.number_input(f"{away_team} GD", -50, 50, 0)
         
         st.markdown("---")
         
         col14, col15, col16, col17 = st.columns(4)
         with col14:
-            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 6)
+            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 7)
         with col15:
-            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 7)
+            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 4)
         with col16:
-            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 8)
+            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 10)
         with col17:
-            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 13)
+            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 11)
         
         st.markdown("---")
         
-        st.markdown("**Odds**")
-        col18, col19, col20, col21, col22 = st.columns(5)
+        st.markdown("**Odds (from SportyBet screenshot)**")
+        col18, col19, col20 = st.columns(3)
         with col18:
-            odds_home = st.number_input("Home", 0.0, 10.0, 2.88, 0.05)
+            odds_home = st.number_input("Home", 0.0, 10.0, 3.10, 0.05)
+            odds_draw = st.number_input("Draw", 0.0, 10.0, 2.90, 0.05)
+            odds_away = st.number_input("Away", 0.0, 10.0, 2.45, 0.05)
+        
         with col19:
-            odds_draw = st.number_input("Draw", 0.0, 10.0, 3.14, 0.05)
+            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 2.80, 0.05)
+            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 1.43, 0.05)
+        
         with col20:
-            odds_away = st.number_input("Away", 0.0, 10.0, 2.83, 0.05)
-        with col21:
-            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 2.40, 0.05)
-        with col22:
-            odds_btts = st.number_input("BTTS", 0.0, 10.0, 1.99, 0.05)
+            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 2.20, 0.05)
+            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 1.60, 0.05)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -519,7 +531,9 @@ def main():
                 'draw': odds_draw,
                 'away': odds_away,
                 'over': odds_over,
-                'btts': odds_btts
+                'under': odds_under,
+                'btts_yes': odds_btts_yes,
+                'btts_no': odds_btts_no
             }
             
             result = predictor.get_best_bet(data, odds)
@@ -539,7 +553,7 @@ def main():
             
             st.markdown("---")
             
-            # EFFICIENCY GAP (unique core)
+            # EFFICIENCY GAP
             st.markdown("**⚡ EFFICIENCY GAP:**")
             gap_color = "🟢" if result['efficiency_gap'] > 0 else "🔴"
             st.markdown(f"{gap_color} **{result['efficiency_gap']:+.3f}** (favors **{home_team if result['efficiency_gap'] > 0 else away_team}**)")
@@ -547,19 +561,30 @@ def main():
             
             st.markdown("---")
             
-            # BTTS / Over rules
+            # TRIGGER CHECKS
             st.markdown("**📋 TRIGGER CHECKS:**")
-            if result['btts_triggered']:
-                st.markdown("✅ BTTS: TRIGGERED (both xG ≥1.25, both conv ≥11%)")
-            else:
-                st.markdown(f"❌ BTTS: {result['btts_msg']}")
             
+            # BTTS
+            if result['btts_yes_trigger']:
+                st.markdown("✅ BTTS Yes: TRIGGERED (both xG ≥1.25, both conv ≥11%)")
+            else:
+                st.markdown("❌ BTTS Yes: NOT TRIGGERED")
+            
+            if result['btts_no_trigger']:
+                st.markdown("✅ BTTS No: TRIGGERED (low xG or low conversion)")
+            else:
+                st.markdown("❌ BTTS No: NOT TRIGGERED")
+            
+            # Over/Under
             if result['over_triggered']:
                 st.markdown("✅ Over 2.5: TRIGGERED (total xG ≥2.8, both conv ≥11%)")
-            elif result['under_triggered']:
-                st.markdown("📉 Under 2.5: TRIGGERED (low total xG or weak attack)")
             else:
-                st.markdown("⚠️ Over/Under: MIXED SIGNALS")
+                st.markdown("❌ Over 2.5: NOT TRIGGERED")
+            
+            if result['under_triggered']:
+                st.markdown("📉 Under 2.5: TRIGGERED (total xG ≤2.7 or weak attack)")
+            else:
+                st.markdown("⚠️ Under 2.5: NOT TRIGGERED")
             
             st.markdown("---")
             
@@ -578,12 +603,14 @@ def main():
                 if best['type'] == "1X2":
                     fav = home_team if home_team in best['name'] else away_team
                     st.markdown(f"**Reason:** Efficiency gap ({result['efficiency_gap']:+.3f}) favors {fav}, market mispriced.")
-                elif best['name'] == "Over 2.5 Goals":
+                elif "Over" in best['name']:
                     st.markdown(f"**Reason:** Total xG {result['total_xg']:.2f} ≥ 2.8 and both conversions ≥ 11%.")
-                elif best['name'] == "Under 2.5 Goals":
+                elif "Under" in best['name']:
                     st.markdown(f"**Reason:** Total xG {result['total_xg']:.2f} ≤ 2.7 or weak attack.")
-                elif best['name'] == "BTTS Yes":
+                elif "BTTS Yes" in best['name']:
                     st.markdown(f"**Reason:** Both xG ≥ 1.25 ({result['home_xg']:.2f}/{result['away_xg']:.2f}) and both conv ≥ 11%.")
+                elif "BTTS No" in best['name']:
+                    st.markdown(f"**Reason:** Low xG ({result['home_xg']:.2f}/{result['away_xg']:.2f}) or poor conversion rates.")
                 
                 # Secondary bets
                 if len(result['markets']) > 1:
@@ -594,14 +621,13 @@ def main():
                 
                 # VERDICT
                 st.markdown("---")
-                if result['efficiency_gap'] > 0.05:
-                    verdict = f"{home_team} slight edge but low quality match. Small stake only."
-                elif result['efficiency_gap'] < -0.05:
-                    verdict = f"{away_team} stronger than numbers suggest. Value on away side."
-                elif result['under_triggered']:
+                if abs(result['efficiency_gap']) > 0.05:
+                    fav = home_team if result['efficiency_gap'] > 0 else away_team
+                    verdict = f"{fav} stronger than numbers suggest. Value on {fav.lower()}."
+                elif result['under_triggered'] and not result['over_triggered']:
                     verdict = "Low-scoring game expected. Under 2.5 is the structural play."
-                elif not result['btts_triggered']:
-                    verdict = "BTTS unlikely given conversion or xG fails. Focus on 1X2 or Under."
+                elif result['btts_no_trigger'] and not result['btts_yes_trigger']:
+                    verdict = "BTTS unlikely given xG or conversion fails. Focus on 1X2 or Under."
                 else:
                     verdict = "Tight game. Small stake or skip if edge < 3%."
                 
@@ -638,7 +664,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("🎯 **GrokBet v3.0** | Screenshot Value Filter | Efficiency Gap | Stake scales by edge")
+    st.caption("🎯 **GrokBet v3.0** | Screenshot Value Filter | Efficiency Gap | BTTS Yes + No | Stake scales by edge")
 
 if __name__ == "__main__":
     main()
