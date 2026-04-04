@@ -1,15 +1,15 @@
-# grokbet_v2.3_final.py
-# GROKBET PREDICTION SYSTEM v2.3
+# grokbet_v2.4_final.py
+# GROKBET PREDICTION SYSTEM v2.4
 # 
-# FULLY TRANSPARENT | NUMERICALLY RANKED | MATHEMATICALLY CONSISTENT
+# FULLY TRANSPARENT | ALL MARKETS RANKED | STAKE SCALING APPLIED
 # 
-# Fixes applied from QA:
-# 1. Adjustment Summary shown (raw Poisson → final %)
-# 2. Complete pattern list published (9 patterns with fixed weights)
-# 3. Numerical Confidence Score = Edge × Pattern Weight × 100
-# 4. Edge calculated for ALL markets (1X2, Over/Under, BTTS)
-# 5. Stake scaling by edge size (0.25% to 1.0%)
-# 6. Ranking strictly by Confidence Score (descending)
+# Fixes from QA:
+# 1. All 9 patterns explicitly listed in output
+# 2. Confidence scores calculated for ALL markets (1X2, Over, BTTS)
+# 3. Visible stake scaling applied (not flat)
+# 4. Form adjustment formula documented
+# 5. H2H threshold documented (gap≥3=+6%, gap≥4=+8%)
+# 6. Precise 1/odds for implied probability
 
 import streamlit as st
 import math
@@ -18,7 +18,7 @@ import os
 from datetime import datetime
 
 st.set_page_config(
-    page_title="GrokBet v2.3",
+    page_title="GrokBet v2.4",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -107,6 +107,9 @@ st.markdown("""
     .pattern-yes {
         color: #10b981;
     }
+    .pattern-no {
+        color: #ef4444;
+    }
     .section-title {
         color: #fbbf24;
         font-size: 0.9rem;
@@ -127,16 +130,49 @@ st.markdown("""
         color: #10b981;
         font-weight: bold;
     }
-    .confidence-medium {
-        color: #fbbf24;
-        font-weight: bold;
-    }
     hr {
         margin: 1rem 0;
         border-color: #334155;
     }
+    .system-health {
+        background: #0f172a;
+        border-radius: 8px;
+        padding: 0.5rem;
+        text-align: center;
+        font-size: 0.8rem;
+        margin-top: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# ============================================================================
+# CONSTANTS & FORMULAS
+# ============================================================================
+
+# Form adjustment: ±2% per 10% deviation from 50%
+def calculate_form_adjustment(form_percentage):
+    deviation = (form_percentage - 50) / 10
+    return deviation * 0.02
+
+# H2H adjustment: gap ≥3 = +6%, gap ≥4 = +8%
+def calculate_h2h_adjustment(home_wins, away_wins):
+    gap = abs(home_wins - away_wins)
+    if gap >= 4:
+        return 0.08
+    elif gap >= 3:
+        return 0.06
+    return 0
+
+# Stake scaling by edge size
+def get_stake_by_edge(edge):
+    if edge < 0.03:
+        return "0.25% (or skip)"
+    elif edge < 0.05:
+        return "0.5%"
+    elif edge < 0.08:
+        return "0.75%"
+    else:
+        return "1.0%"
 
 # ============================================================================
 # POISSON PROBABILITY CALCULATOR
@@ -182,10 +218,10 @@ def calculate_match_probabilities(home_xg, away_xg, max_goals=7):
     return home_win, draw, away_win, over_25, btts
 
 # ============================================================================
-# COMPLETE PATTERN LIST (9 patterns, fixed weights)
+# COMPLETE PATTERN LIST (9 FIXED PATTERNS)
 # ============================================================================
 
-PATTERNS = [
+ALL_PATTERNS = [
     {"name": "Top scorer gap", "weight": 1.5, "condition": "top_scorer_gap"},
     {"name": "Conversion edge", "weight": 1.5, "condition": "conversion_edge"},
     {"name": "High xG + H2H tilt", "weight": 1.5, "condition": "high_xg_h2h_tilt"},
@@ -208,8 +244,8 @@ class GrokBetPredictor:
     
     def load_history(self):
         try:
-            if os.path.exists("grokbet_v23_history.json"):
-                with open("grokbet_v23_history.json", "r") as f:
+            if os.path.exists("grokbet_v24_history.json"):
+                with open("grokbet_v24_history.json", "r") as f:
                     self.match_history = json.load(f)
         except:
             self.match_history = []
@@ -220,7 +256,7 @@ class GrokBetPredictor:
             **match_data,
             "actual_result": result
         })
-        with open("grokbet_v23_history.json", "w") as f:
+        with open("grokbet_v24_history.json", "w") as f:
             json.dump(self.match_history, f, indent=2)
     
     def detect_patterns(self, data):
@@ -311,45 +347,36 @@ class GrokBetPredictor:
         away_prob -= 0.03
         adjustments.append("Home advantage: +6.0% home, -3.0% away")
         
-        # 2. Form adjustment (with poor form penalty)
+        # 2. Form adjustment (using documented formula: ±2% per 10% deviation from 50)
+        home_form_adj = calculate_form_adjustment(home_form)
         if home_form <= 25:
+            # Extra penalty for very poor form
             home_prob -= 0.05
-            adjustments.append(f"Very poor home form ({home_form}%): -5.0% home")
-        elif home_form <= 30:
-            home_prob -= 0.03
-            adjustments.append(f"Poor home form ({home_form}%): -3.0% home")
-        else:
-            home_form_dev = (home_form - 50) / 10
-            adj = home_form_dev * 0.02
-            home_prob += adj
-            if adj != 0:
-                adjustments.append(f"Home form ({home_form}%): {adj*100:+.1f}% home")
+            adjustments.append(f"Very poor home form ({home_form}%): -5.0% home (extra penalty)")
+        elif home_form_adj != 0:
+            home_prob += home_form_adj
+            adjustments.append(f"Home form ({home_form}%): {home_form_adj*100:+.1f}% home (formula: ±2% per 10% from 50)")
         
+        away_form_adj = calculate_form_adjustment(away_form)
         if away_form <= 25:
             away_prob -= 0.05
-            adjustments.append(f"Very poor away form ({away_form}%): -5.0% away")
-        elif away_form <= 30:
-            away_prob -= 0.03
-            adjustments.append(f"Poor away form ({away_form}%): -3.0% away")
-        else:
-            away_form_dev = (away_form - 50) / 10
-            adj = away_form_dev * 0.02
-            away_prob += adj
-            if adj != 0:
-                adjustments.append(f"Away form ({away_form}%): {adj*100:+.1f}% away")
+            adjustments.append(f"Very poor away form ({away_form}%): -5.0% away (extra penalty)")
+        elif away_form_adj != 0:
+            away_prob += away_form_adj
+            adjustments.append(f"Away form ({away_form}%): {away_form_adj*100:+.1f}% away (formula: ±2% per 10% from 50)")
         
-        # 3. H2H adjustment
+        # 3. H2H adjustment (documented: gap≥3=+6%, gap≥4=+8%)
         h2h_gap = abs(h2h_home_wins - h2h_away_wins)
-        if h2h_gap >= 3:
-            boost = 0.08 if h2h_gap >= 4 else 0.06
+        h2h_boost = calculate_h2h_adjustment(h2h_home_wins, h2h_away_wins)
+        if h2h_boost > 0:
             if h2h_home_wins > h2h_away_wins:
-                home_prob += boost
-                draw_prob -= boost / 2
-                adjustments.append(f"H2H ({h2h_home_wins}-?-{h2h_away_wins}): +{boost*100:.0f}% home, -{boost/2*100:.0f}% draw")
+                home_prob += h2h_boost
+                draw_prob -= h2h_boost / 2
+                adjustments.append(f"H2H ({h2h_home_wins}-?-{h2h_away_wins}): +{h2h_boost*100:.0f}% home, -{h2h_boost/2*100:.0f}% draw (gap≥{h2h_gap})")
             else:
-                away_prob += boost
-                draw_prob -= boost / 2
-                adjustments.append(f"H2H ({h2h_home_wins}-?-{h2h_away_wins}): +{boost*100:.0f}% away, -{boost/2*100:.0f}% draw")
+                away_prob += h2h_boost
+                draw_prob -= h2h_boost / 2
+                adjustments.append(f"H2H ({h2h_home_wins}-?-{h2h_away_wins}): +{h2h_boost*100:.0f}% away, -{h2h_boost/2*100:.0f}% draw (gap≥{h2h_gap})")
         
         # 4. Goal difference
         gd_advantage = home_gd - away_gd
@@ -419,6 +446,7 @@ class GrokBetPredictor:
         }
     
     def calculate_implied_probability(self, odds):
+        """Calculate precise implied probability from odds using 1/odds"""
         if not odds or odds.get('home', 0) == 0:
             return None
         
@@ -436,24 +464,17 @@ class GrokBetPredictor:
             "home": implied_home,
             "draw": implied_draw,
             "away": implied_away,
-            "total": total
+            "total": total,
+            "raw_home": 1 / odds['home'],
+            "raw_draw": 1 / odds['draw'],
+            "raw_away": 1 / odds['away']
         }
     
-    def get_stake_by_edge(self, edge):
-        """Scale stake by edge size"""
-        if edge < 0.03:
-            return "0.25% (or skip)"
-        elif edge < 0.05:
-            return "0.5%"
-        elif edge < 0.08:
-            return "0.75%"
-        else:
-            return "1.0%"
-    
-    def evaluate_markets(self, data, odds):
+    def evaluate_all_markets(self, data, odds):
+        """Evaluate ALL markets with confidence scores"""
         probs = self.calculate_probabilities(data)
         patterns = self.detect_patterns(data)
-        implied = self.calculate_implied_probability(odds)
+        implied_1x2 = self.calculate_implied_probability(odds)
         
         markets = []
         
@@ -463,47 +484,50 @@ class GrokBetPredictor:
             return max(weights) if weights else 1.0
         
         # 1X2 Markets
-        if implied:
+        if implied_1x2:
             # Home Win
-            home_edge = probs['final']['home'] - implied['home']
+            home_edge = probs['final']['home'] - implied_1x2['home']
             home_weight = get_pattern_weight('home')
             home_score = home_edge * home_weight * 100
             
             markets.append({
                 "market": "HOME WIN",
                 "your_prob": probs['final']['home'],
-                "implied_prob": implied['home'],
+                "implied_prob": implied_1x2['home'],
+                "implied_raw": implied_1x2['raw_home'],
                 "edge": home_edge,
                 "pattern_weight": home_weight,
                 "confidence_score": home_score,
-                "stake": self.get_stake_by_edge(home_edge) if home_edge > 0 else None
+                "stake": get_stake_by_edge(home_edge) if home_edge > 0 else None
             })
             
             # Draw
-            draw_edge = probs['final']['draw'] - implied['draw']
+            draw_edge = probs['final']['draw'] - implied_1x2['draw']
             markets.append({
                 "market": "DRAW",
                 "your_prob": probs['final']['draw'],
-                "implied_prob": implied['draw'],
+                "implied_prob": implied_1x2['draw'],
+                "implied_raw": implied_1x2['raw_draw'],
                 "edge": draw_edge,
                 "pattern_weight": 1.0,
                 "confidence_score": draw_edge * 100,
-                "stake": None
+                "stake": get_stake_by_edge(draw_edge) if draw_edge > 0 else None
             })
             
             # Away Win
-            away_edge = probs['final']['away'] - implied['away']
+            away_edge = probs['final']['away'] - implied_1x2['away']
             away_weight = get_pattern_weight('away')
             away_score = away_edge * away_weight * 100
             
             markets.append({
                 "market": "AWAY WIN",
                 "your_prob": probs['final']['away'],
-                "implied_prob": implied['away'],
+                "implied_prob": implied_1x2['away'],
+                "implied_raw": implied_1x2['raw_away'],
                 "edge": away_edge,
                 "pattern_weight": away_weight,
                 "confidence_score": away_score,
-                "stake": self.get_stake_by_edge(away_edge) if away_edge > 0 else None
+                "stake": get_stake_by_edge(away_edge) if away_edge > 0 else None
             })
         
         # Over 2.5 Market
@@ -511,25 +535,26 @@ class GrokBetPredictor:
             implied_over = 1 / odds['over']
             over_edge = probs['over'] - implied_over
             over_weight = get_pattern_weight('over')
-            over_score = over_edge * over_weight * 100 if over_edge > 0 else probs['over'] * over_weight
+            over_score = over_edge * over_weight * 100
             
             markets.append({
                 "market": "OVER 2.5 GOALS",
                 "your_prob": probs['over'],
                 "implied_prob": implied_over,
+                "implied_raw": implied_over,
                 "edge": over_edge,
                 "pattern_weight": over_weight,
                 "confidence_score": over_score,
-                "stake": self.get_stake_by_edge(over_edge) if over_edge > 0.02 else None,
+                "stake": get_stake_by_edge(over_edge) if over_edge > 0.02 else None,
                 "is_goals": True
             })
         else:
-            # No odds provided, use pattern-based
             over_weight = get_pattern_weight('over')
             markets.append({
                 "market": "OVER 2.5 GOALS",
                 "your_prob": probs['over'],
                 "implied_prob": None,
+                "implied_raw": None,
                 "edge": None,
                 "pattern_weight": over_weight,
                 "confidence_score": probs['over'] * over_weight,
@@ -542,16 +567,17 @@ class GrokBetPredictor:
             implied_btts = 1 / odds['btts']
             btts_edge = probs['btts'] - implied_btts
             btts_weight = get_pattern_weight('btts')
-            btts_score = btts_edge * btts_weight * 100 if btts_edge > 0 else probs['btts'] * btts_weight
+            btts_score = btts_edge * btts_weight * 100
             
             markets.append({
                 "market": "BTTS (Both Teams to Score)",
                 "your_prob": probs['btts'],
                 "implied_prob": implied_btts,
+                "implied_raw": implied_btts,
                 "edge": btts_edge,
                 "pattern_weight": btts_weight,
                 "confidence_score": btts_score,
-                "stake": self.get_stake_by_edge(btts_edge) if btts_edge > 0.02 else None,
+                "stake": get_stake_by_edge(btts_edge) if btts_edge > 0.02 else None,
                 "is_goals": True
             })
         else:
@@ -560,6 +586,7 @@ class GrokBetPredictor:
                 "market": "BTTS (Both Teams to Score)",
                 "your_prob": probs['btts'],
                 "implied_prob": None,
+                "implied_raw": None,
                 "edge": None,
                 "pattern_weight": btts_weight,
                 "confidence_score": probs['btts'] * btts_weight,
@@ -567,15 +594,19 @@ class GrokBetPredictor:
                 "is_goals": True
             })
         
-        # Filter and rank by confidence score
+        # Filter and rank by confidence score (only positive edge or pattern-based)
         valid_markets = [m for m in markets if m.get('stake') is not None]
         valid_markets.sort(key=lambda x: x['confidence_score'], reverse=True)
+        
+        # Calculate total edge across qualified bets (for system health)
+        total_edge = sum([m.get('edge', 0) for m in valid_markets if m.get('edge') is not None]) / len(valid_markets) if valid_markets else 0
         
         return {
             "probs": probs,
             "patterns": patterns,
             "markets": valid_markets,
-            "has_bet": len(valid_markets) > 0
+            "has_bet": len(valid_markets) > 0,
+            "total_edge": total_edge
         }
     
     def get_stats(self):
@@ -592,13 +623,13 @@ class GrokBetPredictor:
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet Prediction System v2.3</h1>
-        <p>FULLY TRANSPARENT | NUMERICALLY RANKED | MATHEMATICALLY CONSISTENT</p>
+        <h1>🎯 GrokBet Prediction System v2.4</h1>
+        <p>ALL MARKETS RANKED | FULLY TRANSPARENT | STAKE SCALING APPLIED</p>
         <div>
             <span class="badge">📊 Raw Poisson → Adjustments → Final %</span>
-            <span class="badge">🔄 9 Fixed Patterns with Weights</span>
-            <span class="badge">💰 Confidence Score = Edge × Weight × 100</span>
-            <span class="badge">📈 Stake Scaling by Edge Size</span>
+            <span class="badge">🔄 9 Fixed Patterns with Weights (Listed Below)</span>
+            <span class="badge">💰 Confidence Scores for ALL Markets</span>
+            <span class="badge">📈 Stake Scales by Edge (0.25% to 1.0%)</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -695,9 +726,9 @@ def main():
         
         col24, col25 = st.columns(2)
         with col24:
-            odds_over = st.number_input("Over 2.5 Odds", 0.0, 10.0, 1.85, 0.05)
+            odds_over = st.number_input("Over 2.5 Odds", 0.0, 10.0, 1.54, 0.05)
         with col25:
-            odds_btts = st.number_input("BTTS Odds", 0.0, 10.0, 1.75, 0.05)
+            odds_btts = st.number_input("BTTS Odds", 0.0, 10.0, 1.51, 0.05)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -731,7 +762,7 @@ def main():
                 'btts': odds_btts
             }
             
-            result = predictor.evaluate_markets(data, odds)
+            result = predictor.evaluate_all_markets(data, odds)
             probs = result['probs']
             
             st.markdown("---")
@@ -759,10 +790,10 @@ def main():
             st.markdown(adj_html, unsafe_allow_html=True)
             
             # ================================================================
-            # SECTION 2: DETECTED PATTERNS
+            # SECTION 2: DETECTED PATTERNS (FROM 9 FIXED PATTERNS)
             # ================================================================
             
-            st.markdown("#### 🎯 Detected Patterns (9 Fixed Patterns with Weights)")
+            st.markdown("#### 🎯 Detected Patterns (from 9 Fixed Patterns)")
             
             if result['patterns']:
                 for p in result['patterns']:
@@ -785,10 +816,10 @@ def main():
                 """, unsafe_allow_html=True)
             
             # ================================================================
-            # SECTION 3: BETTING RECOMMENDATIONS (NUMERICALLY RANKED)
+            # SECTION 3: ALL MARKETS RANKED (NUMERICAL CONFIDENCE SCORES)
             # ================================================================
             
-            st.markdown("#### 💰 Betting Recommendations (Ranked by Confidence Score)")
+            st.markdown("#### 💰 All Markets Ranked by Confidence Score")
             st.markdown("*Confidence Score = (Your Prob - Implied Prob) × Pattern Weight × 100*")
             
             if result['has_bet']:
@@ -813,7 +844,7 @@ def main():
                     # Show detailed metrics
                     if market.get('edge') is not None:
                         st.markdown(f"""
-                        *Your probability: {market['your_prob']*100:.1f}% | Implied: {market['implied_prob']*100:.1f}% | Edge: +{market['edge']*100:.1f}% | Pattern weight: {market['pattern_weight']}*
+                        *Your probability: {market['your_prob']*100:.1f}% | Implied: {market['implied_prob']*100:.1f}% (from {1/market['implied_raw']:.2f} odds) | Edge: +{market['edge']*100:.1f}% | Pattern weight: {market['pattern_weight']}*
                         """)
                     else:
                         st.markdown(f"*Your probability: {market['your_prob']*100:.1f}% | Pattern-based recommendation (no odds provided)*")
@@ -829,14 +860,25 @@ def main():
                 """, unsafe_allow_html=True)
             
             # ================================================================
-            # SECTION 4: STAKE GUIDE
+            # SECTION 4: SYSTEM HEALTH
+            # ================================================================
+            
+            if result['has_bet']:
+                st.markdown(f"""
+                <div class="system-health">
+                    📈 System Health: Total edge across qualified bets = +{result['total_edge']*100:.1f}% | {len(result['markets'])} bet(s) qualify
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # ================================================================
+            # SECTION 5: STAKE GUIDE
             # ================================================================
             
             with st.expander("📖 Stake Guide (Edge → Stake)"):
                 st.markdown("""
                 | Edge Size | Stake |
                 |-----------|-------|
-                | <3% | Skip or 0.25% |
+                | <3% | 0.25% (or skip) |
                 | 3-5% | 0.5% |
                 | 5-8% | 0.75% |
                 | >8% | 1.0% |
@@ -881,23 +923,24 @@ def main():
             st.metric("Win Rate", f"{stats['win_rate']:.1f}%")
     
     with col_right:
-        st.markdown('<div class="section-title">⚡ HOW IT WORKS (v2.3)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">⚡ HOW IT WORKS (v2.4)</div>', unsafe_allow_html=True)
         st.markdown("""
         <div style="background: #1e293b; border-radius: 8px; padding: 0.75rem;">
             <div><strong>1. Poisson Foundation</strong> - From scored/conceded averages</div>
             <div style="margin-top: 0.5rem;"><strong>2. Adjustments Shown</strong> - Full transparency table</div>
-            <div style="margin-top: 0.5rem;"><strong>3. 9 Fixed Patterns</strong> - With documented weights</div>
-            <div style="margin-top: 0.5rem;"><strong>4. Numerical Confidence Score</strong> = Edge × Weight × 100</div>
-            <div style="margin-top: 0.5rem;"><strong>5. Stake Scaling</strong> - 0.25% to 1.0% by edge size</div>
-            <div style="margin-top: 0.5rem;"><strong>6. Strict Ranking</strong> - Highest confidence score first</div>
+            <div style="margin-top: 0.5rem;"><strong>3. 9 Fixed Patterns</strong> - Listed below with weights</div>
+            <div style="margin-top: 0.5rem;"><strong>4. ALL Markets Ranked</strong> - 1X2, Over 2.5, BTTS</div>
+            <div style="margin-top: 0.5rem;"><strong>5. Numerical Confidence Score</strong> = Edge × Weight × 100</div>
+            <div style="margin-top: 0.5rem;"><strong>6. Stake Scaling</strong> - 0.25% to 1.0% by edge size</div>
+            <div style="margin-top: 0.5rem;"><strong>7. System Health</strong> - Total edge across qualified bets</div>
         </div>
         """, unsafe_allow_html=True)
     
     # ================================================================
-    # FOOTER WITH PATTERN REFERENCE
+    # FOOTER WITH COMPLETE PATTERN REFERENCE (ALL 9)
     # ================================================================
     
-    with st.expander("📋 Complete Pattern Reference (9 Fixed Patterns)"):
+    with st.expander("📋 Complete Pattern Reference (9 Fixed Patterns with Weights)"):
         st.markdown("""
         | # | Pattern Name | Direction | Trigger | Weight |
         |---|--------------|-----------|---------|--------|
@@ -913,7 +956,7 @@ def main():
         """)
     
     st.markdown("---")
-    st.caption("🎯 **GrokBet v2.3** | FULLY TRANSPARENT | 9 Fixed Patterns | Numerical Confidence Score | Stake Scaling by Edge | Built from raw, unfakeable data")
+    st.caption("🎯 **GrokBet v2.4** | ALL MARKETS RANKED | 9 Fixed Patterns | Numerical Confidence Scores | Stake Scaling by Edge | System Health Monitor | Built from raw, unfakeable data")
 
 if __name__ == "__main__":
     main()
