@@ -1,13 +1,15 @@
-# grokbet_v2.2_final.py
-# GROKBET PREDICTION SYSTEM v2.2
+# grokbet_v2.3_final.py
+# GROKBET PREDICTION SYSTEM v2.3
 # 
-# Core Features:
-# 1. Poisson foundation from raw, unfakeable data
-# 2. Automatic pattern detection
-# 3. MULTI-MARKET analysis (1X2, Over/Under 2.5, BTTS)
-# 4. Confidence scoring system
-# 5. Best-in-scenario recommendation
-# 6. Value guardrail on all markets
+# FULLY TRANSPARENT | NUMERICALLY RANKED | MATHEMATICALLY CONSISTENT
+# 
+# Fixes applied from QA:
+# 1. Adjustment Summary shown (raw Poisson → final %)
+# 2. Complete pattern list published (9 patterns with fixed weights)
+# 3. Numerical Confidence Score = Edge × Pattern Weight × 100
+# 4. Edge calculated for ALL markets (1X2, Over/Under, BTTS)
+# 5. Stake scaling by edge size (0.25% to 1.0%)
+# 6. Ranking strictly by Confidence Score (descending)
 
 import streamlit as st
 import math
@@ -16,7 +18,7 @@ import os
 from datetime import datetime
 
 st.set_page_config(
-    page_title="GrokBet v2.2",
+    page_title="GrokBet v2.3",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -67,6 +69,14 @@ st.markdown("""
         border: 1px solid #334155;
         margin-bottom: 1rem;
     }
+    .adjustment-table {
+        background: #0f172a;
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        font-family: monospace;
+        font-size: 0.8rem;
+    }
     .result-primary {
         background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #fbbf24;
@@ -96,9 +106,6 @@ st.markdown("""
     }
     .pattern-yes {
         color: #10b981;
-    }
-    .pattern-no {
-        color: #ef4444;
     }
     .section-title {
         color: #fbbf24;
@@ -175,6 +182,22 @@ def calculate_match_probabilities(home_xg, away_xg, max_goals=7):
     return home_win, draw, away_win, over_25, btts
 
 # ============================================================================
+# COMPLETE PATTERN LIST (9 patterns, fixed weights)
+# ============================================================================
+
+PATTERNS = [
+    {"name": "Top scorer gap", "weight": 1.5, "condition": "top_scorer_gap"},
+    {"name": "Conversion edge", "weight": 1.5, "condition": "conversion_edge"},
+    {"name": "High xG + H2H tilt", "weight": 1.5, "condition": "high_xg_h2h_tilt"},
+    {"name": "High total xG", "weight": 1.5, "condition": "high_total_xg"},
+    {"name": "Moderate total xG", "weight": 1.0, "condition": "moderate_total_xg"},
+    {"name": "BTTS spot", "weight": 1.0, "condition": "btts_spot"},
+    {"name": "Strong home form", "weight": 1.0, "condition": "strong_home_form"},
+    {"name": "Strong away form", "weight": 1.0, "condition": "strong_away_form"},
+    {"name": "Very poor home form", "weight": 1.0, "condition": "very_poor_home_form"}
+]
+
+# ============================================================================
 # MAIN PREDICTION CLASS
 # ============================================================================
 
@@ -185,8 +208,8 @@ class GrokBetPredictor:
     
     def load_history(self):
         try:
-            if os.path.exists("grokbet_v22_history.json"):
-                with open("grokbet_v22_history.json", "r") as f:
+            if os.path.exists("grokbet_v23_history.json"):
+                with open("grokbet_v23_history.json", "r") as f:
                     self.match_history = json.load(f)
         except:
             self.match_history = []
@@ -197,11 +220,12 @@ class GrokBetPredictor:
             **match_data,
             "actual_result": result
         })
-        with open("grokbet_v22_history.json", "w") as f:
+        with open("grokbet_v23_history.json", "w") as f:
             json.dump(self.match_history, f, indent=2)
     
     def detect_patterns(self, data):
-        patterns = []
+        """Detect which patterns are present from the 9 fixed patterns"""
+        patterns_found = []
         
         home_top_scorer = data.get('home_top_scorer', 0)
         away_top_scorer = data.get('away_top_scorer', 0)
@@ -212,150 +236,183 @@ class GrokBetPredictor:
         h2h_home_wins = data.get('h2h_home_wins', 0)
         h2h_away_wins = data.get('h2h_away_wins', 0)
         total_xg = home_xg + away_xg
+        home_form = data.get('home_form', 50)
+        away_form = data.get('away_form', 50)
         
         # Pattern 1: Top scorer gap
         if home_top_scorer > 0 and away_top_scorer > 0:
             if home_top_scorer >= away_top_scorer * 2:
-                patterns.append({"name": "Top scorer gap", "direction": "home", "confidence": "HIGH", "weight": 1.5})
+                patterns_found.append({"name": "Top scorer gap", "direction": "home", "weight": 1.5})
             elif away_top_scorer >= home_top_scorer * 2:
-                patterns.append({"name": "Top scorer gap", "direction": "away", "confidence": "HIGH", "weight": 1.5})
+                patterns_found.append({"name": "Top scorer gap", "direction": "away", "weight": 1.5})
         
         # Pattern 2: Conversion edge
         if home_conversion > 0 and away_conversion > 0:
             if home_conversion >= away_conversion + 4:
-                patterns.append({"name": "Conversion edge", "direction": "home", "confidence": "HIGH", "weight": 1.5})
+                patterns_found.append({"name": "Conversion edge", "direction": "home", "weight": 1.5})
             elif away_conversion >= home_conversion + 4:
-                patterns.append({"name": "Conversion edge", "direction": "away", "confidence": "HIGH", "weight": 1.5})
+                patterns_found.append({"name": "Conversion edge", "direction": "away", "weight": 1.5})
         
         # Pattern 3: High xG + H2H tilt
         h2h_gap = abs(h2h_home_wins - h2h_away_wins)
         if total_xg >= 2.7 and h2h_gap >= 3:
             if h2h_home_wins > h2h_away_wins:
-                patterns.append({"name": "High xG + H2H tilt", "direction": "home", "confidence": "HIGH", "weight": 1.5})
+                patterns_found.append({"name": "High xG + H2H tilt", "direction": "home", "weight": 1.5})
             else:
-                patterns.append({"name": "High xG + H2H tilt", "direction": "away", "confidence": "HIGH", "weight": 1.5})
+                patterns_found.append({"name": "High xG + H2H tilt", "direction": "away", "weight": 1.5})
         
-        # Pattern 4: High total xG (for Over 2.5)
+        # Pattern 4: High total xG
         if total_xg >= 2.7:
-            patterns.append({"name": "High total xG", "direction": "over", "confidence": "HIGH", "weight": 1.5})
+            patterns_found.append({"name": "High total xG", "direction": "over", "weight": 1.5})
+        
+        # Pattern 5: Moderate total xG
         elif total_xg >= 2.4:
-            patterns.append({"name": "Moderate total xG", "direction": "over", "confidence": "MEDIUM", "weight": 1.0})
+            patterns_found.append({"name": "Moderate total xG", "direction": "over", "weight": 1.0})
         
-        # Pattern 5: BTTS spot
+        # Pattern 6: BTTS spot
         if home_xg >= 1.2 and away_xg >= 1.2:
-            patterns.append({"name": "BTTS spot", "direction": "btts", "confidence": "MEDIUM", "weight": 1.0})
+            patterns_found.append({"name": "BTTS spot", "direction": "btts", "weight": 1.0})
         
-        # Pattern 6: Strong home form
-        home_form = data.get('home_form', 50)
+        # Pattern 7: Strong home form
         if home_form >= 70:
-            patterns.append({"name": "Strong home form", "direction": "home", "confidence": "MEDIUM", "weight": 1.0})
+            patterns_found.append({"name": "Strong home form", "direction": "home", "weight": 1.0})
         
-        # Pattern 7: Strong away form
-        away_form = data.get('away_form', 50)
+        # Pattern 8: Strong away form
         if away_form >= 70:
-            patterns.append({"name": "Strong away form", "direction": "away", "confidence": "MEDIUM", "weight": 1.0})
+            patterns_found.append({"name": "Strong away form", "direction": "away", "weight": 1.0})
         
-        # Pattern 8: Very poor home form (caution)
+        # Pattern 9: Very poor home form
         if home_form <= 25:
-            patterns.append({"name": "Very poor home form", "direction": "away", "confidence": "MEDIUM", "weight": 1.0})
+            patterns_found.append({"name": "Very poor home form", "direction": "away", "weight": 1.0})
         
-        return patterns
+        return patterns_found
     
-    def calculate_probabilities(self, data):
-        home_xg = data.get('home_xg', 0)
-        away_xg = data.get('away_xg', 0)
+    def calculate_adjustments(self, data, raw_home, raw_draw, raw_away):
+        """Calculate all adjustments and return detailed breakdown"""
+        adjustments = []
         
-        home_prob, draw_prob, away_prob, over_prob, btts_prob = calculate_match_probabilities(home_xg, away_xg)
+        home_prob = raw_home
+        draw_prob = raw_draw
+        away_prob = raw_away
         
-        # Adjustments
-        # Home advantage
+        home_form = data.get('home_form', 50)
+        away_form = data.get('away_form', 50)
+        h2h_home_wins = data.get('h2h_home_wins', 0)
+        h2h_away_wins = data.get('h2h_away_wins', 0)
+        home_gd = data.get('home_gd', 0)
+        away_gd = data.get('away_gd', 0)
+        home_top_scorer = data.get('home_top_scorer', 0)
+        away_top_scorer = data.get('away_top_scorer', 0)
+        home_conversion = data.get('home_conversion', 0)
+        away_conversion = data.get('away_conversion', 0)
+        
+        # 1. Home advantage
         home_prob += 0.06
         away_prob -= 0.03
+        adjustments.append("Home advantage: +6.0% home, -3.0% away")
         
-        # Form adjustment
-        home_form = data.get('home_form', 50)
-        away_form = data.get('away_form', 50)
-        
-        # Stronger penalty for very poor form
+        # 2. Form adjustment (with poor form penalty)
         if home_form <= 25:
             home_prob -= 0.05
+            adjustments.append(f"Very poor home form ({home_form}%): -5.0% home")
         elif home_form <= 30:
             home_prob -= 0.03
+            adjustments.append(f"Poor home form ({home_form}%): -3.0% home")
         else:
             home_form_dev = (home_form - 50) / 10
-            home_prob += home_form_dev * 0.02
+            adj = home_form_dev * 0.02
+            home_prob += adj
+            if adj != 0:
+                adjustments.append(f"Home form ({home_form}%): {adj*100:+.1f}% home")
         
         if away_form <= 25:
             away_prob -= 0.05
+            adjustments.append(f"Very poor away form ({away_form}%): -5.0% away")
         elif away_form <= 30:
             away_prob -= 0.03
+            adjustments.append(f"Poor away form ({away_form}%): -3.0% away")
         else:
             away_form_dev = (away_form - 50) / 10
-            away_prob += away_form_dev * 0.02
+            adj = away_form_dev * 0.02
+            away_prob += adj
+            if adj != 0:
+                adjustments.append(f"Away form ({away_form}%): {adj*100:+.1f}% away")
         
-        # H2H adjustment (stronger for gap ≥3)
-        h2h_home_wins = data.get('h2h_home_wins', 0)
-        h2h_away_wins = data.get('h2h_away_wins', 0)
+        # 3. H2H adjustment
         h2h_gap = abs(h2h_home_wins - h2h_away_wins)
-        
         if h2h_gap >= 3:
             boost = 0.08 if h2h_gap >= 4 else 0.06
             if h2h_home_wins > h2h_away_wins:
                 home_prob += boost
                 draw_prob -= boost / 2
+                adjustments.append(f"H2H ({h2h_home_wins}-?-{h2h_away_wins}): +{boost*100:.0f}% home, -{boost/2*100:.0f}% draw")
             else:
                 away_prob += boost
                 draw_prob -= boost / 2
+                adjustments.append(f"H2H ({h2h_home_wins}-?-{h2h_away_wins}): +{boost*100:.0f}% away, -{boost/2*100:.0f}% draw")
         
-        # GD adjustment
-        home_gd = data.get('home_gd', 0)
-        away_gd = data.get('away_gd', 0)
+        # 4. Goal difference
         gd_advantage = home_gd - away_gd
         gd_adjustment = (gd_advantage / 5) * 0.01
-        home_prob += gd_adjustment
-        away_prob -= gd_adjustment * 0.5
+        if gd_adjustment != 0:
+            home_prob += gd_adjustment
+            away_prob -= gd_adjustment * 0.5
+            adjustments.append(f"GD ({home_gd} vs {away_gd}): {gd_adjustment*100:+.1f}% home")
         
-        # Top scorer adjustment
-        home_top_scorer = data.get('home_top_scorer', 0)
-        away_top_scorer = data.get('away_top_scorer', 0)
-        
+        # 5. Top scorer
         if home_top_scorer > 0 and away_top_scorer > 0:
             if home_top_scorer >= away_top_scorer * 2:
                 home_prob += 0.04
+                adjustments.append(f"Top scorer ({home_top_scorer} vs {away_top_scorer}): +4.0% home")
             elif away_top_scorer >= home_top_scorer * 2:
                 away_prob += 0.04
+                adjustments.append(f"Top scorer ({home_top_scorer} vs {away_top_scorer}): +4.0% away")
         
-        # Conversion adjustment
-        home_conversion = data.get('home_conversion', 0)
-        away_conversion = data.get('away_conversion', 0)
-        
+        # 6. Conversion
         if home_conversion > 0 and away_conversion > 0:
             if home_conversion >= away_conversion + 4:
                 home_prob += 0.03
+                adjustments.append(f"Conversion ({home_conversion}% vs {away_conversion}%): +3.0% home")
             elif away_conversion >= home_conversion + 4:
                 away_prob += 0.03
+                adjustments.append(f"Conversion ({home_conversion}% vs {away_conversion}%): +3.0% away")
         
-        # Injury adjustment
+        # 7. Injuries
         if data.get('injury_home'):
             home_prob -= 0.05
             away_prob += 0.02
+            adjustments.append("Key home injury: -5.0% home, +2.0% away")
         if data.get('injury_away'):
             away_prob -= 0.05
             home_prob += 0.02
+            adjustments.append("Key away injury: -5.0% away, +2.0% home")
+        
+        return home_prob, draw_prob, away_prob, adjustments
+    
+    def calculate_probabilities(self, data):
+        """Calculate final probabilities with full transparency"""
+        home_xg = data.get('home_xg', 0)
+        away_xg = data.get('away_xg', 0)
+        
+        # Raw Poisson
+        raw_home, raw_draw, raw_away, raw_over, raw_btts = calculate_match_probabilities(home_xg, away_xg)
+        
+        # Apply adjustments
+        final_home, final_draw, final_away, adjustments = self.calculate_adjustments(data, raw_home, raw_draw, raw_away)
         
         # Normalize 1X2
-        total_1x2 = home_prob + draw_prob + away_prob
+        total_1x2 = final_home + final_draw + final_away
         if total_1x2 > 0:
-            home_prob /= total_1x2
-            draw_prob /= total_1x2
-            away_prob /= total_1x2
+            final_home /= total_1x2
+            final_draw /= total_1x2
+            final_away /= total_1x2
         
         return {
-            "home": home_prob,
-            "draw": draw_prob,
-            "away": away_prob,
-            "over": over_prob,
-            "btts": btts_prob,
+            "raw": {"home": raw_home, "draw": raw_draw, "away": raw_away},
+            "final": {"home": final_home, "draw": final_draw, "away": final_away},
+            "over": raw_over,
+            "btts": raw_btts,
+            "adjustments": adjustments,
             "home_xg": home_xg,
             "away_xg": away_xg,
             "total_xg": home_xg + away_xg
@@ -382,6 +439,17 @@ class GrokBetPredictor:
             "total": total
         }
     
+    def get_stake_by_edge(self, edge):
+        """Scale stake by edge size"""
+        if edge < 0.03:
+            return "0.25% (or skip)"
+        elif edge < 0.05:
+            return "0.5%"
+        elif edge < 0.08:
+            return "0.75%"
+        else:
+            return "1.0%"
+    
     def evaluate_markets(self, data, odds):
         probs = self.calculate_probabilities(data)
         patterns = self.detect_patterns(data)
@@ -389,87 +457,118 @@ class GrokBetPredictor:
         
         markets = []
         
+        # Helper to get pattern weight for a direction
+        def get_pattern_weight(direction):
+            weights = [p['weight'] for p in patterns if p.get('direction') == direction]
+            return max(weights) if weights else 1.0
+        
         # 1X2 Markets
         if implied:
             # Home Win
-            home_edge = probs['home'] - implied['home']
-            home_patterns = [p for p in patterns if p['direction'] == 'home']
-            home_confidence = max([p.get('weight', 1.0) for p in home_patterns]) if home_patterns else 0
-            home_score = home_edge * home_confidence if home_confidence > 0 else 0
+            home_edge = probs['final']['home'] - implied['home']
+            home_weight = get_pattern_weight('home')
+            home_score = home_edge * home_weight * 100
             
             markets.append({
                 "market": "HOME WIN",
-                "your_prob": probs['home'],
+                "your_prob": probs['final']['home'],
                 "implied_prob": implied['home'],
                 "edge": home_edge,
-                "patterns": home_patterns,
+                "pattern_weight": home_weight,
                 "confidence_score": home_score,
-                "stake": "0.75-1%" if home_edge >= 0.05 and home_confidence >= 1.0 else "0.5%" if home_edge >= 0.03 else None
+                "stake": self.get_stake_by_edge(home_edge) if home_edge > 0 else None
             })
             
             # Draw
-            draw_edge = probs['draw'] - implied['draw']
+            draw_edge = probs['final']['draw'] - implied['draw']
             markets.append({
                 "market": "DRAW",
-                "your_prob": probs['draw'],
+                "your_prob": probs['final']['draw'],
                 "implied_prob": implied['draw'],
                 "edge": draw_edge,
-                "patterns": [],
-                "confidence_score": draw_edge * 0.8,
+                "pattern_weight": 1.0,
+                "confidence_score": draw_edge * 100,
                 "stake": None
             })
             
             # Away Win
-            away_edge = probs['away'] - implied['away']
-            away_patterns = [p for p in patterns if p['direction'] == 'away']
-            away_confidence = max([p.get('weight', 1.0) for p in away_patterns]) if away_patterns else 0
-            away_score = away_edge * away_confidence if away_confidence > 0 else 0
+            away_edge = probs['final']['away'] - implied['away']
+            away_weight = get_pattern_weight('away')
+            away_score = away_edge * away_weight * 100
             
             markets.append({
                 "market": "AWAY WIN",
-                "your_prob": probs['away'],
+                "your_prob": probs['final']['away'],
                 "implied_prob": implied['away'],
                 "edge": away_edge,
-                "patterns": away_patterns,
+                "pattern_weight": away_weight,
                 "confidence_score": away_score,
-                "stake": "0.75-1%" if away_edge >= 0.05 and away_confidence >= 1.0 else "0.5%" if away_edge >= 0.03 else None
+                "stake": self.get_stake_by_edge(away_edge) if away_edge > 0 else None
             })
         
         # Over 2.5 Market
-        over_patterns = [p for p in patterns if p['direction'] == 'over']
-        over_confidence = max([p.get('weight', 1.0) for p in over_patterns]) if over_patterns else 0
-        
-        markets.append({
-            "market": "OVER 2.5 GOALS",
-            "your_prob": probs['over'],
-            "implied_prob": None,
-            "edge": None,
-            "patterns": over_patterns,
-            "confidence_score": probs['over'] * over_confidence if over_confidence > 0 else probs['over'] * 0.5,
-            "stake": "0.5-0.75%" if probs['over'] >= 0.51 and over_confidence >= 1.0 else "0.25-0.5%" if probs['over'] >= 0.51 else None,
-            "is_goals": True
-        })
+        if odds.get('over', 0) > 0:
+            implied_over = 1 / odds['over']
+            over_edge = probs['over'] - implied_over
+            over_weight = get_pattern_weight('over')
+            over_score = over_edge * over_weight * 100 if over_edge > 0 else probs['over'] * over_weight
+            
+            markets.append({
+                "market": "OVER 2.5 GOALS",
+                "your_prob": probs['over'],
+                "implied_prob": implied_over,
+                "edge": over_edge,
+                "pattern_weight": over_weight,
+                "confidence_score": over_score,
+                "stake": self.get_stake_by_edge(over_edge) if over_edge > 0.02 else None,
+                "is_goals": True
+            })
+        else:
+            # No odds provided, use pattern-based
+            over_weight = get_pattern_weight('over')
+            markets.append({
+                "market": "OVER 2.5 GOALS",
+                "your_prob": probs['over'],
+                "implied_prob": None,
+                "edge": None,
+                "pattern_weight": over_weight,
+                "confidence_score": probs['over'] * over_weight,
+                "stake": "0.5-0.75%" if probs['over'] >= 0.51 and over_weight >= 1.0 else None,
+                "is_goals": True
+            })
         
         # BTTS Market
-        btts_patterns = [p for p in patterns if p['direction'] == 'btts']
-        btts_confidence = max([p.get('weight', 1.0) for p in btts_patterns]) if btts_patterns else 0
+        if odds.get('btts', 0) > 0:
+            implied_btts = 1 / odds['btts']
+            btts_edge = probs['btts'] - implied_btts
+            btts_weight = get_pattern_weight('btts')
+            btts_score = btts_edge * btts_weight * 100 if btts_edge > 0 else probs['btts'] * btts_weight
+            
+            markets.append({
+                "market": "BTTS (Both Teams to Score)",
+                "your_prob": probs['btts'],
+                "implied_prob": implied_btts,
+                "edge": btts_edge,
+                "pattern_weight": btts_weight,
+                "confidence_score": btts_score,
+                "stake": self.get_stake_by_edge(btts_edge) if btts_edge > 0.02 else None,
+                "is_goals": True
+            })
+        else:
+            btts_weight = get_pattern_weight('btts')
+            markets.append({
+                "market": "BTTS (Both Teams to Score)",
+                "your_prob": probs['btts'],
+                "implied_prob": None,
+                "edge": None,
+                "pattern_weight": btts_weight,
+                "confidence_score": probs['btts'] * btts_weight,
+                "stake": "0.5-0.75%" if probs['btts'] >= 0.55 and btts_weight >= 1.0 else None,
+                "is_goals": True
+            })
         
-        markets.append({
-            "market": "BTTS (Both Teams to Score)",
-            "your_prob": probs['btts'],
-            "implied_prob": None,
-            "edge": None,
-            "patterns": btts_patterns,
-            "confidence_score": probs['btts'] * btts_confidence if btts_confidence > 0 else probs['btts'] * 0.3,
-            "stake": "0.5-0.75%" if probs['btts'] >= 0.55 and btts_confidence >= 1.0 else "0.25-0.5%" if probs['btts'] >= 0.50 else None,
-            "is_goals": True
-        })
-        
-        # Filter and rank
+        # Filter and rank by confidence score
         valid_markets = [m for m in markets if m.get('stake') is not None]
-        for m in valid_markets:
-            m['confidence_score'] = m.get('confidence_score', 0)
-        
         valid_markets.sort(key=lambda x: x['confidence_score'], reverse=True)
         
         return {
@@ -493,13 +592,13 @@ class GrokBetPredictor:
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet Prediction System v2.2</h1>
-        <p>Multi-Market Analysis | 1X2 | Over/Under 2.5 | BTTS | Best-in-Scenario</p>
+        <h1>🎯 GrokBet Prediction System v2.3</h1>
+        <p>FULLY TRANSPARENT | NUMERICALLY RANKED | MATHEMATICALLY CONSISTENT</p>
         <div>
-            <span class="badge">📊 Poisson + Adjustments</span>
-            <span class="badge">🔄 Automatic Pattern Detection</span>
-            <span class="badge">💰 Multi-Market Value Check</span>
-            <span class="badge">🏆 Best-in-Scenario Ranking</span>
+            <span class="badge">📊 Raw Poisson → Adjustments → Final %</span>
+            <span class="badge">🔄 9 Fixed Patterns with Weights</span>
+            <span class="badge">💰 Confidence Score = Edge × Weight × 100</span>
+            <span class="badge">📈 Stake Scaling by Edge Size</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -594,13 +693,11 @@ def main():
         with col23:
             odds_away = st.number_input("Away Win", 0.0, 20.0, 2.15, 0.05)
         
-        st.markdown("---")
-        
         col24, col25 = st.columns(2)
         with col24:
-            odds_over = st.number_input("Over 2.5 Odds (if available)", 0.0, 10.0, 1.85, 0.05)
+            odds_over = st.number_input("Over 2.5 Odds", 0.0, 10.0, 1.85, 0.05)
         with col25:
-            odds_btts = st.number_input("BTTS Odds (if available)", 0.0, 10.0, 1.75, 0.05)
+            odds_btts = st.number_input("BTTS Odds", 0.0, 10.0, 1.75, 0.05)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -635,27 +732,38 @@ def main():
             }
             
             result = predictor.evaluate_markets(data, odds)
+            probs = result['probs']
             
             st.markdown("---")
             st.markdown("### 🔮 ANALYSIS RESULTS")
             
-            # Display probabilities
-            st.markdown("#### 📊 Poisson Probabilities")
-            probs = result['probs']
-            col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
-            with col_p1:
-                st.metric(f"{home_team} Win", f"{probs['home']*100:.1f}%")
-            with col_p2:
-                st.metric("Draw", f"{probs['draw']*100:.1f}%")
-            with col_p3:
-                st.metric(f"{away_team} Win", f"{probs['away']*100:.1f}%")
-            with col_p4:
-                st.metric("Over 2.5", f"{probs['over']*100:.1f}%")
-            with col_p5:
-                st.metric("BTTS", f"{probs['btts']*100:.1f}%")
+            # ================================================================
+            # SECTION 1: ADJUSTMENT SUMMARY (FULL TRANSPARENCY)
+            # ================================================================
             
-            # Display patterns
-            st.markdown("#### 🎯 Detected Patterns")
+            st.markdown("#### 📊 Adjustment Summary (Raw Poisson → Final %)")
+            
+            adj_html = f"""
+            <div class="adjustment-table">
+                <strong>RAW POISSON:</strong>         {home_team} {probs['raw']['home']*100:.1f}% | Draw {probs['raw']['draw']*100:.1f}% | {away_team} {probs['raw']['away']*100:.1f}%<br>
+            """
+            
+            for adj in probs['adjustments']:
+                adj_html += f"<strong>• {adj}</strong><br>"
+            
+            adj_html += f"""
+                <strong>FINAL (normalized):</strong>   {home_team} {probs['final']['home']*100:.1f}% | Draw {probs['final']['draw']*100:.1f}% | {away_team} {probs['final']['away']*100:.1f}%
+            </div>
+            """
+            
+            st.markdown(adj_html, unsafe_allow_html=True)
+            
+            # ================================================================
+            # SECTION 2: DETECTED PATTERNS
+            # ================================================================
+            
+            st.markdown("#### 🎯 Detected Patterns (9 Fixed Patterns with Weights)")
+            
             if result['patterns']:
                 for p in result['patterns']:
                     direction_text = f"→ favors {p['direction'].upper()}"
@@ -663,29 +771,32 @@ def main():
                         direction_text = "→ favors OVER 2.5"
                     elif p['direction'] == 'btts':
                         direction_text = "→ both teams likely to score"
-                    confidence_class = "confidence-high" if p['confidence'] == "HIGH" else "confidence-medium"
                     st.markdown(f"""
                     <div class="pattern-box">
                         <span class="pattern-yes">✅ {p['name']}</span> {direction_text}
-                        <span class="{confidence_class}"> ({p['confidence']} confidence)</span>
+                        <span style="color: #fbbf24;"> (weight: {p['weight']})</span>
                     </div>
                     """, unsafe_allow_html=True)
             else:
                 st.markdown("""
                 <div class="pattern-box">
-                    <span class="pattern-no">❌ No strong patterns detected</span>
+                    <span class="pattern-no">❌ No patterns detected</span>
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Display betting recommendations
-            st.markdown("#### 💰 Betting Recommendations (Ranked by Confidence)")
+            # ================================================================
+            # SECTION 3: BETTING RECOMMENDATIONS (NUMERICALLY RANKED)
+            # ================================================================
+            
+            st.markdown("#### 💰 Betting Recommendations (Ranked by Confidence Score)")
+            st.markdown("*Confidence Score = (Your Prob - Implied Prob) × Pattern Weight × 100*")
             
             if result['has_bet']:
                 for i, market in enumerate(result['markets']):
                     if i == 0:
                         st.markdown(f"""
                         <div class="result-primary">
-                            <h3 style="margin: 0; color: #fbbf24;">🏆 BEST IN SCENARIO</h3>
+                            <h3 style="margin: 0; color: #fbbf24;">🏆 BEST IN SCENARIO (Score: {market['confidence_score']:.1f})</h3>
                             <p style="margin: 0.5rem 0; font-size: 1.2rem;">✅ BET: {market['market']}</p>
                             <p style="margin: 0.5rem 0;"><span class="stake-highlight">💰 Stake: {market['stake']}</span></p>
                         </div>
@@ -693,20 +804,19 @@ def main():
                     else:
                         st.markdown(f"""
                         <div class="result-secondary">
-                            <h3 style="margin: 0; color: #10b981;">✅ ALSO QUALIFIES: {market['market']}</h3>
+                            <h3 style="margin: 0; color: #10b981;">✅ ALSO QUALIFIES (Score: {market['confidence_score']:.1f})</h3>
+                            <p style="margin: 0.5rem 0;">🎯 {market['market']}</p>
                             <p style="margin: 0.5rem 0;"><span class="stake-highlight">💰 Stake: {market['stake']}</span></p>
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # Show details
+                    # Show detailed metrics
                     if market.get('edge') is not None:
-                        st.markdown(f"*Your probability: {market['your_prob']*100:.1f}% | Implied from odds: {market['implied_prob']*100:.1f}% | Edge: +{market['edge']*100:.1f}%*")
+                        st.markdown(f"""
+                        *Your probability: {market['your_prob']*100:.1f}% | Implied: {market['implied_prob']*100:.1f}% | Edge: +{market['edge']*100:.1f}% | Pattern weight: {market['pattern_weight']}*
+                        """)
                     else:
-                        st.markdown(f"*Your probability: {market['your_prob']*100:.1f}% | Pattern-based recommendation*")
-                    
-                    if market.get('patterns'):
-                        pattern_names = [p['name'] for p in market['patterns']]
-                        st.markdown(f"*Supporting patterns: {', '.join(pattern_names)}*")
+                        st.markdown(f"*Your probability: {market['your_prob']*100:.1f}% | Pattern-based recommendation (no odds provided)*")
                     
                     st.markdown("")
             else:
@@ -718,7 +828,24 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Save buttons
+            # ================================================================
+            # SECTION 4: STAKE GUIDE
+            # ================================================================
+            
+            with st.expander("📖 Stake Guide (Edge → Stake)"):
+                st.markdown("""
+                | Edge Size | Stake |
+                |-----------|-------|
+                | <3% | Skip or 0.25% |
+                | 3-5% | 0.5% |
+                | 5-8% | 0.75% |
+                | >8% | 1.0% |
+                """)
+            
+            # ================================================================
+            # SAVE BUTTONS
+            # ================================================================
+            
             st.markdown("---")
             st.markdown("#### 📝 Record Actual Result")
             
@@ -739,7 +866,10 @@ def main():
                     st.info("Saved for later!")
                     st.rerun()
     
-    # Right column with stats and reference
+    # ================================================================
+    # RIGHT COLUMN - STATS AND REFERENCE
+    # ================================================================
+    
     st.markdown("---")
     col_left, col_right = st.columns([1, 2])
     
@@ -751,20 +881,39 @@ def main():
             st.metric("Win Rate", f"{stats['win_rate']:.1f}%")
     
     with col_right:
-        st.markdown('<div class="section-title">⚡ HOW IT WORKS (v2.2)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">⚡ HOW IT WORKS (v2.3)</div>', unsafe_allow_html=True)
         st.markdown("""
         <div style="background: #1e293b; border-radius: 8px; padding: 0.75rem;">
             <div><strong>1. Poisson Foundation</strong> - From scored/conceded averages</div>
-            <div style="margin-top: 0.5rem;"><strong>2. Adjustments</strong> - Home advantage, form, H2H, GD, top scorer, conversion</div>
-            <div style="margin-top: 0.5rem;"><strong>3. Pattern Detection</strong> - Automatic across 8+ patterns</div>
-            <div style="margin-top: 0.5rem;"><strong>4. Multi-Market Analysis</strong> - 1X2, Over 2.5, BTTS</div>
-            <div style="margin-top: 0.5rem;"><strong>5. Confidence Scoring</strong> - Edge × Pattern weight</div>
-            <div style="margin-top: 0.5rem;"><strong>6. Best-in-Scenario</strong> - Highest confidence market is primary bet</div>
+            <div style="margin-top: 0.5rem;"><strong>2. Adjustments Shown</strong> - Full transparency table</div>
+            <div style="margin-top: 0.5rem;"><strong>3. 9 Fixed Patterns</strong> - With documented weights</div>
+            <div style="margin-top: 0.5rem;"><strong>4. Numerical Confidence Score</strong> = Edge × Weight × 100</div>
+            <div style="margin-top: 0.5rem;"><strong>5. Stake Scaling</strong> - 0.25% to 1.0% by edge size</div>
+            <div style="margin-top: 0.5rem;"><strong>6. Strict Ranking</strong> - Highest confidence score first</div>
         </div>
         """, unsafe_allow_html=True)
     
+    # ================================================================
+    # FOOTER WITH PATTERN REFERENCE
+    # ================================================================
+    
+    with st.expander("📋 Complete Pattern Reference (9 Fixed Patterns)"):
+        st.markdown("""
+        | # | Pattern Name | Direction | Trigger | Weight |
+        |---|--------------|-----------|---------|--------|
+        | 1 | Top scorer gap | home/away | Top scorer ≥2× opponent | 1.5 |
+        | 2 | Conversion edge | home/away | Conversion % ≥4% higher | 1.5 |
+        | 3 | High xG + H2H tilt | home/away | Total xG ≥2.7 AND H2H win gap ≥3 | 1.5 |
+        | 4 | High total xG | over | Total xG ≥2.7 | 1.5 |
+        | 5 | Moderate total xG | over | Total xG 2.4-2.7 | 1.0 |
+        | 6 | BTTS spot | btts | Both xG ≥1.2 | 1.0 |
+        | 7 | Strong home form | home | Home form ≥70% | 1.0 |
+        | 8 | Strong away form | away | Away form ≥70% | 1.0 |
+        | 9 | Very poor home form | away | Home form ≤25% | 1.0 |
+        """)
+    
     st.markdown("---")
-    st.caption("🎯 **GrokBet v2.2** | Multi-Market | Best-in-Scenario | Built from raw, unfakeable data")
+    st.caption("🎯 **GrokBet v2.3** | FULLY TRANSPARENT | 9 Fixed Patterns | Numerical Confidence Score | Stake Scaling by Edge | Built from raw, unfakeable data")
 
 if __name__ == "__main__":
     main()
