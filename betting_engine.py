@@ -1,12 +1,18 @@
-# grokbet_vfinal_corrected.py
-# GROKBET vFINAL – CORRECTED VERSION
+# grokbet_vfinal_simplified.py
+# GROKBET vFINAL – SIMPLIFIED
 # 
-# FIX: Rare Over 2.5 now properly triggers even when no other bets qualify
+# Core Principle: Bet the odds favorite unless a Strong Override says otherwise.
+# 
+# Rules:
+# 1. For 1X2: Bet favorite if odds ≤ 2.00
+# 2. For Over/Under/BTTS: Bet favorite if odds ≤ 2.00
+# 3. Override goals markets (Over/Under/BTTS) if:
+#    - Gap > 0.8 OR H2H ≥ 3 wins (for the favorite team)
+# 4. Small gap (|Gap| ≤ 0.4) → consider Draw if odds ≥ 3.00
+# 5. Otherwise SKIP
 
 import streamlit as st
 import math
-import json
-import os
 from datetime import datetime
 
 st.set_page_config(
@@ -17,7 +23,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - CLEAN & MINIMAL
+# CUSTOM CSS
 # ============================================================================
 
 st.markdown("""
@@ -80,9 +86,9 @@ st.markdown("""
         border-radius: 8px;
         margin: 0.75rem 0;
     }
-    .result-trigger {
-        background: linear-gradient(135deg, #1e293b 0%, #2a3e4a 100%);
-        border-left: 4px solid #3b82f6;
+    .result-override {
+        background: linear-gradient(135deg, #1e293b 0%, #3e2a1e 100%);
+        border-left: 4px solid #f97316;
         padding: 0.75rem;
         border-radius: 8px;
         margin: 0.5rem 0;
@@ -104,28 +110,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# CONSTANTS & FORMULAS - vFINAL LOCKED
+# CONSTANTS
 # ============================================================================
 
-# Thresholds
+ODDS_THRESHOLD_1X2 = 2.00
+ODDS_THRESHOLD_GOALS = 2.00
+DRAW_MIN_ODDS = 3.00
 SMALL_GAP_THRESHOLD = 0.4
-STRONG_GAP_THRESHOLD = 0.6
-VERY_STRONG_GAP_THRESHOLD = 0.8
-FORM_DIFF_THRESHOLD = 30
+STRONG_GAP_THRESHOLD = 0.8
 H2H_WIN_THRESHOLD = 3
-BTTS_NO_MIN_ODDS = 1.70
-UNDER_MIN_ODDS = 1.80
-DRAW_MIN_ODDS = 3.20
-OVER_XG_THRESHOLD = 3.0
-OVER_CONV_THRESHOLD = 12
 
-# Low xG / weak attack thresholds
-SCORED_WEAK_THRESHOLD = 1.0
-TOTAL_XG_LOW_THRESHOLD = 2.3
-CONV_WEAK_THRESHOLD = 10
-FORM_WEAK_THRESHOLD = 30
+# ============================================================================
+# CALCULATIONS
+# ============================================================================
 
 def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
+    """Efficiency = (Scored × Conv%) − (Conceded × ((100 − Form%)/100))"""
     conv_decimal = conv_pct / 100.0
     form_decimal = form_pct / 100.0
     weakness_multiplier = 1.0 - form_decimal
@@ -133,289 +133,208 @@ def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
     defense_penalty = conceded_avg * weakness_multiplier
     return attack_score - defense_penalty
 
-def check_btts_triggers(home_team, away_team, home_scored, away_scored, total_xg, home_conv, away_conv, home_form, away_form):
-    triggers = []
-    trigger_count = 0
-    
-    if home_scored <= SCORED_WEAK_THRESHOLD:
-        triggers.append(f"{home_team} scored {home_scored:.2f} ≤ 1.0")
-        trigger_count += 1
-    elif away_scored <= SCORED_WEAK_THRESHOLD:
-        triggers.append(f"{away_team} scored {away_scored:.2f} ≤ 1.0")
-        trigger_count += 1
-    
-    if home_conv <= CONV_WEAK_THRESHOLD:
-        triggers.append(f"{home_team} conv {home_conv}% ≤ 10%")
-        trigger_count += 1
-    elif away_conv <= CONV_WEAK_THRESHOLD:
-        triggers.append(f"{away_team} conv {away_conv}% ≤ 10%")
-        trigger_count += 1
-    
-    if total_xg <= TOTAL_XG_LOW_THRESHOLD:
-        triggers.append(f"Total xG {total_xg:.2f} ≤ 2.3")
-        trigger_count += 1
-    
-    if home_form <= FORM_WEAK_THRESHOLD:
-        triggers.append(f"{home_team} form {home_form}% ≤ 30%")
-        trigger_count += 1
-    elif away_form <= FORM_WEAK_THRESHOLD:
-        triggers.append(f"{away_team} form {away_form}% ≤ 30%")
-        trigger_count += 1
-    
-    should_bet = trigger_count >= 2
-    
-    if trigger_count >= 3:
-        stake = "1.0%"
-    elif trigger_count >= 2:
-        stake = "0.75%"
+def get_odds_favorite(odds_home, odds_draw, odds_away):
+    """Return the 1X2 favorite and their odds"""
+    min_odds = min(odds_home, odds_draw, odds_away)
+    if min_odds == odds_home:
+        return "Home", odds_home
+    elif min_odds == odds_draw:
+        return "Draw", odds_draw
     else:
-        stake = None
-    
-    return trigger_count, triggers, should_bet, stake
+        return "Away", odds_away
 
-def check_strong_team_triggers(efficiency_gap, h2h_home, h2h_away, home_form, away_form):
-    gap_abs = abs(efficiency_gap)
-    
-    if gap_abs <= STRONG_GAP_THRESHOLD:
-        return None, None, False, None, f"Gap {efficiency_gap:+.3f} ≤ {STRONG_GAP_THRESHOLD}"
-    
-    if efficiency_gap > 0:
-        favored = "home"
-        h2h_wins = h2h_home
-        form = home_form
-        other_form = away_form
-    else:
-        favored = "away"
-        h2h_wins = h2h_away
-        form = away_form
-        other_form = home_form
-    
-    form_diff = abs(form - other_form)
-    h2h_strong = h2h_wins >= H2H_WIN_THRESHOLD
-    form_strong = form_diff >= FORM_DIFF_THRESHOLD
-    
-    if not (h2h_strong or form_strong):
-        return None, None, False, None, f"No H2H (wins={h2h_wins}) or form diff ({form_diff}%)"
-    
-    if gap_abs >= VERY_STRONG_GAP_THRESHOLD:
-        stake = "1.0%"
-        gap_strength = "very strong"
-    else:
-        stake = "0.75%"
-        gap_strength = "strong"
-    
-    reason = f"Gap {efficiency_gap:+.3f} (>0.6) + "
-    if h2h_strong:
-        reason += f"H2H wins={h2h_wins}"
-    if h2h_strong and form_strong:
-        reason += " and "
-    if form_strong:
-        reason += f"form diff={form_diff}%"
-    
-    return favored, gap_strength, True, stake, reason
-
-def check_over_trigger(total_xg, home_conv, away_conv):
-    if total_xg >= OVER_XG_THRESHOLD and home_conv >= OVER_CONV_THRESHOLD and away_conv >= OVER_CONV_THRESHOLD:
-        return True, f"xG {total_xg:.2f} ≥ 3.0, both conv ≥ 12%"
+def check_override(gap_abs, h2h_wins_for_favorite, form_diff, favored_team):
+    """
+    Override goals markets if:
+    - Gap > 0.8 OR H2H ≥ 3 wins
+    """
+    if gap_abs > STRONG_GAP_THRESHOLD:
+        return True, f"Gap {gap_abs:.3f} > 0.8"
+    if h2h_wins_for_favorite >= H2H_WIN_THRESHOLD:
+        return True, f"H2H {h2h_wins_for_favorite} wins"
     return False, None
 
-def calculate_simple_btts_prob(home_xg, away_xg):
-    home_factor = min(0.9, home_xg / 1.5)
-    away_factor = min(0.9, away_xg / 1.5)
-    return home_factor * away_factor
-
-def calculate_simple_over_prob(total_xg):
-    return min(0.65, total_xg / 4.5)
-
-def get_edge_from_odds(odds, prob):
-    if odds <= 0:
-        return 0
-    implied = 1 / odds
-    return prob - implied
-
 # ============================================================================
-# MAIN PREDICTOR CLASS - vFINAL CORRECTED
+# MAIN PREDICTOR
 # ============================================================================
 
-class GrokBetVFinal:
-    def __init__(self):
-        self.history = []
-        self.load_history()
+def get_best_bet(data, odds):
+    home_team = data['home_team']
+    away_team = data['away_team']
+    home_scored = data['home_scored']
+    home_conceded = data['home_conceded']
+    away_scored = data['away_scored']
+    away_conceded = data['away_conceded']
+    home_form = data['home_form']
+    away_form = data['away_form']
+    home_conv = data.get('home_conv', 10)
+    away_conv = data.get('away_conv', 10)
+    h2h_home = data.get('h2h_home', 0)
+    h2h_away = data.get('h2h_away', 0)
     
-    def load_history(self):
-        try:
-            if os.path.exists("grokbet_vfinal.json"):
-                with open("grokbet_vfinal.json", "r") as f:
-                    self.history = json.load(f)
-        except:
-            self.history = []
+    # Calculate xG
+    home_xg = (home_scored + away_conceded) / 2
+    away_xg = (away_scored + home_conceded) / 2
+    total_xg = home_xg + away_xg
     
-    def save_result(self, data, result):
-        self.history.append({
-            "timestamp": datetime.now().isoformat(),
-            **data,
-            "result": result
+    # Calculate Efficiency Gap
+    home_efficiency = calculate_efficiency(home_scored, home_conceded, home_form, home_conv)
+    away_efficiency = calculate_efficiency(away_scored, away_conceded, away_form, away_conv)
+    efficiency_gap = home_efficiency - away_efficiency
+    gap_abs = abs(efficiency_gap)
+    
+    # Form difference
+    form_diff = abs(home_form - away_form)
+    
+    # Get 1X2 favorite
+    favorite_direction, favorite_odds = get_odds_favorite(odds['home'], odds['draw'], odds['away'])
+    
+    # Determine H2H wins for favorite
+    if favorite_direction == "Home":
+        h2h_wins_for_favorite = h2h_home
+        favored_team_name = home_team
+        is_home_favored = True
+    elif favorite_direction == "Away":
+        h2h_wins_for_favorite = h2h_away
+        favored_team_name = away_team
+        is_home_favored = False
+    else:
+        h2h_wins_for_favorite = 0
+        favored_team_name = "Draw"
+        is_home_favored = None
+    
+    # Check override for goals markets
+    override_active, override_reason = check_override(
+        gap_abs, 
+        h2h_wins_for_favorite, 
+        form_diff, 
+        favored_team_name
+    )
+    
+    # Build recommendations
+    recommendations = []
+    
+    # ========== 1X2 MARKET ==========
+    if favorite_direction != "Draw" and favorite_odds <= ODDS_THRESHOLD_1X2:
+        stake = "0.75%" if override_active else "0.5%"
+        recommendations.append({
+            "name": f"{favored_team_name} Win",
+            "odds": favorite_odds,
+            "stake": stake,
+            "type": "1X2",
+            "override": False,
+            "reason": f"Odds favorite at {favorite_odds}"
         })
-        with open("grokbet_vfinal.json", "w") as f:
-            json.dump(self.history, f, indent=2)
     
-    def get_best_bet(self, data, odds):
-        home_team = data['home_team']
-        away_team = data['away_team']
-        home_scored = data['home_scored']
-        home_conceded = data['home_conceded']
-        away_scored = data['away_scored']
-        away_conceded = data['away_conceded']
-        home_form = data['home_form']
-        away_form = data['away_form']
-        home_conv = data.get('home_conv', 10)
-        away_conv = data.get('away_conv', 10)
-        h2h_home = data.get('h2h_home', 0)
-        h2h_away = data.get('h2h_away', 0)
-        home_gd = data.get('home_gd', 0)
-        away_gd = data.get('away_gd', 0)
-        
-        home_xg = (home_scored + away_conceded) / 2
-        away_xg = (away_scored + home_conceded) / 2
-        total_xg = home_xg + away_xg
-        
-        home_efficiency = calculate_efficiency(home_scored, home_conceded, home_form, home_conv)
-        away_efficiency = calculate_efficiency(away_scored, away_conceded, away_form, away_conv)
-        efficiency_gap = home_efficiency - away_efficiency
-        gap_abs = abs(efficiency_gap)
-        
-        # BET TYPE 1
-        btts_trigger_count, btts_triggers, btts_should_bet, btts_stake = check_btts_triggers(
-            home_team, away_team, home_scored, away_scored, total_xg, home_conv, away_conv, home_form, away_form
-        )
-        
-        # BET TYPE 2
-        favored_direction, gap_strength, strong_should_bet, strong_stake, strong_reason = check_strong_team_triggers(
-            efficiency_gap, h2h_home, h2h_away, home_form, away_form
-        )
-        
-        # SAFETY RULES
-        small_gap = gap_abs <= SMALL_GAP_THRESHOLD
-        if small_gap:
-            strong_should_bet = False
-        
-        # RARE OVER 2.5 CHECK
-        over_triggered, over_reason = check_over_trigger(total_xg, home_conv, away_conv)
-        
-        # BUILD RECOMMENDATIONS
-        recommendations = []
-        
-        # BTTS No
-        if btts_should_bet and odds.get('btts_no', 0) >= BTTS_NO_MIN_ODDS:
-            btts_no_prob = 1 - calculate_simple_btts_prob(home_xg, away_xg)
-            edge = get_edge_from_odds(odds['btts_no'], btts_no_prob)
-            if edge > 0.02:
-                recommendations.append({
-                    "name": "BTTS No",
-                    "odds": odds['btts_no'],
-                    "stake": btts_stake,
-                    "edge": edge,
-                    "type": "BTTS No"
-                })
-        
-        # Under 2.5
-        if btts_should_bet and odds.get('under', 0) >= UNDER_MIN_ODDS:
-            under_prob = 1 - calculate_simple_over_prob(total_xg)
-            edge = get_edge_from_odds(odds['under'], under_prob)
-            if edge > 0.02:
-                recommendations.append({
-                    "name": "Under 2.5 Goals",
-                    "odds": odds['under'],
-                    "stake": btts_stake,
-                    "edge": edge,
-                    "type": "Under"
-                })
-        
-        # Strong Team 1X2
-        if strong_should_bet:
-            if favored_direction == "home" and odds.get('home', 0) > 0:
-                home_prob = 0.4 + min(0.3, gap_abs * 0.3)
-                edge = get_edge_from_odds(odds['home'], home_prob)
-                recommendations.append({
-                    "name": f"{home_team} Win",
-                    "odds": odds['home'],
-                    "stake": strong_stake,
-                    "edge": edge,
-                    "type": "1X2",
-                    "reason": strong_reason
-                })
-            elif favored_direction == "away" and odds.get('away', 0) > 0:
-                away_prob = 0.4 + min(0.3, gap_abs * 0.3)
-                edge = get_edge_from_odds(odds['away'], away_prob)
-                recommendations.append({
-                    "name": f"{away_team} Win",
-                    "odds": odds['away'],
-                    "stake": strong_stake,
-                    "edge": edge,
-                    "type": "1X2",
-                    "reason": strong_reason
-                })
-        
-        # Draw (small gap only)
-        if small_gap and odds.get('draw', 0) >= DRAW_MIN_ODDS:
-            draw_prob = 0.35
-            edge = get_edge_from_odds(odds['draw'], draw_prob)
-            if edge > 0.02:
-                recommendations.append({
-                    "name": "Draw",
-                    "odds": odds['draw'],
-                    "stake": "0.5%",
-                    "edge": edge,
-                    "type": "Draw"
-                })
-        
-        # RARE OVER 2.5 - FIXED: Now properly added even if no other bets
-        if over_triggered and odds.get('over', 0) > 0:
-            over_prob = calculate_simple_over_prob(total_xg)
-            edge = get_edge_from_odds(odds['over'], over_prob)
-            # Lower threshold for Over (0.02 instead of 0.03) because it's a rare case
-            if edge > 0.02:
-                recommendations.append({
-                    "name": "Over 2.5 Goals",
-                    "odds": odds['over'],
-                    "stake": "0.5%",
-                    "edge": edge,
-                    "type": "Over",
-                    "reason": over_reason
-                })
-        
-        # Sort by edge
-        recommendations.sort(key=lambda x: x['edge'], reverse=True)
-        
-        # Determine if we have ANY bet (including Over)
-        has_bet = len(recommendations) > 0
-        
-        return {
-            "home_team": home_team,
-            "away_team": away_team,
-            "home_xg": home_xg,
-            "away_xg": away_xg,
-            "total_xg": total_xg,
-            "home_form": home_form,
-            "away_form": away_form,
-            "h2h_home": h2h_home,
-            "h2h_away": h2h_away,
-            "home_gd": home_gd,
-            "away_gd": away_gd,
-            "home_conv": home_conv,
-            "away_conv": away_conv,
-            "efficiency_gap": efficiency_gap,
-            "gap_abs": gap_abs,
-            "small_gap": small_gap,
-            "btts_trigger_count": btts_trigger_count,
-            "btts_triggers": btts_triggers,
-            "btts_should_bet": btts_should_bet,
-            "strong_should_bet": strong_should_bet,
-            "over_triggered": over_triggered,
-            "over_reason": over_reason,
-            "recommendations": recommendations,
-            "has_bet": has_bet
-        }
+    # ========== DRAW (small gap only) ==========
+    if gap_abs <= SMALL_GAP_THRESHOLD and odds['draw'] >= DRAW_MIN_ODDS:
+        recommendations.append({
+            "name": "Draw",
+            "odds": odds['draw'],
+            "stake": "0.5%",
+            "type": "Draw",
+            "override": False,
+            "reason": f"Small gap ({efficiency_gap:+.3f}) + Draw odds ≥ {DRAW_MIN_ODDS}"
+        })
+    
+    # ========== OVER / UNDER 2.5 ==========
+    # Determine favorite for Over/Under
+    if odds['over'] <= odds['under']:
+        over_favored = True
+        fav_odds = odds['over']
+        fav_market = "Over 2.5"
+        opposite_market = "Under 2.5"
+        opposite_odds = odds['under']
+    else:
+        over_favored = False
+        fav_odds = odds['under']
+        fav_market = "Under 2.5"
+        opposite_market = "Over 2.5"
+        opposite_odds = odds['over']
+    
+    if fav_odds <= ODDS_THRESHOLD_GOALS:
+        if override_active:
+            # Override: bet the OPPOSITE
+            stake = "0.75%"
+            recommendations.append({
+                "name": opposite_market,
+                "odds": opposite_odds,
+                "stake": stake,
+                "type": "O/U",
+                "override": True,
+                "reason": f"Override: {override_reason} → betting {opposite_market} instead of {fav_market}"
+            })
+        else:
+            # No override: bet the favorite
+            stake = "0.5%"
+            recommendations.append({
+                "name": fav_market,
+                "odds": fav_odds,
+                "stake": stake,
+                "type": "O/U",
+                "override": False,
+                "reason": f"Odds favorite at {fav_odds}"
+            })
+    
+    # ========== BTTS YES / NO ==========
+    if odds['btts_yes'] <= odds['btts_no']:
+        btts_yes_favored = True
+        fav_odds = odds['btts_yes']
+        fav_market = "BTTS Yes"
+        opposite_market = "BTTS No"
+        opposite_odds = odds['btts_no']
+    else:
+        btts_yes_favored = False
+        fav_odds = odds['btts_no']
+        fav_market = "BTTS No"
+        opposite_market = "BTTS Yes"
+        opposite_odds = odds['btts_yes']
+    
+    if fav_odds <= ODDS_THRESHOLD_GOALS:
+        if override_active:
+            stake = "0.75%"
+            recommendations.append({
+                "name": opposite_market,
+                "odds": opposite_odds,
+                "stake": stake,
+                "type": "BTTS",
+                "override": True,
+                "reason": f"Override: {override_reason} → betting {opposite_market} instead of {fav_market}"
+            })
+        else:
+            stake = "0.5%"
+            recommendations.append({
+                "name": fav_market,
+                "odds": fav_odds,
+                "stake": stake,
+                "type": "BTTS",
+                "override": False,
+                "reason": f"Odds favorite at {fav_odds}"
+            })
+    
+    # Sort: overrides first, then by odds (lower odds = higher confidence)
+    recommendations.sort(key=lambda x: (0 if x['override'] else 1, x['odds']))
+    
+    return {
+        "home_team": home_team,
+        "away_team": away_team,
+        "home_xg": home_xg,
+        "away_xg": away_xg,
+        "total_xg": total_xg,
+        "home_form": home_form,
+        "away_form": away_form,
+        "h2h_home": h2h_home,
+        "h2h_away": h2h_away,
+        "efficiency_gap": efficiency_gap,
+        "gap_abs": gap_abs,
+        "form_diff": form_diff,
+        "favorite_direction": favorite_direction,
+        "favorite_odds": favorite_odds,
+        "override_active": override_active,
+        "override_reason": override_reason,
+        "recommendations": recommendations,
+        "has_bet": len(recommendations) > 0
+    }
 
 # ============================================================================
 # MAIN APP
@@ -425,32 +344,30 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet vFinal</h1>
-        <p>Strong Signal + Safety Filter | Locked & Final | Corrected</p>
+        <p>Odds Favorite + Override | Simplified | Locked</p>
     </div>
     """, unsafe_allow_html=True)
-    
-    predictor = GrokBetVFinal()
     
     with st.container():
         st.markdown('<div class="input-card">', unsafe_allow_html=True)
         
         col1, col2 = st.columns(2)
         with col1:
-            home_team = st.text_input("Home Team", "Atletico Madrid")
+            home_team = st.text_input("Home Team", "River Plate")
         with col2:
-            away_team = st.text_input("Away Team", "Barcelona")
+            away_team = st.text_input("Away Team", "Belgrano")
         
         st.markdown("---")
         
         col3, col4, col5, col6 = st.columns(4)
         with col3:
-            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 1.70, 0.05)
+            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 1.30, 0.05)
         with col4:
-            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 1.00, 0.05)
+            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 0.80, 0.05)
         with col5:
-            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 2.70, 0.05)
+            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 1.10, 0.05)
         with col6:
-            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 1.00, 0.05)
+            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 0.80, 0.05)
         
         home_xg_display = (home_scored + away_conceded) / 2
         away_xg_display = (away_scored + home_conceded) / 2
@@ -460,54 +377,54 @@ def main():
         
         col7, col8 = st.columns(2)
         with col7:
-            home_form = st.number_input(f"{home_team} Form %", 0, 100, 60)
+            home_form = st.number_input(f"{home_team} Form %", 0, 100, 87)
         with col8:
-            away_form = st.number_input(f"{away_team} Form %", 0, 100, 87)
+            away_form = st.number_input(f"{away_team} Form %", 0, 100, 47)
         
         col9, col10, col11 = st.columns(3)
         with col9:
-            h2h_home = st.number_input("H2H Home Wins (last 5)", 0, 5, 1)
+            h2h_home = st.number_input("H2H Home Wins (last 5)", 0, 5, 3)
         with col10:
-            h2h_draws = st.number_input("H2H Draws", 0, 5, 0)
+            h2h_draws = st.number_input("H2H Draws", 0, 5, 1)
         with col11:
-            h2h_away = st.number_input("H2H Away Wins", 0, 5, 4)
+            h2h_away = st.number_input("H2H Away Wins", 0, 5, 1)
         
         st.markdown("---")
         
         col12, col13 = st.columns(2)
         with col12:
-            home_gd = st.number_input(f"{home_team} GD", -50, 50, -2)
+            home_gd = st.number_input(f"{home_team} GD", -50, 50, 5)
         with col13:
-            away_gd = st.number_input(f"{away_team} GD", -50, 50, -8)
+            away_gd = st.number_input(f"{away_team} GD", -50, 50, 3)
         
         st.markdown("---")
         
         col14, col15, col16, col17 = st.columns(4)
         with col14:
-            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 10)
+            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 4)
         with col15:
-            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 14)
+            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 3)
         with col16:
-            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 13)
+            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 10)
         with col17:
-            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 14)
+            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 11)
         
         st.markdown("---")
         
         st.markdown("**Odds (from SportyBet screenshot)**")
         col18, col19, col20 = st.columns(3)
         with col18:
-            odds_home = st.number_input("Home", 0.0, 10.0, 3.12, 0.05)
-            odds_draw = st.number_input("Draw", 0.0, 10.0, 4.09, 0.05)
-            odds_away = st.number_input("Away", 0.0, 10.0, 2.20, 0.05)
+            odds_home = st.number_input("Home", 0.0, 10.0, 1.61, 0.05)
+            odds_draw = st.number_input("Draw", 0.0, 10.0, 3.50, 0.05)
+            odds_away = st.number_input("Away", 0.0, 10.0, 5.25, 0.05)
         
         with col19:
-            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 1.42, 0.05)
-            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 3.00, 0.05)
+            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 2.10, 0.05)
+            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 1.63, 0.05)
         
         with col20:
-            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 1.39, 0.05)
-            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 3.00, 0.05)
+            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 2.05, 0.05)
+            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 1.61, 0.05)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -544,23 +461,25 @@ def main():
                 'btts_no': odds_btts_no
             }
             
-            result = predictor.get_best_bet(data, odds)
+            result = get_best_bet(data, odds)
             
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
+            # Header
             st.markdown(f"### 🎯 GrokBet vFinal")
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
+            # KEY DATA
             st.markdown("**📊 KEY DATA:**")
             st.markdown(f"xG: {result['home_xg']:.2f} | {result['away_xg']:.2f} | Total {result['total_xg']:.2f}")
             st.markdown(f"Form: {home_form}% | {away_form}%")
             st.markdown(f"H2H: {h2h_home}-{h2h_draws}-{h2h_away}")
-            st.markdown(f"GD: {home_gd} | {away_gd}")
             st.markdown(f"Conv: {home_conv}% | {away_conv}%")
             
             st.markdown("---")
             
+            # EFFICIENCY GAP
             st.markdown("**⚡ EFFICIENCY GAP:**")
             gap_color = "🟢" if result['efficiency_gap'] > 0 else "🔴"
             fav_team = home_team if result['efficiency_gap'] > 0 else away_team
@@ -568,85 +487,65 @@ def main():
             
             st.markdown("---")
             
-            st.markdown("**📋 TRIGGER CHECKS:**")
-            st.markdown(f"Bet Type 1 (BTTS No/Under): {result['btts_trigger_count']} triggers → {'✅ TRIGGERED' if result['btts_should_bet'] else '❌ NOT TRIGGERED'}")
-            st.markdown(f"Bet Type 2 (1X2): {'✅ TRIGGERED' if result['strong_should_bet'] else '❌ NOT TRIGGERED'}")
-            st.markdown(f"Rare Over 2.5: {'✅ TRIGGERED' if result['over_triggered'] else '❌ NOT TRIGGERED'}")
-            if result['small_gap']:
-                st.markdown(f"⚠️ Small Gap Rule Active: |Gap| = {result['gap_abs']:.3f} ≤ {SMALL_GAP_THRESHOLD}")
+            # OVERRIDE STATUS
+            if result['override_active']:
+                st.markdown(f"""
+                <div class="result-override">
+                    <strong>⚠️ OVERRIDE ACTIVE</strong><br>
+                    {result['override_reason']}<br>
+                    → Goals markets will bet the OPPOSITE of odds favorite
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("✅ **No override** — betting odds favorite for goals markets")
             
             st.markdown("---")
             
+            # BEST BETS
             if result['has_bet']:
-                best = result['recommendations'][0]
+                # Primary bet (first in list)
+                primary = result['recommendations'][0]
                 
+                override_badge = " (OVERRIDE)" if primary['override'] else ""
                 st.markdown(f"""
                 <div class="result-primary">
                     <strong>🏆 BEST BET:</strong><br>
-                    ✅ <strong>{best['name']}</strong> at {best['odds']:.2f}<br>
-                    📊 Edge: +{best['edge']*100:.1f}% | Stake: <span class="stake-highlight">{best['stake']}</span>
+                    ✅ <strong>{primary['name']}{override_badge}</strong> at {primary['odds']:.2f}<br>
+                    📊 Stake: <span class="stake-highlight">{primary['stake']}</span>
                 </div>
                 """, unsafe_allow_html=True)
+                st.markdown(f"**Reason:** {primary['reason']}")
                 
-                if best['type'] == "Over":
-                    st.markdown(f"**Reason:** {result['over_reason']} — rare Over case.")
-                elif best['type'] == "BTTS No":
-                    st.markdown(f"**Reason:** {result['btts_trigger_count']} triggers indicate one team unlikely to score.")
-                elif best['type'] == "Under":
-                    st.markdown(f"**Reason:** {result['btts_trigger_count']} triggers indicate low-scoring likely.")
-                elif best['type'] == "1X2":
-                    st.markdown(f"**Reason:** {best.get('reason', 'Strong gap + H2H/form difference')}")
-                elif best['type'] == "Draw":
-                    st.markdown(f"**Reason:** Small gap ({result['efficiency_gap']:+.3f}) + Draw odds ≥ {DRAW_MIN_ODDS}")
-                
+                # Secondary bets
                 if len(result['recommendations']) > 1:
                     st.markdown("---")
                     st.markdown("**⚽ SECONDARY OPTIONS:**")
-                    for m in result['recommendations'][1:3]:
-                        st.markdown(f"• {m['name']} at {m['odds']:.2f} – Edge +{m['edge']*100:.1f}% | Stake {m['stake']}")
+                    for bet in result['recommendations'][1:3]:
+                        override_badge = " (OVERRIDE)" if bet['override'] else ""
+                        st.markdown(f"• {bet['name']}{override_badge} at {bet['odds']:.2f} – Stake {bet['stake']}")
                 
+                # VERDICT
                 st.markdown("---")
-                if result['over_triggered']:
-                    verdict = f"Rare Over 2.5 triggered (xG≥3.0, both conv≥12%). This is the structural play."
-                elif result['btts_should_bet']:
-                    verdict = "BTTS/Under trigger active. Goals unlikely."
-                elif result['strong_should_bet']:
-                    verdict = f"Strong team trigger active. Back the favorite."
+                if result['override_active']:
+                    verdict = f"Override active due to {result['override_reason']}. Goals markets bet opposite of odds favorite."
                 else:
-                    verdict = "Follow the recommendation above."
+                    verdict = f"No override. Betting odds favorite in all markets."
                 
                 st.markdown(f"**📝 VERDICT:** {verdict}")
                 
             else:
                 st.markdown("""
                 <div class="result-skip">
-                    <strong>❌ NO BET ZONE</strong><br>
-                    No triggers met. Skip this match entirely.
+                    <strong>❌ NO QUALIFYING BETS</strong><br>
+                    No market meets the odds threshold. Skip this match.
                 </div>
                 """, unsafe_allow_html=True)
             
             st.markdown('</div>', unsafe_allow_html=True)
-            
-            st.markdown("---")
-            col_s1, col_s2, col_s3 = st.columns(3)
-            with col_s1:
-                if st.button("✅ WIN", use_container_width=True):
-                    predictor.save_result(data, "Win")
-                    st.success("Saved!")
-                    st.rerun()
-            with col_s2:
-                if st.button("❌ LOSS", use_container_width=True):
-                    predictor.save_result(data, "Loss")
-                    st.warning("Saved!")
-                    st.rerun()
-            with col_s3:
-                if st.button("📝 SAVE", use_container_width=True):
-                    predictor.save_result(data, "Pending")
-                    st.info("Saved!")
-                    st.rerun()
     
+    # Footer
     st.markdown("---")
-    st.caption("🎯 **GrokBet vFinal** | Strong Signal + Safety Filter | Locked & Final | Corrected")
+    st.caption("🎯 **GrokBet vFinal** | Odds Favorite + Override | Simplified | Locked")
 
 if __name__ == "__main__":
     main()
