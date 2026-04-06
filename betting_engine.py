@@ -124,7 +124,7 @@ H2H_WIN_THRESHOLD = 3
 HIGH_XG_THRESHOLD = 3.0
 HIGH_CONV_THRESHOLD = 15
 WEAK_CONV_THRESHOLD = 10
-WEAK_SCORED_THRESHOLD = 1.0
+WEAK_SCORED_THRESHOLD = 1.2
 
 # ============================================================================
 # CALCULATIONS
