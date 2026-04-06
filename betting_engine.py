@@ -170,7 +170,7 @@ def get_odds_favorite(odds_home, odds_draw, odds_away):
     else:
         return "Away", odds_away
 
-def check_lock_conditions(home_conv, away_conv, home_scored, away_scored, total_xg, h2h_wins_for_favorite):
+def check_lock_conditions(home_team, away_team, home_conv, away_conv, home_scored, away_scored, total_xg, h2h_wins_for_favorite):
     """
     Check all lock conditions (100% proven patterns)
     Returns: (lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under, weak_team_note)
@@ -251,7 +251,7 @@ def get_best_bet(data, odds):
     
     # Check lock conditions
     lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under, weak_team_note = check_lock_conditions(
-        home_conv, away_conv, home_scored, away_scored, total_xg, h2h_wins_for_favorite
+        home_team, away_team, home_conv, away_conv, home_scored, away_scored, total_xg, h2h_wins_for_favorite
     )
     
     is_lock = lock_type is not None
