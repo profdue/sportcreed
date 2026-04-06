@@ -1,10 +1,18 @@
-# grokbet_v3.1_final.py
-# GROKBET v3.1 – FINAL LOCKED VERSION
+# grokbet_vfinal.py
+# GROKBET vFINAL – STRONG SIGNAL + SAFETY FILTER
 # 
-# Core: Efficiency Gap (drives 1X2 direction)
-# Safeguard: Low Attack Filter (blocks BTTS Yes & Over 2.5 when triggered)
-# Small Gap Rule: If |Gap| ≤ 0.4 → no full 1X2 bet (Draw only or skip)
-# Decision: Largest positive edge that survives all filters
+# Core Philosophy: Bet only when data gives a clear, strong signal. Skip everything else.
+# 
+# Bet Type 1: "One Team Unlikely to Score" (BTTS No / Under 2.5)
+#   Trigger: 2+ of (scored ≤1.0, conv ≤10%, total xG ≤2.3, form ≤30%)
+# 
+# Bet Type 2: "Clear Stronger Team" (1X2)
+#   Trigger: |Gap| > 0.6 AND (H2H wins ≥3 OR form diff ≥30%)
+# 
+# Safety Rules:
+#   - Small Gap Rule: |Gap| ≤ 0.4 → no 1X2 side bets (Draw only if odds ≥3.20)
+#   - No Bet Zone: No triggers → skip match
+#   - Over 2.5: Only if xG ≥3.0 AND both conv ≥12% (very rare)
 # 
 # NO MORE CHANGES. This is the final version.
 
@@ -15,7 +23,7 @@ import os
 from datetime import datetime
 
 st.set_page_config(
-    page_title="GrokBet v3.1",
+    page_title="GrokBet vFinal",
     page_icon="🎯",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -85,19 +93,12 @@ st.markdown("""
         border-radius: 8px;
         margin: 0.75rem 0;
     }
-    .result-conflict {
-        background: linear-gradient(135deg, #1e293b 0%, #3e2a1e 100%);
-        border-left: 4px solid #f97316;
-        padding: 0.75rem;
-        border-radius: 8px;
-        margin: 0.75rem 0;
-    }
-    .result-small-gap {
+    .result-trigger {
         background: linear-gradient(135deg, #1e293b 0%, #2a3e4a 100%);
         border-left: 4px solid #3b82f6;
         padding: 0.75rem;
         border-radius: 8px;
-        margin: 0.75rem 0;
+        margin: 0.5rem 0;
     }
     .stake-highlight {
         background: #fbbf24;
@@ -112,28 +113,43 @@ st.markdown("""
         margin: 0.75rem 0;
         border-color: #334155;
     }
-    .filter-block {
-        background: #7f1a1a;
+    .trigger-badge {
+        background: #1e3a2e;
         border-radius: 6px;
         padding: 0.25rem 0.5rem;
         font-size: 0.7rem;
         display: inline-block;
-        margin-left: 0.5rem;
+        margin-right: 0.5rem;
+        margin-bottom: 0.25rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# CONSTANTS & FORMULAS - v3.1 FINAL LOCKED
+# CONSTANTS & FORMULAS - vFINAL LOCKED
 # ============================================================================
 
+# Thresholds
 SMALL_GAP_THRESHOLD = 0.4
+STRONG_GAP_THRESHOLD = 0.6
+VERY_STRONG_GAP_THRESHOLD = 0.8
+FORM_DIFF_THRESHOLD = 30  # percentage points
+H2H_WIN_THRESHOLD = 3  # wins in last 5
+BTTS_NO_MIN_ODDS = 1.70
+UNDER_MIN_ODDS = 1.80
+DRAW_MIN_ODDS = 3.20
+OVER_XG_THRESHOLD = 3.0
+OVER_CONV_THRESHOLD = 12
+
+# Low xG / weak attack thresholds
+SCORED_WEAK_THRESHOLD = 1.0
+TOTAL_XG_LOW_THRESHOLD = 2.3
+CONV_WEAK_THRESHOLD = 10
+FORM_WEAK_THRESHOLD = 30
 
 def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
     """
     Efficiency = (Scored avg × Conversion %) − (Conceded avg × ((100 − Form %)/100))
-    
-    Higher number = stronger team relative to what the numbers "should" allow.
     """
     conv_decimal = conv_pct / 100.0
     form_decimal = form_pct / 100.0
@@ -144,73 +160,112 @@ def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
     
     return attack_score - defense_penalty
 
-def get_stake_by_edge(edge, conflict=False, small_gap=False):
+def check_btts_triggers(home_scored, away_scored, total_xg, home_conv, away_conv, home_form, away_form):
     """
-    Stake scaling: edge > 8% → 1.0%, 5-8% → 0.75%, 3-5% → 0.5%, <3% → skip
-    If conflict (Gap and Filter disagree) → reduce stake by one level
-    If small gap (|Gap| ≤ 0.4) → further reduce stake for 1X2 bets
+    Bet Type 1: "One Team Unlikely to Score"
+    Returns: (trigger_count, triggers_list, should_bet, recommended_bet, stake)
     """
-    if edge < 0.03:
-        return None, False
+    triggers = []
+    trigger_count = 0
     
-    # Base stake by edge
-    if edge >= 0.08:
-        base_stake = "1.0%"
-    elif edge >= 0.05:
-        base_stake = "0.75%"
+    # Condition 1: One team scored avg ≤ 1.0
+    if home_scored <= SCORED_WEAK_THRESHOLD:
+        triggers.append(f"{home_team} scored {home_scored:.2f} ≤ 1.0")
+        trigger_count += 1
+    elif away_scored <= SCORED_WEAK_THRESHOLD:
+        triggers.append(f"{away_team} scored {away_scored:.2f} ≤ 1.0")
+        trigger_count += 1
+    
+    # Condition 2: One team conversion % ≤ 10%
+    if home_conv <= CONV_WEAK_THRESHOLD:
+        triggers.append(f"{home_team} conv {home_conv}% ≤ 10%")
+        trigger_count += 1
+    elif away_conv <= CONV_WEAK_THRESHOLD:
+        triggers.append(f"{away_team} conv {away_conv}% ≤ 10%")
+        trigger_count += 1
+    
+    # Condition 3: Total xG ≤ 2.3
+    if total_xg <= TOTAL_XG_LOW_THRESHOLD:
+        triggers.append(f"Total xG {total_xg:.2f} ≤ 2.3")
+        trigger_count += 1
+    
+    # Condition 4: One team form % ≤ 30%
+    if home_form <= FORM_WEAK_THRESHOLD:
+        triggers.append(f"{home_team} form {home_form}% ≤ 30%")
+        trigger_count += 1
+    elif away_form <= FORM_WEAK_THRESHOLD:
+        triggers.append(f"{away_team} form {away_form}% ≤ 30%")
+        trigger_count += 1
+    
+    should_bet = trigger_count >= 2
+    
+    # Determine stake based on trigger count
+    if trigger_count >= 3:
+        stake = "1.0%"
+    elif trigger_count >= 2:
+        stake = "0.75%"
     else:
-        base_stake = "0.5%"
+        stake = None
     
-    # Apply conflict reduction
-    if conflict:
-        if edge >= 0.08:
-            return "0.75% (conflict)", True
-        elif edge >= 0.05:
-            return "0.5% (conflict)", True
-        else:
-            return "0.25% (conflict)", True
-    
-    # Apply small gap reduction for 1X2 bets
-    if small_gap:
-        if edge >= 0.08:
-            return "0.5% (small gap)", True
-        elif edge >= 0.05:
-            return "0.4% (small gap)", True
-        else:
-            return "0.25% (small gap)", True
-    
-    return base_stake, True
+    return trigger_count, triggers, should_bet, stake
 
-def low_attack_filter(home_scored, away_scored, total_xg, home_conv, away_conv):
+def check_strong_team_triggers(efficiency_gap, h2h_home, h2h_away, home_form, away_form):
     """
-    Low Attack Filter - PERMANENT SAFEGUARD
-    
-    BLOCKS BTTS Yes and Over 2.5 if ANY of these are true:
-    1. Either team Scored avg ≤ 1.0
-    2. Total xG ≤ 2.3
-    3. Either team Conversion % ≤ 10%
-    
-    Returns: (block_btts, block_over, reason)
+    Bet Type 2: "Clear Stronger Team"
+    Returns: (direction, gap_strength, should_bet, stake, reason)
+    direction: "home", "away", or None
     """
-    reasons = []
+    gap_abs = abs(efficiency_gap)
     
-    if home_scored <= 1.0:
-        reasons.append(f"Home scored {home_scored:.2f} ≤ 1.0")
-    if away_scored <= 1.0:
-        reasons.append(f"Away scored {away_scored:.2f} ≤ 1.0")
-    if total_xg <= 2.3:
-        reasons.append(f"Total xG {total_xg:.2f} ≤ 2.3")
-    if home_conv <= 10:
-        reasons.append(f"Home conv {home_conv}% ≤ 10%")
-    if away_conv <= 10:
-        reasons.append(f"Away conv {away_conv}% ≤ 10%")
+    # Gap must be > 0.6
+    if gap_abs <= STRONG_GAP_THRESHOLD:
+        return None, None, False, None, f"Gap {efficiency_gap:+.3f} ≤ {STRONG_GAP_THRESHOLD}"
     
-    block_btts = len(reasons) > 0
-    block_over = len(reasons) > 0
+    # Determine favored team
+    if efficiency_gap > 0:
+        favored = "home"
+        h2h_wins = h2h_home
+        form = home_form
+        other_form = away_form
+    else:
+        favored = "away"
+        h2h_wins = h2h_away
+        form = away_form
+        other_form = home_form
     
-    reason_text = " | ".join(reasons) if reasons else "No filter triggers"
+    # Check H2H or form difference
+    form_diff = abs(form - other_form)
+    h2h_strong = h2h_wins >= H2H_WIN_THRESHOLD
+    form_strong = form_diff >= FORM_DIFF_THRESHOLD
     
-    return block_btts, block_over, reason_text
+    if not (h2h_strong or form_strong):
+        return None, None, False, None, f"No H2H (wins={h2h_wins}) or form diff ({form_diff}%)"
+    
+    # Determine stake based on gap strength
+    if gap_abs >= VERY_STRONG_GAP_THRESHOLD:
+        stake = "1.0%"
+        gap_strength = "very strong"
+    else:
+        stake = "0.75%"
+        gap_strength = "strong"
+    
+    reason = f"Gap {efficiency_gap:+.3f} (>0.6) + "
+    if h2h_strong:
+        reason += f"H2H wins={h2h_wins}"
+    if h2h_strong and form_strong:
+        reason += " and "
+    if form_strong:
+        reason += f"form diff={form_diff}%"
+    
+    return favored, gap_strength, True, stake, reason
+
+def check_over_trigger(total_xg, home_conv, away_conv):
+    """
+    Over 2.5: Only if total xG ≥ 3.0 AND both conv ≥ 12%
+    """
+    if total_xg >= OVER_XG_THRESHOLD and home_conv >= OVER_CONV_THRESHOLD and away_conv >= OVER_CONV_THRESHOLD:
+        return True, f"xG {total_xg:.2f} ≥ 3.0, both conv ≥ 12%"
+    return False, None
 
 def calculate_simple_btts_prob(home_xg, away_xg):
     """Simple BTTS probability from xG (capped)"""
@@ -222,26 +277,26 @@ def calculate_simple_over_prob(total_xg):
     """Simple Over 2.5 probability from total xG (capped)"""
     return min(0.65, total_xg / 4.5)
 
-def normalize_probs(home_prob, draw_prob, away_prob):
-    """Normalize probabilities to sum to 1.0"""
-    total = home_prob + draw_prob + away_prob
-    if total > 0:
-        return home_prob/total, draw_prob/total, away_prob/total
-    return 0.34, 0.33, 0.33
+def get_edge_from_odds(odds, prob):
+    """Calculate edge from odds and probability"""
+    if odds <= 0:
+        return 0
+    implied = 1 / odds
+    return prob - implied
 
 # ============================================================================
-# MAIN PREDICTOR CLASS - v3.1 FINAL LOCKED
+# MAIN PREDICTOR CLASS - vFINAL LOCKED
 # ============================================================================
 
-class GrokBetV31:
+class GrokBetVFinal:
     def __init__(self):
         self.history = []
         self.load_history()
     
     def load_history(self):
         try:
-            if os.path.exists("grokbet_v31_final.json"):
-                with open("grokbet_v31_final.json", "r") as f:
+            if os.path.exists("grokbet_vfinal.json"):
+                with open("grokbet_vfinal.json", "r") as f:
                     self.history = json.load(f)
         except:
             self.history = []
@@ -252,7 +307,7 @@ class GrokBetV31:
             **data,
             "result": result
         })
-        with open("grokbet_v31_final.json", "w") as f:
+        with open("grokbet_vfinal.json", "w") as f:
             json.dump(self.history, f, indent=2)
     
     def get_best_bet(self, data, odds):
@@ -277,196 +332,125 @@ class GrokBetV31:
         away_xg = (away_scored + home_conceded) / 2
         total_xg = home_xg + away_xg
         
-        # ========== STEP 1: EFFICIENCY SCORES ==========
+        # Calculate Efficiency Gap
         home_efficiency = calculate_efficiency(home_scored, home_conceded, home_form, home_conv)
         away_efficiency = calculate_efficiency(away_scored, away_conceded, away_form, away_conv)
         efficiency_gap = home_efficiency - away_efficiency
+        gap_abs = abs(efficiency_gap)
         
-        # Check if gap is small
-        is_small_gap = abs(efficiency_gap) <= SMALL_GAP_THRESHOLD
-        
-        # ========== STEP 2: LOW ATTACK FILTER ==========
-        block_btts, block_over, filter_reason = low_attack_filter(
-            home_scored, away_scored, total_xg, home_conv, away_conv
+        # ========== BET TYPE 1: BTTS No / Under 2.5 ==========
+        btts_trigger_count, btts_triggers, btts_should_bet, btts_stake = check_btts_triggers(
+            home_scored, away_scored, total_xg, home_conv, away_conv, home_form, away_form
         )
         
-        # ========== STEP 3: 1X2 PROBABILITIES FROM EFFICIENCY GAP ==========
-        base_home = 0.34
-        base_away = 0.33
-        base_draw = 0.33
+        # ========== BET TYPE 2: Clear Stronger Team ==========
+        favored_direction, gap_strength, strong_should_bet, strong_stake, strong_reason = check_strong_team_triggers(
+            efficiency_gap, h2h_home, h2h_away, home_form, away_form
+        )
         
-        # Adjust by efficiency gap (capped at ±0.25 swing)
-        gap_adj = efficiency_gap * 0.4
-        gap_adj = max(-0.15, min(0.15, gap_adj))
+        # ========== SAFETY RULES ==========
+        # Small Gap Rule: |Gap| ≤ 0.4 → no 1X2 side bets
+        small_gap = gap_abs <= SMALL_GAP_THRESHOLD
+        if small_gap:
+            strong_should_bet = False  # Override - no side bets when gap is small
         
-        raw_home = base_home + gap_adj
-        raw_away = base_away - gap_adj
-        raw_draw = base_draw
+        # No Bet Zone: If no triggers, skip entirely
+        no_bet_zone = not btts_should_bet and not strong_should_bet
         
-        # H2H adjustment
-        h2h_gap = abs(h2h_home - h2h_away)
-        if h2h_gap >= 4:
-            h2h_adj = 0.08
-        elif h2h_gap >= 3:
-            h2h_adj = 0.06
-        else:
-            h2h_adj = 0
+        # Over 2.5 check (very rare)
+        over_triggered, over_reason = check_over_trigger(total_xg, home_conv, away_conv)
         
-        if h2h_home > h2h_away:
-            raw_home += h2h_adj
-            raw_draw -= h2h_adj / 2
-        elif h2h_away > h2h_home:
-            raw_away += h2h_adj
-            raw_draw -= h2h_adj / 2
+        # ========== BUILD RECOMMENDATIONS ==========
+        recommendations = []
         
-        # GD adjustment
-        gd_adj = ((home_gd - away_gd) / 50) * 0.05
-        raw_home += gd_adj
-        raw_away -= gd_adj
-        
-        # Normalize
-        home_prob, draw_prob, away_prob = normalize_probs(raw_home, raw_draw, raw_away)
-        
-        # ========== STEP 4: MARKET VALUE COMPARISON ==========
-        markets = []
-        
-        # Helper to get implied probability from odds
-        def get_implied(odds, total_implied=None):
-            if odds <= 0:
-                return 0
-            if total_implied:
-                return (1/odds) / total_implied
-            return 1/odds
-        
-        # 1X2 markets - with SMALL GAP RULE applied
-        if odds.get('home', 0) > 0 and odds.get('draw', 0) > 0 and odds.get('away', 0) > 0:
-            total_implied = (1/odds['home']) + (1/odds['draw']) + (1/odds['away'])
-            
-            # Home Win - only if gap > 0.4 (not small gap)
-            if efficiency_gap > SMALL_GAP_THRESHOLD:
-                imp_home = get_implied(odds['home'], total_implied)
-                home_edge = home_prob - imp_home
-                stake_pct, is_valid = get_stake_by_edge(home_edge, conflict=False, small_gap=False)
-                if is_valid:
-                    markets.append({
-                        "name": f"{home_team} Win",
-                        "odds": odds['home'],
-                        "edge": home_edge,
-                        "stake": stake_pct,
-                        "type": "1X2",
-                        "confidence": "high"
-                    })
-            
-            # Away Win - only if gap < -0.4 (not small gap)
-            if efficiency_gap < -SMALL_GAP_THRESHOLD:
-                imp_away = get_implied(odds['away'], total_implied)
-                away_edge = away_prob - imp_away
-                stake_pct, is_valid = get_stake_by_edge(away_edge, conflict=False, small_gap=False)
-                if is_valid:
-                    markets.append({
-                        "name": f"{away_team} Win",
-                        "odds": odds['away'],
-                        "edge": away_edge,
-                        "stake": stake_pct,
-                        "type": "1X2",
-                        "confidence": "high"
-                    })
-            
-            # Draw - ALWAYS allowed, but with reduced stake if small gap
-            imp_draw = get_implied(odds['draw'], total_implied)
-            draw_edge = draw_prob - imp_draw
-            # Only bet Draw if odds ≥ 3.00 OR edge is significant
-            if odds['draw'] >= 3.00 or draw_edge > 0.05:
-                stake_pct, is_valid = get_stake_by_edge(draw_edge, conflict=False, small_gap=is_small_gap)
-                if is_valid:
-                    markets.append({
-                        "name": "Draw",
-                        "odds": odds['draw'],
-                        "edge": draw_edge,
-                        "stake": stake_pct,
-                        "type": "1X2",
-                        "confidence": "medium" if not is_small_gap else "low",
-                        "small_gap": is_small_gap
-                    })
-        
-        # Over 2.5 - only if NOT blocked by Low Attack Filter
-        if odds.get('over', 0) > 0 and not block_over:
-            imp_over = 1 / odds['over']
-            over_prob = calculate_simple_over_prob(total_xg)
-            over_edge = over_prob - imp_over
-            
-            # Check for conflict: Efficiency Gap favors low-scoring?
-            gap_favors_under = abs(efficiency_gap) > 0.3
-            conflict = gap_favors_under and over_edge > 0
-            
-            stake_pct, is_valid = get_stake_by_edge(over_edge, conflict=conflict, small_gap=False)
-            if is_valid:
-                markets.append({
-                    "name": "Over 2.5 Goals",
-                    "odds": odds['over'],
-                    "edge": over_edge,
-                    "stake": stake_pct,
-                    "type": "O/U",
-                    "confidence": "medium" if not conflict else "low",
-                    "conflict": conflict
-                })
-        
-        # Under 2.5 - only if filter triggered (then it's the structural play)
-        if odds.get('under', 0) > 0 and block_over:
-            imp_under = 1 / odds['under']
-            under_prob = 1 - calculate_simple_over_prob(total_xg)
-            under_edge = under_prob - imp_under
-            stake_pct, is_valid = get_stake_by_edge(under_edge, conflict=False, small_gap=False)
-            if is_valid:
-                markets.append({
-                    "name": "Under 2.5 Goals",
-                    "odds": odds['under'],
-                    "edge": under_edge,
-                    "stake": stake_pct,
-                    "type": "O/U",
-                    "confidence": "high"
-                })
-        
-        # BTTS Yes - only if NOT blocked by Low Attack Filter
-        if odds.get('btts_yes', 0) > 0 and not block_btts:
-            imp_btts_yes = 1 / odds['btts_yes']
-            btts_yes_prob = calculate_simple_btts_prob(home_xg, away_xg)
-            btts_yes_edge = btts_yes_prob - imp_btts_yes
-            
-            # Check for conflict: Efficiency Gap favors clean sheet?
-            gap_favors_clean_sheet = abs(efficiency_gap) > 0.3
-            conflict = gap_favors_clean_sheet and btts_yes_edge > 0
-            
-            stake_pct, is_valid = get_stake_by_edge(btts_yes_edge, conflict=conflict, small_gap=False)
-            if is_valid:
-                markets.append({
-                    "name": "BTTS Yes",
-                    "odds": odds['btts_yes'],
-                    "edge": btts_yes_edge,
-                    "stake": stake_pct,
-                    "type": "BTTS",
-                    "confidence": "medium" if not conflict else "low",
-                    "conflict": conflict
-                })
-        
-        # BTTS No - only if filter triggered (then it's the structural play)
-        if odds.get('btts_no', 0) > 0 and block_btts:
-            imp_btts_no = 1 / odds['btts_no']
+        # BTTS No recommendation
+        if btts_should_bet and odds.get('btts_no', 0) >= BTTS_NO_MIN_ODDS:
             btts_no_prob = 1 - calculate_simple_btts_prob(home_xg, away_xg)
-            btts_no_edge = btts_no_prob - imp_btts_no
-            stake_pct, is_valid = get_stake_by_edge(btts_no_edge, conflict=False, small_gap=False)
-            if is_valid:
-                markets.append({
+            edge = get_edge_from_odds(odds['btts_no'], btts_no_prob)
+            if edge > 0.02:
+                recommendations.append({
                     "name": "BTTS No",
                     "odds": odds['btts_no'],
-                    "edge": btts_no_edge,
-                    "stake": stake_pct,
-                    "type": "BTTS",
-                    "confidence": "high"
+                    "stake": btts_stake,
+                    "edge": edge,
+                    "type": "BTTS No",
+                    "triggers": btts_trigger_count
                 })
         
-        # Sort by edge size
-        markets.sort(key=lambda x: x['edge'], reverse=True)
+        # Under 2.5 recommendation
+        if btts_should_bet and odds.get('under', 0) >= UNDER_MIN_ODDS:
+            under_prob = 1 - calculate_simple_over_prob(total_xg)
+            edge = get_edge_from_odds(odds['under'], under_prob)
+            if edge > 0.02:
+                recommendations.append({
+                    "name": "Under 2.5 Goals",
+                    "odds": odds['under'],
+                    "stake": btts_stake,
+                    "edge": edge,
+                    "type": "Under",
+                    "triggers": btts_trigger_count
+                })
+        
+        # Strong Team 1X2 recommendation
+        if strong_should_bet:
+            if favored_direction == "home" and odds.get('home', 0) > 0:
+                # Simple probability estimate based on gap
+                home_prob = 0.4 + min(0.3, gap_abs * 0.3)
+                edge = get_edge_from_odds(odds['home'], home_prob)
+                recommendations.append({
+                    "name": f"{home_team} Win",
+                    "odds": odds['home'],
+                    "stake": strong_stake,
+                    "edge": edge,
+                    "type": "1X2",
+                    "gap": efficiency_gap,
+                    "gap_strength": gap_strength,
+                    "reason": strong_reason
+                })
+            elif favored_direction == "away" and odds.get('away', 0) > 0:
+                away_prob = 0.4 + min(0.3, gap_abs * 0.3)
+                edge = get_edge_from_odds(odds['away'], away_prob)
+                recommendations.append({
+                    "name": f"{away_team} Win",
+                    "odds": odds['away'],
+                    "stake": strong_stake,
+                    "edge": edge,
+                    "type": "1X2",
+                    "gap": efficiency_gap,
+                    "gap_strength": gap_strength,
+                    "reason": strong_reason
+                })
+        
+        # Draw recommendation (only when small gap AND odds ≥ 3.20)
+        if small_gap and odds.get('draw', 0) >= DRAW_MIN_ODDS:
+            draw_prob = 0.35
+            edge = get_edge_from_odds(odds['draw'], draw_prob)
+            if edge > 0.02:
+                recommendations.append({
+                    "name": "Draw",
+                    "odds": odds['draw'],
+                    "stake": "0.5%",
+                    "edge": edge,
+                    "type": "Draw",
+                    "small_gap": True
+                })
+        
+        # Over 2.5 recommendation (very rare)
+        if over_triggered and odds.get('over', 0) > 0:
+            over_prob = calculate_simple_over_prob(total_xg)
+            edge = get_edge_from_odds(odds['over'], over_prob)
+            if edge > 0.03:
+                recommendations.append({
+                    "name": "Over 2.5 Goals",
+                    "odds": odds['over'],
+                    "stake": "0.5%",
+                    "edge": edge,
+                    "type": "Over",
+                    "reason": over_reason
+                })
+        
+        # Sort by edge
+        recommendations.sort(key=lambda x: x['edge'], reverse=True)
         
         return {
             "home_team": home_team,
@@ -477,20 +461,21 @@ class GrokBetV31:
             "home_form": home_form,
             "away_form": away_form,
             "h2h_home": h2h_home,
-            "h2h_draws": data.get('h2h_draws', 0),
             "h2h_away": h2h_away,
-            "home_efficiency": home_efficiency,
-            "away_efficiency": away_efficiency,
+            "home_gd": home_gd,
+            "away_gd": away_gd,
+            "home_conv": home_conv,
+            "away_conv": away_conv,
             "efficiency_gap": efficiency_gap,
-            "is_small_gap": is_small_gap,
-            "home_prob": home_prob,
-            "draw_prob": draw_prob,
-            "away_prob": away_prob,
-            "block_btts": block_btts,
-            "block_over": block_over,
-            "filter_reason": filter_reason,
-            "markets": markets,
-            "has_bet": len(markets) > 0
+            "gap_abs": gap_abs,
+            "small_gap": small_gap,
+            "btts_trigger_count": btts_trigger_count,
+            "btts_triggers": btts_triggers,
+            "btts_should_bet": btts_should_bet,
+            "strong_should_bet": strong_should_bet,
+            "no_bet_zone": no_bet_zone,
+            "recommendations": recommendations,
+            "has_bet": len(recommendations) > 0
         }
 
 # ============================================================================
@@ -500,12 +485,12 @@ class GrokBetV31:
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet v3.1</h1>
-        <p>Efficiency Gap | Low Attack Filter | Small Gap Rule | FINAL LOCKED</p>
+        <h1>🎯 GrokBet vFinal</h1>
+        <p>Strong Signal + Safety Filter | Locked & Final</p>
     </div>
     """, unsafe_allow_html=True)
     
-    predictor = GrokBetV31()
+    predictor = GrokBetVFinal()
     
     with st.container():
         st.markdown('<div class="input-card">', unsafe_allow_html=True)
@@ -626,7 +611,7 @@ def main():
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
             # Header
-            st.markdown(f"### 🎯 GrokBet v3.1")
+            st.markdown(f"### 🎯 GrokBet vFinal")
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
@@ -636,6 +621,7 @@ def main():
             st.markdown(f"Form: {home_form}% | {away_form}%")
             st.markdown(f"H2H: {h2h_home}-{h2h_draws}-{h2h_away}")
             st.markdown(f"GD: {home_gd} | {away_gd}")
+            st.markdown(f"Conv: {home_conv}% | {away_conv}%")
             
             st.markdown("---")
             
@@ -645,105 +631,86 @@ def main():
             fav_team = home_team if result['efficiency_gap'] > 0 else away_team
             st.markdown(f"{gap_color} **{result['efficiency_gap']:+.3f}** (favors **{fav_team}**)")
             
-            # Small Gap Warning
-            if result['is_small_gap']:
-                st.markdown(f"⚠️ **SMALL GAP RULE ACTIVE:** |Gap| = {abs(result['efficiency_gap']):.3f} ≤ {SMALL_GAP_THRESHOLD}")
-                st.markdown("→ No full 1X2 bets. Draw only (if odds ≥ 3.00) or reduced stakes.")
-            else:
-                st.markdown(f"✅ **Gap > {SMALL_GAP_THRESHOLD}** → Full 1X2 bets allowed")
-            
-            st.caption(f"Home EFF: {result['home_efficiency']:.3f} | Away EFF: {result['away_efficiency']:.3f}")
+            if result['small_gap']:
+                st.markdown(f"⚠️ **SMALL GAP:** |{result['efficiency_gap']:+.3f}| ≤ {SMALL_GAP_THRESHOLD} → No 1X2 side bets. Draw only if odds ≥ {DRAW_MIN_ODDS}.")
             
             st.markdown("---")
             
-            # LOW ATTACK FILTER
-            st.markdown("**🛡️ LOW ATTACK FILTER:**")
-            if result['block_btts']:
-                st.markdown(f"❌ **BLOCKED** — {result['filter_reason']}")
-                st.markdown("→ BTTS Yes and Over 2.5 removed from consideration")
-                st.markdown("→ Default lean: Under 2.5 and/or BTTS No")
+            # BET TYPE 1 TRIGGERS
+            st.markdown("**📋 BET TYPE 1: 'One Team Unlikely to Score'**")
+            if result['btts_trigger_count'] >= 2:
+                st.markdown(f"✅ **TRIGGERED** ({result['btts_trigger_count']} triggers)")
+                for t in result['btts_triggers']:
+                    st.markdown(f"  • {t}")
+                st.markdown(f"→ Recommended stake: {result['btts_trigger_count'] * 0.25 + 0.5 if result['btts_trigger_count'] == 2 else '1.0'}%")
             else:
-                st.markdown(f"✅ **PASSED** — {result['filter_reason']}")
-                st.markdown("→ BTTS Yes and Over 2.5 allowed for evaluation")
+                st.markdown(f"❌ **NOT TRIGGERED** ({result['btts_trigger_count']} triggers - need 2+)")
+                if result['btts_triggers']:
+                    for t in result['btts_triggers']:
+                        st.markdown(f"  • {t}")
             
             st.markdown("---")
             
-            # BEST BET
-            if result['has_bet']:
-                best = result['markets'][0]
-                
-                # Show small gap warning if applicable
-                if best.get('small_gap', False):
-                    st.markdown(f"""
-                    <div class="result-small-gap">
-                        <strong>⚠️ SMALL GAP REDUCTION</strong><br>
-                        |Efficiency Gap| ≤ {SMALL_GAP_THRESHOLD} — stake reduced for this Draw bet.
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                # Show conflict warning if applicable
-                if best.get('conflict', False):
-                    st.markdown(f"""
-                    <div class="result-conflict">
-                        <strong>⚠️ CONFLICT DETECTED</strong><br>
-                        Efficiency Gap and Low Attack Filter disagree on this market.<br>
-                        Stake has been reduced.
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                confidence_emoji = "🔥" if best.get('confidence') == "high" else "👍" if best.get('confidence') == "medium" else "⚠️"
+            # BET TYPE 2 TRIGGERS
+            st.markdown("**📋 BET TYPE 2: 'Clear Stronger Team'**")
+            if result['strong_should_bet'] and not result['small_gap']:
+                st.markdown(f"✅ **TRIGGERED**")
+                st.markdown(f"→ Gap {result['efficiency_gap']:+.3f} > {STRONG_GAP_THRESHOLD}")
+            elif result['small_gap']:
+                st.markdown(f"⚠️ **OVERRIDDEN** — Small gap rule prevents 1X2 side bets")
+            else:
+                st.markdown(f"❌ **NOT TRIGGERED**")
+            
+            st.markdown("---")
+            
+            # FINAL RECOMMENDATIONS
+            if result['no_bet_zone']:
+                st.markdown("""
+                <div class="result-skip">
+                    <strong>❌ NO BET ZONE</strong><br>
+                    No triggers met. Skip this match entirely.
+                </div>
+                """, unsafe_allow_html=True)
+            elif result['has_bet']:
+                best = result['recommendations'][0]
                 
                 st.markdown(f"""
                 <div class="result-primary">
                     <strong>🏆 BEST BET:</strong><br>
-                    {confidence_emoji} <strong>{best['name']}</strong> at {best['odds']:.2f}<br>
+                    ✅ <strong>{best['name']}</strong> at {best['odds']:.2f}<br>
                     📊 Edge: +{best['edge']*100:.1f}% | Stake: <span class="stake-highlight">{best['stake']}</span>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 # Reason
-                if best['type'] == "1X2":
-                    if "Draw" in best['name']:
-                        st.markdown(f"**Reason:** Small gap ({result['efficiency_gap']:+.3f}) → Draw is the structural play with odds {best['odds']:.2f}.")
-                    else:
-                        fav = home_team if home_team in best['name'] else away_team
-                        st.markdown(f"**Reason:** Efficiency gap ({result['efficiency_gap']:+.3f}) > {SMALL_GAP_THRESHOLD} favors {fav}.")
-                elif "Over" in best['name']:
-                    st.markdown(f"**Reason:** Total xG {result['total_xg']:.2f} and Low Attack Filter passed.")
-                elif "Under" in best['name']:
-                    st.markdown(f"**Reason:** Low Attack Filter triggered — structural lean to Under.")
-                elif "BTTS Yes" in best['name']:
-                    st.markdown(f"**Reason:** Both xG ≥ 1.25 ({result['home_xg']:.2f}/{result['away_xg']:.2f}) and filter passed.")
-                elif "BTTS No" in best['name']:
-                    st.markdown(f"**Reason:** Low Attack Filter triggered — BTTS unlikely.")
+                if best['type'] == "BTTS No":
+                    st.markdown(f"**Reason:** {result['btts_trigger_count']} triggers indicate one team unlikely to score.")
+                elif best['type'] == "Under":
+                    st.markdown(f"**Reason:** {result['btts_trigger_count']} triggers indicate low-scoring likely.")
+                elif best['type'] == "1X2":
+                    st.markdown(f"**Reason:** {best.get('reason', 'Strong gap + H2H/form difference')}")
+                elif best['type'] == "Draw":
+                    st.markdown(f"**Reason:** Small gap ({result['efficiency_gap']:+.3f}) + Draw odds ≥ {DRAW_MIN_ODDS}")
+                elif best['type'] == "Over":
+                    st.markdown(f"**Reason:** {best.get('reason', 'Rare Over trigger')}")
                 
                 # Secondary bets
-                if len(result['markets']) > 1:
+                if len(result['recommendations']) > 1:
                     st.markdown("---")
                     st.markdown("**⚽ SECONDARY OPTIONS:**")
-                    for m in result['markets'][1:3]:
-                        conflict_flag = " ⚠️ conflict" if m.get('conflict', False) else ""
-                        small_gap_flag = " 📉 small gap" if m.get('small_gap', False) else ""
-                        st.markdown(f"• {m['name']} at {m['odds']:.2f} – Edge +{m['edge']*100:.1f}% | Stake {m['stake']}{conflict_flag}{small_gap_flag}")
+                    for m in result['recommendations'][1:3]:
+                        st.markdown(f"• {m['name']} at {m['odds']:.2f} – Edge +{m['edge']*100:.1f}% | Stake {m['stake']}")
                 
                 # VERDICT
                 st.markdown("---")
-                if result['is_small_gap']:
-                    verdict = f"Small gap ({result['efficiency_gap']:+.3f}) → No full 1X2. "
-                    if result['block_btts']:
-                        verdict += "Low Attack Filter blocks goals. Skip or tiny stake on Draw."
-                    else:
-                        verdict += "Goal markets allowed if edges are clear."
+                if result['btts_trigger_count'] >= 2 and result['strong_should_bet'] and not result['small_gap']:
+                    verdict = f"Both triggers active. Priority on {best['name']}."
+                elif result['btts_trigger_count'] >= 2:
+                    verdict = "BTTS/Under trigger active. Goals unlikely."
+                elif result['strong_should_bet'] and not result['small_gap']:
+                    verdict = f"Strong team trigger active. Back the favorite."
                 else:
-                    if result['efficiency_gap'] > 0:
-                        verdict = f"{home_team} favored by Efficiency Gap (>{SMALL_GAP_THRESHOLD}). "
-                    else:
-                        verdict = f"{away_team} favored by Efficiency Gap (>{SMALL_GAP_THRESHOLD}). "
-                    
-                    if result['block_btts']:
-                        verdict += "Low Attack Filter blocks goals. Focus on 1X2."
-                    else:
-                        verdict += "Goal markets allowed — check edge sizes."
+                    verdict = "Follow the recommendation above. Skip if uncertain."
                 
                 st.markdown(f"**📝 VERDICT:** {verdict}")
                 
@@ -751,7 +718,7 @@ def main():
                 st.markdown("""
                 <div class="result-skip">
                     <strong>❌ NO QUALIFYING BETS</strong><br>
-                    No market meets minimum edge threshold (3%). Skip this match.
+                    No market meets minimum edge threshold or odds requirements. Skip this match.
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -778,7 +745,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("🎯 **GrokBet v3.1 FINAL** | Efficiency Gap + Low Attack Filter + Small Gap Rule | NO MORE CHANGES")
+    st.caption("🎯 **GrokBet vFinal** | Strong Signal + Safety Filter | Locked & Final | No more changes")
 
 if __name__ == "__main__":
     main()
