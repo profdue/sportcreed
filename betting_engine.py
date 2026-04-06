@@ -1,19 +1,16 @@
-# grokbet_vfinal_final.py
-# GROKBET vFINAL – LOCKED
+# grokbet_vfinal_final_corrected.py
+# GROKBET vFINAL – FINAL CORRECTED
 # 
 # Core Principle: Odds Favorite + Smart Override
 # 
-# Rules:
-# 1. Identify odds favorite for each market (1X2, Over/Under, BTTS)
-# 2. Check override triggers for goals markets
-# 3. Bet opposite of odds favorite if override active
-# 4. Otherwise bet odds favorite
+# Override Priority (highest to lowest):
+# 1. BOTH conv ≤ 10% AND both scored ≤ 1.0 → BTTS No (goals very unlikely)
+# 2. Gap > 0.8 + H2H ≥ 3 wins → Over 2.5
+# 3. Gap > 0.8 + H2H < 3 wins → BTTS No
+# 4. H2H ≥ 3 wins (any gap) → Over 2.5
+# 5. Total xG ≥ 3.0 AND (conv ≥ 15%) → Over 2.5 + BTTS Yes
 # 
-# Override Triggers:
-# - Gap > 0.8 AND H2H ≥ 3 wins → Over 2.5
-# - Gap > 0.8 AND H2H < 3 wins → BTTS No
-# - H2H ≥ 3 wins (any gap) → Over 2.5
-# - Total xG ≥ 3.0 AND (conv ≥ 15%) → Over 2.5 + BTTS Yes
+# If no override: bet odds favorite
 # 
 # Stake: 0.75% if override active, otherwise 0.5%
 
@@ -111,14 +108,6 @@ st.markdown("""
         margin: 0.75rem 0;
         border-color: #334155;
     }
-    .trigger-badge {
-        background: #1e3a2e;
-        border-radius: 6px;
-        padding: 0.25rem 0.5rem;
-        font-size: 0.7rem;
-        display: inline-block;
-        margin-right: 0.5rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,13 +123,14 @@ STRONG_GAP_THRESHOLD = 0.8
 H2H_WIN_THRESHOLD = 3
 HIGH_XG_THRESHOLD = 3.0
 HIGH_CONV_THRESHOLD = 15
+WEAK_CONV_THRESHOLD = 10
+WEAK_SCORED_THRESHOLD = 1.0
 
 # ============================================================================
 # CALCULATIONS
 # ============================================================================
 
 def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
-    """Efficiency = (Scored × Conv%) − (Conceded × ((100 − Form%)/100))"""
     conv_decimal = conv_pct / 100.0
     form_decimal = form_pct / 100.0
     weakness_multiplier = 1.0 - form_decimal
@@ -149,7 +139,6 @@ def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
     return attack_score - defense_penalty
 
 def get_odds_favorite(odds_home, odds_draw, odds_away):
-    """Return the 1X2 favorite and their odds"""
     min_odds = min(odds_home, odds_draw, odds_away)
     if min_odds == odds_home:
         return "Home", odds_home
@@ -158,24 +147,35 @@ def get_odds_favorite(odds_home, odds_draw, odds_away):
     else:
         return "Away", odds_away
 
-def check_override(gap_abs, h2h_wins_for_favorite, total_xg, home_conv, away_conv):
+def check_override(gap_abs, h2h_wins_for_favorite, total_xg, home_conv, away_conv, home_scored, away_scored):
     """
     Check override triggers for goals markets.
+    Priority order (highest to lowest):
+    1. Both conv ≤ 10% AND both scored ≤ 1.0 → BTTS No
+    2. Gap > 0.8 + H2H ≥ 3 wins → Over 2.5
+    3. Gap > 0.8 + H2H < 3 wins → BTTS No
+    4. H2H ≥ 3 wins (any gap) → Over 2.5
+    5. xG ≥ 3.0 + conv ≥ 15% → Over 2.5 + BTTS Yes
     Returns: (override_type, override_reason, bet_over, bet_btts_yes)
     """
-    # Trigger 1: Gap > 0.8 AND H2H ≥ 3 wins → Over 2.5
+    # PRIORITY 1: Both weak attacks → BTTS No
+    if (home_conv <= WEAK_CONV_THRESHOLD and away_conv <= WEAK_CONV_THRESHOLD and
+        home_scored <= WEAK_SCORED_THRESHOLD and away_scored <= WEAK_SCORED_THRESHOLD):
+        return "btts_no", f"Both conv ≤ 10% ({home_conv}%/{away_conv}%) AND both scored ≤ 1.0 ({home_scored:.2f}/{away_scored:.2f}) → goals unlikely", False, False
+    
+    # PRIORITY 2: Gap > 0.8 + H2H ≥ 3 wins → Over 2.5
     if gap_abs > STRONG_GAP_THRESHOLD and h2h_wins_for_favorite >= H2H_WIN_THRESHOLD:
         return "over", f"Gap {gap_abs:.3f} > 0.8 AND H2H {h2h_wins_for_favorite} wins", True, False
     
-    # Trigger 2: Gap > 0.8 AND H2H < 3 wins → BTTS No
+    # PRIORITY 3: Gap > 0.8 + H2H < 3 wins → BTTS No
     if gap_abs > STRONG_GAP_THRESHOLD and h2h_wins_for_favorite < H2H_WIN_THRESHOLD:
         return "btts_no", f"Gap {gap_abs:.3f} > 0.8 BUT H2H only {h2h_wins_for_favorite} wins", False, False
     
-    # Trigger 3: H2H ≥ 3 wins (any gap) → Over 2.5
+    # PRIORITY 4: H2H ≥ 3 wins (any gap) → Over 2.5
     if h2h_wins_for_favorite >= H2H_WIN_THRESHOLD:
         return "over", f"H2H {h2h_wins_for_favorite} wins", True, False
     
-    # Trigger 4: Total xG ≥ 3.0 AND (conv ≥ 15%) → Over 2.5 + BTTS Yes
+    # PRIORITY 5: High xG + high conv → Over 2.5 + BTTS Yes
     if total_xg >= HIGH_XG_THRESHOLD and (home_conv >= HIGH_CONV_THRESHOLD or away_conv >= HIGH_CONV_THRESHOLD):
         high_conv_team = "Home" if home_conv >= HIGH_CONV_THRESHOLD else "Away"
         return "both", f"xG {total_xg:.2f} ≥ 3.0 AND {high_conv_team} conv {max(home_conv, away_conv)}% ≥ 15%", True, True
@@ -211,9 +211,6 @@ def get_best_bet(data, odds):
     efficiency_gap = home_efficiency - away_efficiency
     gap_abs = abs(efficiency_gap)
     
-    # Form difference
-    form_diff = abs(home_form - away_form)
-    
     # Get 1X2 favorite
     favorite_direction, favorite_odds = get_odds_favorite(odds['home'], odds['draw'], odds['away'])
     
@@ -230,7 +227,7 @@ def get_best_bet(data, odds):
     
     # Check override for goals markets
     override_type, override_reason, bet_over, bet_btts_yes = check_override(
-        gap_abs, h2h_wins_for_favorite, total_xg, home_conv, away_conv
+        gap_abs, h2h_wins_for_favorite, total_xg, home_conv, away_conv, home_scored, away_scored
     )
     
     override_active = override_type is not None
@@ -247,6 +244,7 @@ def get_best_bet(data, odds):
             "stake": stake,
             "type": "1X2",
             "override": False,
+            "priority": 3,
             "reason": f"Odds favorite at {favorite_odds}"
         })
     
@@ -258,12 +256,12 @@ def get_best_bet(data, odds):
             "stake": "0.5%",
             "type": "Draw",
             "override": False,
+            "priority": 3,
             "reason": f"Small gap ({efficiency_gap:+.3f}) + Draw odds ≥ {DRAW_MIN_ODDS}"
         })
     
     # ========== OVER / UNDER 2.5 ==========
     if bet_over:
-        # Override: bet Over 2.5 (opposite of odds favorite)
         stake = "0.75%"
         recommendations.append({
             "name": "Over 2.5 Goals",
@@ -271,11 +269,10 @@ def get_best_bet(data, odds):
             "stake": stake,
             "type": "O/U",
             "override": True,
-            "priority": 1,  # High priority
+            "priority": 1,
             "reason": f"Override: {override_reason} → betting Over 2.5"
         })
     else:
-        # No override: bet odds favorite for Over/Under
         if odds['over'] <= odds['under'] and odds['over'] <= ODDS_THRESHOLD_GOALS:
             stake = "0.5%"
             recommendations.append({
@@ -301,7 +298,6 @@ def get_best_bet(data, odds):
     
     # ========== BTTS YES / NO ==========
     if bet_btts_yes:
-        # Override: bet BTTS Yes (opposite of odds favorite)
         stake = "0.75%"
         recommendations.append({
             "name": "BTTS Yes",
@@ -313,7 +309,6 @@ def get_best_bet(data, odds):
             "reason": f"Override: {override_reason} → betting BTTS Yes"
         })
     elif override_type == "btts_no":
-        # Override: bet BTTS No (opposite of odds favorite)
         stake = "0.75%"
         recommendations.append({
             "name": "BTTS No",
@@ -325,7 +320,6 @@ def get_best_bet(data, odds):
             "reason": f"Override: {override_reason} → betting BTTS No"
         })
     else:
-        # No override: bet odds favorite for BTTS
         if odds['btts_yes'] <= odds['btts_no'] and odds['btts_yes'] <= ODDS_THRESHOLD_GOALS:
             stake = "0.5%"
             recommendations.append({
@@ -349,8 +343,8 @@ def get_best_bet(data, odds):
                 "reason": f"Odds favorite at {odds['btts_no']}"
             })
     
-    # Sort: priority 1 first (overrides), then by odds
-    recommendations.sort(key=lambda x: (x.get('priority', 3), x['odds']))
+    # Sort by priority (lower number = higher priority)
+    recommendations.sort(key=lambda x: x.get('priority', 3))
     
     return {
         "home_team": home_team,
@@ -364,9 +358,10 @@ def get_best_bet(data, odds):
         "h2h_away": h2h_away,
         "home_conv": home_conv,
         "away_conv": away_conv,
+        "home_scored": home_scored,
+        "away_scored": away_scored,
         "efficiency_gap": efficiency_gap,
         "gap_abs": gap_abs,
-        "form_diff": form_diff,
         "favorite_direction": favorite_direction,
         "favorite_odds": favorite_odds,
         "override_active": override_active,
@@ -384,7 +379,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet vFinal</h1>
-        <p>Odds Favorite + Smart Override | Locked & Final</p>
+        <p>Odds Favorite + Smart Override | FINAL CORRECTED</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -505,21 +500,19 @@ def main():
             
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
-            # Header
             st.markdown(f"### 🎯 GrokBet vFinal")
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
-            # KEY DATA
             st.markdown("**📊 KEY DATA:**")
             st.markdown(f"xG: {result['home_xg']:.2f} | {result['away_xg']:.2f} | Total {result['total_xg']:.2f}")
             st.markdown(f"Form: {home_form}% | {away_form}%")
             st.markdown(f"H2H: {h2h_home}-{h2h_draws}-{h2h_away}")
             st.markdown(f"Conv: {home_conv}% | {away_conv}%")
+            st.markdown(f"Scored: {home_scored:.2f} | {away_scored:.2f}")
             
             st.markdown("---")
             
-            # EFFICIENCY GAP
             st.markdown("**⚡ EFFICIENCY GAP:**")
             gap_color = "🟢" if result['efficiency_gap'] > 0 else "🔴"
             fav_team = home_team if result['efficiency_gap'] > 0 else away_team
@@ -527,24 +520,20 @@ def main():
             
             st.markdown("---")
             
-            # OVERRIDE STATUS
             if result['override_active']:
                 st.markdown(f"""
                 <div class="result-override">
                     <strong>⚠️ OVERRIDE ACTIVE</strong><br>
-                    {result['override_reason']}<br>
-                    → Goals markets betting opposite of odds favorite
+                    {result['override_reason']}
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.markdown("✅ **No override** — betting odds favorite for goals markets")
+                st.markdown("✅ **No override** — betting odds favorite")
             
             st.markdown("---")
             
-            # BEST BETS
             if result['has_bet']:
                 primary = result['recommendations'][0]
-                
                 override_badge = " (OVERRIDE)" if primary['override'] else ""
                 st.markdown(f"""
                 <div class="result-primary">
@@ -555,7 +544,6 @@ def main():
                 """, unsafe_allow_html=True)
                 st.markdown(f"**Reason:** {primary['reason']}")
                 
-                # Secondary bets
                 if len(result['recommendations']) > 1:
                     st.markdown("---")
                     st.markdown("**⚽ SECONDARY OPTIONS:**")
@@ -563,15 +551,11 @@ def main():
                         override_badge = " (OVERRIDE)" if bet['override'] else ""
                         st.markdown(f"• {bet['name']}{override_badge} at {bet['odds']:.2f} – Stake {bet['stake']}")
                 
-                # VERDICT
                 st.markdown("---")
                 if result['override_active']:
-                    verdict = f"Override active: {result['override_reason']}"
+                    st.markdown(f"**📝 VERDICT:** Override active: {result['override_reason']}")
                 else:
-                    verdict = "No override. Betting odds favorite in all markets."
-                
-                st.markdown(f"**📝 VERDICT:** {verdict}")
-                
+                    st.markdown("**📝 VERDICT:** No override. Betting odds favorite in all markets.")
             else:
                 st.markdown("""
                 <div class="result-skip">
@@ -582,9 +566,8 @@ def main():
             
             st.markdown('</div>', unsafe_allow_html=True)
     
-    # Footer
     st.markdown("---")
-    st.caption("🎯 **GrokBet vFinal** | Odds Favorite + Smart Override | Locked & Final | No More Changes")
+    st.caption("🎯 **GrokBet vFinal** | Odds Favorite + Smart Override | FINAL CORRECTED | No More Changes")
 
 if __name__ == "__main__":
     main()
