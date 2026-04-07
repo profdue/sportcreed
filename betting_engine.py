@@ -1,17 +1,15 @@
-# grokbet_vfinal_complete.py
-# GROKBET vFINAL – COMPLETE LOGIC
+# grokbet_vfinal_rebuilt.py
+# GROKBET vFINAL – REBUILT LOCK SYSTEM
 # 
-# This is the final, locked version.
-# No more changes.
+# No single factor triggers a lock.
+# Every lock requires 2-3 independent data points agreeing.
 # 
-# Logic Flow:
-# 1. Calculate xG and Efficiency Gap
-# 2. Check LOCK conditions (5 locks, 100% proven)
-# 3. If LOCK → Bet LOCK at 1.0% stake
-# 4. If NO LOCK → Fallback to odds favorite at 0.5% stake
-# 5. Add 1X2 bets (odds favorite ≤ 2.00)
-# 6. Add informational warnings
-# 7. Output best bet + secondary options + verdict
+# LOCK #1: Low-Scoring (BTTS No / Under 2.5)
+# LOCK #2: High-Scoring (BTTS Yes / Over 2.5)
+# LOCK #3: Winner (1X2)
+# LOCK #4: Draw (Special case)
+# 
+# Fallback: Odds favorite when no lock (0.5% stake)
 
 import streamlit as st
 from datetime import datetime
@@ -150,18 +148,39 @@ st.markdown("""
 ODDS_THRESHOLD_GOALS = 2.00
 ODDS_THRESHOLD_1X2 = 2.00
 DRAW_MIN_ODDS = 3.00
-SMALL_GAP_THRESHOLD = 0.4
 
-# Lock thresholds
-WEAK_CONV_THRESHOLD = 10
-WEAK_SCORED_THRESHOLD = 1.2
-ELITE_DEFENSE_THRESHOLD = 1.0
-HIGH_FORM_THRESHOLD = 60
+# Lock #1: Low-Scoring thresholds
+WEAK_CONV = 10
+WEAK_SCORED = 1.2
+ELITE_ATTACK_SCORED = 1.5
+LOW_XG_THRESHOLD = 2.5
+ELITE_DEFENSE_CONCEDED = 1.0
+HIGH_FORM_DEFENSE = 60
+
+# Lock #2: High-Scoring thresholds
 HIGH_XG_THRESHOLD = 3.0
-HIGH_CONV_THRESHOLD = 15
+GOOD_CONV = 11
+ELITE_DEFENSE_WARNING = 0.8
+ALT_HIGH_XG = 2.8
 H2H_WIN_THRESHOLD = 3
-HIGH_ATTACK_FORM_THRESHOLD = 80
-ELITE_DEFENSE_WARNING_THRESHOLD = 0.8
+MIN_CONV_ALT = 10
+TERRIBLE_FORM_THRESHOLD = 25
+
+# Lock #3: Winner thresholds
+POSITIVE_GAP = 0
+HOME_FORM_THRESHOLD = 60
+H2H_HOME_MIN = 2
+HOME_SCORED_MIN = 1.5
+NEGATIVE_GAP = 0
+AWAY_FORM_THRESHOLD = 60
+H2H_AWAY_MIN = 2
+AWAY_SCORED_MIN = 1.5
+
+# Lock #4: Draw thresholds
+SMALL_GAP_MAX = 0.3
+BALANCED_FORM_MIN = 40
+BALANCED_FORM_MAX = 60
+DRAW_XG_MAX = 2.5
 
 # ============================================================================
 # CALCULATIONS
@@ -186,71 +205,138 @@ def get_odds_favorite(odds_home, odds_draw, odds_away):
     else:
         return "Away", odds_away
 
-def check_lock_conditions(home_team, away_team, home_conv, away_conv, home_scored, away_scored, 
-                          home_conceded, away_conceded, home_form, away_form, total_xg, h2h_wins_for_favorite):
+def check_lock_conditions(data):
     """
-    Check all lock conditions (100% proven patterns)
-    Returns: (lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under, warnings)
+    Check all lock conditions (multiple factors required)
+    Returns: (lock_type, lock_reason, bets, stake)
     """
-    warnings = []
+    home_team = data['home_team']
+    away_team = data['away_team']
+    home_scored = data['home_scored']
+    home_conceded = data['home_conceded']
+    away_scored = data['away_scored']
+    away_conceded = data['away_conceded']
+    home_form = data['home_form']
+    away_form = data['away_form']
+    home_conv = data.get('home_conv', 10)
+    away_conv = data.get('away_conv', 10)
+    h2h_home = data.get('h2h_home', 0)
+    h2h_away = data.get('h2h_away', 0)
+    total_xg = data['total_xg']
+    efficiency_gap = data['efficiency_gap']
+    odds = data['odds']
     
-    # LOCK #1: Weak Attack → BTTS No
-    if home_conv <= WEAK_CONV_THRESHOLD and home_scored <= WEAK_SCORED_THRESHOLD:
-        return "btts_no", f"LOCK #1: {home_team} weak attack (conv {home_conv}%, scored {home_scored:.2f}) → BTTS No", False, False, True, False, warnings
-    if away_conv <= WEAK_CONV_THRESHOLD and away_scored <= WEAK_SCORED_THRESHOLD:
-        return "btts_no", f"LOCK #1: {away_team} weak attack (conv {away_conv}%, scored {away_scored:.2f}) → BTTS No", False, False, True, False, warnings
+    bets = []
     
-    # LOCK #2: Elite Defense → BTTS No
-    if home_conceded <= ELITE_DEFENSE_THRESHOLD and home_form >= HIGH_FORM_THRESHOLD:
-        return "btts_no", f"LOCK #2: {home_team} elite defense (conceded {home_conceded:.2f}) + good form ({home_form}%) → BTTS No", False, False, True, False, warnings
-    if away_conceded <= ELITE_DEFENSE_THRESHOLD and away_form >= HIGH_FORM_THRESHOLD:
-        return "btts_no", f"LOCK #2: {away_team} elite defense (conceded {away_conceded:.2f}) + good form ({away_form}%) → BTTS No", False, False, True, False, warnings
+    # ========== LOCK #1: Low-Scoring (BTTS No / Under 2.5) ==========
+    # Path A: Weak attack + opponent not elite + low xG
+    weak_attack_home = home_conv <= WEAK_CONV and home_scored <= WEAK_SCORED
+    weak_attack_away = away_conv <= WEAK_CONV and away_scored <= WEAK_SCORED
+    opponent_not_elite_home = away_scored <= ELITE_ATTACK_SCORED
+    opponent_not_elite_away = home_scored <= ELITE_ATTACK_SCORED
+    low_xg = total_xg <= LOW_XG_THRESHOLD
     
-    # LOCK #3: High xG → BTTS Yes + Over 2.5
-    if total_xg >= HIGH_XG_THRESHOLD:
-        # Add warning if elite defense present
-        if home_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
-            warnings.append(f"⚠️ WARNING: {home_team} concedes {home_conceded:.2f} (elite defense) — may suppress goals")
-        if away_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
-            warnings.append(f"⚠️ WARNING: {away_team} concedes {away_conceded:.2f} (elite defense) — may suppress goals")
-        return "both", f"LOCK #3: Total xG {total_xg:.2f} ≥ 3.0 → BTTS Yes + Over 2.5", True, True, False, False, warnings
+    if (weak_attack_home and opponent_not_elite_home and low_xg):
+        bets.append({
+            "name": "BTTS No + Under 2.5",
+            "type": "low_scoring",
+            "reason": f"LOCK #1: {home_team} weak attack (conv {home_conv}%, scored {home_scored:.2f}) + opponent not elite + low xG ({total_xg:.2f})",
+            "bets": ["BTTS No", "Under 2.5"]
+        })
+    elif (weak_attack_away and opponent_not_elite_away and low_xg):
+        bets.append({
+            "name": "BTTS No + Under 2.5",
+            "type": "low_scoring",
+            "reason": f"LOCK #1: {away_team} weak attack (conv {away_conv}%, scored {away_scored:.2f}) + opponent not elite + low xG ({total_xg:.2f})",
+            "bets": ["BTTS No", "Under 2.5"]
+        })
     
-    # LOCK #4: H2H Dominance → BTTS Yes + Over 2.5
-    if h2h_wins_for_favorite >= H2H_WIN_THRESHOLD:
-        return "both", f"LOCK #4: H2H {h2h_wins_for_favorite} wins → BTTS Yes + Over 2.5", True, True, False, False, warnings
+    # Path B: Elite defense + opponent weak + low xG
+    elite_defense_home = home_conceded <= ELITE_DEFENSE_CONCEDED and home_form >= HIGH_FORM_DEFENSE
+    elite_defense_away = away_conceded <= ELITE_DEFENSE_CONCEDED and away_form >= HIGH_FORM_DEFENSE
+    opponent_weak_home = away_scored <= WEAK_SCORED
+    opponent_weak_away = home_scored <= WEAK_SCORED
     
-    # LOCK #5: High xG + High Conv → BTTS Yes + Over 2.5
-    if total_xg >= HIGH_XG_THRESHOLD and (home_conv >= HIGH_CONV_THRESHOLD or away_conv >= HIGH_CONV_THRESHOLD):
-        high_conv_team = "Home" if home_conv >= HIGH_CONV_THRESHOLD else "Away"
-        high_conv_value = home_conv if home_conv >= HIGH_CONV_THRESHOLD else away_conv
-        return "both", f"LOCK #5: xG {total_xg:.2f} ≥ 3.0 AND {high_conv_team} conv {high_conv_value}% ≥ 15% → BTTS Yes + Over 2.5", True, True, False, False, warnings
+    if (elite_defense_home and opponent_weak_home and low_xg):
+        bets.append({
+            "name": "BTTS No + Under 2.5",
+            "type": "low_scoring",
+            "reason": f"LOCK #1: {home_team} elite defense (conceded {home_conceded:.2f}, form {home_form}%) + weak opponent + low xG ({total_xg:.2f})",
+            "bets": ["BTTS No", "Under 2.5"]
+        })
+    elif (elite_defense_away and opponent_weak_away and low_xg):
+        bets.append({
+            "name": "BTTS No + Under 2.5",
+            "type": "low_scoring",
+            "reason": f"LOCK #1: {away_team} elite defense (conceded {away_conceded:.2f}, form {away_form}%) + weak opponent + low xG ({total_xg:.2f})",
+            "bets": ["BTTS No", "Under 2.5"]
+        })
     
-    return None, None, False, False, False, False, warnings
-
-def get_warnings(home_team, away_team, home_conv, away_conv, home_scored, away_scored, 
-                 home_conceded, away_conceded, home_form, away_form):
-    """Get informational warnings (not bets)"""
-    warnings = []
+    # ========== LOCK #2: High-Scoring (BTTS Yes / Over 2.5) ==========
+    # Path A: High xG + both good conv + no elite defense
+    both_good_conv = home_conv >= GOOD_CONV and away_conv >= GOOD_CONV
+    no_elite_defense = home_conceded >= ELITE_DEFENSE_WARNING and away_conceded >= ELITE_DEFENSE_WARNING
+    high_xg = total_xg >= HIGH_XG_THRESHOLD
     
-    # Warning P1: Weak team cannot score 2+ goals
-    if home_conv <= WEAK_CONV_THRESHOLD and home_scored <= WEAK_SCORED_THRESHOLD:
-        warnings.append(f"⚠️ NOTE: {home_team} (conv {home_conv}%, scored {home_scored:.2f}) historically cannot score 2+ goals")
-    if away_conv <= WEAK_CONV_THRESHOLD and away_scored <= WEAK_SCORED_THRESHOLD:
-        warnings.append(f"⚠️ NOTE: {away_team} (conv {away_conv}%, scored {away_scored:.2f}) historically cannot score 2+ goals")
+    if high_xg and both_good_conv and no_elite_defense:
+        bets.append({
+            "name": "BTTS Yes + Over 2.5",
+            "type": "high_scoring",
+            "reason": f"LOCK #2: High xG ({total_xg:.2f}) + both good conv ({home_conv}%/{away_conv}%) + no elite defense",
+            "bets": ["BTTS Yes", "Over 2.5"]
+        })
     
-    # Warning P2: Elite defense may suppress goals
-    if home_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
-        warnings.append(f"⚠️ NOTE: {home_team} concedes {home_conceded:.2f} (elite defense) — may suppress opposition goals")
-    if away_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
-        warnings.append(f"⚠️ NOTE: {away_team} concedes {away_conceded:.2f} (elite defense) — may suppress opposition goals")
+    # Path B: Decent xG + H2H dominance + decent conv + not terrible form
+    decent_xg = total_xg >= ALT_HIGH_XG
+    h2h_dominance = (h2h_home >= H2H_WIN_THRESHOLD) or (h2h_away >= H2H_WIN_THRESHOLD)
+    decent_conv = home_conv >= MIN_CONV_ALT and away_conv >= MIN_CONV_ALT
+    not_terrible_form = home_form > TERRIBLE_FORM_THRESHOLD and away_form > TERRIBLE_FORM_THRESHOLD
     
-    # Warning P3: High form team may overperform
-    if home_form >= HIGH_ATTACK_FORM_THRESHOLD and home_conv >= WEAK_CONV_THRESHOLD:
-        warnings.append(f"⚠️ NOTE: {home_team} has high form ({home_form}%) — may overperform expectations")
-    if away_form >= HIGH_ATTACK_FORM_THRESHOLD and away_conv >= WEAK_CONV_THRESHOLD:
-        warnings.append(f"⚠️ NOTE: {away_team} has high form ({away_form}%) — may overperform expectations")
+    if decent_xg and h2h_dominance and decent_conv and not_terrible_form:
+        bets.append({
+            "name": "BTTS Yes + Over 2.5",
+            "type": "high_scoring",
+            "reason": f"LOCK #2: xG {total_xg:.2f} + H2H dominance + both conv ≥10% + form not terrible",
+            "bets": ["BTTS Yes", "Over 2.5"]
+        })
     
-    return warnings
+    # ========== LOCK #3: Winner (1X2) ==========
+    # Home Win
+    if efficiency_gap > POSITIVE_GAP and home_form >= HOME_FORM_THRESHOLD:
+        if h2h_home >= H2H_HOME_MIN or home_scored >= HOME_SCORED_MIN:
+            bets.append({
+                "name": f"{home_team} Win",
+                "type": "winner",
+                "reason": f"LOCK #3: Positive gap ({efficiency_gap:+.3f}) + home form {home_form}% + H2H/scoring advantage",
+                "bets": [f"{home_team} Win"]
+            })
+    
+    # Away Win
+    if efficiency_gap < NEGATIVE_GAP and away_form >= AWAY_FORM_THRESHOLD:
+        if h2h_away >= H2H_AWAY_MIN or away_scored >= AWAY_SCORED_MIN:
+            bets.append({
+                "name": f"{away_team} Win",
+                "type": "winner",
+                "reason": f"LOCK #3: Negative gap ({efficiency_gap:+.3f}) + away form {away_form}% + H2H/scoring advantage",
+                "bets": [f"{away_team} Win"]
+            })
+    
+    # ========== LOCK #4: Draw ==========
+    small_gap = abs(efficiency_gap) <= SMALL_GAP_MAX
+    balanced_form = (home_form >= BALANCED_FORM_MIN and home_form <= BALANCED_FORM_MAX and
+                     away_form >= BALANCED_FORM_MIN and away_form <= BALANCED_FORM_MAX)
+    low_xg_draw = total_xg <= DRAW_XG_MAX
+    good_draw_odds = odds.get('draw', 0) >= DRAW_MIN_ODDS
+    
+    if small_gap and balanced_form and low_xg_draw and good_draw_odds:
+        bets.append({
+            "name": "Draw",
+            "type": "draw",
+            "reason": f"LOCK #4: Small gap ({abs(efficiency_gap):.3f}) + balanced form ({home_form}%/{away_form}%) + low xG ({total_xg:.2f}) + odds ≥ {DRAW_MIN_ODDS}",
+            "bets": ["Draw"]
+        })
+    
+    return bets
 
 # ============================================================================
 # MAIN PREDICTOR
@@ -281,95 +367,80 @@ def get_best_bet(data, odds):
     efficiency_gap = home_efficiency - away_efficiency
     gap_abs = abs(efficiency_gap)
     
-    # Get 1X2 favorite for H2H check
+    # Get 1X2 favorite
     favorite_direction, favorite_odds = get_odds_favorite(odds['home'], odds['draw'], odds['away'])
     
-    # Determine H2H wins for favorite
     if favorite_direction == "Home":
-        h2h_wins_for_favorite = h2h_home
         favored_team_name = home_team
     elif favorite_direction == "Away":
-        h2h_wins_for_favorite = h2h_away
         favored_team_name = away_team
     else:
-        h2h_wins_for_favorite = 0
         favored_team_name = "Draw"
     
-    # Check lock conditions
-    lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under, lock_warnings = check_lock_conditions(
-        home_team, away_team, home_conv, away_conv, home_scored, away_scored,
-        home_conceded, away_conceded, home_form, away_form, total_xg, h2h_wins_for_favorite
-    )
+    # Prepare data for lock check
+    lock_data = {
+        'home_team': home_team,
+        'away_team': away_team,
+        'home_scored': home_scored,
+        'home_conceded': home_conceded,
+        'away_scored': away_scored,
+        'away_conceded': away_conceded,
+        'home_form': home_form,
+        'away_form': away_form,
+        'home_conv': home_conv,
+        'away_conv': away_conv,
+        'h2h_home': h2h_home,
+        'h2h_away': h2h_away,
+        'total_xg': total_xg,
+        'efficiency_gap': efficiency_gap,
+        'odds': odds
+    }
     
-    # Get informational warnings
-    info_warnings = get_warnings(
-        home_team, away_team, home_conv, away_conv, home_scored, away_scored,
-        home_conceded, away_conceded, home_form, away_form
-    )
-    
-    # Combine warnings
-    all_warnings = lock_warnings + info_warnings
-    
-    is_lock = lock_type is not None
-    stake_lock = "1.0%" if is_lock else "0.5%"
+    # Check locks
+    lock_bets = check_lock_conditions(lock_data)
     
     # Build recommendations
     recommendations = []
     
-    # ========== GOALS MARKETS BASED ON LOCK ==========
-    if is_lock:
-        if lock_type == "btts_no":
-            if odds['btts_no'] <= ODDS_THRESHOLD_GOALS:
+    # Add lock bets first
+    for lock in lock_bets:
+        for bet_name in lock['bets']:
+            # Find odds for this bet
+            bet_odds = None
+            if bet_name == "BTTS No":
+                bet_odds = odds.get('btts_no', 0)
+            elif bet_name == "BTTS Yes":
+                bet_odds = odds.get('btts_yes', 0)
+            elif bet_name == "Over 2.5":
+                bet_odds = odds.get('over', 0)
+            elif bet_name == "Under 2.5":
+                bet_odds = odds.get('under', 0)
+            elif bet_name == f"{home_team} Win":
+                bet_odds = odds.get('home', 0)
+            elif bet_name == f"{away_team} Win":
+                bet_odds = odds.get('away', 0)
+            elif bet_name == "Draw":
+                bet_odds = odds.get('draw', 0)
+            
+            if bet_odds and bet_odds > 0:
                 recommendations.append({
-                    "name": "BTTS No",
-                    "odds": odds['btts_no'],
-                    "stake": stake_lock,
-                    "type": "BTTS",
+                    "name": bet_name,
+                    "odds": bet_odds,
+                    "stake": "1.0%",
+                    "type": lock['type'],
                     "is_lock": True,
                     "priority": 1,
-                    "reason": lock_reason
-                })
-            if odds['under'] <= ODDS_THRESHOLD_GOALS:
-                recommendations.append({
-                    "name": "Under 2.5 Goals",
-                    "odds": odds['under'],
-                    "stake": stake_lock,
-                    "type": "O/U",
-                    "is_lock": True,
-                    "priority": 1,
-                    "reason": lock_reason
-                })
-        
-        elif lock_type == "both":
-            if odds['over'] <= ODDS_THRESHOLD_GOALS:
-                recommendations.append({
-                    "name": "Over 2.5 Goals",
-                    "odds": odds['over'],
-                    "stake": stake_lock,
-                    "type": "O/U",
-                    "is_lock": True,
-                    "priority": 1,
-                    "reason": lock_reason
-                })
-            if odds['btts_yes'] <= ODDS_THRESHOLD_GOALS:
-                recommendations.append({
-                    "name": "BTTS Yes",
-                    "odds": odds['btts_yes'],
-                    "stake": stake_lock,
-                    "type": "BTTS",
-                    "is_lock": True,
-                    "priority": 1,
-                    "reason": lock_reason
+                    "reason": lock['reason']
                 })
     
-    else:
-        # NO LOCK: Bet odds favorite for goals markets
+    # If no locks, fallback to odds favorite
+    if not recommendations:
         # Over / Under 2.5
         if odds['over'] <= odds['under'] and odds['over'] <= ODDS_THRESHOLD_GOALS:
             recommendations.append({
                 "name": "Over 2.5 Goals",
                 "odds": odds['over'],
-                "stake": stake_lock,
+                "stake": "0.5%",
                 "type": "O/U",
                 "is_lock": False,
                 "priority": 2,
@@ -379,7 +450,7 @@ def get_best_bet(data, odds):
             recommendations.append({
                 "name": "Under 2.5 Goals",
                 "odds": odds['under'],
-                "stake": stake_lock,
+                "stake": "0.5%",
                 "type": "O/U",
                 "is_lock": False,
                 "priority": 2,
@@ -391,7 +462,7 @@ def get_best_bet(data, odds):
             recommendations.append({
                 "name": "BTTS Yes",
                 "odds": odds['btts_yes'],
-                "stake": stake_lock,
+                "stake": "0.5%",
                 "type": "BTTS",
                 "is_lock": False,
                 "priority": 2,
@@ -401,36 +472,24 @@ def get_best_bet(data, odds):
             recommendations.append({
                 "name": "BTTS No",
                 "odds": odds['btts_no'],
-                "stake": stake_lock,
+                "stake": "0.5%",
                 "type": "BTTS",
                 "is_lock": False,
                 "priority": 2,
                 "reason": f"NO LOCK: Odds favorite at {odds['btts_no']}"
             })
-    
-    # ========== 1X2 MARKET ==========
-    if favorite_direction != "Draw" and favorite_odds <= ODDS_THRESHOLD_1X2:
-        recommendations.append({
-            "name": f"{favored_team_name} Win",
-            "odds": favorite_odds,
-            "stake": "0.5%",
-            "type": "1X2",
-            "is_lock": False,
-            "priority": 3,
-            "reason": f"Odds favorite at {favorite_odds}"
-        })
-    
-    # ========== DRAW (small gap only) ==========
-    if gap_abs <= SMALL_GAP_THRESHOLD and odds['draw'] >= DRAW_MIN_ODDS:
-        recommendations.append({
-            "name": "Draw",
-            "odds": odds['draw'],
-            "stake": "0.5%",
-            "type": "Draw",
-            "is_lock": False,
-            "priority": 3,
-            "reason": f"Small gap ({efficiency_gap:+.3f}) + Draw odds ≥ {DRAW_MIN_ODDS}"
-        })
+        
+        # 1X2
+        if favorite_direction != "Draw" and favorite_odds <= ODDS_THRESHOLD_1X2:
+            recommendations.append({
+                "name": f"{favored_team_name} Win",
+                "odds": favorite_odds,
+                "stake": "0.5%",
+                "type": "1X2",
+                "is_lock": False,
+                "priority": 3,
+                "reason": f"NO LOCK: Odds favorite at {favorite_odds}"
+            })
     
     # Sort by priority
     recommendations.sort(key=lambda x: x.get('priority', 3))
@@ -453,10 +512,8 @@ def get_best_bet(data, odds):
         "away_conceded": away_conceded,
         "efficiency_gap": efficiency_gap,
         "gap_abs": gap_abs,
-        "is_lock": is_lock,
-        "lock_type": lock_type,
-        "lock_reason": lock_reason,
-        "warnings": all_warnings,
+        "has_lock": len(lock_bets) > 0,
+        "lock_bets": lock_bets,
         "recommendations": recommendations,
         "has_bet": len(recommendations) > 0
     }
@@ -469,7 +526,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet vFinal</h1>
-        <p>Complete Logic | 5 Locks (100%) | Odds Favorite Fallback (87%)</p>
+        <p>Rebuilt Lock System | Multiple Conditions Required | No Single Factor</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -612,24 +669,19 @@ def main():
             st.markdown("---")
             
             # LOCK / NO LOCK Indicator
-            if result['is_lock']:
+            if result['has_lock']:
                 st.markdown(f"""
                 <div class="result-lock">
-                    <strong>🔒 LOCK</strong> <span class="lock-badge">100% PROVEN</span><br>
-                    {result['lock_reason']}
+                    <strong>🔒 LOCK TRIGGERED</strong> <span class="lock-badge">MULTIPLE CONDITIONS</span>
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div class="result-nolock">
-                    <strong>⚠️ NO LOCK</strong> <span class="nolock-badge">ODDS FAVORITE</span><br>
-                    No lock condition met. Falling back to odds favorite.
+                    <strong>⚠️ NO LOCK</strong> <span class="nolock-badge">FALLBACK TO ODDS</span><br>
+                    No lock conditions met. Falling back to odds favorite.
                 </div>
                 """, unsafe_allow_html=True)
-            
-            # Warnings
-            for warning in result['warnings']:
-                st.markdown(f"<div class='warning-text'>{warning}</div>", unsafe_allow_html=True)
             
             st.markdown("---")
             
@@ -653,8 +705,8 @@ def main():
                         st.markdown(f"• {bet['name']}{lock_badge} at {bet['odds']:.2f} – Stake {bet['stake']}")
                 
                 st.markdown("---")
-                if result['is_lock']:
-                    st.markdown("**📝 VERDICT:** 🔒 LOCK bet — 100% proven pattern. High confidence.")
+                if result['has_lock']:
+                    st.markdown("**📝 VERDICT:** 🔒 LOCK bet — Multiple conditions confirmed. High confidence.")
                 else:
                     st.markdown("**📝 VERDICT:** ⚠️ NO LOCK — Betting odds favorite. Standard confidence (87% historical).")
             else:
@@ -668,7 +720,7 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.caption("🎯 **GrokBet vFinal** | Complete Logic | 5 Locks (100%) | NO LOCK → Odds Favorite (87%) | No More Changes")
+    st.caption("🎯 **GrokBet vFinal** | Rebuilt Lock System | Multiple Conditions Required | No Single Factor")
 
 if __name__ == "__main__":
     main()
