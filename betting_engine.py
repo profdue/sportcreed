@@ -1,18 +1,22 @@
-# grokbet_vfinal_complete.py
-# GROKBET vFINAL – COMPLETE LOGIC
+# grokbet_btts_no_filter.py
+# GROKBET – STRICT BTTS NO FILTER ONLY
 # 
-# LOCK #1: BTTS No (Multiple conditions required)
-# LOCK #2: High-Scoring (BTTS Yes / Over 2.5)
-# LOCK #3: Winner (1X2)
-# LOCK #4: Draw (Special case)
+# This is the only prediction.
+# No 1X2. No Over/Under. No other markets.
 # 
-# Fallback: Odds favorite when no lock (0.5% stake)
+# Conditions (ALL must be true):
+# 1. One team's final xG ≤ 0.50
+# 2. Model BTTS No probability ≥ 70%
+# 3. At least one team Scored Avg ≤ 1.10
+# 4. At least one team Conv % ≤ 11%
+# 5. Total xG unbalanced or low (difference ≥ 1.5 OR total ≤ 2.8)
 
 import streamlit as st
-from datetime import datetime
+import numpy as np
+from scipy.stats import poisson
 
 st.set_page_config(
-    page_title="GrokBet vFinal",
+    page_title="GrokBet - BTTS No Filter",
     page_icon="🎯",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -61,44 +65,16 @@ st.markdown("""
         border: 1px solid #334155;
         margin-top: 1rem;
     }
-    .result-lock-bttsno {
+    .result-bet {
         background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #10b981;
         padding: 0.75rem;
         border-radius: 8px;
         margin: 0.75rem 0;
     }
-    .result-lock-highscoring {
-        background: linear-gradient(135deg, #1e293b 0%, #1e3a4a 100%);
-        border-left: 4px solid #3b82f6;
-        padding: 0.75rem;
-        border-radius: 8px;
-        margin: 0.75rem 0;
-    }
-    .result-lock-winner {
-        background: linear-gradient(135deg, #1e293b 0%, #3e2a1e 100%);
-        border-left: 4px solid #f97316;
-        padding: 0.75rem;
-        border-radius: 8px;
-        margin: 0.75rem 0;
-    }
-    .result-lock-draw {
-        background: linear-gradient(135deg, #1e293b 0%, #2a3e4a 100%);
-        border-left: 4px solid #a855f7;
-        padding: 0.75rem;
-        border-radius: 8px;
-        margin: 0.75rem 0;
-    }
-    .result-nolock {
+    .result-skip {
         background: #1e293b;
         border-left: 4px solid #ef4444;
-        padding: 0.75rem;
-        border-radius: 8px;
-        margin: 0.75rem 0;
-    }
-    .result-primary {
-        background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
-        border-left: 4px solid #fbbf24;
         padding: 0.75rem;
         border-radius: 8px;
         margin: 0.75rem 0;
@@ -112,19 +88,15 @@ st.markdown("""
         font-size: 0.8rem;
         display: inline-block;
     }
-    .lock-badge {
-        background: #10b981;
-        color: #0f172a;
-        padding: 0.2rem 0.5rem;
-        border-radius: 6px;
-        font-weight: bold;
-        font-size: 0.7rem;
-        display: inline-block;
-        margin-left: 0.5rem;
-    }
     hr {
         margin: 0.75rem 0;
         border-color: #334155;
+    }
+    .condition-pass {
+        color: #10b981;
+    }
+    .condition-fail {
+        color: #ef4444;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -133,437 +105,126 @@ st.markdown("""
 # CONSTANTS
 # ============================================================================
 
-# Odds thresholds
-ODDS_THRESHOLD_GOALS = 2.00
-ODDS_THRESHOLD_1X2 = 2.00
-DRAW_MIN_ODDS = 3.00
+MIN_XG = 0.3
+BTTS_NO_MIN_PROB = 70.0  # percentage
+WEAK_SCORED_THRESHOLD = 1.10
+WEAK_CONV_THRESHOLD = 11
+XG_IMBALANCE_MIN = 1.5
+TOTAL_XG_MAX = 2.8
 
-# LOCK #1: BTTS No thresholds
-WEAK_CONV = 10
-WEAK_SCORED = 1.2
-ELITE_ATTACK_SCORED = 1.5
-LOW_XG_THRESHOLD = 2.5
-ELITE_DEFENSE_CONCEDED = 1.0
-HIGH_FORM_DEFENSE = 60
-
-# LOCK #2: High-Scoring thresholds
-HIGH_XG_THRESHOLD = 3.0
-GOOD_CONV = 11
-ELITE_DEFENSE_WARNING = 0.8
-ALT_HIGH_XG = 2.8
-H2H_WIN_THRESHOLD = 3
-MIN_CONV_ALT = 10
-TERRIBLE_FORM_THRESHOLD = 25
-
-# LOCK #3: Winner thresholds
-HOME_FORM_THRESHOLD = 60
-H2H_HOME_MIN = 2
-HOME_SCORED_MIN = 1.5
-AWAY_FORM_THRESHOLD = 60
-H2H_AWAY_MIN = 2
-AWAY_SCORED_MIN = 1.5
-
-# LOCK #4: Draw thresholds
-SMALL_GAP_MAX = 0.3
-BALANCED_FORM_MIN = 40
-BALANCED_FORM_MAX = 60
-DRAW_XG_MAX = 2.5
+# Adjustment weights
+FORM_WEIGHT = 0.4
+H2H_WIN_WEIGHT = 0.25
+H2H_DRAW_WEIGHT = 0.1
+GD_WEIGHT = 0.5
+TOP_SCORER_WEIGHT = 0.08
+CONV_WEIGHT = 0.6
 
 # ============================================================================
 # CALCULATIONS
 # ============================================================================
 
-def calculate_efficiency(scored_avg, conceded_avg, form_pct, conv_pct):
-    """Efficiency = (Scored × Conv%) − (Conceded × ((100 − Form%)/100))"""
-    conv_decimal = conv_pct / 100.0
-    form_decimal = form_pct / 100.0
-    weakness_multiplier = 1.0 - form_decimal
-    attack_score = scored_avg * conv_decimal
-    defense_penalty = conceded_avg * weakness_multiplier
-    return attack_score - defense_penalty
+def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
+                 home_form, away_form, h2h_home, h2h_draws, h2h_away,
+                 home_gd, away_gd, home_top, away_top, home_conv, away_conv):
+    
+    # Base xG
+    xG_home_base = (home_scored + away_conceded) / 2.0
+    xG_away_base = (away_scored + home_conceded) / 2.0
+    
+    # Adjustments
+    form_adj = (home_form - away_form) / 100.0 * FORM_WEIGHT
+    h2h_adj = ((h2h_home - h2h_away) * H2H_WIN_WEIGHT) + (h2h_draws * H2H_DRAW_WEIGHT)
+    gd_adj = (home_gd - away_gd) / 20.0 * GD_WEIGHT
+    top_adj = (home_top - away_top) * TOP_SCORER_WEIGHT
+    conv_adj = (home_conv - away_conv) / 100.0 * CONV_WEIGHT
+    
+    total_adj = form_adj + h2h_adj + gd_adj + top_adj + conv_adj
+    
+    xG_home = xG_home_base + total_adj
+    xG_away = xG_away_base - total_adj
+    
+    # Clamp to minimum
+    xG_home = max(xG_home, MIN_XG)
+    xG_away = max(xG_away, MIN_XG)
+    
+    return xG_home, xG_away
 
-def get_odds_favorite(odds_home, odds_draw, odds_away):
-    """Return the 1X2 favorite and their odds"""
-    min_odds = min(odds_home, odds_draw, odds_away)
-    if min_odds == odds_home:
-        return "Home", odds_home
-    elif min_odds == odds_draw:
-        return "Draw", odds_draw
-    else:
-        return "Away", odds_away
+def calculate_btts_prob(xG_home, xG_away, max_goals=8):
+    """Calculate BTTS Yes and No probabilities using Poisson"""
+    
+    home_probs = [poisson.pmf(i, xG_home) for i in range(max_goals + 1)]
+    away_probs = [poisson.pmf(i, xG_away) for i in range(max_goals + 1)]
+    
+    # Normalize
+    home_sum = sum(home_probs)
+    away_sum = sum(away_probs)
+    home_probs = [p / home_sum for p in home_probs]
+    away_probs = [p / away_sum for p in away_probs]
+    
+    btts_yes_prob = 0.0
+    
+    for h in range(1, max_goals + 1):
+        for a in range(1, max_goals + 1):
+            btts_yes_prob += home_probs[h] * away_probs[a]
+    
+    btts_no_prob = 1.0 - btts_yes_prob
+    
+    return btts_yes_prob * 100, btts_no_prob * 100
 
-def check_lock_conditions(data):
-    """
-    Check all lock conditions (multiple factors required)
-    Returns: list of lock bets with their type and details
-    """
-    home_team = data['home_team']
-    away_team = data['away_team']
-    home_scored = data['home_scored']
-    home_conceded = data['home_conceded']
-    away_scored = data['away_scored']
-    away_conceded = data['away_conceded']
-    home_form = data['home_form']
-    away_form = data['away_form']
-    home_conv = data.get('home_conv', 10)
-    away_conv = data.get('away_conv', 10)
-    h2h_home = data.get('h2h_home', 0)
-    h2h_away = data.get('h2h_away', 0)
-    total_xg = data['total_xg']
-    efficiency_gap = data['efficiency_gap']
-    odds = data['odds']
+def check_filter_conditions(home_scored, away_scored, home_conv, away_conv,
+                            xG_home, xG_away, btts_no_prob, total_xG):
+    """Check all 5 conditions for BTTS No bet"""
     
-    locks = []
+    conditions = []
     
-    # ========== LOCK #1: BTTS NO ==========
-    # Path A: Weak attack + opponent not elite + low xG
-    weak_attack_home = home_conv <= WEAK_CONV and home_scored <= WEAK_SCORED
-    weak_attack_away = away_conv <= WEAK_CONV and away_scored <= WEAK_SCORED
-    opponent_not_elite_home = away_scored <= ELITE_ATTACK_SCORED
-    opponent_not_elite_away = home_scored <= ELITE_ATTACK_SCORED
-    low_xg = total_xg <= LOW_XG_THRESHOLD
+    # Condition 1: One team xG ≤ 0.50
+    cond1 = xG_home <= 0.50 or xG_away <= 0.50
+    weak_xG_team = "Home" if xG_home <= 0.50 else "Away" if xG_away <= 0.50 else None
+    conditions.append({
+        "name": "One team xG ≤ 0.50",
+        "pass": cond1,
+        "detail": f"{weak_xG_team} xG = {min(xG_home, xG_away):.2f}" if cond1 else f"Lowest xG = {min(xG_home, xG_away):.2f}"
+    })
     
-    if (weak_attack_home and opponent_not_elite_home and low_xg):
-        locks.append({
-            "name": "BTTS No",
-            "secondary": "Under 2.5",
-            "type": "btts_no",
-            "type_name": "BTTS No",
-            "reason": f"LOCK #1: {home_team} weak attack (conv {home_conv}%, scored {home_scored:.2f}) + opponent not elite + low xG ({total_xg:.2f})",
-            "primary_bet": "BTTS No",
-            "secondary_bet": "Under 2.5",
-            "primary_odds_key": "btts_no",
-            "secondary_odds_key": "under"
-        })
-    elif (weak_attack_away and opponent_not_elite_away and low_xg):
-        locks.append({
-            "name": "BTTS No",
-            "secondary": "Under 2.5",
-            "type": "btts_no",
-            "type_name": "BTTS No",
-            "reason": f"LOCK #1: {away_team} weak attack (conv {away_conv}%, scored {away_scored:.2f}) + opponent not elite + low xG ({total_xg:.2f})",
-            "primary_bet": "BTTS No",
-            "secondary_bet": "Under 2.5",
-            "primary_odds_key": "btts_no",
-            "secondary_odds_key": "under"
-        })
+    # Condition 2: BTTS No probability ≥ 70%
+    cond2 = btts_no_prob >= BTTS_NO_MIN_PROB
+    conditions.append({
+        "name": f"BTTS No probability ≥ {BTTS_NO_MIN_PROB}%",
+        "pass": cond2,
+        "detail": f"{btts_no_prob:.1f}%"
+    })
     
-    # Path B: Elite defense + opponent weak + low xG
-    elite_defense_home = home_conceded <= ELITE_DEFENSE_CONCEDED and home_form >= HIGH_FORM_DEFENSE
-    elite_defense_away = away_conceded <= ELITE_DEFENSE_CONCEDED and away_form >= HIGH_FORM_DEFENSE
-    opponent_weak_home = away_scored <= WEAK_SCORED
-    opponent_weak_away = home_scored <= WEAK_SCORED
+    # Condition 3: At least one team Scored Avg ≤ 1.10
+    cond3 = home_scored <= WEAK_SCORED_THRESHOLD or away_scored <= WEAK_SCORED_THRESHOLD
+    weak_scored_team = "Home" if home_scored <= WEAK_SCORED_THRESHOLD else "Away" if away_scored <= WEAK_SCORED_THRESHOLD else None
+    conditions.append({
+        "name": f"Scored Avg ≤ {WEAK_SCORED_THRESHOLD}",
+        "pass": cond3,
+        "detail": f"{weak_scored_team} scored {min(home_scored, away_scored):.2f}" if cond3 else f"Lowest scored = {min(home_scored, away_scored):.2f}"
+    })
     
-    if (elite_defense_home and opponent_weak_home and low_xg):
-        locks.append({
-            "name": "BTTS No",
-            "secondary": "Under 2.5",
-            "type": "btts_no",
-            "type_name": "BTTS No",
-            "reason": f"LOCK #1: {home_team} elite defense (conceded {home_conceded:.2f}, form {home_form}%) + weak opponent + low xG ({total_xg:.2f})",
-            "primary_bet": "BTTS No",
-            "secondary_bet": "Under 2.5",
-            "primary_odds_key": "btts_no",
-            "secondary_odds_key": "under"
-        })
-    elif (elite_defense_away and opponent_weak_away and low_xg):
-        locks.append({
-            "name": "BTTS No",
-            "secondary": "Under 2.5",
-            "type": "btts_no",
-            "type_name": "BTTS No",
-            "reason": f"LOCK #1: {away_team} elite defense (conceded {away_conceded:.2f}, form {away_form}%) + weak opponent + low xG ({total_xg:.2f})",
-            "primary_bet": "BTTS No",
-            "secondary_bet": "Under 2.5",
-            "primary_odds_key": "btts_no",
-            "secondary_odds_key": "under"
-        })
+    # Condition 4: At least one team Conv % ≤ 11%
+    cond4 = home_conv <= WEAK_CONV_THRESHOLD or away_conv <= WEAK_CONV_THRESHOLD
+    weak_conv_team = "Home" if home_conv <= WEAK_CONV_THRESHOLD else "Away" if away_conv <= WEAK_CONV_THRESHOLD else None
+    conditions.append({
+        "name": f"Conv % ≤ {WEAK_CONV_THRESHOLD}%",
+        "pass": cond4,
+        "detail": f"{weak_conv_team} conv {min(home_conv, away_conv)}%" if cond4 else f"Lowest conv = {min(home_conv, away_conv)}%"
+    })
     
-    # ========== LOCK #2: High-Scoring (BTTS Yes + Over 2.5) ==========
-    # Path A: High xG + both good conv + no elite defense
-    both_good_conv = home_conv >= GOOD_CONV and away_conv >= GOOD_CONV
-    no_elite_defense = home_conceded >= ELITE_DEFENSE_WARNING and away_conceded >= ELITE_DEFENSE_WARNING
-    high_xg = total_xg >= HIGH_XG_THRESHOLD
+    # Condition 5: Total xG unbalanced or low
+    xG_diff = abs(xG_home - xG_away)
+    cond5 = xG_diff >= XG_IMBALANCE_MIN or total_xG <= TOTAL_XG_MAX
+    conditions.append({
+        "name": "xG unbalanced or low",
+        "pass": cond5,
+        "detail": f"Diff = {xG_diff:.2f}, Total = {total_xG:.2f}"
+    })
     
-    if high_xg and both_good_conv and no_elite_defense:
-        locks.append({
-            "name": "BTTS Yes + Over 2.5",
-            "secondary": None,
-            "type": "high_scoring",
-            "type_name": "High-Scoring",
-            "reason": f"LOCK #2: High xG ({total_xg:.2f}) + both good conv ({home_conv}%/{away_conv}%) + no elite defense",
-            "primary_bet": "BTTS Yes",
-            "secondary_bet": "Over 2.5",
-            "primary_odds_key": "btts_yes",
-            "secondary_odds_key": "over"
-        })
+    all_pass = cond1 and cond2 and cond3 and cond4 and cond5
     
-    # Path B: Decent xG + H2H dominance + decent conv + not terrible form
-    decent_xg = total_xg >= ALT_HIGH_XG
-    h2h_dominance = (h2h_home >= H2H_WIN_THRESHOLD) or (h2h_away >= H2H_WIN_THRESHOLD)
-    decent_conv = home_conv >= MIN_CONV_ALT and away_conv >= MIN_CONV_ALT
-    not_terrible_form = home_form > TERRIBLE_FORM_THRESHOLD and away_form > TERRIBLE_FORM_THRESHOLD
-    
-    if decent_xg and h2h_dominance and decent_conv and not_terrible_form:
-        locks.append({
-            "name": "BTTS Yes + Over 2.5",
-            "secondary": None,
-            "type": "high_scoring",
-            "type_name": "High-Scoring",
-            "reason": f"LOCK #2: xG {total_xg:.2f} + H2H dominance + both conv ≥10% + form not terrible",
-            "primary_bet": "BTTS Yes",
-            "secondary_bet": "Over 2.5",
-            "primary_odds_key": "btts_yes",
-            "secondary_odds_key": "over"
-        })
-    
-    # ========== LOCK #3: Winner (1X2) ==========
-    # Home Win
-    if efficiency_gap > 0 and home_form >= HOME_FORM_THRESHOLD:
-        if h2h_home >= H2H_HOME_MIN or home_scored >= HOME_SCORED_MIN:
-            locks.append({
-                "name": f"{home_team} Win",
-                "secondary": None,
-                "type": "winner",
-                "type_name": "Winner",
-                "reason": f"LOCK #3: Positive gap ({efficiency_gap:+.3f}) + home form {home_form}% + H2H/scoring advantage",
-                "primary_bet": f"{home_team} Win",
-                "secondary_bet": None,
-                "primary_odds_key": "home",
-                "secondary_odds_key": None
-            })
-    
-    # Away Win
-    if efficiency_gap < 0 and away_form >= AWAY_FORM_THRESHOLD:
-        if h2h_away >= H2H_AWAY_MIN or away_scored >= AWAY_SCORED_MIN:
-            locks.append({
-                "name": f"{away_team} Win",
-                "secondary": None,
-                "type": "winner",
-                "type_name": "Winner",
-                "reason": f"LOCK #3: Negative gap ({efficiency_gap:+.3f}) + away form {away_form}% + H2H/scoring advantage",
-                "primary_bet": f"{away_team} Win",
-                "secondary_bet": None,
-                "primary_odds_key": "away",
-                "secondary_odds_key": None
-            })
-    
-    # ========== LOCK #4: Draw ==========
-    small_gap = abs(efficiency_gap) <= SMALL_GAP_MAX
-    balanced_form = (home_form >= BALANCED_FORM_MIN and home_form <= BALANCED_FORM_MAX and
-                     away_form >= BALANCED_FORM_MIN and away_form <= BALANCED_FORM_MAX)
-    low_xg_draw = total_xg <= DRAW_XG_MAX
-    good_draw_odds = odds.get('draw', 0) >= DRAW_MIN_ODDS
-    
-    if small_gap and balanced_form and low_xg_draw and good_draw_odds:
-        locks.append({
-            "name": "Draw",
-            "secondary": None,
-            "type": "draw",
-            "type_name": "Draw",
-            "reason": f"LOCK #4: Small gap ({abs(efficiency_gap):.3f}) + balanced form ({home_form}%/{away_form}%) + low xG ({total_xg:.2f}) + odds ≥ {DRAW_MIN_ODDS}",
-            "primary_bet": "Draw",
-            "secondary_bet": None,
-            "primary_odds_key": "draw",
-            "secondary_odds_key": None
-        })
-    
-    return locks
-
-# ============================================================================
-# MAIN PREDICTOR
-# ============================================================================
-
-def get_best_bet(data, odds):
-    home_team = data['home_team']
-    away_team = data['away_team']
-    home_scored = data['home_scored']
-    home_conceded = data['home_conceded']
-    away_scored = data['away_scored']
-    away_conceded = data['away_conceded']
-    home_form = data['home_form']
-    away_form = data['away_form']
-    home_conv = data.get('home_conv', 10)
-    away_conv = data.get('away_conv', 10)
-    h2h_home = data.get('h2h_home', 0)
-    h2h_away = data.get('h2h_away', 0)
-    
-    # Calculate xG
-    home_xg = (home_scored + away_conceded) / 2
-    away_xg = (away_scored + home_conceded) / 2
-    total_xg = home_xg + away_xg
-    
-    # Calculate Efficiency Gap
-    home_efficiency = calculate_efficiency(home_scored, home_conceded, home_form, home_conv)
-    away_efficiency = calculate_efficiency(away_scored, away_conceded, away_form, away_conv)
-    efficiency_gap = home_efficiency - away_efficiency
-    gap_abs = abs(efficiency_gap)
-    
-    # Get 1X2 favorite
-    favorite_direction, favorite_odds = get_odds_favorite(odds['home'], odds['draw'], odds['away'])
-    
-    if favorite_direction == "Home":
-        favored_team_name = home_team
-    elif favorite_direction == "Away":
-        favored_team_name = away_team
-    else:
-        favored_team_name = "Draw"
-    
-    # Prepare data for lock check
-    lock_data = {
-        'home_team': home_team,
-        'away_team': away_team,
-        'home_scored': home_scored,
-        'home_conceded': home_conceded,
-        'away_scored': away_scored,
-        'away_conceded': away_conceded,
-        'home_form': home_form,
-        'away_form': away_form,
-        'home_conv': home_conv,
-        'away_conv': away_conv,
-        'h2h_home': h2h_home,
-        'h2h_away': h2h_away,
-        'total_xg': total_xg,
-        'efficiency_gap': efficiency_gap,
-        'odds': odds
-    }
-    
-    # Check locks
-    locks = check_lock_conditions(lock_data)
-    
-    # Build recommendations
-    recommendations = []
-    active_lock_type = None
-    active_lock_name = None
-    active_lock_reason = None
-    
-    # Add lock bets first
-    for lock in locks:
-        active_lock_type = lock['type_name']
-        active_lock_name = lock['name']
-        active_lock_reason = lock['reason']
-        
-        # Add primary bet
-        bet_odds = odds.get(lock['primary_odds_key'], 0)
-        if bet_odds and bet_odds > 0:
-            recommendations.append({
-                "name": lock['primary_bet'],
-                "odds": bet_odds,
-                "stake": "1.0%",
-                "type": lock['type'],
-                "type_name": lock['type_name'],
-                "is_lock": True,
-                "priority": 1,
-                "reason": lock['reason']
-            })
-        
-        # Add secondary bet if exists
-        if lock['secondary_bet'] and lock['secondary_odds_key']:
-            sec_odds = odds.get(lock['secondary_odds_key'], 0)
-            if sec_odds and sec_odds > 0:
-                recommendations.append({
-                    "name": lock['secondary_bet'],
-                    "odds": sec_odds,
-                    "stake": "1.0%",
-                    "type": lock['type'],
-                    "type_name": lock['type_name'],
-                    "is_lock": True,
-                    "priority": 1,
-                    "reason": f"Secondary to: {lock['reason']}"
-                })
-    
-    # If no locks, fallback to odds favorite
-    if not recommendations:
-        # Over / Under 2.5
-        if odds['over'] <= odds['under'] and odds['over'] <= ODDS_THRESHOLD_GOALS:
-            recommendations.append({
-                "name": "Over 2.5 Goals",
-                "odds": odds['over'],
-                "stake": "0.5%",
-                "type": "fallback",
-                "type_name": "No Lock",
-                "is_lock": False,
-                "priority": 2,
-                "reason": f"NO LOCK: Odds favorite at {odds['over']}"
-            })
-        elif odds['under'] <= odds['over'] and odds['under'] <= ODDS_THRESHOLD_GOALS:
-            recommendations.append({
-                "name": "Under 2.5 Goals",
-                "odds": odds['under'],
-                "stake": "0.5%",
-                "type": "fallback",
-                "type_name": "No Lock",
-                "is_lock": False,
-                "priority": 2,
-                "reason": f"NO LOCK: Odds favorite at {odds['under']}"
-            })
-        
-        # BTTS Yes / No
-        if odds['btts_yes'] <= odds['btts_no'] and odds['btts_yes'] <= ODDS_THRESHOLD_GOALS:
-            recommendations.append({
-                "name": "BTTS Yes",
-                "odds": odds['btts_yes'],
-                "stake": "0.5%",
-                "type": "fallback",
-                "type_name": "No Lock",
-                "is_lock": False,
-                "priority": 2,
-                "reason": f"NO LOCK: Odds favorite at {odds['btts_yes']}"
-            })
-        elif odds['btts_no'] <= odds['btts_yes'] and odds['btts_no'] <= ODDS_THRESHOLD_GOALS:
-            recommendations.append({
-                "name": "BTTS No",
-                "odds": odds['btts_no'],
-                "stake": "0.5%",
-                "type": "fallback",
-                "type_name": "No Lock",
-                "is_lock": False,
-                "priority": 2,
-                "reason": f"NO LOCK: Odds favorite at {odds['btts_no']}"
-            })
-        
-        # 1X2
-        if favorite_direction != "Draw" and favorite_odds <= ODDS_THRESHOLD_1X2:
-            recommendations.append({
-                "name": f"{favored_team_name} Win",
-                "odds": favorite_odds,
-                "stake": "0.5%",
-                "type": "fallback",
-                "type_name": "No Lock",
-                "is_lock": False,
-                "priority": 3,
-                "reason": f"NO LOCK: Odds favorite at {favorite_odds}"
-            })
-    
-    # Sort by priority
-    recommendations.sort(key=lambda x: x.get('priority', 3))
-    
-    return {
-        "home_team": home_team,
-        "away_team": away_team,
-        "home_xg": home_xg,
-        "away_xg": away_xg,
-        "total_xg": total_xg,
-        "home_form": home_form,
-        "away_form": away_form,
-        "h2h_home": h2h_home,
-        "h2h_away": h2h_away,
-        "home_conv": home_conv,
-        "away_conv": away_conv,
-        "home_scored": home_scored,
-        "away_scored": away_scored,
-        "home_conceded": home_conceded,
-        "away_conceded": away_conceded,
-        "efficiency_gap": efficiency_gap,
-        "gap_abs": gap_abs,
-        "has_lock": len(locks) > 0,
-        "active_lock_type": active_lock_type,
-        "active_lock_name": active_lock_name,
-        "active_lock_reason": active_lock_reason,
-        "locks": locks,
-        "recommendations": recommendations,
-        "has_bet": len(recommendations) > 0
-    }
+    return all_pass, conditions
 
 # ============================================================================
 # MAIN APP
@@ -572,8 +233,8 @@ def get_best_bet(data, odds):
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet vFinal</h1>
-        <p>Complete Logic | 4 Locks | Multiple Conditions Required</p>
+        <h1>🎯 GrokBet - BTTS No Filter</h1>
+        <p>Strict 5-Condition Filter | No Other Predictions</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -582,33 +243,29 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            home_team = st.text_input("Home Team", "Nordsjaelland")
+            home_team = st.text_input("Home Team", "Bandirma")
         with col2:
-            away_team = st.text_input("Away Team", "Broendby")
+            away_team = st.text_input("Away Team", "Sariyer")
         
         st.markdown("---")
         
         col3, col4, col5, col6 = st.columns(4)
         with col3:
-            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 1.70, 0.05)
+            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 1.30, 0.05)
         with col4:
-            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 1.60, 0.05)
+            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 1.00, 0.05)
         with col5:
-            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 1.30, 0.05)
+            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 1.10, 0.05)
         with col6:
-            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 1.00, 0.05)
-        
-        home_xg_display = (home_scored + away_conceded) / 2
-        away_xg_display = (away_scored + home_conceded) / 2
-        st.caption(f"xG: {home_team} {home_xg_display:.2f} | {away_team} {away_xg_display:.2f} | Total: {home_xg_display + away_xg_display:.2f}")
+            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 1.20, 0.05)
         
         st.markdown("---")
         
         col7, col8 = st.columns(2)
         with col7:
-            home_form = st.number_input(f"{home_team} Form %", 0, 100, 67)
+            home_form = st.number_input(f"{home_team} Form %", 0, 100, 60)
         with col8:
-            away_form = st.number_input(f"{away_team} Form %", 0, 100, 20)
+            away_form = st.number_input(f"{away_team} Form %", 0, 100, 47)
         
         col9, col10, col11 = st.columns(3)
         with col9:
@@ -622,183 +279,106 @@ def main():
         
         col12, col13 = st.columns(2)
         with col12:
-            home_gd = st.number_input(f"{home_team} GD", -50, 50, 1)
+            home_gd = st.number_input(f"{home_team} GD", -50, 50, 10)
         with col13:
-            away_gd = st.number_input(f"{away_team} GD", -50, 50, 8)
+            away_gd = st.number_input(f"{away_team} GD", -50, 50, -4)
         
         st.markdown("---")
         
         col14, col15, col16, col17 = st.columns(4)
         with col14:
-            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 6)
+            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 12)
         with col15:
-            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 5)
+            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 7)
         with col16:
-            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 15)
+            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 11)
         with col17:
-            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 11)
+            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 9)
         
         st.markdown("---")
         
         st.markdown("**Odds (from SportyBet screenshot)**")
         col18, col19, col20 = st.columns(3)
         with col18:
-            odds_home = st.number_input("Home", 0.0, 10.0, 2.30, 0.05)
-            odds_draw = st.number_input("Draw", 0.0, 10.0, 3.50, 0.05)
-            odds_away = st.number_input("Away", 0.0, 10.0, 3.00, 0.05)
+            odds_home = st.number_input("Home", 0.0, 10.0, 2.10, 0.05)
+            odds_draw = st.number_input("Draw", 0.0, 10.0, 3.30, 0.05)
+            odds_away = st.number_input("Away", 0.0, 10.0, 3.40, 0.05)
         
         with col19:
-            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 1.65, 0.05)
-            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 2.20, 0.05)
+            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 2.05, 0.05)
+            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 1.77, 0.05)
         
         with col20:
-            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 1.54, 0.05)
-            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 2.35, 0.05)
+            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 1.79, 0.05)
+            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 1.88, 0.05)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
-        analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
+        analyze = st.button("🔍 CHECK BTTS NO FILTER", use_container_width=True, type="primary")
         
         if analyze:
-            data = {
-                'home_team': home_team,
-                'away_team': away_team,
-                'home_scored': home_scored,
-                'home_conceded': home_conceded,
-                'away_scored': away_scored,
-                'away_conceded': away_conceded,
-                'home_form': home_form,
-                'away_form': away_form,
-                'h2h_home': h2h_home,
-                'h2h_draws': h2h_draws,
-                'h2h_away': h2h_away,
-                'home_gd': home_gd,
-                'away_gd': away_gd,
-                'home_top': home_top,
-                'away_top': away_top,
-                'home_conv': home_conv,
-                'away_conv': away_conv
-            }
+            # Calculate xG
+            xG_home, xG_away = calculate_xG(
+                home_scored, home_conceded, away_scored, away_conceded,
+                home_form, away_form, h2h_home, h2h_draws, h2h_away,
+                home_gd, away_gd, home_top, away_top, home_conv, away_conv
+            )
             
-            odds = {
-                'home': odds_home,
-                'draw': odds_draw,
-                'away': odds_away,
-                'over': odds_over,
-                'under': odds_under,
-                'btts_yes': odds_btts_yes,
-                'btts_no': odds_btts_no
-            }
+            total_xG = xG_home + xG_away
             
-            result = get_best_bet(data, odds)
+            # Calculate BTTS probability
+            btts_yes_prob, btts_no_prob = calculate_btts_prob(xG_home, xG_away)
+            
+            # Check filter conditions
+            all_pass, conditions = check_filter_conditions(
+                home_scored, away_scored, home_conv, away_conv,
+                xG_home, xG_away, btts_no_prob, total_xG
+            )
             
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
-            st.markdown(f"### 🎯 GrokBet vFinal")
+            st.markdown(f"### 🎯 GrokBet - BTTS No Filter")
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
-            st.markdown("**📊 KEY DATA:**")
-            st.markdown(f"xG: {result['home_xg']:.2f} | {result['away_xg']:.2f} | Total {result['total_xg']:.2f}")
-            st.markdown(f"Form: {home_form}% | {away_form}%")
-            st.markdown(f"H2H: {h2h_home}-{h2h_draws}-{h2h_away}")
-            st.markdown(f"Conv: {home_conv}% | {away_conv}%")
-            st.markdown(f"Scored: {home_scored:.2f} | {away_scored:.2f}")
-            st.markdown(f"Conceded: {home_conceded:.2f} | {away_conceded:.2f}")
+            st.markdown("**📊 CALCULATED xG:**")
+            st.markdown(f"{home_team}: **{xG_home:.2f}** | {away_team}: **{xG_away:.2f}** | Total: **{total_xG:.2f}**")
             
             st.markdown("---")
             
-            st.markdown("**⚡ EFFICIENCY GAP:**")
-            gap_color = "🟢" if result['efficiency_gap'] > 0 else "🔴"
-            fav_team = home_team if result['efficiency_gap'] > 0 else away_team
-            st.markdown(f"{gap_color} **{result['efficiency_gap']:+.3f}** (favors **{fav_team}**)")
-            
-            st.markdown("---")
-            
-            # LOCK / NO LOCK Indicator with correct styling
-            if result['has_lock']:
-                lock_type = result['active_lock_type']
-                if lock_type == "BTTS No":
-                    st.markdown(f"""
-                    <div class="result-lock-bttsno">
-                        <strong>🔒 LOCK TRIGGERED: {lock_type}</strong> <span class="lock-badge">MULTIPLE CONDITIONS</span><br>
-                        {result['active_lock_reason']}
-                    </div>
-                    """, unsafe_allow_html=True)
-                elif lock_type == "High-Scoring":
-                    st.markdown(f"""
-                    <div class="result-lock-highscoring">
-                        <strong>🔒 LOCK TRIGGERED: {lock_type}</strong> <span class="lock-badge">MULTIPLE CONDITIONS</span><br>
-                        {result['active_lock_reason']}
-                    </div>
-                    """, unsafe_allow_html=True)
-                elif lock_type == "Winner":
-                    st.markdown(f"""
-                    <div class="result-lock-winner">
-                        <strong>🔒 LOCK TRIGGERED: {lock_type}</strong> <span class="lock-badge">MULTIPLE CONDITIONS</span><br>
-                        {result['active_lock_reason']}
-                    </div>
-                    """, unsafe_allow_html=True)
-                elif lock_type == "Draw":
-                    st.markdown(f"""
-                    <div class="result-lock-draw">
-                        <strong>🔒 LOCK TRIGGERED: {lock_type}</strong> <span class="lock-badge">MULTIPLE CONDITIONS</span><br>
-                        {result['active_lock_reason']}
-                    </div>
-                    """, unsafe_allow_html=True)
+            st.markdown("**📋 STRICT FILTER CONDITIONS (ALL must be true):**")
+            for cond in conditions:
+                if cond['pass']:
+                    st.markdown(f"✅ **{cond['name']}** - {cond['detail']}")
                 else:
-                    st.markdown(f"""
-                    <div class="result-lock-bttsno">
-                        <strong>🔒 LOCK TRIGGERED</strong> <span class="lock-badge">MULTIPLE CONDITIONS</span><br>
-                        {result['active_lock_reason']}
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"❌ **{cond['name']}** - {cond['detail']}")
+            
+            st.markdown("---")
+            
+            if all_pass:
+                btts_no_odds = odds_btts_no
+                st.markdown(f"""
+                <div class="result-bet">
+                    <strong>✅ BET TRIGGERED</strong><br>
+                    🎯 <strong>BTTS No</strong> at {btts_no_odds:.2f}<br>
+                    📊 BTTS No Probability: <strong>{btts_no_prob:.1f}%</strong><br>
+                    📊 Stake: <span class="stake-highlight">1.0%</span>
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown("**📝 VERDICT:** All 5 conditions met. Bet BTTS No.")
             else:
                 st.markdown(f"""
-                <div class="result-nolock">
-                    <strong>⚠️ NO LOCK</strong><br>
-                    No lock conditions met. Falling back to odds favorite.
+                <div class="result-skip">
+                    <strong>❌ NO BET</strong><br>
+                    Not all conditions met. Skip this match completely.
                 </div>
                 """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            if result['has_bet']:
-                primary = result['recommendations'][0]
-                lock_badge = " 🔒 LOCK" if primary.get('is_lock', False) else ""
-                st.markdown(f"""
-                <div class="result-primary">
-                    <strong>🏆 BEST BET:</strong><br>
-                    ✅ <strong>{primary['name']}{lock_badge}</strong> at {primary['odds']:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">{primary['stake']}</span>
-                </div>
-                """, unsafe_allow_html=True)
-                st.markdown(f"**Reason:** {primary['reason']}")
-                
-                if len(result['recommendations']) > 1:
-                    st.markdown("---")
-                    st.markdown("**⚽ SECONDARY OPTIONS:**")
-                    for bet in result['recommendations'][1:4]:
-                        lock_badge = " 🔒 LOCK" if bet.get('is_lock', False) else ""
-                        st.markdown(f"• {bet['name']}{lock_badge} at {bet['odds']:.2f} – Stake {bet['stake']}")
-                
-                st.markdown("---")
-                if result['has_lock']:
-                    st.markdown(f"**📝 VERDICT:** 🔒 {result['active_lock_type']} LOCK — Multiple conditions confirmed. High confidence.")
-                else:
-                    st.markdown("**📝 VERDICT:** ⚠️ NO LOCK — Betting odds favorite. Standard confidence (87% historical).")
-            else:
-                st.markdown("""
-                <div class="result-nolock">
-                    <strong>❌ NO QUALIFYING BETS</strong><br>
-                    No market meets the odds threshold. Skip this match.
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown("**📝 VERDICT:** Do not bet anything on this match.")
             
             st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.caption("🎯 **GrokBet vFinal** | Complete Logic | 4 Locks | Multiple Conditions Required | No Single Factor")
+    st.caption("🎯 **GrokBet - BTTS No Filter** | Strict 5-Condition Filter | No 1X2 | No Over/Under | No Other Bets")
 
 if __name__ == "__main__":
     main()
