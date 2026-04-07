@@ -1,11 +1,17 @@
-# grokbet_vfinal_universal.py
-# GROKBET vFINAL – UNIVERSAL LOGIC
+# grokbet_vfinal_complete.py
+# GROKBET vFINAL – COMPLETE LOGIC
 # 
-# For every match, the same logic applies:
-# 1. Check LOCK conditions (100% proven patterns)
-# 2. If ANY LOCK true → LOCK → Stake 1.0%
-# 3. If NO LOCK true → NO LOCK → Odds favorite → Stake 0.5%
-# 4. Skip if odds favorite > 2.00 for goals markets
+# This is the final, locked version.
+# No more changes.
+# 
+# Logic Flow:
+# 1. Calculate xG and Efficiency Gap
+# 2. Check LOCK conditions (5 locks, 100% proven)
+# 3. If LOCK → Bet LOCK at 1.0% stake
+# 4. If NO LOCK → Fallback to odds favorite at 0.5% stake
+# 5. Add 1X2 bets (odds favorite ≤ 2.00)
+# 6. Add informational warnings
+# 7. Output best bet + secondary options + verdict
 
 import streamlit as st
 from datetime import datetime
@@ -61,28 +67,28 @@ st.markdown("""
         margin-top: 1rem;
     }
     .result-lock {
-        background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%);
+        background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #10b981;
         padding: 0.75rem;
         border-radius: 8px;
         margin: 0.75rem 0;
     }
     .result-nolock {
-        background: linear-gradient(135deg, #1e293b 0%, #3a2a1a 100%);
+        background: linear-gradient(135deg, #1e293b 0%, #3e2a1e 100%);
         border-left: 4px solid #f97316;
         padding: 0.75rem;
         border-radius: 8px;
         margin: 0.75rem 0;
     }
     .result-primary {
-        background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%);
+        background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #fbbf24;
         padding: 0.75rem;
         border-radius: 8px;
         margin: 0.75rem 0;
     }
     .result-secondary {
-        background: linear-gradient(135deg, #1e293b 0%, #1a3a4a 100%);
+        background: linear-gradient(135deg, #1e293b 0%, #1e3a4a 100%);
         border-left: 4px solid #10b981;
         padding: 0.75rem;
         border-radius: 8px;
@@ -124,18 +130,14 @@ st.markdown("""
         display: inline-block;
         margin-left: 0.5rem;
     }
+    .warning-text {
+        color: #f97316;
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
+    }
     hr {
         margin: 0.75rem 0;
         border-color: #334155;
-    }
-    .warning {
-        background: #3a2a1a;
-        border-left: 3px solid #fbbf24;
-        padding: 0.5rem;
-        border-radius: 6px;
-        margin: 0.5rem 0;
-        font-size: 0.75rem;
-        color: #fcd34d;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -144,6 +146,7 @@ st.markdown("""
 # CONSTANTS
 # ============================================================================
 
+# Odds thresholds
 ODDS_THRESHOLD_GOALS = 2.00
 ODDS_THRESHOLD_1X2 = 2.00
 DRAW_MIN_ODDS = 3.00
@@ -152,14 +155,13 @@ SMALL_GAP_THRESHOLD = 0.4
 # Lock thresholds
 WEAK_CONV_THRESHOLD = 10
 WEAK_SCORED_THRESHOLD = 1.2
-ELITE_DEFENSE_CONCEDED_THRESHOLD = 1.0
-ELITE_DEFENSE_FORM_THRESHOLD = 60
+ELITE_DEFENSE_THRESHOLD = 1.0
+HIGH_FORM_THRESHOLD = 60
 HIGH_XG_THRESHOLD = 3.0
 HIGH_CONV_THRESHOLD = 15
 H2H_WIN_THRESHOLD = 3
-ELITE_DEFENSE_CONCEDED_STRICT = 0.8
-HIGH_FORM_THRESHOLD = 80
-HIGH_FORM_CONV_THRESHOLD = 10
+HIGH_ATTACK_FORM_THRESHOLD = 80
+ELITE_DEFENSE_WARNING_THRESHOLD = 0.8
 
 # ============================================================================
 # CALCULATIONS
@@ -185,87 +187,68 @@ def get_odds_favorite(odds_home, odds_draw, odds_away):
         return "Away", odds_away
 
 def check_lock_conditions(home_team, away_team, home_conv, away_conv, home_scored, away_scored, 
-                         home_conceded, away_conceded, home_form, away_form, total_xg, h2h_wins_for_favorite):
+                          home_conceded, away_conceded, home_form, away_form, total_xg, h2h_wins_for_favorite):
     """
     Check all lock conditions (100% proven patterns)
-    Priority order as defined in the logic breakdown:
-    LOCK #1: Weak attack → BTTS No
-    LOCK #2: Elite defense → BTTS No
-    LOCK #3: High xG → BTTS Yes + Over 2.5
-    LOCK #4: H2H dominance → BTTS Yes + Over 2.5
-    LOCK #5: High xG + High Conv → BTTS Yes + Over 2.5
-    
-    Returns: (lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under)
-    """
-    
-    # LOCK #1: Weak attack → BTTS No
-    # Condition: One team conv ≤ 10% AND that same team scored ≤ 1.2
-    weak_attack_home = (home_conv <= WEAK_CONV_THRESHOLD and home_scored <= WEAK_SCORED_THRESHOLD)
-    weak_attack_away = (away_conv <= WEAK_CONV_THRESHOLD and away_scored <= WEAK_SCORED_THRESHOLD)
-    
-    if weak_attack_home or weak_attack_away:
-        weak_team = home_team if weak_attack_home else away_team
-        return ("btts_no", f"🔒 LOCK #1: Weak attack — {weak_team} (conv {home_conv if weak_attack_home else away_conv}%, scored {home_scored if weak_attack_home else away_scored:.2f}) → BTTS No", 
-                False, False, True, False)
-    
-    # LOCK #2: Elite defense → BTTS No
-    # Condition: One team conceded ≤ 1.0 AND that team form ≥ 60%
-    elite_defense_home = (home_conceded <= ELITE_DEFENSE_CONCEDED_THRESHOLD and home_form >= ELITE_DEFENSE_FORM_THRESHOLD)
-    elite_defense_away = (away_conceded <= ELITE_DEFENSE_CONCEDED_THRESHOLD and away_form >= ELITE_DEFENSE_FORM_THRESHOLD)
-    
-    if elite_defense_home or elite_defense_away:
-        elite_team = home_team if elite_defense_home else away_team
-        return ("btts_no", f"🔒 LOCK #2: Elite defense — {elite_team} (conceded {home_conceded if elite_defense_home else away_conceded:.2f}, form {home_form if elite_defense_home else away_form}%) → BTTS No",
-                False, False, True, False)
-    
-    # LOCK #3: High xG → BTTS Yes + Over 2.5
-    # Condition: Total xG ≥ 3.0
-    if total_xg >= HIGH_XG_THRESHOLD:
-        return ("both", f"🔒 LOCK #3: High xG — Total xG {total_xg:.2f} ≥ 3.0 → BTTS Yes + Over 2.5",
-                True, True, False, False)
-    
-    # LOCK #4: H2H dominance → BTTS Yes + Over 2.5
-    # Condition: H2H wins ≥ 3 (last 5 matches)
-    if h2h_wins_for_favorite >= H2H_WIN_THRESHOLD:
-        return ("both", f"🔒 LOCK #4: H2H dominance — {h2h_wins_for_favorite} wins in last 5 H2H → BTTS Yes + Over 2.5",
-                True, True, False, False)
-    
-    # LOCK #5: High xG + High Conv → BTTS Yes + Over 2.5
-    # Condition: Total xG ≥ 3.0 AND (home conv ≥ 15% OR away conv ≥ 15%)
-    if total_xg >= HIGH_XG_THRESHOLD and (home_conv >= HIGH_CONV_THRESHOLD or away_conv >= HIGH_CONV_THRESHOLD):
-        high_conv_team = "Home" if home_conv >= HIGH_CONV_THRESHOLD else "Away"
-        return ("both", f"🔒 LOCK #5: High xG + High conv — xG {total_xg:.2f} ≥ 3.0 and {high_conv_team} conv {max(home_conv, away_conv)}% ≥ 15% → BTTS Yes + Over 2.5",
-                True, True, False, False)
-    
-    return None, None, False, False, False, False
-
-def get_informational_warnings(home_team, away_team, home_conv, away_conv, home_scored, away_scored,
-                               home_conceded, away_conceded, home_form, away_form):
-    """
-    Get informational warnings (no bet impact)
-    Warning P1: Weak team cannot score 2+
-    Warning P2: Elite defense may suppress goals
-    Warning P3: High form team may overperform
+    Returns: (lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under, warnings)
     """
     warnings = []
     
-    # Warning P1: Weak team cannot score 2+
+    # LOCK #1: Weak Attack → BTTS No
     if home_conv <= WEAK_CONV_THRESHOLD and home_scored <= WEAK_SCORED_THRESHOLD:
-        warnings.append(f"⚠️ {home_team} (conv {home_conv}%, scored {home_scored:.2f}) cannot score 2+ goals")
+        return "btts_no", f"LOCK #1: {home_team} weak attack (conv {home_conv}%, scored {home_scored:.2f}) → BTTS No", False, False, True, False, warnings
     if away_conv <= WEAK_CONV_THRESHOLD and away_scored <= WEAK_SCORED_THRESHOLD:
-        warnings.append(f"⚠️ {away_team} (conv {away_conv}%, scored {away_scored:.2f}) cannot score 2+ goals")
+        return "btts_no", f"LOCK #1: {away_team} weak attack (conv {away_conv}%, scored {away_scored:.2f}) → BTTS No", False, False, True, False, warnings
+    
+    # LOCK #2: Elite Defense → BTTS No
+    if home_conceded <= ELITE_DEFENSE_THRESHOLD and home_form >= HIGH_FORM_THRESHOLD:
+        return "btts_no", f"LOCK #2: {home_team} elite defense (conceded {home_conceded:.2f}) + good form ({home_form}%) → BTTS No", False, False, True, False, warnings
+    if away_conceded <= ELITE_DEFENSE_THRESHOLD and away_form >= HIGH_FORM_THRESHOLD:
+        return "btts_no", f"LOCK #2: {away_team} elite defense (conceded {away_conceded:.2f}) + good form ({away_form}%) → BTTS No", False, False, True, False, warnings
+    
+    # LOCK #3: High xG → BTTS Yes + Over 2.5
+    if total_xg >= HIGH_XG_THRESHOLD:
+        # Add warning if elite defense present
+        if home_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
+            warnings.append(f"⚠️ WARNING: {home_team} concedes {home_conceded:.2f} (elite defense) — may suppress goals")
+        if away_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
+            warnings.append(f"⚠️ WARNING: {away_team} concedes {away_conceded:.2f} (elite defense) — may suppress goals")
+        return "both", f"LOCK #3: Total xG {total_xg:.2f} ≥ 3.0 → BTTS Yes + Over 2.5", True, True, False, False, warnings
+    
+    # LOCK #4: H2H Dominance → BTTS Yes + Over 2.5
+    if h2h_wins_for_favorite >= H2H_WIN_THRESHOLD:
+        return "both", f"LOCK #4: H2H {h2h_wins_for_favorite} wins → BTTS Yes + Over 2.5", True, True, False, False, warnings
+    
+    # LOCK #5: High xG + High Conv → BTTS Yes + Over 2.5
+    if total_xg >= HIGH_XG_THRESHOLD and (home_conv >= HIGH_CONV_THRESHOLD or away_conv >= HIGH_CONV_THRESHOLD):
+        high_conv_team = "Home" if home_conv >= HIGH_CONV_THRESHOLD else "Away"
+        high_conv_value = home_conv if home_conv >= HIGH_CONV_THRESHOLD else away_conv
+        return "both", f"LOCK #5: xG {total_xg:.2f} ≥ 3.0 AND {high_conv_team} conv {high_conv_value}% ≥ 15% → BTTS Yes + Over 2.5", True, True, False, False, warnings
+    
+    return None, None, False, False, False, False, warnings
+
+def get_warnings(home_team, away_team, home_conv, away_conv, home_scored, away_scored, 
+                 home_conceded, away_conceded, home_form, away_form):
+    """Get informational warnings (not bets)"""
+    warnings = []
+    
+    # Warning P1: Weak team cannot score 2+ goals
+    if home_conv <= WEAK_CONV_THRESHOLD and home_scored <= WEAK_SCORED_THRESHOLD:
+        warnings.append(f"⚠️ NOTE: {home_team} (conv {home_conv}%, scored {home_scored:.2f}) historically cannot score 2+ goals")
+    if away_conv <= WEAK_CONV_THRESHOLD and away_scored <= WEAK_SCORED_THRESHOLD:
+        warnings.append(f"⚠️ NOTE: {away_team} (conv {away_conv}%, scored {away_scored:.2f}) historically cannot score 2+ goals")
     
     # Warning P2: Elite defense may suppress goals
-    if home_conceded <= ELITE_DEFENSE_CONCEDED_STRICT:
-        warnings.append(f"⚠️ {home_team} has elite defense (conceded {home_conceded:.2f}) — may suppress goals")
-    if away_conceded <= ELITE_DEFENSE_CONCEDED_STRICT:
-        warnings.append(f"⚠️ {away_team} has elite defense (conceded {away_conceded:.2f}) — may suppress goals")
+    if home_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
+        warnings.append(f"⚠️ NOTE: {home_team} concedes {home_conceded:.2f} (elite defense) — may suppress opposition goals")
+    if away_conceded <= ELITE_DEFENSE_WARNING_THRESHOLD:
+        warnings.append(f"⚠️ NOTE: {away_team} concedes {away_conceded:.2f} (elite defense) — may suppress opposition goals")
     
     # Warning P3: High form team may overperform
-    if home_form >= HIGH_FORM_THRESHOLD and home_conv >= HIGH_FORM_CONV_THRESHOLD:
-        warnings.append(f"⚠️ {home_team} has high form ({home_form}%) — may overperform expectations")
-    if away_form >= HIGH_FORM_THRESHOLD and away_conv >= HIGH_FORM_CONV_THRESHOLD:
-        warnings.append(f"⚠️ {away_team} has high form ({away_form}%) — may overperform expectations")
+    if home_form >= HIGH_ATTACK_FORM_THRESHOLD and home_conv >= WEAK_CONV_THRESHOLD:
+        warnings.append(f"⚠️ NOTE: {home_team} has high form ({home_form}%) — may overperform expectations")
+    if away_form >= HIGH_ATTACK_FORM_THRESHOLD and away_conv >= WEAK_CONV_THRESHOLD:
+        warnings.append(f"⚠️ NOTE: {away_team} has high form ({away_form}%) — may overperform expectations")
     
     return warnings
 
@@ -274,16 +257,6 @@ def get_informational_warnings(home_team, away_team, home_conv, away_conv, home_
 # ============================================================================
 
 def get_best_bet(data, odds):
-    """
-    STEP 0: Input Data Required
-    STEP 1: Calculate Derived Metrics (xG + Efficiency Gap)
-    STEP 2: Check LOCK Conditions
-    STEP 3: If NO LOCK → Fallback to Odds Favorite
-    STEP 4: 1X2 Markets
-    STEP 5: Add Informational Warnings
-    STEP 6: Output Priority Order
-    """
-    
     home_team = data['home_team']
     away_team = data['away_team']
     home_scored = data['home_scored']
@@ -297,7 +270,7 @@ def get_best_bet(data, odds):
     h2h_home = data.get('h2h_home', 0)
     h2h_away = data.get('h2h_away', 0)
     
-    # STEP 1: Calculate Derived Metrics
+    # Calculate xG
     home_xg = (home_scored + away_conceded) / 2
     away_xg = (away_scored + home_conceded) / 2
     total_xg = home_xg + away_xg
@@ -311,7 +284,7 @@ def get_best_bet(data, odds):
     # Get 1X2 favorite for H2H check
     favorite_direction, favorite_odds = get_odds_favorite(odds['home'], odds['draw'], odds['away'])
     
-    # Determine H2H wins for favorite (for LOCK #4)
+    # Determine H2H wins for favorite
     if favorite_direction == "Home":
         h2h_wins_for_favorite = h2h_home
         favored_team_name = home_team
@@ -322,11 +295,20 @@ def get_best_bet(data, odds):
         h2h_wins_for_favorite = 0
         favored_team_name = "Draw"
     
-    # STEP 2: Check LOCK Conditions (in priority order)
-    lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under = check_lock_conditions(
+    # Check lock conditions
+    lock_type, lock_reason, bet_over, bet_btts_yes, bet_btts_no, bet_under, lock_warnings = check_lock_conditions(
         home_team, away_team, home_conv, away_conv, home_scored, away_scored,
         home_conceded, away_conceded, home_form, away_form, total_xg, h2h_wins_for_favorite
     )
+    
+    # Get informational warnings
+    info_warnings = get_warnings(
+        home_team, away_team, home_conv, away_conv, home_scored, away_scored,
+        home_conceded, away_conceded, home_form, away_form
+    )
+    
+    # Combine warnings
+    all_warnings = lock_warnings + info_warnings
     
     is_lock = lock_type is not None
     stake_lock = "1.0%" if is_lock else "0.5%"
@@ -336,7 +318,6 @@ def get_best_bet(data, odds):
     
     # ========== GOALS MARKETS BASED ON LOCK ==========
     if is_lock:
-        # LOCK bets (Priority 1)
         if lock_type == "btts_no":
             if odds['btts_no'] <= ODDS_THRESHOLD_GOALS:
                 recommendations.append({
@@ -344,6 +325,16 @@ def get_best_bet(data, odds):
                     "odds": odds['btts_no'],
                     "stake": stake_lock,
                     "type": "BTTS",
+                    "is_lock": True,
+                    "priority": 1,
+                    "reason": lock_reason
+                })
+            if odds['under'] <= ODDS_THRESHOLD_GOALS:
+                recommendations.append({
+                    "name": "Under 2.5 Goals",
+                    "odds": odds['under'],
+                    "stake": stake_lock,
+                    "type": "O/U",
                     "is_lock": True,
                     "priority": 1,
                     "reason": lock_reason
@@ -372,9 +363,9 @@ def get_best_bet(data, odds):
                 })
     
     else:
-        # STEP 3: NO LOCK → Fallback to Odds Favorite (Priority 2)
+        # NO LOCK: Bet odds favorite for goals markets
         # Over / Under 2.5
-        if odds['over'] < odds['under'] and odds['over'] <= ODDS_THRESHOLD_GOALS:
+        if odds['over'] <= odds['under'] and odds['over'] <= ODDS_THRESHOLD_GOALS:
             recommendations.append({
                 "name": "Over 2.5 Goals",
                 "odds": odds['over'],
@@ -384,7 +375,7 @@ def get_best_bet(data, odds):
                 "priority": 2,
                 "reason": f"NO LOCK: Odds favorite at {odds['over']}"
             })
-        elif odds['under'] < odds['over'] and odds['under'] <= ODDS_THRESHOLD_GOALS:
+        elif odds['under'] <= odds['over'] and odds['under'] <= ODDS_THRESHOLD_GOALS:
             recommendations.append({
                 "name": "Under 2.5 Goals",
                 "odds": odds['under'],
@@ -396,7 +387,7 @@ def get_best_bet(data, odds):
             })
         
         # BTTS Yes / No
-        if odds['btts_yes'] < odds['btts_no'] and odds['btts_yes'] <= ODDS_THRESHOLD_GOALS:
+        if odds['btts_yes'] <= odds['btts_no'] and odds['btts_yes'] <= ODDS_THRESHOLD_GOALS:
             recommendations.append({
                 "name": "BTTS Yes",
                 "odds": odds['btts_yes'],
@@ -406,7 +397,7 @@ def get_best_bet(data, odds):
                 "priority": 2,
                 "reason": f"NO LOCK: Odds favorite at {odds['btts_yes']}"
             })
-        elif odds['btts_no'] < odds['btts_yes'] and odds['btts_no'] <= ODDS_THRESHOLD_GOALS:
+        elif odds['btts_no'] <= odds['btts_yes'] and odds['btts_no'] <= ODDS_THRESHOLD_GOALS:
             recommendations.append({
                 "name": "BTTS No",
                 "odds": odds['btts_no'],
@@ -417,8 +408,7 @@ def get_best_bet(data, odds):
                 "reason": f"NO LOCK: Odds favorite at {odds['btts_no']}"
             })
     
-    # STEP 4: 1X2 Markets (Separate, Lower Priority - Priority 3)
-    # Winner Bet
+    # ========== 1X2 MARKET ==========
     if favorite_direction != "Draw" and favorite_odds <= ODDS_THRESHOLD_1X2:
         recommendations.append({
             "name": f"{favored_team_name} Win",
@@ -430,7 +420,7 @@ def get_best_bet(data, odds):
             "reason": f"Odds favorite at {favorite_odds}"
         })
     
-    # Draw Bet (Special Case: small gap + odds ≥ 3.00)
+    # ========== DRAW (small gap only) ==========
     if gap_abs <= SMALL_GAP_THRESHOLD and odds['draw'] >= DRAW_MIN_ODDS:
         recommendations.append({
             "name": "Draw",
@@ -444,12 +434,6 @@ def get_best_bet(data, odds):
     
     # Sort by priority
     recommendations.sort(key=lambda x: x.get('priority', 3))
-    
-    # STEP 5: Add Informational Warnings
-    warnings = get_informational_warnings(
-        home_team, away_team, home_conv, away_conv, home_scored, away_scored,
-        home_conceded, away_conceded, home_form, away_form
-    )
     
     return {
         "home_team": home_team,
@@ -472,7 +456,7 @@ def get_best_bet(data, odds):
         "is_lock": is_lock,
         "lock_type": lock_type,
         "lock_reason": lock_reason,
-        "warnings": warnings,
+        "warnings": all_warnings,
         "recommendations": recommendations,
         "has_bet": len(recommendations) > 0
     }
@@ -485,7 +469,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet vFinal</h1>
-        <p>Universal Logic | LOCK Indicator | 100% Proven Patterns</p>
+        <p>Complete Logic | 5 Locks (100%) | Odds Favorite Fallback (87%)</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -494,22 +478,21 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            home_team = st.text_input("Home Team", "Kolos")
+            home_team = st.text_input("Home Team", "Sporting CP")
         with col2:
-            away_team = st.text_input("Away Team", "Metalist 1925")
+            away_team = st.text_input("Away Team", "Arsenal")
         
         st.markdown("---")
         
-        st.markdown("**📊 Scoring Averages**")
         col3, col4, col5, col6 = st.columns(4)
         with col3:
-            home_scored = st.number_input(f"{home_team} Scored Avg", 0.0, 3.0, 0.70, 0.05)
+            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 2.20, 0.05)
         with col4:
-            home_conceded = st.number_input(f"{home_team} Conceded Avg", 0.0, 3.0, 1.70, 0.05)
+            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 1.40, 0.05)
         with col5:
-            away_scored = st.number_input(f"{away_team} Scored Avg", 0.0, 3.0, 1.10, 0.05)
+            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 2.60, 0.05)
         with col6:
-            away_conceded = st.number_input(f"{away_team} Conceded Avg", 0.0, 3.0, 0.60, 0.05)
+            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 0.50, 0.05)
         
         home_xg_display = (home_scored + away_conceded) / 2
         away_xg_display = (away_scored + home_conceded) / 2
@@ -517,52 +500,56 @@ def main():
         
         st.markdown("---")
         
-        st.markdown("**📈 Team Form**")
         col7, col8 = st.columns(2)
         with col7:
-            home_form = st.number_input(f"{home_team} Form %", 0, 100, 47)
+            home_form = st.number_input(f"{home_team} Form %", 0, 100, 67)
         with col8:
-            away_form = st.number_input(f"{away_team} Form %", 0, 100, 80)
+            away_form = st.number_input(f"{away_team} Form %", 0, 100, 47)
         
-        st.markdown("---")
-        
-        st.markdown("**🆚 Head-to-Head (Last 5 Matches)**")
         col9, col10, col11 = st.columns(3)
         with col9:
-            h2h_home = st.number_input("Home Wins", 0, 5, 1)
+            h2h_home = st.number_input("H2H Home Wins (last 5)", 0, 5, 1)
         with col10:
-            h2h_draws = st.number_input("Draws", 0, 5, 2)
+            h2h_draws = st.number_input("H2H Draws", 0, 5, 2)
         with col11:
-            h2h_away = st.number_input("Away Wins", 0, 5, 2)
+            h2h_away = st.number_input("H2H Away Wins", 0, 5, 2)
         
         st.markdown("---")
         
-        st.markdown("**🎯 Conversion Rates**")
-        col16, col17 = st.columns(2)
+        col12, col13 = st.columns(2)
+        with col12:
+            home_gd = st.number_input(f"{home_team} GD", -50, 50, 8)
+        with col13:
+            away_gd = st.number_input(f"{away_team} GD", -50, 50, 21)
+        
+        st.markdown("---")
+        
+        col14, col15, col16, col17 = st.columns(4)
+        with col14:
+            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 5)
+        with col15:
+            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 6)
         with col16:
-            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 10)
+            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 16)
         with col17:
-            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 11)
+            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 18)
         
         st.markdown("---")
         
-        st.markdown("**💰 Odds (from SportyBet screenshot)**")
+        st.markdown("**Odds (from SportyBet screenshot)**")
         col18, col19, col20 = st.columns(3)
         with col18:
-            st.markdown("**1X2**")
-            odds_home = st.number_input("Home", 0.0, 10.0, 3.10, 0.05)
-            odds_draw = st.number_input("Draw", 0.0, 10.0, 2.90, 0.05)
-            odds_away = st.number_input("Away", 0.0, 10.0, 2.45, 0.05)
+            odds_home = st.number_input("Home", 0.0, 10.0, 4.35, 0.05)
+            odds_draw = st.number_input("Draw", 0.0, 10.0, 3.73, 0.05)
+            odds_away = st.number_input("Away", 0.0, 10.0, 1.92, 0.05)
         
         with col19:
-            st.markdown("**Over/Under 2.5**")
-            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 2.80, 0.05)
-            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 1.37, 0.05)
+            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 1.92, 0.05)
+            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 1.92, 0.05)
         
         with col20:
-            st.markdown("**BTTS**")
-            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 2.20, 0.05)
-            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 1.53, 0.05)
+            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 1.80, 0.05)
+            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 2.00, 0.05)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -579,7 +566,12 @@ def main():
                 'home_form': home_form,
                 'away_form': away_form,
                 'h2h_home': h2h_home,
+                'h2h_draws': h2h_draws,
                 'h2h_away': h2h_away,
+                'home_gd': home_gd,
+                'away_gd': away_gd,
+                'home_top': home_top,
+                'away_top': away_top,
                 'home_conv': home_conv,
                 'away_conv': away_conv
             }
@@ -602,14 +594,13 @@ def main():
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
-            # STEP 1: Display Derived Metrics
-            st.markdown("**📊 STEP 1: DERIVED METRICS**")
-            st.markdown(f"xG: {result['home_xg']:.2f} | {result['away_xg']:.2f} | **Total {result['total_xg']:.2f}**")
+            st.markdown("**📊 KEY DATA:**")
+            st.markdown(f"xG: {result['home_xg']:.2f} | {result['away_xg']:.2f} | Total {result['total_xg']:.2f}")
             st.markdown(f"Form: {home_form}% | {away_form}%")
             st.markdown(f"H2H: {h2h_home}-{h2h_draws}-{h2h_away}")
-            st.markdown(f"Conv Rate: {home_conv}% | {away_conv}%")
-            st.markdown(f"Scored Avg: {home_scored:.2f} | {away_scored:.2f}")
-            st.markdown(f"Conceded Avg: {home_conceded:.2f} | {away_conceded:.2f}")
+            st.markdown(f"Conv: {home_conv}% | {away_conv}%")
+            st.markdown(f"Scored: {home_scored:.2f} | {away_scored:.2f}")
+            st.markdown(f"Conceded: {home_conceded:.2f} | {away_conceded:.2f}")
             
             st.markdown("---")
             
@@ -620,38 +611,34 @@ def main():
             
             st.markdown("---")
             
-            # STEP 2: LOCK / NO LOCK Indicator
+            # LOCK / NO LOCK Indicator
             if result['is_lock']:
                 st.markdown(f"""
                 <div class="result-lock">
-                    <strong>🔒 STEP 2: LOCK TRIGGERED</strong> <span class="lock-badge">100% PROVEN</span><br>
+                    <strong>🔒 LOCK</strong> <span class="lock-badge">100% PROVEN</span><br>
                     {result['lock_reason']}
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div class="result-nolock">
-                    <strong>⚠️ STEP 2: NO LOCK</strong> <span class="nolock-badge">FALLBACK TO ODDS FAVORITE</span><br>
-                    No lock condition met. Falling back to odds favorite (STEP 3).
+                    <strong>⚠️ NO LOCK</strong> <span class="nolock-badge">ODDS FAVORITE</span><br>
+                    No lock condition met. Falling back to odds favorite.
                 </div>
                 """, unsafe_allow_html=True)
             
-            # STEP 5: Informational Warnings
-            if result['warnings']:
-                st.markdown("---")
-                st.markdown("**📢 STEP 5: INFORMATIONAL WARNINGS**")
-                for warning in result['warnings']:
-                    st.markdown(f"<div class='warning'>{warning}</div>", unsafe_allow_html=True)
+            # Warnings
+            for warning in result['warnings']:
+                st.markdown(f"<div class='warning-text'>{warning}</div>", unsafe_allow_html=True)
             
             st.markdown("---")
             
-            # STEP 6: Output Priority Order
             if result['has_bet']:
                 primary = result['recommendations'][0]
-                lock_badge = " 🔒 LOCK (Priority 1)" if primary.get('is_lock', False) else " ⚠️ FALLBACK (Priority 2)" if primary.get('priority') == 2 else " (Priority 3)"
+                lock_badge = " 🔒 LOCK" if primary.get('is_lock', False) else ""
                 st.markdown(f"""
                 <div class="result-primary">
-                    <strong>🏆 STEP 6: BEST BET</strong><br>
+                    <strong>🏆 BEST BET:</strong><br>
                     ✅ <strong>{primary['name']}{lock_badge}</strong> at {primary['odds']:.2f}<br>
                     📊 Stake: <span class="stake-highlight">{primary['stake']}</span>
                 </div>
@@ -667,21 +654,21 @@ def main():
                 
                 st.markdown("---")
                 if result['is_lock']:
-                    st.markdown("**📝 VERDICT:** 🔒 LOCK bet — 100% proven pattern. High confidence. (Stake: 1.0%)")
+                    st.markdown("**📝 VERDICT:** 🔒 LOCK bet — 100% proven pattern. High confidence.")
                 else:
-                    st.markdown("**📝 VERDICT:** ⚠️ NO LOCK — Betting odds favorite. Standard confidence (87% historical). (Stake: 0.5%)")
+                    st.markdown("**📝 VERDICT:** ⚠️ NO LOCK — Betting odds favorite. Standard confidence (87% historical).")
             else:
                 st.markdown("""
                 <div class="result-skip">
                     <strong>❌ NO QUALIFYING BETS</strong><br>
-                    No market meets the odds threshold (≤ 2.00 for goals markets, ≤ 2.00 for 1X2, or draw with gap ≤ 0.4 and odds ≥ 3.00). Skip this match.
+                    No market meets the odds threshold. Skip this match.
                 </div>
                 """, unsafe_allow_html=True)
             
             st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.caption("🎯 **GrokBet vFinal** | Universal Logic | LOCK (1.0% stake) | NO LOCK → Odds Favorite (0.5% stake)")
+    st.caption("🎯 **GrokBet vFinal** | Complete Logic | 5 Locks (100%) | NO LOCK → Odds Favorite (87%) | No More Changes")
 
 if __name__ == "__main__":
     main()
