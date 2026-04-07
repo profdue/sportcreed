@@ -12,8 +12,7 @@
 # 5. Total xG unbalanced or low (difference ≥ 1.5 OR total ≤ 2.8)
 
 import streamlit as st
-import numpy as np
-from scipy.stats import poisson
+import math
 
 st.set_page_config(
     page_title="GrokBet - BTTS No Filter",
@@ -121,6 +120,32 @@ TOP_SCORER_WEIGHT = 0.08
 CONV_WEIGHT = 0.6
 
 # ============================================================================
+# POISSON WITHOUT SCIPY
+# ============================================================================
+
+def poisson_pmf(k, lam):
+    """Poisson probability mass function (pure Python)"""
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    
+    # Calculate using log to avoid overflow
+    log_p = (k * math.log(lam)) - lam - math.lgamma(k + 1)
+    return math.exp(log_p)
+
+def math_lgamma(n):
+    """Log gamma approximation for integers"""
+    if n <= 1:
+        return 0.0
+    # Using Lanczos approximation for log gamma
+    x = n
+    log_gamma = (x - 0.5) * math.log(x) - x + 0.5 * math.log(2 * math.pi) + 1/(12*x)
+    return log_gamma
+
+# Override math.lgamma if not available
+if not hasattr(math, 'lgamma'):
+    math.lgamma = math_lgamma
+
+# ============================================================================
 # CALCULATIONS
 # ============================================================================
 
@@ -151,12 +176,17 @@ def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
     return xG_home, xG_away
 
 def calculate_btts_prob(xG_home, xG_away, max_goals=8):
-    """Calculate BTTS Yes and No probabilities using Poisson"""
+    """Calculate BTTS Yes and No probabilities using Poisson (no scipy)"""
     
-    home_probs = [poisson.pmf(i, xG_home) for i in range(max_goals + 1)]
-    away_probs = [poisson.pmf(i, xG_away) for i in range(max_goals + 1)]
+    # Calculate probabilities for each goal count
+    home_probs = []
+    away_probs = []
     
-    # Normalize
+    for i in range(max_goals + 1):
+        home_probs.append(poisson_pmf(i, xG_home))
+        away_probs.append(poisson_pmf(i, xG_away))
+    
+    # Normalize (sum should be very close to 1, but just to be safe)
     home_sum = sum(home_probs)
     away_sum = sum(away_probs)
     home_probs = [p / home_sum for p in home_probs]
