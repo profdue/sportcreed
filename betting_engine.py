@@ -1,31 +1,20 @@
-# grokbet_final_locked.py
-# GROKBET – FINAL LOCKED VERSION
+# grokbet_two_factor_locked.py
+# GROKBET – TWO-FACTOR RULES (LOCKED PENDING 3-FACTOR)
 # 
-# Two rules only:
+# Three rules only:
 # 
-# RULE 1: BTTS Yes Lock
-# Trigger when ALL THREE are true:
-# - Away Scored Avg ≥ 1.30
-# - Total xG ≥ 2.8
-# - Both Conversion % ≥ 11%
-# Bet: BTTS Yes | Stake: 1.0%
+# RULE 1: BTTS Yes – Away Form ≤ 33% AND Away GD ≥ -13
+# RULE 2: BTTS Yes – Total xG ≥ 2.9 AND Home Top Scorer ≥ 2
+# RULE 3: Over 2.5 – H2H Draws ≤ 1 AND H2H Away Wins ≤ 1
 # 
-# RULE 2: Under 2.5 Lock
-# Trigger when ALL FOUR are true:
-# - Away Scored Avg ≤ 1.00
-# - Total xG ≤ 2.5
-# - Away Conversion % ≤ 10%
-# - Home Scored Avg ≤ 1.20
-# Bet: Under 2.5 | Stake: 1.0%
-# 
-# Priority: BTTS Yes Lock first, then Under 2.5 Lock
+# Priority: Check all rules. First match wins.
 # No trigger → Skip match
 
 import streamlit as st
 import math
 
 st.set_page_config(
-    page_title="GrokBet - Final Locked",
+    page_title="GrokBet - Two-Factor Rules",
     page_icon="🎯",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -81,7 +70,7 @@ st.markdown("""
         border-radius: 8px;
         margin: 0.75rem 0;
     }
-    .result-under {
+    .result-over {
         background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #10b981;
         padding: 0.75rem;
@@ -108,12 +97,6 @@ st.markdown("""
         margin: 0.75rem 0;
         border-color: #334155;
     }
-    .condition-pass {
-        color: #10b981;
-    }
-    .condition-fail {
-        color: #ef4444;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -123,16 +106,15 @@ st.markdown("""
 
 MIN_XG = 0.3
 
-# BTTS Yes Lock thresholds
-BTTS_AWAY_SCORED_MIN = 1.30
-BTTS_XG_MIN = 2.8
-BTTS_BOTH_CONV_MIN = 11
+# Rule thresholds
+RULE1_AWAY_FORM_MAX = 33
+RULE1_AWAY_GD_MIN = -13
 
-# Under 2.5 Lock thresholds
-UNDER_AWAY_SCORED_MAX = 1.00
-UNDER_XG_MAX = 2.5
-UNDER_AWAY_CONV_MAX = 10
-UNDER_HOME_SCORED_MAX = 1.20
+RULE2_XG_MIN = 2.9
+RULE2_HOME_TOP_SCORER_MIN = 2
+
+RULE3_H2H_DRAWS_MAX = 1
+RULE3_H2H_AWAY_WINS_MAX = 1
 
 # Adjustment weights (for xG calculation)
 FORM_WEIGHT = 0.4
@@ -192,27 +174,6 @@ def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
     
     return xG_home, xG_away
 
-def check_btts_yes_lock(away_scored, total_xg, home_conv, away_conv):
-    """Check if BTTS Yes lock conditions are met"""
-    cond1 = away_scored >= BTTS_AWAY_SCORED_MIN
-    cond2 = total_xg >= BTTS_XG_MIN
-    cond3 = home_conv >= BTTS_BOTH_CONV_MIN and away_conv >= BTTS_BOTH_CONV_MIN
-    
-    all_pass = cond1 and cond2 and cond3
-    
-    return all_pass, cond1, cond2, cond3
-
-def check_under_lock(away_scored, total_xg, away_conv, home_scored):
-    """Check if Under 2.5 lock conditions are met"""
-    cond1 = away_scored <= UNDER_AWAY_SCORED_MAX
-    cond2 = total_xg <= UNDER_XG_MAX
-    cond3 = away_conv <= UNDER_AWAY_CONV_MAX
-    cond4 = home_scored <= UNDER_HOME_SCORED_MAX
-    
-    all_pass = cond1 and cond2 and cond3 and cond4
-    
-    return all_pass, cond1, cond2, cond3, cond4
-
 # ============================================================================
 # MAIN APP
 # ============================================================================
@@ -220,8 +181,8 @@ def check_under_lock(away_scored, total_xg, away_conv, home_scored):
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet - Final Locked</h1>
-        <p>Two Rules Only | BTTS Yes Lock | Under 2.5 Lock</p>
+        <h1>🎯 GrokBet - Two-Factor Rules</h1>
+        <p>3 Locked Rules | 100% Backtest Accuracy | Pending 3-Factor</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -304,7 +265,7 @@ def main():
         analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
         
         if analyze:
-            # Calculate xG
+            # Calculate xG for Rule 2
             xG_home, xG_away = calculate_xG(
                 home_scored, home_conceded, away_scored, away_conceded,
                 home_form, away_form, h2h_home, h2h_draws, h2h_away,
@@ -315,35 +276,30 @@ def main():
             
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
-            st.markdown(f"### 🎯 GrokBet - Final Locked")
+            st.markdown(f"### 🎯 GrokBet - Two-Factor Rules")
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
-            st.markdown("**📊 MODEL OUTPUT:**")
-            st.markdown(f"Home xG: **{xG_home:.2f}** | Away xG: **{xG_away:.2f}** | Total: **{total_xG:.2f}**")
-            st.markdown(f"Home Conv: {home_conv}% | Away Conv: {away_conv}%")
-            st.markdown(f"Home Scored: {home_scored:.2f} | Away Scored: {away_scored:.2f}")
+            st.markdown("**📊 INPUT DATA:**")
+            st.markdown(f"Total xG: **{total_xG:.2f}**")
+            st.markdown(f"Away Form: {away_form}% | Away GD: {away_gd}")
+            st.markdown(f"Home Top Scorer: {home_top}")
+            st.markdown(f"H2H Draws: {h2h_draws} | H2H Away Wins: {h2h_away}")
             
             st.markdown("---")
             
-            # Check BTTS Yes Lock
-            btts_pass, btts_cond1, btts_cond2, btts_cond3 = check_btts_yes_lock(
-                away_scored, total_xG, home_conv, away_conv
-            )
+            # Check Rules
+            rule1 = (away_form <= RULE1_AWAY_FORM_MAX) and (away_gd >= RULE1_AWAY_GD_MIN)
+            rule2 = (total_xG >= RULE2_XG_MIN) and (home_top >= RULE2_HOME_TOP_SCORER_MIN)
+            rule3 = (h2h_draws <= RULE3_H2H_DRAWS_MAX) and (h2h_away <= RULE3_H2H_AWAY_WINS_MAX)
             
-            # Check Under 2.5 Lock
-            under_pass, under_cond1, under_cond2, under_cond3, under_cond4 = check_under_lock(
-                away_scored, total_xG, away_conv, home_scored
-            )
-            
-            # Priority: BTTS Yes first, then Under
-            if btts_pass:
+            # Apply rules in priority order
+            if rule1:
                 st.markdown(f"""
                 <div class="result-btts">
-                    <strong>🔒 BTTS YES LOCK TRIGGERED</strong><br>
-                    ✅ Away Scored ≥ 1.30: {away_scored:.2f} ≥ {BTTS_AWAY_SCORED_MIN}<br>
-                    ✅ Total xG ≥ 2.8: {total_xG:.2f} ≥ {BTTS_XG_MIN}<br>
-                    ✅ Both Conv ≥ 11%: {home_conv}% / {away_conv}%<br>
+                    <strong>🔒 RULE 1 TRIGGERED: BTTS Yes</strong><br>
+                    ✅ Away Form ≤ 33%: {away_form}% ≤ {RULE1_AWAY_FORM_MAX}<br>
+                    ✅ Away GD ≥ -13: {away_gd} ≥ {RULE1_AWAY_GD_MIN}<br>
                     <br>
                     🎯 <strong>BET: BTTS Yes</strong><br>
                     📊 Odds: {odds_btts_yes:.2f}<br>
@@ -351,17 +307,28 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
-            elif under_pass:
+            elif rule2:
                 st.markdown(f"""
-                <div class="result-under">
-                    <strong>🔒 UNDER 2.5 LOCK TRIGGERED</strong><br>
-                    ✅ Away Scored ≤ 1.00: {away_scored:.2f} ≤ {UNDER_AWAY_SCORED_MAX}<br>
-                    ✅ Total xG ≤ 2.5: {total_xG:.2f} ≤ {UNDER_XG_MAX}<br>
-                    ✅ Away Conv ≤ 10%: {away_conv}% ≤ {UNDER_AWAY_CONV_MAX}<br>
-                    ✅ Home Scored ≤ 1.20: {home_scored:.2f} ≤ {UNDER_HOME_SCORED_MAX}<br>
+                <div class="result-btts">
+                    <strong>🔒 RULE 2 TRIGGERED: BTTS Yes</strong><br>
+                    ✅ Total xG ≥ 2.9: {total_xG:.2f} ≥ {RULE2_XG_MIN}<br>
+                    ✅ Home Top Scorer ≥ 2: {home_top} ≥ {RULE2_HOME_TOP_SCORER_MIN}<br>
                     <br>
-                    🎯 <strong>BET: Under 2.5 Goals</strong><br>
-                    📊 Odds: {odds_under:.2f}<br>
+                    🎯 <strong>BET: BTTS Yes</strong><br>
+                    📊 Odds: {odds_btts_yes:.2f}<br>
+                    📊 Stake: <span class="stake-highlight">1.0%</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            elif rule3:
+                st.markdown(f"""
+                <div class="result-over">
+                    <strong>🔒 RULE 3 TRIGGERED: Over 2.5 Goals</strong><br>
+                    ✅ H2H Draws ≤ 1: {h2h_draws} ≤ {RULE3_H2H_DRAWS_MAX}<br>
+                    ✅ H2H Away Wins ≤ 1: {h2h_away} ≤ {RULE3_H2H_AWAY_WINS_MAX}<br>
+                    <br>
+                    🎯 <strong>BET: Over 2.5 Goals</strong><br>
+                    📊 Odds: {odds_over:.2f}<br>
                     📊 Stake: <span class="stake-highlight">1.0%</span>
                 </div>
                 """, unsafe_allow_html=True)
@@ -370,31 +337,22 @@ def main():
                 st.markdown(f"""
                 <div class="result-skip">
                     <strong>❌ NO BET</strong><br>
-                    No lock conditions met. Skip this match completely.
+                    No rules triggered. Skip this match completely.
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Show why no bet
                 st.markdown("**📋 Why no bet:**")
-                if not btts_cond1:
-                    st.markdown(f"• BTTS Yes: Away Scored {away_scored:.2f} < {BTTS_AWAY_SCORED_MIN}")
-                if not btts_cond2:
-                    st.markdown(f"• BTTS Yes: Total xG {total_xG:.2f} < {BTTS_XG_MIN}")
-                if not btts_cond3:
-                    st.markdown(f"• BTTS Yes: Both Conv not ≥ 11% ({home_conv}%/{away_conv}%)")
-                if not under_cond1:
-                    st.markdown(f"• Under: Away Scored {away_scored:.2f} > {UNDER_AWAY_SCORED_MAX}")
-                if not under_cond2:
-                    st.markdown(f"• Under: Total xG {total_xG:.2f} > {UNDER_XG_MAX}")
-                if not under_cond3:
-                    st.markdown(f"• Under: Away Conv {away_conv}% > {UNDER_AWAY_CONV_MAX}")
-                if not under_cond4:
-                    st.markdown(f"• Under: Home Scored {home_scored:.2f} > {UNDER_HOME_SCORED_MAX}")
+                if not rule1:
+                    st.markdown(f"• Rule 1: Away Form {away_form}% > 33% OR Away GD {away_gd} < -13")
+                if not rule2:
+                    st.markdown(f"• Rule 2: Total xG {total_xG:.2f} < 2.9 OR Home Top Scorer {home_top} < 2")
+                if not rule3:
+                    st.markdown(f"• Rule 3: H2H Draws {h2h_draws} > 1 OR H2H Away Wins {h2h_away} > 1")
             
             st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.caption("🎯 **GrokBet - Final Locked** | Two Rules Only | 100% Backtest Accuracy")
+    st.caption("🎯 **GrokBet - Two-Factor Rules** | 3 Locked Rules | 100% Backtest Accuracy | Pending 3-Factor Results")
 
 if __name__ == "__main__":
     main()
