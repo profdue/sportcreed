@@ -28,7 +28,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - ENHANCED
+# CUSTOM CSS - ENHANCED WITH BETTER TEXT VISIBILITY
 # ============================================================================
 
 st.markdown("""
@@ -40,13 +40,18 @@ st.markdown("""
         max-width: 1200px;
     }
     
+    /* Force all text to be visible */
+    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span, label {
+        color: #e2e8f0 !important;
+    }
+    
     /* Animated gradient header */
     .main-header {
         background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
         padding: 1.5rem 2rem;
         border-radius: 16px;
         margin-bottom: 1.5rem;
-        border: 1px solid rgba(251, 191, 36, 0.3);
+        border: 1px solid #fbbf24;
         text-align: center;
         animation: fadeIn 0.5s ease-in;
     }
@@ -68,35 +73,34 @@ st.markdown("""
     
     .main-header p {
         margin: 0.5rem 0 0 0;
-        color: #94a3b8;
+        color: #cbd5e1 !important;
         font-size: 0.9rem;
     }
     
     .badge {
         display: inline-block;
         background: rgba(251, 191, 36, 0.2);
-        border: 1px solid rgba(251, 191, 36, 0.5);
+        border: 1px solid #fbbf24;
         border-radius: 20px;
         padding: 0.2rem 0.8rem;
         font-size: 0.7rem;
-        color: #fbbf24;
+        color: #fbbf24 !important;
         margin-top: 0.5rem;
     }
     
     /* Input cards with glassmorphism */
     .input-card {
-        background: rgba(30, 41, 59, 0.7);
-        backdrop-filter: blur(10px);
+        background: #1e293b;
         border-radius: 16px;
         padding: 1.5rem;
-        border: 1px solid rgba(51, 65, 85, 0.5);
+        border: 1px solid #fbbf24;
         margin-bottom: 1.5rem;
         transition: all 0.3s ease;
     }
     
     .input-card:hover {
-        border-color: rgba(251, 191, 36, 0.3);
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+        border-color: #f59e0b;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     }
     
     /* Section headers */
@@ -104,11 +108,12 @@ st.markdown("""
         font-size: 0.85rem;
         text-transform: uppercase;
         letter-spacing: 2px;
-        color: #fbbf24;
+        color: #fbbf24 !important;
         margin-bottom: 1rem;
         display: flex;
         align-items: center;
         gap: 0.5rem;
+        font-weight: bold;
     }
     
     .section-header::before {
@@ -118,10 +123,10 @@ st.markdown("""
     
     /* Result boxes */
     .result-box {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        background: #0f172a;
         border-radius: 20px;
         padding: 1.5rem;
-        border: 1px solid #334155;
+        border: 2px solid #fbbf24;
         margin-top: 1.5rem;
         animation: slideUp 0.4s ease-out;
     }
@@ -132,25 +137,35 @@ st.markdown("""
     }
     
     .result-btts {
-        background: linear-gradient(135deg, #1e293b 0%, #1e3a4a 100%);
-        border-left: 4px solid #3b82f6;
+        background: #1e293b;
+        border-left: 6px solid #3b82f6;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
         transition: transform 0.2s ease;
+        border-top: 1px solid #334155;
+        border-right: 1px solid #334155;
+        border-bottom: 1px solid #334155;
     }
     
     .result-btts:hover {
         transform: translateX(5px);
     }
     
+    .result-btts strong, .result-btts .rule-indicator, .result-btts .stake-highlight {
+        color: #ffffff !important;
+    }
+    
     .result-over {
-        background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
-        border-left: 4px solid #10b981;
+        background: #1e293b;
+        border-left: 6px solid #10b981;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
         transition: transform 0.2s ease;
+        border-top: 1px solid #334155;
+        border-right: 1px solid #334155;
+        border-bottom: 1px solid #334155;
     }
     
     .result-over:hover {
@@ -158,17 +173,20 @@ st.markdown("""
     }
     
     .result-skip {
-        background: linear-gradient(135deg, #1e293b 0%, #2a1a1a 100%);
-        border-left: 4px solid #ef4444;
+        background: #1e293b;
+        border-left: 6px solid #ef4444;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
+        border-top: 1px solid #334155;
+        border-right: 1px solid #334155;
+        border-bottom: 1px solid #334155;
     }
     
     /* Stake highlight */
     .stake-highlight {
         background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        color: #0f172a;
+        color: #0f172a !important;
         padding: 0.25rem 0.75rem;
         border-radius: 20px;
         font-weight: bold;
@@ -177,16 +195,35 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(251, 191, 36, 0.3);
     }
     
-    /* Stats grid */
+    /* Stats grid - LOCK LOGIC DISPLAY CARD */
+    .logic-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border-radius: 16px;
+        padding: 1.25rem;
+        margin: 1rem 0;
+        border: 2px solid #fbbf24;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    
+    .logic-title {
+        font-size: 1rem;
+        font-weight: bold;
+        color: #fbbf24 !important;
+        margin-bottom: 1rem;
+        text-align: center;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    
     .stats-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         gap: 0.75rem;
         margin: 1rem 0;
     }
     
     .stat-card {
-        background: rgba(15, 23, 42, 0.5);
+        background: #0f172a;
         border-radius: 10px;
         padding: 0.75rem;
         text-align: center;
@@ -195,16 +232,51 @@ st.markdown("""
     
     .stat-label {
         font-size: 0.7rem;
-        color: #94a3b8;
+        color: #94a3b8 !important;
         text-transform: uppercase;
         letter-spacing: 1px;
     }
     
     .stat-value {
-        font-size: 1.5rem;
+        font-size: 1.4rem;
         font-weight: bold;
-        color: #fbbf24;
+        color: #fbbf24 !important;
         margin-top: 0.25rem;
+    }
+    
+    .stat-value-critical {
+        font-size: 1.8rem;
+        font-weight: bold;
+        color: #fbbf24 !important;
+        margin-top: 0.25rem;
+    }
+    
+    /* Rule status indicators */
+    .rule-status {
+        display: inline-block;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        text-align: center;
+        line-height: 24px;
+        font-size: 14px;
+        font-weight: bold;
+        margin-right: 8px;
+    }
+    
+    .rule-pass {
+        background: #10b981;
+        color: white;
+    }
+    
+    .rule-fail {
+        background: #ef4444;
+        color: white;
+    }
+    
+    .rule-check {
+        color: #fbbf24 !important;
+        font-weight: bold;
     }
     
     /* Odds grid */
@@ -216,10 +288,22 @@ st.markdown("""
     }
     
     .odds-item {
-        background: rgba(0, 0, 0, 0.3);
+        background: #0f172a;
         border-radius: 10px;
         padding: 0.5rem;
         text-align: center;
+        border: 1px solid #334155;
+    }
+    
+    .odds-label {
+        font-size: 0.7rem;
+        color: #94a3b8 !important;
+    }
+    
+    .odds-value {
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: #fbbf24 !important;
     }
     
     /* Divider */
@@ -227,18 +311,19 @@ st.markdown("""
         margin: 1rem 0;
         border: none;
         height: 1px;
-        background: linear-gradient(90deg, transparent, #334155, transparent);
+        background: linear-gradient(90deg, transparent, #fbbf24, transparent);
     }
     
     /* Button styling */
     .stButton > button {
         background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        color: #0f172a;
+        color: #0f172a !important;
         font-weight: bold;
         border: none;
         border-radius: 12px;
         padding: 0.75rem;
         transition: all 0.3s ease;
+        font-size: 1rem;
     }
     
     .stButton > button:hover {
@@ -249,26 +334,37 @@ st.markdown("""
     /* Number inputs */
     .stNumberInput > div > div > input {
         background: #0f172a;
-        border-color: #334155;
-        color: #e2e8f0;
+        border-color: #fbbf24;
+        color: #fbbf24 !important;
+        font-weight: bold;
+    }
+    
+    .stNumberInput label {
+        color: #cbd5e1 !important;
     }
     
     /* Text inputs */
     .stTextInput > div > div > input {
         background: #0f172a;
-        border-color: #334155;
-        color: #e2e8f0;
+        border-color: #fbbf24;
+        color: #fbbf24 !important;
         font-weight: bold;
+        font-size: 1rem;
+    }
+    
+    .stTextInput label {
+        color: #cbd5e1 !important;
     }
     
     /* Rule indicator */
     .rule-indicator {
-        font-size: 0.8rem;
+        font-size: 0.85rem;
         padding: 0.2rem 0.5rem;
         border-radius: 6px;
-        background: rgba(251, 191, 36, 0.1);
+        background: rgba(251, 191, 36, 0.15);
         display: inline-block;
         margin-right: 0.5rem;
+        color: #fbbf24 !important;
     }
     
     /* Footer */
@@ -276,9 +372,14 @@ st.markdown("""
         text-align: center;
         padding: 1rem;
         margin-top: 1rem;
-        border-top: 1px solid #334155;
+        border-top: 1px solid #fbbf24;
         font-size: 0.7rem;
-        color: #64748b;
+        color: #94a3b8 !important;
+    }
+    
+    /* Headers */
+    h1, h2, h3, h4, h5, h6 {
+        color: #fbbf24 !important;
     }
     
     /* Responsive */
@@ -411,7 +512,7 @@ def main():
         
         col3, col4 = st.columns(2)
         with col3:
-            st.markdown(f"**{home_team}**")
+            st.markdown(f"**🏠 {home_team}**")
             home_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 1.70, 0.05, key="home_scored")
             home_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 1.60, 0.05, key="home_conceded")
             home_form = st.number_input("📈 Form %", 0, 100, 67, key="home_form")
@@ -419,7 +520,7 @@ def main():
             home_top = st.number_input("🎯 Top Scorer Goals", 0, 30, 6, key="home_top")
             home_conv = st.number_input("🎯 Conversion %", 0, 100, 15, key="home_conv")
         with col4:
-            st.markdown(f"**{away_team}**")
+            st.markdown(f"**✈️ {away_team}**")
             away_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 1.30, 0.05, key="away_scored")
             away_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 1.00, 0.05, key="away_conceded")
             away_form = st.number_input("📈 Form %", 0, 100, 20, key="away_form")
@@ -481,35 +582,54 @@ def main():
             
             st.markdown(f"### 🎯 {home_team} vs {away_team}")
             
-            # Stats grid for quick overview
+            # LOCK LOGIC DISPLAY CARD - Shows all important data from your lock logic
             st.markdown("""
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-label">📊 Total xG</div>
-                    <div class="stat-value">{:.2f}</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">📈 {} Form</div>
-                    <div class="stat-value">{}%</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">📉 {} Form</div>
-                    <div class="stat-value">{}%</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">🎯 {} Top Scorer</div>
-                    <div class="stat-value">{}</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">🎯 {} Top Scorer</div>
-                    <div class="stat-value">{}</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">🤝 H2H Draws/Away Wins</div>
-                    <div class="stat-value">{}/{}</div>
+            <div class="logic-card">
+                <div class="logic-title">🔒 LOCK LOGIC DATA - 7 TWO-FACTOR RULES</div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">📊 TOTAL xG</div>
+                        <div class="stat-value-critical">{:.2f}</div>
+                        <div class="stat-label">Threshold: ≥ 2.9</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">🏠 HOME TOP SCORER</div>
+                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-label">Rule 1: ≥ 2 | Rule 5/6: ≤ 8/9</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">✈️ AWAY TOP SCORER</div>
+                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-label">Rule 2: ≥ 1 | Rule 3: ≥ 2</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">📉 AWAY FORM</div>
+                        <div class="stat-value-critical">{}%</div>
+                        <div class="stat-label">Rule 4: ≤ 33%</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">➕ AWAY GD</div>
+                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-label">Rule 4: ≥ -13</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">🤝 H2H DRAWS</div>
+                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-label">Rule 7: ≤ 1</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">✈️ H2H AWAY WINS</div>
+                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-label">Rules 5,6,7: ≤ 1</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">🎯 PREDICTED SCORE</div>
+                        <div class="stat-value-critical">{:.1f} - {:.1f}</div>
+                        <div class="stat-label">Home - Away</div>
+                    </div>
                 </div>
             </div>
-            """.format(total_xG, home_team, home_form, away_team, away_form, home_team, home_top, away_team, away_top, h2h_draws, h2h_away), unsafe_allow_html=True)
+            """.format(total_xG, home_top, away_top, away_form, away_gd, h2h_draws, h2h_away, xG_home, xG_away), unsafe_allow_html=True)
             
             st.markdown("---")
             
@@ -625,9 +745,9 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.markdown("**📋 Why no bet:**")
+                st.markdown("**📋 Why no bet (Rule failures):**")
                 
-                # Create a clean grid for rule failures
+                # Create a clean list for rule failures
                 failures = []
                 if not (total_xG >= RULE1_XG_MIN and home_top >= RULE1_HOME_TOP_SCORER_MIN):
                     failures.append(f"• Rule 1: xG {total_xG:.2f} < 2.9 OR Home Top Scorer {home_top} < 2")
