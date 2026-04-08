@@ -1,27 +1,24 @@
-# grokbet_final_locked.py
+# grokbet_final.py
 # GROKBET – FINAL LOCKED VERSION
 # 
-# 7 Two-Factor Rules (100% Accuracy on 42 Matches)
+# Two rules only:
 # 
-# BTTS Yes Rules (4):
-# 1. Total xG ≥ 2.9 AND Home Top Scorer ≥ 2
-# 2. Total xG ≥ 2.9 AND Away Top Scorer ≥ 1
-# 3. Total xG ≥ 2.9 AND Away Top Scorer ≥ 2
-# 4. Away Form ≤ 33% AND Away GD ≥ -13
+# RULE A: Total xG ≥ 2.9 AND Home Top Scorer ≥ 2
+# RULE B: Away Form ≤ 33% AND Away GD ≥ -13
 # 
-# Over 2.5 Rules (3):
-# 5. Home Top Scorer ≤ 8 AND H2H Away Wins ≤ 1
-# 6. Home Top Scorer ≤ 9 AND H2H Away Wins ≤ 1
-# 7. H2H Draws ≤ 1 AND H2H Away Wins ≤ 1
+# ADDITIONAL FILTER (applies to both rules):
+# Skip if either team has:
+# - Scored Avg ≤ 1.0 OR
+# - Conversion % ≤ 10%
 # 
-# Priority: Check rules in order. First match wins.
-# Stake: 1.0% when triggered
+# This filter avoids weak attacks that kill BTTS.
+# Trade-off: Skips 1 winning bet to avoid 4 losing bets.
 
 import streamlit as st
 import math
 
 st.set_page_config(
-    page_title="GrokBet - Final Locked",
+    page_title="GrokBet - Final",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -51,7 +48,7 @@ st.markdown("""
         padding: 1.5rem 2rem;
         border-radius: 16px;
         margin-bottom: 1.5rem;
-        border: 1px solid #fbbf24;
+        border: 2px solid #fbbf24;
         text-align: center;
         animation: fadeIn 0.5s ease-in;
     }
@@ -88,7 +85,7 @@ st.markdown("""
         margin-top: 0.5rem;
     }
     
-    /* Input cards with glassmorphism */
+    /* Input cards */
     .input-card {
         background: #1e293b;
         border-radius: 16px;
@@ -136,7 +133,7 @@ st.markdown("""
         to { opacity: 1; transform: translateY(0); }
     }
     
-    .result-btts {
+    .result-bet {
         background: #1e293b;
         border-left: 6px solid #3b82f6;
         padding: 1.25rem;
@@ -148,33 +145,24 @@ st.markdown("""
         border-bottom: 1px solid #334155;
     }
     
-    .result-btts:hover {
-        transform: translateX(5px);
-    }
-    
-    .result-btts strong, .result-btts .rule-indicator, .result-btts .stake-highlight {
-        color: #ffffff !important;
-    }
-    
-    .result-over {
-        background: #1e293b;
-        border-left: 6px solid #10b981;
-        padding: 1.25rem;
-        border-radius: 12px;
-        margin: 0.75rem 0;
-        transition: transform 0.2s ease;
-        border-top: 1px solid #334155;
-        border-right: 1px solid #334155;
-        border-bottom: 1px solid #334155;
-    }
-    
-    .result-over:hover {
+    .result-bet:hover {
         transform: translateX(5px);
     }
     
     .result-skip {
         background: #1e293b;
         border-left: 6px solid #ef4444;
+        padding: 1.25rem;
+        border-radius: 12px;
+        margin: 0.75rem 0;
+        border-top: 1px solid #334155;
+        border-right: 1px solid #334155;
+        border-bottom: 1px solid #334155;
+    }
+    
+    .result-filter {
+        background: #1e293b;
+        border-left: 6px solid #f97316;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
@@ -195,7 +183,7 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(251, 191, 36, 0.3);
     }
     
-    /* Stats grid - LOCK LOGIC DISPLAY CARD */
+    /* LOGIC DISPLAY CARD */
     .logic-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border-radius: 16px;
@@ -217,7 +205,7 @@ st.markdown("""
     
     .stats-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         gap: 0.75rem;
         margin: 1rem 0;
     }
@@ -251,58 +239,40 @@ st.markdown("""
         margin-top: 0.25rem;
     }
     
-    /* Rule status indicators */
-    .rule-status {
-        display: inline-block;
-        width: 24px;
-        height: 24px;
-        border-radius: 50%;
-        text-align: center;
-        line-height: 24px;
-        font-size: 14px;
-        font-weight: bold;
-        margin-right: 8px;
-    }
-    
-    .rule-pass {
-        background: #10b981;
-        color: white;
-    }
-    
-    .rule-fail {
-        background: #ef4444;
-        color: white;
-    }
-    
-    .rule-check {
-        color: #fbbf24 !important;
+    .stat-pass {
+        color: #10b981 !important;
         font-weight: bold;
     }
     
-    /* Odds grid */
-    .odds-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1rem;
-        margin-top: 0.5rem;
+    .stat-fail {
+        color: #ef4444 !important;
+        font-weight: bold;
     }
     
-    .odds-item {
+    /* Filter status card */
+    .filter-card {
         background: #0f172a;
-        border-radius: 10px;
-        padding: 0.5rem;
-        text-align: center;
-        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 1rem;
+        margin: 1rem 0;
+        border: 1px solid #f97316;
     }
     
-    .odds-label {
-        font-size: 0.7rem;
-        color: #94a3b8 !important;
-    }
-    
-    .odds-value {
-        font-size: 1.2rem;
+    .filter-title {
+        font-size: 0.85rem;
         font-weight: bold;
+        color: #f97316 !important;
+        margin-bottom: 0.5rem;
+    }
+    
+    /* Rule indicator */
+    .rule-indicator {
+        font-size: 0.85rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 6px;
+        background: rgba(251, 191, 36, 0.15);
+        display: inline-block;
+        margin-right: 0.5rem;
         color: #fbbf24 !important;
     }
     
@@ -324,6 +294,7 @@ st.markdown("""
         padding: 0.75rem;
         transition: all 0.3s ease;
         font-size: 1rem;
+        width: 100%;
     }
     
     .stButton > button:hover {
@@ -356,14 +327,8 @@ st.markdown("""
         color: #cbd5e1 !important;
     }
     
-    /* Rule indicator */
-    .rule-indicator {
-        font-size: 0.85rem;
-        padding: 0.2rem 0.5rem;
-        border-radius: 6px;
-        background: rgba(251, 191, 36, 0.15);
-        display: inline-block;
-        margin-right: 0.5rem;
+    /* Headers */
+    h1, h2, h3, h4, h5, h6 {
         color: #fbbf24 !important;
     }
     
@@ -377,18 +342,10 @@ st.markdown("""
         color: #94a3b8 !important;
     }
     
-    /* Headers */
-    h1, h2, h3, h4, h5, h6 {
-        color: #fbbf24 !important;
-    }
-    
     /* Responsive */
     @media (max-width: 768px) {
         .stats-grid {
             grid-template-columns: repeat(2, 1fr);
-        }
-        .odds-grid {
-            grid-template-columns: 1fr;
         }
     }
 </style>
@@ -400,27 +357,17 @@ st.markdown("""
 
 MIN_XG = 0.3
 
-# Rule thresholds
-RULE1_XG_MIN = 2.9
-RULE1_HOME_TOP_SCORER_MIN = 2
+# Rule A thresholds
+RULE_A_XG_MIN = 2.9
+RULE_A_HOME_TOP_SCORER_MIN = 2
 
-RULE2_XG_MIN = 2.9
-RULE2_AWAY_TOP_SCORER_MIN = 1
+# Rule B thresholds
+RULE_B_AWAY_FORM_MAX = 33
+RULE_B_AWAY_GD_MIN = -13
 
-RULE3_XG_MIN = 2.9
-RULE3_AWAY_TOP_SCORER_MIN = 2
-
-RULE4_AWAY_FORM_MAX = 33
-RULE4_AWAY_GD_MIN = -13
-
-RULE5_HOME_TOP_SCORER_MAX = 8
-RULE5_H2H_AWAY_WINS_MAX = 1
-
-RULE6_HOME_TOP_SCORER_MAX = 9
-RULE6_H2H_AWAY_WINS_MAX = 1
-
-RULE7_H2H_DRAWS_MAX = 1
-RULE7_H2H_AWAY_WINS_MAX = 1
+# Weak attack filter thresholds
+WEAK_SCORED_MAX = 1.0
+WEAK_CONV_MAX = 10
 
 # Adjustment weights (for xG calculation)
 FORM_WEIGHT = 0.4
@@ -480,6 +427,25 @@ def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
     
     return xG_home, xG_away
 
+def check_weak_attack_filter(home_scored, away_scored, home_conv, away_conv, home_team, away_team):
+    """Skip if either team has weak attack"""
+    home_weak = home_scored <= WEAK_SCORED_MAX or home_conv <= WEAK_CONV_MAX
+    away_weak = away_scored <= WEAK_SCORED_MAX or away_conv <= WEAK_CONV_MAX
+    
+    is_weak = home_weak or away_weak
+    reasons = []
+    
+    if home_scored <= WEAK_SCORED_MAX:
+        reasons.append(f"{home_team} scored {home_scored:.2f} ≤ {WEAK_SCORED_MAX}")
+    if home_conv <= WEAK_CONV_MAX:
+        reasons.append(f"{home_team} conv {home_conv}% ≤ {WEAK_CONV_MAX}%")
+    if away_scored <= WEAK_SCORED_MAX:
+        reasons.append(f"{away_team} scored {away_scored:.2f} ≤ {WEAK_SCORED_MAX}")
+    if away_conv <= WEAK_CONV_MAX:
+        reasons.append(f"{away_team} conv {away_conv}% ≤ {WEAK_CONV_MAX}%")
+    
+    return is_weak, reasons
+
 # ============================================================================
 # MAIN APP
 # ============================================================================
@@ -487,8 +453,8 @@ def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet - Final Locked</h1>
-        <p>7 Two-Factor Rules | 100% Backtest Accuracy (42 Matches)</p>
+        <h1>🎯 GrokBet - Final</h1>
+        <p>2 Locked BTTS Yes Rules + Weak Attack Filter</p>
         <div class="badge">⚠️ Stake: 1.0% when triggered</div>
     </div>
     """, unsafe_allow_html=True)
@@ -500,10 +466,10 @@ def main():
         col1, col2 = st.columns([1, 1])
         with col1:
             st.markdown('<div class="section-header">🏠 HOME TEAM</div>', unsafe_allow_html=True)
-            home_team = st.text_input("Team Name", "Nordsjaelland", label_visibility="collapsed")
+            home_team = st.text_input("Team Name", "Goztepe Izmir", label_visibility="collapsed")
         with col2:
             st.markdown('<div class="section-header">✈️ AWAY TEAM</div>', unsafe_allow_html=True)
-            away_team = st.text_input("Team Name", "Broendby", label_visibility="collapsed")
+            away_team = st.text_input("Team Name", "Galatasaray", label_visibility="collapsed")
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
@@ -513,20 +479,20 @@ def main():
         col3, col4 = st.columns(2)
         with col3:
             st.markdown(f"**🏠 {home_team}**")
-            home_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 1.70, 0.05, key="home_scored")
-            home_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 1.60, 0.05, key="home_conceded")
-            home_form = st.number_input("📈 Form %", 0, 100, 67, key="home_form")
-            home_gd = st.number_input("➕ Goal Difference", -50, 50, 1, key="home_gd")
-            home_top = st.number_input("🎯 Top Scorer Goals", 0, 30, 6, key="home_top")
-            home_conv = st.number_input("🎯 Conversion %", 0, 100, 15, key="home_conv")
+            home_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 1.20, 0.05, key="home_scored")
+            home_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 0.70, 0.05, key="home_conceded")
+            home_form = st.number_input("📈 Form %", 0, 100, 33, key="home_form")
+            home_gd = st.number_input("➕ Goal Difference", -50, 50, 12, key="home_gd")
+            home_top = st.number_input("🎯 Top Scorer Goals", 0, 30, 7, key="home_top")
+            home_conv = st.number_input("🎯 Conversion %", 0, 100, 11, key="home_conv")
         with col4:
             st.markdown(f"**✈️ {away_team}**")
-            away_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 1.30, 0.05, key="away_scored")
-            away_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 1.00, 0.05, key="away_conceded")
-            away_form = st.number_input("📈 Form %", 0, 100, 20, key="away_form")
-            away_gd = st.number_input("➕ Goal Difference", -50, 50, 8, key="away_gd")
-            away_top = st.number_input("🎯 Top Scorer Goals", 0, 30, 5, key="away_top")
-            away_conv = st.number_input("🎯 Conversion %", 0, 100, 11, key="away_conv")
+            away_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 2.30, 0.05, key="away_scored")
+            away_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 0.70, 0.05, key="away_conceded")
+            away_form = st.number_input("📈 Form %", 0, 100, 60, key="away_form")
+            away_gd = st.number_input("➕ Goal Difference", -50, 50, 43, key="away_gd")
+            away_top = st.number_input("🎯 Top Scorer Goals", 0, 30, 13, key="away_top")
+            away_conv = st.number_input("🎯 Conversion %", 0, 100, 15, key="away_conv")
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
@@ -534,34 +500,34 @@ def main():
         st.markdown('<div class="section-header">🤝 HEAD TO HEAD (Last 5 Matches)</div>', unsafe_allow_html=True)
         col5, col6, col7 = st.columns(3)
         with col5:
-            h2h_home = st.number_input(f"{home_team} Wins", 0, 5, 2)
+            h2h_home = st.number_input(f"{home_team} Wins", 0, 5, 0)
         with col6:
-            h2h_draws = st.number_input("Draws", 0, 5, 2)
+            h2h_draws = st.number_input("Draws", 0, 5, 0)
         with col7:
-            h2h_away = st.number_input(f"{away_team} Wins", 0, 5, 1)
+            h2h_away = st.number_input(f"{away_team} Wins", 0, 5, 5)
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # Odds section with better layout
+        # Odds section
         st.markdown('<div class="section-header">💰 ODDS (SportyBet)</div>', unsafe_allow_html=True)
         
         col8, col9, col10 = st.columns(3)
         
         with col8:
             st.markdown("**1X2 Market**")
-            odds_home = st.number_input("🏠 Home", 0.0, 10.0, 2.30, 0.05, key="odds_home")
-            odds_draw = st.number_input("🤝 Draw", 0.0, 10.0, 3.50, 0.05, key="odds_draw")
-            odds_away = st.number_input("✈️ Away", 0.0, 10.0, 3.00, 0.05, key="odds_away")
+            odds_home = st.number_input("🏠 Home", 0.0, 10.0, 4.28, 0.05, key="odds_home")
+            odds_draw = st.number_input("🤝 Draw", 0.0, 10.0, 3.78, 0.05, key="odds_draw")
+            odds_away = st.number_input("✈️ Away", 0.0, 10.0, 1.88, 0.05, key="odds_away")
         
         with col9:
             st.markdown("**Over/Under 2.5**")
-            odds_over = st.number_input("📈 Over 2.5", 0.0, 10.0, 1.65, 0.05, key="odds_over")
-            odds_under = st.number_input("📉 Under 2.5", 0.0, 10.0, 2.20, 0.05, key="odds_under")
+            odds_over = st.number_input("📈 Over 2.5", 0.0, 10.0, 1.82, 0.05, key="odds_over")
+            odds_under = st.number_input("📉 Under 2.5", 0.0, 10.0, 2.05, 0.05, key="odds_under")
         
         with col10:
             st.markdown("**BTTS Market**")
-            odds_btts_yes = st.number_input("✅ BTTS Yes", 0.0, 10.0, 1.54, 0.05, key="odds_btts_yes")
-            odds_btts_no = st.number_input("❌ BTTS No", 0.0, 10.0, 2.35, 0.05, key="odds_btts_no")
+            odds_btts_yes = st.number_input("✅ BTTS Yes", 0.0, 10.0, 1.74, 0.05, key="odds_btts_yes")
+            odds_btts_no = st.number_input("❌ BTTS No", 0.0, 10.0, 2.10, 0.05, key="odds_btts_no")
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -569,7 +535,7 @@ def main():
         analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
         
         if analyze:
-            # Calculate xG for rules that need it
+            # Calculate xG for Rule A
             xG_home, xG_away = calculate_xG(
                 home_scored, home_conceded, away_scored, away_conceded,
                 home_form, away_form, h2h_home, h2h_draws, h2h_away,
@@ -582,193 +548,133 @@ def main():
             
             st.markdown(f"### 🎯 {home_team} vs {away_team}")
             
-            # LOCK LOGIC DISPLAY CARD - Shows all important data from your lock logic
+            # LOGIC DISPLAY CARD - Shows all important data
             st.markdown("""
             <div class="logic-card">
-                <div class="logic-title">🔒 LOCK LOGIC DATA - 7 TWO-FACTOR RULES</div>
+                <div class="logic-title">🔒 LOCK LOGIC DATA - 2 RULES + WEAK ATTACK FILTER</div>
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-label">📊 TOTAL xG</div>
                         <div class="stat-value-critical">{:.2f}</div>
-                        <div class="stat-label">Threshold: ≥ 2.9</div>
+                        <div class="stat-label">Rule A: ≥ 2.9</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">🏠 HOME TOP SCORER</div>
                         <div class="stat-value-critical">{}</div>
-                        <div class="stat-label">Rule 1: ≥ 2 | Rule 5/6: ≤ 8/9</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">✈️ AWAY TOP SCORER</div>
-                        <div class="stat-value-critical">{}</div>
-                        <div class="stat-label">Rule 2: ≥ 1 | Rule 3: ≥ 2</div>
+                        <div class="stat-label">Rule A: ≥ 2</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">📉 AWAY FORM</div>
                         <div class="stat-value-critical">{}%</div>
-                        <div class="stat-label">Rule 4: ≤ 33%</div>
+                        <div class="stat-label">Rule B: ≤ 33%</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">➕ AWAY GD</div>
                         <div class="stat-value-critical">{}</div>
-                        <div class="stat-label">Rule 4: ≥ -13</div>
+                        <div class="stat-label">Rule B: ≥ -13</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">🤝 H2H DRAWS</div>
-                        <div class="stat-value-critical">{}</div>
-                        <div class="stat-label">Rule 7: ≤ 1</div>
+                        <div class="stat-label">🏠 HOME SCORED</div>
+                        <div class="stat-value">{:.2f}</div>
+                        <div class="stat-label">Filter: > 1.0</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">✈️ H2H AWAY WINS</div>
-                        <div class="stat-value-critical">{}</div>
-                        <div class="stat-label">Rules 5,6,7: ≤ 1</div>
+                        <div class="stat-label">🏠 HOME CONV %</div>
+                        <div class="stat-value">{}%</div>
+                        <div class="stat-label">Filter: > 10%</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">🎯 PREDICTED SCORE</div>
-                        <div class="stat-value-critical">{:.1f} - {:.1f}</div>
-                        <div class="stat-label">Home - Away</div>
+                        <div class="stat-label">✈️ AWAY SCORED</div>
+                        <div class="stat-value">{:.2f}</div>
+                        <div class="stat-label">Filter: > 1.0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">✈️ AWAY CONV %</div>
+                        <div class="stat-value">{}%</div>
+                        <div class="stat-label">Filter: > 10%</div>
                     </div>
                 </div>
             </div>
-            """.format(total_xG, home_top, away_top, away_form, away_gd, h2h_draws, h2h_away, xG_home, xG_away), unsafe_allow_html=True)
+            """.format(total_xG, home_top, away_form, away_gd, home_scored, home_conv, away_scored, away_conv), unsafe_allow_html=True)
             
             st.markdown("---")
             
-            # Check rules in priority order
-            # BTTS Yes Rules (1-4)
-            rule1 = (total_xG >= RULE1_XG_MIN) and (home_top >= RULE1_HOME_TOP_SCORER_MIN)
-            rule2 = (total_xG >= RULE2_XG_MIN) and (away_top >= RULE2_AWAY_TOP_SCORER_MIN)
-            rule3 = (total_xG >= RULE3_XG_MIN) and (away_top >= RULE3_AWAY_TOP_SCORER_MIN)
-            rule4 = (away_form <= RULE4_AWAY_FORM_MAX) and (away_gd >= RULE4_AWAY_GD_MIN)
+            # Check weak attack filter first
+            is_weak, weak_reasons = check_weak_attack_filter(
+                home_scored, away_scored, home_conv, away_conv, home_team, away_team
+            )
             
-            # Over 2.5 Rules (5-7)
-            rule5 = (home_top <= RULE5_HOME_TOP_SCORER_MAX) and (h2h_away <= RULE5_H2H_AWAY_WINS_MAX)
-            rule6 = (home_top <= RULE6_HOME_TOP_SCORER_MAX) and (h2h_away <= RULE6_H2H_AWAY_WINS_MAX)
-            rule7 = (h2h_draws <= RULE7_H2H_DRAWS_MAX) and (h2h_away <= RULE7_H2H_AWAY_WINS_MAX)
-            
-            # Apply rules in priority order
-            if rule1:
+            if is_weak:
                 st.markdown(f"""
-                <div class="result-btts">
-                    <strong>🔒 RULE 1 ACTIVATED - BTTS Yes</strong><br><br>
-                    <span class="rule-indicator">✅</span> Total xG ≥ 2.9: {total_xG:.2f} ≥ 2.9<br>
-                    <span class="rule-indicator">✅</span> Home Top Scorer ≥ 2: {home_top} ≥ 2<br>
+                <div class="result-filter">
+                    <strong>⚠️ WEAK ATTACK FILTER TRIGGERED - NO BET</strong><br><br>
+                    <span class="rule-indicator">🚫</span> {' | '.join(weak_reasons)}<br>
                     <br>
-                    🎯 <strong>BET: BTTS Yes</strong><br>
-                    📊 Odds: {odds_btts_yes:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
+                    <strong>📝 Verdict:</strong> Skipping this match to avoid potential BTTS No outcome.<br>
+                    📊 Stake: <span class="stake-highlight">0% (Skipped)</span>
                 </div>
                 """, unsafe_allow_html=True)
-                
-            elif rule2:
-                st.markdown(f"""
-                <div class="result-btts">
-                    <strong>🔒 RULE 2 ACTIVATED - BTTS Yes</strong><br><br>
-                    <span class="rule-indicator">✅</span> Total xG ≥ 2.9: {total_xG:.2f} ≥ 2.9<br>
-                    <span class="rule-indicator">✅</span> Away Top Scorer ≥ 1: {away_top} ≥ 1<br>
-                    <br>
-                    🎯 <strong>BET: BTTS Yes</strong><br>
-                    📊 Odds: {odds_btts_yes:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            elif rule3:
-                st.markdown(f"""
-                <div class="result-btts">
-                    <strong>🔒 RULE 3 ACTIVATED - BTTS Yes</strong><br><br>
-                    <span class="rule-indicator">✅</span> Total xG ≥ 2.9: {total_xG:.2f} ≥ 2.9<br>
-                    <span class="rule-indicator">✅</span> Away Top Scorer ≥ 2: {away_top} ≥ 2<br>
-                    <br>
-                    🎯 <strong>BET: BTTS Yes</strong><br>
-                    📊 Odds: {odds_btts_yes:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            elif rule4:
-                st.markdown(f"""
-                <div class="result-btts">
-                    <strong>🔒 RULE 4 ACTIVATED - BTTS Yes</strong><br><br>
-                    <span class="rule-indicator">✅</span> Away Form ≤ 33%: {away_form}% ≤ 33<br>
-                    <span class="rule-indicator">✅</span> Away GD ≥ -13: {away_gd} ≥ -13<br>
-                    <br>
-                    🎯 <strong>BET: BTTS Yes</strong><br>
-                    📊 Odds: {odds_btts_yes:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            elif rule5:
-                st.markdown(f"""
-                <div class="result-over">
-                    <strong>🔒 RULE 5 ACTIVATED - Over 2.5 Goals</strong><br><br>
-                    <span class="rule-indicator">✅</span> Home Top Scorer ≤ 8: {home_top} ≤ 8<br>
-                    <span class="rule-indicator">✅</span> H2H Away Wins ≤ 1: {h2h_away} ≤ 1<br>
-                    <br>
-                    🎯 <strong>BET: Over 2.5 Goals</strong><br>
-                    📊 Odds: {odds_over:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            elif rule6:
-                st.markdown(f"""
-                <div class="result-over">
-                    <strong>🔒 RULE 6 ACTIVATED - Over 2.5 Goals</strong><br><br>
-                    <span class="rule-indicator">✅</span> Home Top Scorer ≤ 9: {home_top} ≤ 9<br>
-                    <span class="rule-indicator">✅</span> H2H Away Wins ≤ 1: {h2h_away} ≤ 1<br>
-                    <br>
-                    🎯 <strong>BET: Over 2.5 Goals</strong><br>
-                    📊 Odds: {odds_over:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            elif rule7:
-                st.markdown(f"""
-                <div class="result-over">
-                    <strong>🔒 RULE 7 ACTIVATED - Over 2.5 Goals</strong><br><br>
-                    <span class="rule-indicator">✅</span> H2H Draws ≤ 1: {h2h_draws} ≤ 1<br>
-                    <span class="rule-indicator">✅</span> H2H Away Wins ≤ 1: {h2h_away} ≤ 1<br>
-                    <br>
-                    🎯 <strong>BET: Over 2.5 Goals</strong><br>
-                    📊 Odds: {odds_over:.2f}<br>
-                    📊 Stake: <span class="stake-highlight">1.0%</span>
-                </div>
-                """, unsafe_allow_html=True)
-                
             else:
-                st.markdown(f"""
-                <div class="result-skip">
-                    <strong>❌ NO BET - Skip This Match</strong><br><br>
-                    No rules triggered. Complete pass.
-                </div>
-                """, unsafe_allow_html=True)
+                # Check rules
+                rule_a = (total_xG >= RULE_A_XG_MIN) and (home_top >= RULE_A_HOME_TOP_SCORER_MIN)
+                rule_b = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
                 
-                st.markdown("**📋 Why no bet (Rule failures):**")
+                # Show rule check status
+                st.markdown("**🔍 Rule Check Status:**")
+                rule_a_status = "✅ PASS" if rule_a else "❌ FAIL"
+                rule_b_status = "✅ PASS" if rule_b else "❌ FAIL"
+                st.markdown(f"- Rule A: {rule_a_status} (xG ≥ 2.9 AND Home Top Scorer ≥ 2)")
+                st.markdown(f"- Rule B: {rule_b_status} (Away Form ≤ 33% AND Away GD ≥ -13)")
+                st.markdown("---")
                 
-                # Create a clean list for rule failures
-                failures = []
-                if not (total_xG >= RULE1_XG_MIN and home_top >= RULE1_HOME_TOP_SCORER_MIN):
-                    failures.append(f"• Rule 1: xG {total_xG:.2f} < 2.9 OR Home Top Scorer {home_top} < 2")
-                if not (total_xG >= RULE2_XG_MIN and away_top >= RULE2_AWAY_TOP_SCORER_MIN):
-                    failures.append(f"• Rule 2/3: xG {total_xG:.2f} < 2.9 OR Away Top Scorer {away_top} < 1/2")
-                if not (away_form <= RULE4_AWAY_FORM_MAX and away_gd >= RULE4_AWAY_GD_MIN):
-                    failures.append(f"• Rule 4: Away Form {away_form}% > 33 OR Away GD {away_gd} < -13")
-                if not ((home_top <= RULE5_HOME_TOP_SCORER_MAX and h2h_away <= RULE5_H2H_AWAY_WINS_MAX) or 
-                       (home_top <= RULE6_HOME_TOP_SCORER_MAX and h2h_away <= RULE6_H2H_AWAY_WINS_MAX)):
-                    failures.append(f"• Rule 5/6: Home Top Scorer {home_top} > 8/9 OR H2H Away Wins {h2h_away} > 1")
-                if not (h2h_draws <= RULE7_H2H_DRAWS_MAX and h2h_away <= RULE7_H2H_AWAY_WINS_MAX):
-                    failures.append(f"• Rule 7: H2H Draws {h2h_draws} > 1 OR H2H Away Wins {h2h_away} > 1")
-                
-                for failure in failures:
-                    st.markdown(failure)
+                if rule_a:
+                    st.markdown(f"""
+                    <div class="result-bet">
+                        <strong>🔒 RULE A TRIGGERED: BTTS Yes</strong><br><br>
+                        <span class="rule-indicator">✅</span> Total xG ≥ 2.9: {total_xG:.2f} ≥ 2.9<br>
+                        <span class="rule-indicator">✅</span> Home Top Scorer ≥ 2: {home_top} ≥ 2<br>
+                        <span class="rule-indicator">✅</span> Weak Attack Filter: PASSED (no weak attacks)<br>
+                        <br>
+                        🎯 <strong>BET: BTTS Yes</strong><br>
+                        📊 Odds: {odds_btts_yes:.2f}<br>
+                        📊 Stake: <span class="stake-highlight">1.0%</span>
+                        <br><br>
+                        <strong>📝 Verdict:</strong> Rule A triggered. Bet BTTS Yes.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                elif rule_b:
+                    st.markdown(f"""
+                    <div class="result-bet">
+                        <strong>🔒 RULE B TRIGGERED: BTTS Yes</strong><br><br>
+                        <span class="rule-indicator">✅</span> Away Form ≤ 33%: {away_form}% ≤ 33<br>
+                        <span class="rule-indicator">✅</span> Away GD ≥ -13: {away_gd} ≥ -13<br>
+                        <span class="rule-indicator">✅</span> Weak Attack Filter: PASSED (no weak attacks)<br>
+                        <br>
+                        🎯 <strong>BET: BTTS Yes</strong><br>
+                        📊 Odds: {odds_btts_yes:.2f}<br>
+                        📊 Stake: <span class="stake-highlight">1.0%</span>
+                        <br><br>
+                        <strong>📝 Verdict:</strong> Rule B triggered. Bet BTTS Yes.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                else:
+                    st.markdown(f"""
+                    <div class="result-skip">
+                        <strong>❌ NO BET</strong><br><br>
+                        No rules triggered. Skip this match completely.<br>
+                        <br>
+                        <strong>📝 Verdict:</strong> No rule triggered. Skip match.<br>
+                        📊 Stake: <span class="stake-highlight">0% (Skipped)</span>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("""
     <div class="footer">
-        🎯 GrokBet - Final Locked | 7 Two-Factor Rules | 100% Backtest Accuracy (42 Matches) | No More Changes
+        🎯 GrokBet - Final | 2 Rules + Weak Attack Filter | Live Tested
     </div>
     """, unsafe_allow_html=True)
 
