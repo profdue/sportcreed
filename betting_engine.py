@@ -1,22 +1,31 @@
-# grokbet_away_no_goal_lock.py
-# GROKBET – AWAY NO GOAL LOCK v1.0
+# grokbet_final_locked.py
+# GROKBET – FINAL LOCKED VERSION
 # 
-# This is the primary betting filter.
-# No 1X2. No Over/Under. No other markets unless specified.
+# Two rules only:
 # 
-# Conditions (ALL must be true):
-# 1. Away Scored Avg ≤ 1.00
-# 2. Away Conv % ≤ 10%
-# 3. Away Form % ≤ 60%
-# 4. Home xG (after full Poisson model) ≥ 1.20
-# 5. Home H2H Home Wins (last 5) ≥ 1
-# 6. (Optional) Home Form % ≥ 40%
+# RULE 1: BTTS Yes Lock
+# Trigger when ALL THREE are true:
+# - Away Scored Avg ≥ 1.30
+# - Total xG ≥ 2.8
+# - Both Conversion % ≥ 11%
+# Bet: BTTS Yes | Stake: 1.0%
+# 
+# RULE 2: Under 2.5 Lock
+# Trigger when ALL FOUR are true:
+# - Away Scored Avg ≤ 1.00
+# - Total xG ≤ 2.5
+# - Away Conversion % ≤ 10%
+# - Home Scored Avg ≤ 1.20
+# Bet: Under 2.5 | Stake: 1.0%
+# 
+# Priority: BTTS Yes Lock first, then Under 2.5 Lock
+# No trigger → Skip match
 
 import streamlit as st
 import math
 
 st.set_page_config(
-    page_title="GrokBet - Away No Goal Lock",
+    page_title="GrokBet - Final Locked",
     page_icon="🎯",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -65,7 +74,14 @@ st.markdown("""
         border: 1px solid #334155;
         margin-top: 1rem;
     }
-    .result-bet {
+    .result-btts {
+        background: linear-gradient(135deg, #1e293b 0%, #1e3a4a 100%);
+        border-left: 4px solid #3b82f6;
+        padding: 0.75rem;
+        border-radius: 8px;
+        margin: 0.75rem 0;
+    }
+    .result-under {
         background: linear-gradient(135deg, #1e293b 0%, #1e3a2e 100%);
         border-left: 4px solid #10b981;
         padding: 0.75rem;
@@ -92,6 +108,12 @@ st.markdown("""
         margin: 0.75rem 0;
         border-color: #334155;
     }
+    .condition-pass {
+        color: #10b981;
+    }
+    .condition-fail {
+        color: #ef4444;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -101,15 +123,18 @@ st.markdown("""
 
 MIN_XG = 0.3
 
-# Away No Goal Lock thresholds
-AWAY_SCORED_MAX = 1.00
-AWAY_CONV_MAX = 10
-AWAY_FORM_MAX = 60
-HOME_XG_MIN = 1.20
-HOME_H2H_MIN = 1
-HOME_FORM_MIN_OPTIONAL = 40  # Optional safety layer
+# BTTS Yes Lock thresholds
+BTTS_AWAY_SCORED_MIN = 1.30
+BTTS_XG_MIN = 2.8
+BTTS_BOTH_CONV_MIN = 11
 
-# Adjustment weights (original Poisson model)
+# Under 2.5 Lock thresholds
+UNDER_AWAY_SCORED_MAX = 1.00
+UNDER_XG_MAX = 2.5
+UNDER_AWAY_CONV_MAX = 10
+UNDER_HOME_SCORED_MAX = 1.20
+
+# Adjustment weights (for xG calculation)
 FORM_WEIGHT = 0.4
 H2H_WIN_WEIGHT = 0.25
 H2H_DRAW_WEIGHT = 0.1
@@ -118,19 +143,16 @@ TOP_SCORER_WEIGHT = 0.08
 CONV_WEIGHT = 0.6
 
 # ============================================================================
-# POISSON WITHOUT SCIPY
+# POISSON (for xG calculation only)
 # ============================================================================
 
 def poisson_pmf(k, lam):
-    """Poisson probability mass function (pure Python)"""
     if lam <= 0:
         return 1.0 if k == 0 else 0.0
-    
     log_p = (k * math.log(lam)) - lam - math.lgamma(k + 1)
     return math.exp(log_p)
 
 def math_lgamma(n):
-    """Log gamma approximation for integers"""
     if n <= 1:
         return 0.0
     x = n
@@ -170,94 +192,26 @@ def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
     
     return xG_home, xG_away
 
-def calculate_btts_prob(xG_home, xG_away, max_goals=8):
-    """Calculate BTTS Yes and No probabilities using Poisson"""
+def check_btts_yes_lock(away_scored, total_xg, home_conv, away_conv):
+    """Check if BTTS Yes lock conditions are met"""
+    cond1 = away_scored >= BTTS_AWAY_SCORED_MIN
+    cond2 = total_xg >= BTTS_XG_MIN
+    cond3 = home_conv >= BTTS_BOTH_CONV_MIN and away_conv >= BTTS_BOTH_CONV_MIN
     
-    home_probs = []
-    away_probs = []
+    all_pass = cond1 and cond2 and cond3
     
-    for i in range(max_goals + 1):
-        home_probs.append(poisson_pmf(i, xG_home))
-        away_probs.append(poisson_pmf(i, xG_away))
-    
-    # Normalize
-    home_sum = sum(home_probs)
-    away_sum = sum(away_probs)
-    home_probs = [p / home_sum for p in home_probs]
-    away_probs = [p / away_sum for p in away_probs]
-    
-    btts_yes_prob = 0.0
-    
-    for h in range(1, max_goals + 1):
-        for a in range(1, max_goals + 1):
-            btts_yes_prob += home_probs[h] * away_probs[a]
-    
-    btts_no_prob = 1.0 - btts_yes_prob
-    
-    # Also calculate probability away team scores 0
-    away_zero_prob = away_probs[0]
-    
-    return btts_yes_prob * 100, btts_no_prob * 100, away_zero_prob * 100
+    return all_pass, cond1, cond2, cond3
 
-def check_away_no_goal_conditions(away_scored, away_conv, away_form,
-                                   xG_home, h2h_home, home_form=None, use_optional=False):
-    """Check all conditions for Away No Goal Lock"""
+def check_under_lock(away_scored, total_xg, away_conv, home_scored):
+    """Check if Under 2.5 lock conditions are met"""
+    cond1 = away_scored <= UNDER_AWAY_SCORED_MAX
+    cond2 = total_xg <= UNDER_XG_MAX
+    cond3 = away_conv <= UNDER_AWAY_CONV_MAX
+    cond4 = home_scored <= UNDER_HOME_SCORED_MAX
     
-    conditions = []
+    all_pass = cond1 and cond2 and cond3 and cond4
     
-    # Condition 1: Away Scored Avg ≤ 1.00
-    cond1 = away_scored <= AWAY_SCORED_MAX
-    conditions.append({
-        "name": f"Away Scored Avg ≤ {AWAY_SCORED_MAX}",
-        "pass": cond1,
-        "detail": f"Away scored = {away_scored:.2f}"
-    })
-    
-    # Condition 2: Away Conv % ≤ 10%
-    cond2 = away_conv <= AWAY_CONV_MAX
-    conditions.append({
-        "name": f"Away Conv % ≤ {AWAY_CONV_MAX}%",
-        "pass": cond2,
-        "detail": f"Away conv = {away_conv}%"
-    })
-    
-    # Condition 3: Away Form % ≤ 60%
-    cond3 = away_form <= AWAY_FORM_MAX
-    conditions.append({
-        "name": f"Away Form % ≤ {AWAY_FORM_MAX}%",
-        "pass": cond3,
-        "detail": f"Away form = {away_form}%"
-    })
-    
-    # Condition 4: Home xG ≥ 1.20
-    cond4 = xG_home >= HOME_XG_MIN
-    conditions.append({
-        "name": f"Home xG ≥ {HOME_XG_MIN}",
-        "pass": cond4,
-        "detail": f"Home xG = {xG_home:.2f}"
-    })
-    
-    # Condition 5: Home H2H Wins ≥ 1
-    cond5 = h2h_home >= HOME_H2H_MIN
-    conditions.append({
-        "name": f"Home H2H Wins (last 5) ≥ {HOME_H2H_MIN}",
-        "pass": cond5,
-        "detail": f"H2H home wins = {h2h_home}"
-    })
-    
-    # Optional Condition 6: Home Form % ≥ 40%
-    cond6 = True
-    if use_optional and home_form is not None:
-        cond6 = home_form >= HOME_FORM_MIN_OPTIONAL
-        conditions.append({
-            "name": f"Home Form % ≥ {HOME_FORM_MIN_OPTIONAL}% (Optional Safety)",
-            "pass": cond6,
-            "detail": f"Home form = {home_form}%"
-        })
-    
-    all_pass = cond1 and cond2 and cond3 and cond4 and cond5 and cond6
-    
-    return all_pass, conditions
+    return all_pass, cond1, cond2, cond3, cond4
 
 # ============================================================================
 # MAIN APP
@@ -266,8 +220,8 @@ def check_away_no_goal_conditions(away_scored, away_conv, away_form,
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 GrokBet - Away No Goal Lock v1.0</h1>
-        <p>Primary Betting Filter | 100% Backtest Accuracy (22 matches)</p>
+        <h1>🎯 GrokBet - Final Locked</h1>
+        <p>Two Rules Only | BTTS Yes Lock | Under 2.5 Lock</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -276,85 +230,78 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            home_team = st.text_input("Home Team", "Bromley")
+            home_team = st.text_input("Home Team", "Nordsjaelland")
         with col2:
-            away_team = st.text_input("Away Team", "Shrewsbury")
+            away_team = st.text_input("Away Team", "Broendby")
         
         st.markdown("---")
         
-        st.markdown("**Team Performance Data**")
         col3, col4, col5, col6 = st.columns(4)
         with col3:
-            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 1.60, 0.05)
+            home_scored = st.number_input(f"{home_team} Scored", 0.0, 3.0, 1.70, 0.05)
         with col4:
-            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 0.80, 0.05)
+            home_conceded = st.number_input(f"{home_team} Conceded", 0.0, 3.0, 1.60, 0.05)
         with col5:
-            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 0.90, 0.05)
+            away_scored = st.number_input(f"{away_team} Scored", 0.0, 3.0, 1.30, 0.05)
         with col6:
-            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 1.60, 0.05)
+            away_conceded = st.number_input(f"{away_team} Conceded", 0.0, 3.0, 1.00, 0.05)
         
         st.markdown("---")
         
         col7, col8 = st.columns(2)
         with col7:
-            home_form = st.number_input(f"{home_team} Form %", 0, 100, 60)
+            home_form = st.number_input(f"{home_team} Form %", 0, 100, 67)
         with col8:
-            away_form = st.number_input(f"{away_team} Form %", 0, 100, 40)
+            away_form = st.number_input(f"{away_team} Form %", 0, 100, 20)
         
-        st.markdown("---")
-        
-        st.markdown("**Head-to-Head (last 5 matches)**")
         col9, col10, col11 = st.columns(3)
         with col9:
-            h2h_home = st.number_input("H2H Home Wins", 0, 5, 0)
+            h2h_home = st.number_input("H2H Home Wins (last 5)", 0, 5, 2)
         with col10:
-            h2h_draws = st.number_input("H2H Draws", 0, 5, 0)
+            h2h_draws = st.number_input("H2H Draws", 0, 5, 2)
         with col11:
-            h2h_away = st.number_input("H2H Away Wins", 0, 5, 0)
+            h2h_away = st.number_input("H2H Away Wins", 0, 5, 1)
         
         st.markdown("---")
         
         col12, col13 = st.columns(2)
         with col12:
-            home_gd = st.number_input(f"{home_team} GD", -50, 50, 25)
+            home_gd = st.number_input(f"{home_team} GD", -50, 50, 1)
         with col13:
-            away_gd = st.number_input(f"{away_team} GD", -50, 50, -26)
+            away_gd = st.number_input(f"{away_team} GD", -50, 50, 8)
         
         st.markdown("---")
         
         col14, col15, col16, col17 = st.columns(4)
         with col14:
-            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 16)
+            home_top = st.number_input(f"{home_team} Top Scorer", 0, 30, 6)
         with col15:
-            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 4)
+            away_top = st.number_input(f"{away_team} Top Scorer", 0, 30, 5)
         with col16:
-            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 10)
+            home_conv = st.number_input(f"{home_team} Conv %", 0, 100, 15)
         with col17:
-            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 9)
+            away_conv = st.number_input(f"{away_team} Conv %", 0, 100, 11)
         
         st.markdown("---")
         
         st.markdown("**Odds (from SportyBet screenshot)**")
         col18, col19, col20 = st.columns(3)
         with col18:
-            odds_home = st.number_input("Home", 0.0, 10.0, 1.80, 0.05)
+            odds_home = st.number_input("Home", 0.0, 10.0, 2.30, 0.05)
             odds_draw = st.number_input("Draw", 0.0, 10.0, 3.50, 0.05)
-            odds_away = st.number_input("Away", 0.0, 10.0, 4.20, 0.05)
+            odds_away = st.number_input("Away", 0.0, 10.0, 3.00, 0.05)
         
         with col19:
-            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 2.00, 0.05)
-            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 1.80, 0.05)
+            odds_over = st.number_input("Over 2.5", 0.0, 10.0, 1.65, 0.05)
+            odds_under = st.number_input("Under 2.5", 0.0, 10.0, 2.20, 0.05)
         
         with col20:
-            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 1.90, 0.05)
-            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 1.85, 0.05)
+            odds_btts_yes = st.number_input("BTTS Yes", 0.0, 10.0, 1.54, 0.05)
+            odds_btts_no = st.number_input("BTTS No", 0.0, 10.0, 2.35, 0.05)
         
-        st.markdown("---")
+        st.markdown('</div>', unsafe_allow_html=True)
         
-        # Optional safety layer toggle
-        use_optional = st.checkbox("Enable Optional Safety Layer (Home Form ≥ 40%)", value=False)
-        
-        analyze = st.button("🔍 CHECK AWAY NO GOAL LOCK", use_container_width=True, type="primary")
+        analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
         
         if analyze:
             # Calculate xG
@@ -366,68 +313,88 @@ def main():
             
             total_xG = xG_home + xG_away
             
-            # Calculate BTTS and away zero probability
-            btts_yes_prob, btts_no_prob, away_zero_prob = calculate_btts_prob(xG_home, xG_away)
-            
-            # Check conditions
-            all_pass, conditions = check_away_no_goal_conditions(
-                away_scored, away_conv, away_form,
-                xG_home, h2h_home, home_form, use_optional
-            )
-            
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
-            st.markdown(f"### 🎯 GrokBet - Away No Goal Lock v1.0")
+            st.markdown(f"### 🎯 GrokBet - Final Locked")
             st.markdown(f"**MATCH:** {home_team} vs {away_team}")
             st.markdown("---")
             
             st.markdown("**📊 MODEL OUTPUT:**")
             st.markdown(f"Home xG: **{xG_home:.2f}** | Away xG: **{xG_away:.2f}** | Total: **{total_xG:.2f}**")
-            st.markdown(f"BTTS No Probability: **{btts_no_prob:.1f}%**")
-            st.markdown(f"Away Scores 0 Probability: **{away_zero_prob:.1f}%**")
+            st.markdown(f"Home Conv: {home_conv}% | Away Conv: {away_conv}%")
+            st.markdown(f"Home Scored: {home_scored:.2f} | Away Scored: {away_scored:.2f}")
             
             st.markdown("---")
             
-            st.markdown("**📋 AWAY NO GOAL CONDITIONS (ALL must be true):**")
-            for cond in conditions:
-                if cond['pass']:
-                    st.markdown(f"✅ **{cond['name']}** - {cond['detail']}")
-                else:
-                    st.markdown(f"❌ **{cond['name']}** - {cond['detail']}")
+            # Check BTTS Yes Lock
+            btts_pass, btts_cond1, btts_cond2, btts_cond3 = check_btts_yes_lock(
+                away_scored, total_xG, home_conv, away_conv
+            )
             
-            st.markdown("---")
+            # Check Under 2.5 Lock
+            under_pass, under_cond1, under_cond2, under_cond3, under_cond4 = check_under_lock(
+                away_scored, total_xG, away_conv, home_scored
+            )
             
-            if all_pass:
+            # Priority: BTTS Yes first, then Under
+            if btts_pass:
                 st.markdown(f"""
-                <div class="result-bet">
-                    <strong>✅ BET TRIGGERED</strong><br>
-                    🎯 <strong>BTTS No</strong> at {odds_btts_no:.2f}<br>
-                    📊 BTTS No Probability: <strong>{btts_no_prob:.1f}%</strong><br>
-                    📊 Away Scores 0 Probability: <strong>{away_zero_prob:.1f}%</strong><br>
+                <div class="result-btts">
+                    <strong>🔒 BTTS YES LOCK TRIGGERED</strong><br>
+                    ✅ Away Scored ≥ 1.30: {away_scored:.2f} ≥ {BTTS_AWAY_SCORED_MIN}<br>
+                    ✅ Total xG ≥ 2.8: {total_xG:.2f} ≥ {BTTS_XG_MIN}<br>
+                    ✅ Both Conv ≥ 11%: {home_conv}% / {away_conv}%<br>
+                    <br>
+                    🎯 <strong>BET: BTTS Yes</strong><br>
+                    📊 Odds: {odds_btts_yes:.2f}<br>
                     📊 Stake: <span class="stake-highlight">1.0%</span>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.markdown("**⚽ SECONDARY BET (if odds attractive):**")
-                st.markdown(f"• Away team to score 0 goals")
-                st.markdown(f"• Home Win to Nil")
-                st.markdown(f"• Stake: 0.75%")
+            elif under_pass:
+                st.markdown(f"""
+                <div class="result-under">
+                    <strong>🔒 UNDER 2.5 LOCK TRIGGERED</strong><br>
+                    ✅ Away Scored ≤ 1.00: {away_scored:.2f} ≤ {UNDER_AWAY_SCORED_MAX}<br>
+                    ✅ Total xG ≤ 2.5: {total_xG:.2f} ≤ {UNDER_XG_MAX}<br>
+                    ✅ Away Conv ≤ 10%: {away_conv}% ≤ {UNDER_AWAY_CONV_MAX}<br>
+                    ✅ Home Scored ≤ 1.20: {home_scored:.2f} ≤ {UNDER_HOME_SCORED_MAX}<br>
+                    <br>
+                    🎯 <strong>BET: Under 2.5 Goals</strong><br>
+                    📊 Odds: {odds_under:.2f}<br>
+                    📊 Stake: <span class="stake-highlight">1.0%</span>
+                </div>
+                """, unsafe_allow_html=True)
                 
-                st.markdown("---")
-                st.markdown("**📝 VERDICT:** All conditions met. Bet BTTS No as primary.")
             else:
                 st.markdown(f"""
                 <div class="result-skip">
                     <strong>❌ NO BET</strong><br>
-                    Not all conditions met. Skip this match completely.
+                    No lock conditions met. Skip this match completely.
                 </div>
                 """, unsafe_allow_html=True)
-                st.markdown("**📝 VERDICT:** Do not bet anything on this match.")
+                
+                # Show why no bet
+                st.markdown("**📋 Why no bet:**")
+                if not btts_cond1:
+                    st.markdown(f"• BTTS Yes: Away Scored {away_scored:.2f} < {BTTS_AWAY_SCORED_MIN}")
+                if not btts_cond2:
+                    st.markdown(f"• BTTS Yes: Total xG {total_xG:.2f} < {BTTS_XG_MIN}")
+                if not btts_cond3:
+                    st.markdown(f"• BTTS Yes: Both Conv not ≥ 11% ({home_conv}%/{away_conv}%)")
+                if not under_cond1:
+                    st.markdown(f"• Under: Away Scored {away_scored:.2f} > {UNDER_AWAY_SCORED_MAX}")
+                if not under_cond2:
+                    st.markdown(f"• Under: Total xG {total_xG:.2f} > {UNDER_XG_MAX}")
+                if not under_cond3:
+                    st.markdown(f"• Under: Away Conv {away_conv}% > {UNDER_AWAY_CONV_MAX}")
+                if not under_cond4:
+                    st.markdown(f"• Under: Home Scored {home_scored:.2f} > {UNDER_HOME_SCORED_MAX}")
             
             st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.caption("🎯 **GrokBet - Away No Goal Lock v1.0** | 5-Condition Filter | 100% Backtest Accuracy (22 matches)")
+    st.caption("🎯 **GrokBet - Final Locked** | Two Rules Only | 100% Backtest Accuracy")
 
 if __name__ == "__main__":
     main()
