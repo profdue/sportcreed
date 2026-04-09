@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - NO GREY TEXT, EVERYTHING BRIGHT AND VIBRANT
+# CUSTOM CSS - BLACK INPUT TEXT FOR VISIBILITY
 # ============================================================================
 
 st.markdown("""
@@ -38,14 +38,39 @@ st.markdown("""
     }
     
     /* Force ALL text to be bright and visible - NO GREY */
-    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span, label, .st-emotion-cache-1v0mbdj, .st-emotion-cache-1y4p8pa {
+    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span {
         color: #ffffff !important;
     }
     
-    /* All text inputs, numbers, labels - BRIGHT */
+    /* Input labels - BLACK for visibility */
     .stNumberInput label, .stTextInput label, .stSelectbox label {
+        color: #000000 !important;
+        font-weight: bold !important;
+        font-size: 0.85rem !important;
+        background: #fbbf24 !important;
+        padding: 0.2rem 0.5rem !important;
+        border-radius: 6px !important;
+        display: inline-block !important;
+        margin-bottom: 0.3rem !important;
+    }
+    
+    /* Input values stay gold */
+    .stNumberInput input, .stTextInput input {
         color: #fbbf24 !important;
         font-weight: bold !important;
+        background: #0f172a !important;
+        border-color: #fbbf24 !important;
+    }
+    
+    /* Team name labels - black with gold background */
+    .team-label {
+        color: #000000 !important;
+        font-weight: bold !important;
+        background: #fbbf24 !important;
+        padding: 0.3rem 0.8rem !important;
+        border-radius: 8px !important;
+        display: inline-block !important;
+        margin-bottom: 0.5rem !important;
         font-size: 0.9rem !important;
     }
     
@@ -112,7 +137,7 @@ st.markdown("""
         transform: translateY(-2px);
     }
     
-    /* Section headers */
+    /* Section headers - gold text */
     .section-header {
         font-size: 0.9rem;
         text-transform: uppercase;
@@ -322,7 +347,7 @@ st.markdown("""
         box-shadow: 0 6px 20px rgba(251, 191, 36, 0.5);
     }
     
-    /* Number inputs */
+    /* Number inputs - keep gold values */
     .stNumberInput > div > div > input {
         background: #0f172a;
         border-color: #fbbf24;
@@ -508,7 +533,7 @@ def main():
         
         col3, col4 = st.columns(2)
         with col3:
-            st.markdown(f"**🏠 {home_team}**")
+            st.markdown(f'<div class="team-label">🏠 {home_team}</div>', unsafe_allow_html=True)
             home_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 1.20, 0.05, key="home_scored")
             home_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 0.70, 0.05, key="home_conceded")
             home_form = st.number_input("📈 Form %", 0, 100, 33, key="home_form")
@@ -516,7 +541,7 @@ def main():
             home_top = st.number_input("🎯 Top Scorer Goals", 0, 30, 7, key="home_top")
             home_conv = st.number_input("🎯 Conversion %", 0, 100, 11, key="home_conv")
         with col4:
-            st.markdown(f"**✈️ {away_team}**")
+            st.markdown(f'<div class="team-label">✈️ {away_team}</div>', unsafe_allow_html=True)
             away_scored = st.number_input("⚽ Goals Scored", 0.0, 3.0, 2.30, 0.05, key="away_scored")
             away_conceded = st.number_input("🛡️ Goals Conceded", 0.0, 3.0, 0.70, 0.05, key="away_conceded")
             away_form = st.number_input("📈 Form %", 0, 100, 60, key="away_form")
