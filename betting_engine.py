@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - DISPLAY CARD TEXT WHITE, OTHERS BLACK
+# CUSTOM CSS - EVERYTHING IN DISPLAY CARD WHITE
 # ============================================================================
 
 st.markdown("""
@@ -37,39 +37,51 @@ st.markdown("""
         max-width: 1200px;
     }
     
-    /* Default text - BLACK for most content */
-    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span, label, .st-emotion-cache-1v0mbdj {
-        color: #000000 !important;
-    }
-    
-    /* DISPLAY CARD - Force ALL text inside to be WHITE */
-    .logic-card, .logic-card * {
+    /* LOGIC DISPLAY CARD - FORCE EVERYTHING INSIDE TO BE WHITE */
+    .logic-card, 
+    .logic-card *,
+    .logic-card .stat-card,
+    .logic-card .stat-card *,
+    .logic-card .stat-label,
+    .logic-card .stat-value,
+    .logic-card .stat-value-critical,
+    .logic-card .logic-title {
         color: #ffffff !important;
     }
     
-    /* Result boxes - Force text to be WHITE */
-    .result-box, .result-box * {
-        color: #ffffff !important;
-    }
-    
-    /* Rule check status - Force text to be WHITE */
-    .rule-check-status, .rule-check-status * {
-        color: #ffffff !important;
-    }
-    
-    /* Result bet/skip/filter - Force text to be WHITE */
-    .result-bet, .result-bet *,
-    .result-skip, .result-skip *,
-    .result-filter, .result-filter * {
-        color: #ffffff !important;
-    }
-    
-    /* But keep gold highlights in display cards */
-    .stat-value-critical, .logic-title, .section-header, .rule-indicator {
+    /* Keep gold color for specific elements in display card */
+    .logic-card .stat-value-critical {
         color: #fbbf24 !important;
     }
     
-    /* PASS/FAIL colors in rule check */
+    .logic-card .logic-title {
+        color: #fbbf24 !important;
+    }
+    
+    .logic-card .stat-label {
+        color: #fbbf24 !important;
+    }
+    
+    /* Result boxes - ALL TEXT WHITE */
+    .result-box, 
+    .result-box *,
+    .result-bet,
+    .result-bet *,
+    .result-skip,
+    .result-skip *,
+    .result-filter,
+    .result-filter *,
+    .rule-check-status,
+    .rule-check-status * {
+        color: #ffffff !important;
+    }
+    
+    /* Keep stake highlight with dark text */
+    .stake-highlight {
+        color: #0f172a !important;
+    }
+    
+    /* Rule check status - keep PASS/FAIL colors */
     .pass-text {
         color: #10b981 !important;
     }
@@ -121,7 +133,7 @@ st.markdown("""
         box-shadow: 0 0 20px rgba(251, 191, 36, 0.2);
     }
     
-    /* Header text - keep gold/white */
+    /* Header text */
     .main-header h1 {
         margin: 0;
         font-size: 2rem;
@@ -166,11 +178,6 @@ st.markdown("""
         border-color: #f59e0b;
         box-shadow: 0 4px 20px rgba(251, 191, 36, 0.2);
         transform: translateY(-2px);
-    }
-    
-    /* Input card text - keep black for visibility on light backgrounds */
-    .input-card .stMarkdown, .input-card p, .input-card span {
-        color: #ffffff !important;
     }
     
     /* Section headers - gold text */
@@ -272,17 +279,6 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(251, 191, 36, 0.2);
     }
     
-    .logic-title {
-        font-size: 1.1rem;
-        font-weight: bold;
-        color: #fbbf24 !important;
-        margin-bottom: 1rem;
-        text-align: center;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        text-shadow: 0 0 5px rgba(251, 191, 36, 0.5);
-    }
-    
     .stats-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -303,30 +299,6 @@ st.markdown("""
         transform: translateY(-2px);
         border-color: #f59e0b;
         box-shadow: 0 4px 12px rgba(251, 191, 36, 0.2);
-    }
-    
-    .stat-label {
-        font-size: 0.7rem;
-        color: #fbbf24 !important;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        font-weight: bold;
-    }
-    
-    .stat-value {
-        font-size: 1.4rem;
-        font-weight: bold;
-        color: #ffffff !important;
-        margin-top: 0.25rem;
-        text-shadow: 0 0 5px rgba(255, 255, 255, 0.3);
-    }
-    
-    .stat-value-critical {
-        font-size: 1.8rem;
-        font-weight: bold;
-        color: #fbbf24 !important;
-        margin-top: 0.25rem;
-        text-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
     }
     
     /* Rule indicator */
@@ -406,12 +378,6 @@ st.markdown("""
         box-shadow: 0 0 8px rgba(251, 191, 36, 0.3);
     }
     
-    /* Headers outside display cards - black */
-    h1, h2, h3, h4, h5, h6 {
-        color: #000000 !important;
-        font-weight: bold !important;
-    }
-    
     /* Footer */
     .footer {
         text-align: center;
@@ -421,6 +387,11 @@ st.markdown("""
         font-size: 0.75rem;
         color: #000000 !important;
         font-weight: bold;
+    }
+    
+    /* Default text color for non-display-card elements */
+    body, .stApp, .main {
+        color: #000000;
     }
     
     /* Responsive */
@@ -629,7 +600,7 @@ def main():
             
             st.markdown(f"### 🎯 {home_team} vs {away_team}")
             
-            # LOGIC DISPLAY CARD - Shows all important data (ALL TEXT WHITE)
+            # LOGIC DISPLAY CARD - ALL TEXT IS WHITE
             st.markdown(f"""
             <div class="logic-card">
                 <div class="logic-title">🔒 LOCK LOGIC DATA - 2 RULES + WEAK ATTACK FILTER</div>
@@ -701,7 +672,7 @@ def main():
                 rule_a = (total_xG >= RULE_A_XG_MIN) and (home_top >= RULE_A_HOME_TOP_SCORER_MIN)
                 rule_b = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
                 
-                # Show rule check status with visible colors (ALL TEXT WHITE in this container)
+                # Show rule check status
                 st.markdown("""
                 <div class="rule-check-status">
                     <strong>🔍 RULE CHECK STATUS:</strong><br><br>
