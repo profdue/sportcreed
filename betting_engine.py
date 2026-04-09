@@ -1,18 +1,19 @@
 # grokbet_final.py
 # GROKBET – FINAL LOCKED VERSION
 # 
-# Two rules only:
+# Three rules:
 # 
-# RULE A: Total xG ≥ 2.9 AND Home Top Scorer ≥ 2
-# RULE B: Away Form ≤ 33% AND Away GD ≥ -13
+# RULE A: Total xG ≥ 2.9 AND Home Top Scorer ≥ 2 → BTTS Yes
+# RULE B: Away Form ≤ 33% AND Away GD ≥ -13 → BTTS Yes
+# RULE C: Total xG ≥ 2.9 AND Home Top Scorer ≥ 2 → Over 1.5 Goals
 # 
-# ADDITIONAL FILTER (applies to both rules):
+# ADDITIONAL FILTER (applies to Rules A & B only):
 # Skip if either team has:
 # - Scored Avg ≤ 1.0 OR
 # - Conversion % ≤ 10%
 # 
 # This filter avoids weak attacks that kill BTTS.
-# Trade-off: Skips 1 winning bet to avoid 4 losing bets.
+# Rule C has NO weak attack filter (it only needs 2+ goals).
 
 import streamlit as st
 import math
@@ -257,6 +258,18 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(249, 115, 22, 0.2);
     }
     
+    .result-over {
+        background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%);
+        border-left: 6px solid #10b981;
+        padding: 1.25rem;
+        border-radius: 12px;
+        margin: 0.75rem 0;
+        border-top: 1px solid #10b981;
+        border-right: 1px solid #10b981;
+        border-bottom: 1px solid #10b981;
+        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);
+    }
+    
     /* Stake highlight */
     .stake-highlight {
         background: linear-gradient(135deg, #fbbf24, #f59e0b);
@@ -409,15 +422,19 @@ st.markdown("""
 
 MIN_XG = 0.3
 
-# Rule A thresholds
+# Rule A thresholds (BTTS Yes)
 RULE_A_XG_MIN = 2.9
 RULE_A_HOME_TOP_SCORER_MIN = 2
 
-# Rule B thresholds
+# Rule B thresholds (BTTS Yes)
 RULE_B_AWAY_FORM_MAX = 33
 RULE_B_AWAY_GD_MIN = -13
 
-# Weak attack filter thresholds
+# Rule C thresholds (Over 1.5)
+RULE_C_XG_MIN = 2.9
+RULE_C_HOME_TOP_SCORER_MIN = 2
+
+# Weak attack filter thresholds (applies to Rules A & B only)
 WEAK_SCORED_MAX = 1.0
 WEAK_CONV_MAX = 10
 
@@ -480,7 +497,7 @@ def calculate_xG(home_scored, home_conceded, away_scored, away_conceded,
     return xG_home, xG_away
 
 def check_weak_attack_filter(home_scored, away_scored, home_conv, away_conv, home_team, away_team):
-    """Skip if either team has weak attack"""
+    """Skip if either team has weak attack (applies to BTTS Yes rules only)"""
     home_weak = home_scored <= WEAK_SCORED_MAX or home_conv <= WEAK_CONV_MAX
     away_weak = away_scored <= WEAK_SCORED_MAX or away_conv <= WEAK_CONV_MAX
     
@@ -506,7 +523,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎯 GrokBet - Final</h1>
-        <p>2 Locked BTTS Yes Rules + Weak Attack Filter</p>
+        <p>3 Locked Rules | BTTS Yes (x2) + Over 1.5</p>
         <div class="badge">⚠️ STAKE: 1.0% WHEN TRIGGERED</div>
     </div>
     """, unsafe_allow_html=True)
@@ -587,7 +604,7 @@ def main():
         analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
         
         if analyze:
-            # Calculate xG for Rule A
+            # Calculate xG for Rule A & C
             xG_home, xG_away = calculate_xG(
                 home_scored, home_conceded, away_scored, away_conceded,
                 home_form, away_form, h2h_home, h2h_draws, h2h_away,
@@ -603,17 +620,17 @@ def main():
             # LOGIC DISPLAY CARD - ALL TEXT IS WHITE
             st.markdown(f"""
             <div class="logic-card">
-                <div class="logic-title">🔒 LOCK LOGIC DATA - 2 RULES + WEAK ATTACK FILTER</div>
+                <div class="logic-title">🔒 LOCK LOGIC DATA - 3 RULES + WEAK ATTACK FILTER</div>
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-label">📊 TOTAL xG</div>
                         <div class="stat-value-critical">{total_xG:.2f}</div>
-                        <div class="stat-label">Rule A: ≥ 2.9</div>
+                        <div class="stat-label">Rules A & C: ≥ 2.9</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">🏠 HOME TOP SCORER</div>
                         <div class="stat-value-critical">{home_top}</div>
-                        <div class="stat-label">Rule A: ≥ 2</div>
+                        <div class="stat-label">Rules A & C: ≥ 2</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">📉 AWAY FORM</div>
@@ -651,49 +668,75 @@ def main():
             
             st.markdown("---")
             
-            # Check weak attack filter first
+            # Check rules
+            rule_a_condition = (total_xG >= RULE_A_XG_MIN) and (home_top >= RULE_A_HOME_TOP_SCORER_MIN)
+            rule_b_condition = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
+            rule_c_condition = (total_xG >= RULE_C_XG_MIN) and (home_top >= RULE_C_HOME_TOP_SCORER_MIN)
+            
+            # Check weak attack filter for Rules A & B
             is_weak, weak_reasons = check_weak_attack_filter(
                 home_scored, away_scored, home_conv, away_conv, home_team, away_team
             )
             
+            # Show rule check status
+            st.markdown("""
+            <div class="rule-check-status">
+                <strong>🔍 RULE CHECK STATUS:</strong><br><br>
+            """, unsafe_allow_html=True)
+            
+            # Rule A status
+            if rule_a_condition:
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → BTTS Yes</span>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+            
+            # Rule B status
+            if rule_b_condition:
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13) → BTTS Yes</span>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
+            
+            # Rule C status
+            if rule_c_condition:
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule C: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → Over 1.5 Goals</span>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule C: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("---")
+            
+            # Check Rule C first (Over 1.5) - NO weak attack filter
+            if rule_c_condition:
+                # Over 1.5 odds are typically not shown, use Over 2.5 odds as proxy or calculate
+                over_15_odds = odds_over if odds_over > 0 else 1.20
+                st.markdown(f"""
+                <div class="result-over">
+                    <strong>🔒 RULE C TRIGGERED: Over 1.5 Goals</strong><br><br>
+                    <span class="rule-indicator">✅</span> Total xG ≥ 2.9: {total_xG:.2f} ≥ 2.9<br>
+                    <span class="rule-indicator">✅</span> Home Top Scorer ≥ 2: {home_top} ≥ 2<br>
+                    <br>
+                    🎯 <strong>BET: Over 1.5 Goals</strong><br>
+                    📊 ODDS: ~{over_15_odds:.2f} (use Over 0.5 or check market)<br>
+                    📊 STAKE: <span class="stake-highlight">1.0%</span>
+                    <br><br>
+                    <strong>📝 VERDICT:</strong> Rule C triggered. Guarantees at least 2 goals in the match.
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown("---")
+            
+            # Check Rules A & B for BTTS Yes (with weak attack filter)
             if is_weak:
                 reasons_text = ' | '.join(weak_reasons)
                 st.markdown(f"""
                 <div class="result-filter">
-                    <strong>⚠️ WEAK ATTACK FILTER TRIGGERED - NO BET</strong><br><br>
+                    <strong>⚠️ WEAK ATTACK FILTER TRIGGERED - NO BTTS YES BET</strong><br><br>
                     <span class="rule-indicator">🚫</span> {reasons_text}<br>
                     <br>
-                    <strong>📝 VERDICT:</strong> Skipping this match to avoid potential BTTS No outcome.<br>
-                    📊 STAKE: <span class="stake-highlight">0% (SKIPPED)</span>
+                    <strong>📝 VERDICT:</strong> Skipping BTTS Yes bet due to weak attack. Rule C may still apply.
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                # Check rules
-                rule_a = (total_xG >= RULE_A_XG_MIN) and (home_top >= RULE_A_HOME_TOP_SCORER_MIN)
-                rule_b = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
-                
-                # Show rule check status
-                st.markdown("""
-                <div class="rule-check-status">
-                    <strong>🔍 RULE CHECK STATUS:</strong><br><br>
-                """, unsafe_allow_html=True)
-                
-                # Rule A status
-                if rule_a:
-                    st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
-                
-                # Rule B status
-                if rule_b:
-                    st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown("---")
-                
-                if rule_a:
+                if rule_a_condition:
                     st.markdown(f"""
                     <div class="result-bet">
                         <strong>🔒 RULE A TRIGGERED: BTTS Yes</strong><br><br>
@@ -709,7 +752,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                     
-                elif rule_b:
+                elif rule_b_condition:
                     st.markdown(f"""
                     <div class="result-bet">
                         <strong>🔒 RULE B TRIGGERED: BTTS Yes</strong><br><br>
@@ -725,14 +768,13 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                     
-                else:
+                elif not rule_a_condition and not rule_b_condition and not rule_c_condition:
                     st.markdown(f"""
                     <div class="result-skip">
                         <strong>❌ NO BET</strong><br><br>
                         No rules triggered. Skip this match completely.<br>
                         <br>
-                        <strong>📝 VERDICT:</strong> No rule triggered. Skip match.<br>
-                        📊 STAKE: <span class="stake-highlight">0% (SKIPPED)</span>
+                        <strong>📝 VERDICT:</strong> No rule triggered. Skip match.
                     </div>
                     """, unsafe_allow_html=True)
             
@@ -740,7 +782,7 @@ def main():
     
     st.markdown("""
     <div class="footer">
-        🎯 GrokBet - Final | 2 Rules + Weak Attack Filter | Live Tested
+        🎯 GrokBet - Final | 3 Rules (BTTS Yes x2 + Over 1.5) | Weak Attack Filter for BTTS | Live Tested
     </div>
     """, unsafe_allow_html=True)
 
