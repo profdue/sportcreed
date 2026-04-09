@@ -699,21 +699,21 @@ def main():
             
             # Rule A status
             if rule_a_condition:
-                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → BTTS Yes</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → BTTS Yes</span>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
             
             # Rule B status
             if rule_b_condition:
-                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #ffffff;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13) → BTTS Yes</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13) → BTTS Yes</span>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #ffffff;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
             
             # Rule C status
             if rule_c_condition:
-                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule C: PASS</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → Over 1.5 Goals</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule C: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → Over 1.5 Goals</span>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule C: FAIL</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule C: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
             
             st.markdown('</div>', unsafe_allow_html=True)
             st.markdown("---")
