@@ -39,7 +39,7 @@ st.markdown("""
     
     /* Force ALL text to be bright and visible - NO GREY */
     .stMarkdown, .stMarkdown p, .stMarkdown div, p, span {
-        color: #000000 !important;
+        color: #ffffff !important;
     }
     
     /* Rule check status - FORCE VISIBLE */
