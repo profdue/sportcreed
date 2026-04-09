@@ -72,6 +72,8 @@ st.markdown("""
     .result-skip *,
     .result-filter,
     .result-filter *,
+    .result-over,
+    .result-over *,
     .rule-check-status,
     .rule-check-status * {
         color: #ffffff !important;
@@ -198,6 +200,13 @@ st.markdown("""
         content: "▸";
         color: #fbbf24;
         font-size: 1.2rem;
+    }
+    
+    /* Collapsible odds section */
+    .collapsible-header {
+        cursor: pointer;
+        user-select: none;
+        margin: 1rem 0;
     }
     
     /* Result boxes */
@@ -402,11 +411,6 @@ st.markdown("""
         font-weight: bold;
     }
     
-    /* Default text color for non-display-card elements */
-    body, .stApp, .main {
-        color: #000000;
-    }
-    
     /* Responsive */
     @media (max-width: 768px) {
         .stats-grid {
@@ -577,26 +581,27 @@ def main():
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # Odds section
-        st.markdown('<div class="section-header">💰 ODDS (SportyBet)</div>', unsafe_allow_html=True)
-        
-        col8, col9, col10 = st.columns(3)
-        
-        with col8:
-            st.markdown("**1X2 Market**")
-            odds_home = st.number_input("🏠 Home", 0.0, 10.0, 4.28, 0.05, key="odds_home")
-            odds_draw = st.number_input("🤝 Draw", 0.0, 10.0, 3.78, 0.05, key="odds_draw")
-            odds_away = st.number_input("✈️ Away", 0.0, 10.0, 1.88, 0.05, key="odds_away")
-        
-        with col9:
-            st.markdown("**Over/Under 2.5**")
-            odds_over = st.number_input("📈 Over 2.5", 0.0, 10.0, 1.82, 0.05, key="odds_over")
-            odds_under = st.number_input("📉 Under 2.5", 0.0, 10.0, 2.05, 0.05, key="odds_under")
-        
-        with col10:
-            st.markdown("**BTTS Market**")
-            odds_btts_yes = st.number_input("✅ BTTS Yes", 0.0, 10.0, 1.74, 0.05, key="odds_btts_yes")
-            odds_btts_no = st.number_input("❌ BTTS No", 0.0, 10.0, 2.10, 0.05, key="odds_btts_no")
+        # ========== COLLAPSIBLE ODDS SECTION ==========
+        with st.expander("💰 ODDS (SportyBet) - Click to expand", expanded=False):
+            st.markdown("### Betting Odds")
+            
+            col8, col9, col10 = st.columns(3)
+            
+            with col8:
+                st.markdown("**1X2 Market**")
+                odds_home = st.number_input("🏠 Home", 0.0, 10.0, 4.28, 0.05, key="odds_home")
+                odds_draw = st.number_input("🤝 Draw", 0.0, 10.0, 3.78, 0.05, key="odds_draw")
+                odds_away = st.number_input("✈️ Away", 0.0, 10.0, 1.88, 0.05, key="odds_away")
+            
+            with col9:
+                st.markdown("**Over/Under 2.5**")
+                odds_over = st.number_input("📈 Over 2.5", 0.0, 10.0, 1.82, 0.05, key="odds_over")
+                odds_under = st.number_input("📉 Under 2.5", 0.0, 10.0, 2.05, 0.05, key="odds_under")
+            
+            with col10:
+                st.markdown("**BTTS Market**")
+                odds_btts_yes = st.number_input("✅ BTTS Yes", 0.0, 10.0, 1.74, 0.05, key="odds_btts_yes")
+                odds_btts_no = st.number_input("❌ BTTS No", 0.0, 10.0, 2.10, 0.05, key="odds_btts_no")
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -612,6 +617,14 @@ def main():
             )
             
             total_xG = xG_home + xG_away
+            
+            # Set default odds if collapsible section was not expanded (use defaults)
+            try:
+                odds_btts_yes_val = odds_btts_yes
+                odds_over_val = odds_over
+            except NameError:
+                odds_btts_yes_val = 1.74
+                odds_over_val = 1.82
             
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
@@ -686,29 +699,28 @@ def main():
             
             # Rule A status
             if rule_a_condition:
-                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → BTTS Yes</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → BTTS Yes</span>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
             
             # Rule B status
             if rule_b_condition:
-                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13) → BTTS Yes</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #ffffff;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13) → BTTS Yes</span>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #000000;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #ffffff;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
             
             # Rule C status
             if rule_c_condition:
-                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule C: PASS</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → Over 1.5 Goals</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule C: PASS</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2) → Over 1.5 Goals</span>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule C: FAIL</span> <span style="color: #000000;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+                st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule C: FAIL</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
             
             st.markdown('</div>', unsafe_allow_html=True)
             st.markdown("---")
             
             # Check Rule C first (Over 1.5) - NO weak attack filter
             if rule_c_condition:
-                # Over 1.5 odds are typically not shown, use Over 2.5 odds as proxy or calculate
-                over_15_odds = odds_over if odds_over > 0 else 1.20
+                over_15_odds = odds_over_val if odds_over_val > 0 else 1.20
                 st.markdown(f"""
                 <div class="result-over">
                     <strong>🔒 RULE C TRIGGERED: Over 1.5 Goals</strong><br><br>
@@ -716,7 +728,7 @@ def main():
                     <span class="rule-indicator">✅</span> Home Top Scorer ≥ 2: {home_top} ≥ 2<br>
                     <br>
                     🎯 <strong>BET: Over 1.5 Goals</strong><br>
-                    📊 ODDS: ~{over_15_odds:.2f} (use Over 0.5 or check market)<br>
+                    📊 ODDS: ~{over_15_odds:.2f} (check market)<br>
                     📊 STAKE: <span class="stake-highlight">1.0%</span>
                     <br><br>
                     <strong>📝 VERDICT:</strong> Rule C triggered. Guarantees at least 2 goals in the match.
@@ -745,7 +757,7 @@ def main():
                         <span class="rule-indicator">✅</span> Weak Attack Filter: PASSED (no weak attacks)<br>
                         <br>
                         🎯 <strong>BET: BTTS Yes</strong><br>
-                        📊 ODDS: {odds_btts_yes:.2f}<br>
+                        📊 ODDS: {odds_btts_yes_val:.2f}<br>
                         📊 STAKE: <span class="stake-highlight">1.0%</span>
                         <br><br>
                         <strong>📝 VERDICT:</strong> Rule A triggered. Bet BTTS Yes.
@@ -761,7 +773,7 @@ def main():
                         <span class="rule-indicator">✅</span> Weak Attack Filter: PASSED (no weak attacks)<br>
                         <br>
                         🎯 <strong>BET: BTTS Yes</strong><br>
-                        📊 ODDS: {odds_btts_yes:.2f}<br>
+                        📊 ODDS: {odds_btts_yes_val:.2f}<br>
                         📊 STAKE: <span class="stake-highlight">1.0%</span>
                         <br><br>
                         <strong>📝 VERDICT:</strong> Rule B triggered. Bet BTTS Yes.
