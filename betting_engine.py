@@ -401,7 +401,7 @@ st.markdown("""
         margin-top: 1rem;
         border-top: 2px solid #fbbf24;
         font-size: 0.75rem;
-        color: #fbbf24 !important;
+        color: #000000 !important;
         font-weight: bold;
     }
     
