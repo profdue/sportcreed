@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - BLACK INPUT TEXT FOR VISIBILITY
+# CUSTOM CSS - DISPLAY CARD TEXT WHITE, OTHERS BLACK
 # ============================================================================
 
 st.markdown("""
@@ -37,35 +37,47 @@ st.markdown("""
         max-width: 1200px;
     }
     
-    /* Force ALL text to be bright and visible - NO GREY */
-    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span {
+    /* Default text - BLACK for most content */
+    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span, label, .st-emotion-cache-1v0mbdj {
         color: #000000 !important;
     }
     
-    /* Rule check status - FORCE VISIBLE */
-    .rule-check-status {
-        background: #0f172a !important;
-        padding: 0.75rem !important;
-        border-radius: 8px !important;
-        margin: 0.5rem 0 !important;
-        border-left: 4px solid #fbbf24 !important;
+    /* DISPLAY CARD - Force ALL text inside to be WHITE */
+    .logic-card, .logic-card * {
+        color: #ffffff !important;
     }
     
-    .rule-check-status strong {
+    /* Result boxes - Force text to be WHITE */
+    .result-box, .result-box * {
+        color: #ffffff !important;
+    }
+    
+    /* Rule check status - Force text to be WHITE */
+    .rule-check-status, .rule-check-status * {
+        color: #ffffff !important;
+    }
+    
+    /* Result bet/skip/filter - Force text to be WHITE */
+    .result-bet, .result-bet *,
+    .result-skip, .result-skip *,
+    .result-filter, .result-filter * {
+        color: #ffffff !important;
+    }
+    
+    /* But keep gold highlights in display cards */
+    .stat-value-critical, .logic-title, .section-header, .rule-indicator {
         color: #fbbf24 !important;
     }
     
-    .rule-check-status .pass-text {
+    /* PASS/FAIL colors in rule check */
+    .pass-text {
         color: #10b981 !important;
-        font-weight: bold !important;
     }
-    
-    .rule-check-status .fail-text {
+    .fail-text {
         color: #ef4444 !important;
-        font-weight: bold !important;
     }
     
-    /* Input labels - BLACK for visibility */
+    /* Input labels - BLACK with gold background */
     .stNumberInput label, .stTextInput label, .stSelectbox label {
         color: #000000 !important;
         font-weight: bold !important;
@@ -109,11 +121,7 @@ st.markdown("""
         box-shadow: 0 0 20px rgba(251, 191, 36, 0.2);
     }
     
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(-10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    
+    /* Header text - keep gold/white */
     .main-header h1 {
         margin: 0;
         font-size: 2rem;
@@ -158,6 +166,11 @@ st.markdown("""
         border-color: #f59e0b;
         box-shadow: 0 4px 20px rgba(251, 191, 36, 0.2);
         transform: translateY(-2px);
+    }
+    
+    /* Input card text - keep black for visibility on light backgrounds */
+    .input-card .stMarkdown, .input-card p, .input-card span {
+        color: #ffffff !important;
     }
     
     /* Section headers - gold text */
@@ -211,10 +224,6 @@ st.markdown("""
     .result-bet:hover {
         transform: translateX(5px);
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
-    }
-    
-    .result-bet strong, .result-bet .rule-indicator {
-        color: #ffffff !important;
     }
     
     .result-skip {
@@ -332,6 +341,15 @@ st.markdown("""
         font-weight: bold;
     }
     
+    /* Rule check status container */
+    .rule-check-status {
+        background: #0f172a !important;
+        padding: 0.75rem !important;
+        border-radius: 8px !important;
+        margin: 0.5rem 0 !important;
+        border-left: 4px solid #fbbf24 !important;
+    }
+    
     /* Divider */
     hr {
         margin: 1rem 0;
@@ -388,9 +406,9 @@ st.markdown("""
         box-shadow: 0 0 8px rgba(251, 191, 36, 0.3);
     }
     
-    /* All headers */
+    /* Headers outside display cards - black */
     h1, h2, h3, h4, h5, h6 {
-        color: #fbbf24 !important;
+        color: #000000 !important;
         font-weight: bold !important;
     }
     
@@ -403,11 +421,6 @@ st.markdown("""
         font-size: 0.75rem;
         color: #000000 !important;
         font-weight: bold;
-    }
-    
-    /* Override any white background text issues */
-    .stAlert, .stInfo, .stWarning, .stError, .stSuccess {
-        background-color: #0f172a !important;
     }
     
     /* Responsive */
@@ -616,7 +629,7 @@ def main():
             
             st.markdown(f"### 🎯 {home_team} vs {away_team}")
             
-            # LOGIC DISPLAY CARD - Shows all important data
+            # LOGIC DISPLAY CARD - Shows all important data (ALL TEXT WHITE)
             st.markdown(f"""
             <div class="logic-card">
                 <div class="logic-title">🔒 LOCK LOGIC DATA - 2 RULES + WEAK ATTACK FILTER</div>
@@ -688,7 +701,7 @@ def main():
                 rule_a = (total_xG >= RULE_A_XG_MIN) and (home_top >= RULE_A_HOME_TOP_SCORER_MIN)
                 rule_b = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
                 
-                # Show rule check status with visible colors
+                # Show rule check status with visible colors (ALL TEXT WHITE in this container)
                 st.markdown("""
                 <div class="rule-check-status">
                     <strong>🔍 RULE CHECK STATUS:</strong><br><br>
