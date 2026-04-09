@@ -42,6 +42,29 @@ st.markdown("""
         color: #ffffff !important;
     }
     
+    /* Rule check status - FORCE VISIBLE */
+    .rule-check-status {
+        background: #0f172a !important;
+        padding: 0.75rem !important;
+        border-radius: 8px !important;
+        margin: 0.5rem 0 !important;
+        border-left: 4px solid #fbbf24 !important;
+    }
+    
+    .rule-check-status strong {
+        color: #fbbf24 !important;
+    }
+    
+    .rule-check-status .pass-text {
+        color: #10b981 !important;
+        font-weight: bold !important;
+    }
+    
+    .rule-check-status .fail-text {
+        color: #ef4444 !important;
+        font-weight: bold !important;
+    }
+    
     /* Input labels - BLACK for visibility */
     .stNumberInput label, .stTextInput label, .stSelectbox label {
         color: #000000 !important;
@@ -297,16 +320,6 @@ st.markdown("""
         text-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
     }
     
-    .stat-pass {
-        color: #10b981 !important;
-        font-weight: bold;
-    }
-    
-    .stat-fail {
-        color: #ef4444 !important;
-        font-weight: bold;
-    }
-    
     /* Rule indicator */
     .rule-indicator {
         font-size: 0.85rem;
@@ -392,9 +405,9 @@ st.markdown("""
         font-weight: bold;
     }
     
-    /* Any remaining grey elements */
-    .st-emotion-cache-1v0mbdj, .st-emotion-cache-1y4p8pa, .st-emotion-cache-6qob1r {
-        color: #ffffff !important;
+    /* Override any white background text issues */
+    .stAlert, .stInfo, .stWarning, .stError, .stSuccess {
+        background-color: #0f172a !important;
     }
     
     /* Responsive */
@@ -675,12 +688,25 @@ def main():
                 rule_a = (total_xG >= RULE_A_XG_MIN) and (home_top >= RULE_A_HOME_TOP_SCORER_MIN)
                 rule_b = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
                 
-                # Show rule check status
-                st.markdown("**🔍 RULE CHECK STATUS:**")
-                rule_a_status = "✅ PASS" if rule_a else "❌ FAIL"
-                rule_b_status = "✅ PASS" if rule_b else "❌ FAIL"
-                st.markdown(f"- **Rule A:** {rule_a_status} (xG ≥ 2.9 AND Home Top Scorer ≥ 2)")
-                st.markdown(f"- **Rule B:** {rule_b_status} (Away Form ≤ 33% AND Away GD ≥ -13)")
+                # Show rule check status with visible colors
+                st.markdown("""
+                <div class="rule-check-status">
+                    <strong>🔍 RULE CHECK STATUS:</strong><br><br>
+                """, unsafe_allow_html=True)
+                
+                # Rule A status
+                if rule_a:
+                    st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule A: PASS</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule A: FAIL</span> <span style="color: #ffffff;">(xG {total_xG:.2f} ≥ 2.9 AND Home Top Scorer {home_top} ≥ 2)</span>', unsafe_allow_html=True)
+                
+                # Rule B status
+                if rule_b:
+                    st.markdown(f'<span style="color: #10b981; font-weight: bold;">✅ Rule B: PASS</span> <span style="color: #ffffff;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<span style="color: #ef4444; font-weight: bold;">❌ Rule B: FAIL</span> <span style="color: #ffffff;">(Away Form {away_form}% ≤ 33% AND Away GD {away_gd} ≥ -13)</span>', unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown("---")
                 
                 if rule_a:
