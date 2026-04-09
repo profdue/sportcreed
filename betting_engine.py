@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - ENHANCED WITH BETTER TEXT VISIBILITY
+# CUSTOM CSS - NO GREY TEXT, EVERYTHING BRIGHT AND VIBRANT
 # ============================================================================
 
 st.markdown("""
@@ -37,9 +37,16 @@ st.markdown("""
         max-width: 1200px;
     }
     
-    /* Force all text to be visible */
-    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span, label {
-        color: #e2e8f0 !important;
+    /* Force ALL text to be bright and visible - NO GREY */
+    .stMarkdown, .stMarkdown p, .stMarkdown div, p, span, label, .st-emotion-cache-1v0mbdj, .st-emotion-cache-1y4p8pa {
+        color: #ffffff !important;
+    }
+    
+    /* All text inputs, numbers, labels - BRIGHT */
+    .stNumberInput label, .stTextInput label, .stSelectbox label {
+        color: #fbbf24 !important;
+        font-weight: bold !important;
+        font-size: 0.9rem !important;
     }
     
     /* Animated gradient header */
@@ -51,6 +58,7 @@ st.markdown("""
         border: 2px solid #fbbf24;
         text-align: center;
         animation: fadeIn 0.5s ease-in;
+        box-shadow: 0 0 20px rgba(251, 191, 36, 0.2);
     }
     
     @keyframes fadeIn {
@@ -70,39 +78,43 @@ st.markdown("""
     
     .main-header p {
         margin: 0.5rem 0 0 0;
-        color: #cbd5e1 !important;
+        color: #fbbf24 !important;
         font-size: 0.9rem;
+        font-weight: bold;
     }
     
     .badge {
         display: inline-block;
-        background: rgba(251, 191, 36, 0.2);
-        border: 1px solid #fbbf24;
+        background: linear-gradient(135deg, #fbbf24, #f59e0b);
         border-radius: 20px;
-        padding: 0.2rem 0.8rem;
-        font-size: 0.7rem;
-        color: #fbbf24 !important;
+        padding: 0.3rem 1rem;
+        font-size: 0.75rem;
+        color: #0f172a !important;
+        font-weight: bold;
         margin-top: 0.5rem;
+        box-shadow: 0 2px 8px rgba(251, 191, 36, 0.3);
     }
     
     /* Input cards */
     .input-card {
-        background: #1e293b;
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border-radius: 16px;
         padding: 1.5rem;
         border: 1px solid #fbbf24;
         margin-bottom: 1.5rem;
         transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     }
     
     .input-card:hover {
         border-color: #f59e0b;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 20px rgba(251, 191, 36, 0.2);
+        transform: translateY(-2px);
     }
     
     /* Section headers */
     .section-header {
-        font-size: 0.85rem;
+        font-size: 0.9rem;
         text-transform: uppercase;
         letter-spacing: 2px;
         color: #fbbf24 !important;
@@ -116,16 +128,18 @@ st.markdown("""
     .section-header::before {
         content: "▸";
         color: #fbbf24;
+        font-size: 1.2rem;
     }
     
     /* Result boxes */
     .result-box {
-        background: #0f172a;
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
         border-radius: 20px;
         padding: 1.5rem;
         border: 2px solid #fbbf24;
         margin-top: 1.5rem;
         animation: slideUp 0.4s ease-out;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     }
     
     @keyframes slideUp {
@@ -134,41 +148,49 @@ st.markdown("""
     }
     
     .result-bet {
-        background: #1e293b;
+        background: linear-gradient(135deg, #1e293b 0%, #1a2a3a 100%);
         border-left: 6px solid #3b82f6;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
         transition: transform 0.2s ease;
-        border-top: 1px solid #334155;
-        border-right: 1px solid #334155;
-        border-bottom: 1px solid #334155;
+        border-top: 1px solid #3b82f6;
+        border-right: 1px solid #3b82f6;
+        border-bottom: 1px solid #3b82f6;
+        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.2);
     }
     
     .result-bet:hover {
         transform: translateX(5px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+    
+    .result-bet strong, .result-bet .rule-indicator {
+        color: #ffffff !important;
     }
     
     .result-skip {
-        background: #1e293b;
+        background: linear-gradient(135deg, #1e293b 0%, #2a1a1a 100%);
         border-left: 6px solid #ef4444;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
-        border-top: 1px solid #334155;
-        border-right: 1px solid #334155;
-        border-bottom: 1px solid #334155;
+        border-top: 1px solid #ef4444;
+        border-right: 1px solid #ef4444;
+        border-bottom: 1px solid #ef4444;
+        box-shadow: 0 2px 8px rgba(239, 68, 68, 0.2);
     }
     
     .result-filter {
-        background: #1e293b;
+        background: linear-gradient(135deg, #1e293b 0%, #2a1a1a 100%);
         border-left: 6px solid #f97316;
         padding: 1.25rem;
         border-radius: 12px;
         margin: 0.75rem 0;
-        border-top: 1px solid #334155;
-        border-right: 1px solid #334155;
-        border-bottom: 1px solid #334155;
+        border-top: 1px solid #f97316;
+        border-right: 1px solid #f97316;
+        border-bottom: 1px solid #f97316;
+        box-shadow: 0 2px 8px rgba(249, 115, 22, 0.2);
     }
     
     /* Stake highlight */
@@ -180,7 +202,7 @@ st.markdown("""
         font-weight: bold;
         font-size: 0.85rem;
         display: inline-block;
-        box-shadow: 0 2px 8px rgba(251, 191, 36, 0.3);
+        box-shadow: 0 2px 8px rgba(251, 191, 36, 0.4);
     }
     
     /* LOGIC DISPLAY CARD */
@@ -190,17 +212,18 @@ st.markdown("""
         padding: 1.25rem;
         margin: 1rem 0;
         border: 2px solid #fbbf24;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 12px rgba(251, 191, 36, 0.2);
     }
     
     .logic-title {
-        font-size: 1rem;
+        font-size: 1.1rem;
         font-weight: bold;
         color: #fbbf24 !important;
         margin-bottom: 1rem;
         text-align: center;
         text-transform: uppercase;
-        letter-spacing: 1px;
+        letter-spacing: 2px;
+        text-shadow: 0 0 5px rgba(251, 191, 36, 0.5);
     }
     
     .stats-grid {
@@ -211,25 +234,34 @@ st.markdown("""
     }
     
     .stat-card {
-        background: #0f172a;
-        border-radius: 10px;
+        background: linear-gradient(135deg, #0f172a 0%, #1a1a2e 100%);
+        border-radius: 12px;
         padding: 0.75rem;
         text-align: center;
-        border: 1px solid #334155;
+        border: 1px solid #fbbf24;
+        transition: all 0.2s ease;
+    }
+    
+    .stat-card:hover {
+        transform: translateY(-2px);
+        border-color: #f59e0b;
+        box-shadow: 0 4px 12px rgba(251, 191, 36, 0.2);
     }
     
     .stat-label {
         font-size: 0.7rem;
-        color: #94a3b8 !important;
+        color: #fbbf24 !important;
         text-transform: uppercase;
         letter-spacing: 1px;
+        font-weight: bold;
     }
     
     .stat-value {
         font-size: 1.4rem;
         font-weight: bold;
-        color: #fbbf24 !important;
+        color: #ffffff !important;
         margin-top: 0.25rem;
+        text-shadow: 0 0 5px rgba(255, 255, 255, 0.3);
     }
     
     .stat-value-critical {
@@ -237,6 +269,7 @@ st.markdown("""
         font-weight: bold;
         color: #fbbf24 !important;
         margin-top: 0.25rem;
+        text-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
     }
     
     .stat-pass {
@@ -249,39 +282,24 @@ st.markdown("""
         font-weight: bold;
     }
     
-    /* Filter status card */
-    .filter-card {
-        background: #0f172a;
-        border-radius: 12px;
-        padding: 1rem;
-        margin: 1rem 0;
-        border: 1px solid #f97316;
-    }
-    
-    .filter-title {
-        font-size: 0.85rem;
-        font-weight: bold;
-        color: #f97316 !important;
-        margin-bottom: 0.5rem;
-    }
-    
     /* Rule indicator */
     .rule-indicator {
         font-size: 0.85rem;
         padding: 0.2rem 0.5rem;
         border-radius: 6px;
-        background: rgba(251, 191, 36, 0.15);
+        background: rgba(251, 191, 36, 0.2);
         display: inline-block;
         margin-right: 0.5rem;
         color: #fbbf24 !important;
+        font-weight: bold;
     }
     
     /* Divider */
     hr {
         margin: 1rem 0;
         border: none;
-        height: 1px;
-        background: linear-gradient(90deg, transparent, #fbbf24, transparent);
+        height: 2px;
+        background: linear-gradient(90deg, transparent, #fbbf24, #f59e0b, transparent);
     }
     
     /* Button styling */
@@ -295,11 +313,13 @@ st.markdown("""
         transition: all 0.3s ease;
         font-size: 1rem;
         width: 100%;
+        text-transform: uppercase;
+        letter-spacing: 1px;
     }
     
     .stButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(251, 191, 36, 0.4);
+        box-shadow: 0 6px 20px rgba(251, 191, 36, 0.5);
     }
     
     /* Number inputs */
@@ -308,10 +328,12 @@ st.markdown("""
         border-color: #fbbf24;
         color: #fbbf24 !important;
         font-weight: bold;
+        font-size: 1rem;
     }
     
-    .stNumberInput label {
-        color: #cbd5e1 !important;
+    .stNumberInput > div > div > input:focus {
+        border-color: #f59e0b;
+        box-shadow: 0 0 8px rgba(251, 191, 36, 0.3);
     }
     
     /* Text inputs */
@@ -323,13 +345,15 @@ st.markdown("""
         font-size: 1rem;
     }
     
-    .stTextInput label {
-        color: #cbd5e1 !important;
+    .stTextInput > div > div > input:focus {
+        border-color: #f59e0b;
+        box-shadow: 0 0 8px rgba(251, 191, 36, 0.3);
     }
     
-    /* Headers */
+    /* All headers */
     h1, h2, h3, h4, h5, h6 {
         color: #fbbf24 !important;
+        font-weight: bold !important;
     }
     
     /* Footer */
@@ -337,9 +361,15 @@ st.markdown("""
         text-align: center;
         padding: 1rem;
         margin-top: 1rem;
-        border-top: 1px solid #fbbf24;
-        font-size: 0.7rem;
-        color: #94a3b8 !important;
+        border-top: 2px solid #fbbf24;
+        font-size: 0.75rem;
+        color: #fbbf24 !important;
+        font-weight: bold;
+    }
+    
+    /* Any remaining grey elements */
+    .st-emotion-cache-1v0mbdj, .st-emotion-cache-1y4p8pa, .st-emotion-cache-6qob1r {
+        color: #ffffff !important;
     }
     
     /* Responsive */
@@ -455,7 +485,7 @@ def main():
     <div class="main-header">
         <h1>🎯 GrokBet - Final</h1>
         <p>2 Locked BTTS Yes Rules + Weak Attack Filter</p>
-        <div class="badge">⚠️ Stake: 1.0% when triggered</div>
+        <div class="badge">⚠️ STAKE: 1.0% WHEN TRIGGERED</div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -549,53 +579,53 @@ def main():
             st.markdown(f"### 🎯 {home_team} vs {away_team}")
             
             # LOGIC DISPLAY CARD - Shows all important data
-            st.markdown("""
+            st.markdown(f"""
             <div class="logic-card">
                 <div class="logic-title">🔒 LOCK LOGIC DATA - 2 RULES + WEAK ATTACK FILTER</div>
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-label">📊 TOTAL xG</div>
-                        <div class="stat-value-critical">{:.2f}</div>
+                        <div class="stat-value-critical">{total_xG:.2f}</div>
                         <div class="stat-label">Rule A: ≥ 2.9</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">🏠 HOME TOP SCORER</div>
-                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-value-critical">{home_top}</div>
                         <div class="stat-label">Rule A: ≥ 2</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">📉 AWAY FORM</div>
-                        <div class="stat-value-critical">{}%</div>
+                        <div class="stat-value-critical">{away_form}%</div>
                         <div class="stat-label">Rule B: ≤ 33%</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">➕ AWAY GD</div>
-                        <div class="stat-value-critical">{}</div>
+                        <div class="stat-value-critical">{away_gd}</div>
                         <div class="stat-label">Rule B: ≥ -13</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">🏠 HOME SCORED</div>
-                        <div class="stat-value">{:.2f}</div>
+                        <div class="stat-value">{home_scored:.2f}</div>
                         <div class="stat-label">Filter: > 1.0</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">🏠 HOME CONV %</div>
-                        <div class="stat-value">{}%</div>
+                        <div class="stat-value">{home_conv}%</div>
                         <div class="stat-label">Filter: > 10%</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">✈️ AWAY SCORED</div>
-                        <div class="stat-value">{:.2f}</div>
+                        <div class="stat-value">{away_scored:.2f}</div>
                         <div class="stat-label">Filter: > 1.0</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">✈️ AWAY CONV %</div>
-                        <div class="stat-value">{}%</div>
+                        <div class="stat-value">{away_conv}%</div>
                         <div class="stat-label">Filter: > 10%</div>
                     </div>
                 </div>
             </div>
-            """.format(total_xG, home_top, away_form, away_gd, home_scored, home_conv, away_scored, away_conv), unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
             
             st.markdown("---")
             
@@ -605,13 +635,14 @@ def main():
             )
             
             if is_weak:
+                reasons_text = ' | '.join(weak_reasons)
                 st.markdown(f"""
                 <div class="result-filter">
                     <strong>⚠️ WEAK ATTACK FILTER TRIGGERED - NO BET</strong><br><br>
-                    <span class="rule-indicator">🚫</span> {' | '.join(weak_reasons)}<br>
+                    <span class="rule-indicator">🚫</span> {reasons_text}<br>
                     <br>
-                    <strong>📝 Verdict:</strong> Skipping this match to avoid potential BTTS No outcome.<br>
-                    📊 Stake: <span class="stake-highlight">0% (Skipped)</span>
+                    <strong>📝 VERDICT:</strong> Skipping this match to avoid potential BTTS No outcome.<br>
+                    📊 STAKE: <span class="stake-highlight">0% (SKIPPED)</span>
                 </div>
                 """, unsafe_allow_html=True)
             else:
@@ -620,11 +651,11 @@ def main():
                 rule_b = (away_form <= RULE_B_AWAY_FORM_MAX) and (away_gd >= RULE_B_AWAY_GD_MIN)
                 
                 # Show rule check status
-                st.markdown("**🔍 Rule Check Status:**")
+                st.markdown("**🔍 RULE CHECK STATUS:**")
                 rule_a_status = "✅ PASS" if rule_a else "❌ FAIL"
                 rule_b_status = "✅ PASS" if rule_b else "❌ FAIL"
-                st.markdown(f"- Rule A: {rule_a_status} (xG ≥ 2.9 AND Home Top Scorer ≥ 2)")
-                st.markdown(f"- Rule B: {rule_b_status} (Away Form ≤ 33% AND Away GD ≥ -13)")
+                st.markdown(f"- **Rule A:** {rule_a_status} (xG ≥ 2.9 AND Home Top Scorer ≥ 2)")
+                st.markdown(f"- **Rule B:** {rule_b_status} (Away Form ≤ 33% AND Away GD ≥ -13)")
                 st.markdown("---")
                 
                 if rule_a:
@@ -636,10 +667,10 @@ def main():
                         <span class="rule-indicator">✅</span> Weak Attack Filter: PASSED (no weak attacks)<br>
                         <br>
                         🎯 <strong>BET: BTTS Yes</strong><br>
-                        📊 Odds: {odds_btts_yes:.2f}<br>
-                        📊 Stake: <span class="stake-highlight">1.0%</span>
+                        📊 ODDS: {odds_btts_yes:.2f}<br>
+                        📊 STAKE: <span class="stake-highlight">1.0%</span>
                         <br><br>
-                        <strong>📝 Verdict:</strong> Rule A triggered. Bet BTTS Yes.
+                        <strong>📝 VERDICT:</strong> Rule A triggered. Bet BTTS Yes.
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -652,10 +683,10 @@ def main():
                         <span class="rule-indicator">✅</span> Weak Attack Filter: PASSED (no weak attacks)<br>
                         <br>
                         🎯 <strong>BET: BTTS Yes</strong><br>
-                        📊 Odds: {odds_btts_yes:.2f}<br>
-                        📊 Stake: <span class="stake-highlight">1.0%</span>
+                        📊 ODDS: {odds_btts_yes:.2f}<br>
+                        📊 STAKE: <span class="stake-highlight">1.0%</span>
                         <br><br>
-                        <strong>📝 Verdict:</strong> Rule B triggered. Bet BTTS Yes.
+                        <strong>📝 VERDICT:</strong> Rule B triggered. Bet BTTS Yes.
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -665,8 +696,8 @@ def main():
                         <strong>❌ NO BET</strong><br><br>
                         No rules triggered. Skip this match completely.<br>
                         <br>
-                        <strong>📝 Verdict:</strong> No rule triggered. Skip match.<br>
-                        📊 Stake: <span class="stake-highlight">0% (Skipped)</span>
+                        <strong>📝 VERDICT:</strong> No rule triggered. Skip match.<br>
+                        📊 STAKE: <span class="stake-highlight">0% (SKIPPED)</span>
                     </div>
                     """, unsafe_allow_html=True)
             
