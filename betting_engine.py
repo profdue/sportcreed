@@ -6,18 +6,18 @@
 # Rules (100% certainty, 0 false alarms):
 # 
 # RULE 1: Away Team Strength
-#   H2H_Draws ≤ 1 AND Away_Win_Pct_Season ≥ 0.40
+#   H2H_Draws ≤ 1 AND Away_Win_Pct_Season ≥ 40%
 # 
 # RULE 2: Extreme Position Gap
 #   Position_Gap ≥ 7
 # 
 # RULE 3: Home Win Mismatch
-#   Home_Win_Pct_Season ≥ 0.50 AND Away_Win_Pct_Season < 0.30
+#   Home_Win_Pct_Season ≥ 50% AND Away_Win_Pct_Season < 30%
 # 
 # RULE 4: Goals Mismatch
 #   Home_Avg_Goals_Scored > 1.5 AND Away_Avg_Goals_Conceded > 1.5
 # 
-# If ANY rule triggers → Forebet's DRAW prediction is WRONG → Bet No Draw (Home or Away win)
+# If ANY rule triggers → Forebet's DRAW prediction is WRONG → Bet No Draw
 
 import streamlit as st
 
@@ -177,13 +177,11 @@ st.markdown("""
         color: #94a3b8 !important;
     }
     
-    .rule-triggered {
-        color: #10b981 !important;
-        font-weight: bold;
-    }
-    
-    .rule-not-triggered {
-        color: #ef4444 !important;
+    .raw-data-note {
+        font-size: 0.7rem;
+        color: #94a3b8;
+        text-align: center;
+        margin-top: 0.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -194,14 +192,14 @@ st.markdown("""
 
 # RULE 1: Away Team Strength
 RULE1_H2H_DRAWS_MAX = 1
-RULE1_AWAY_WIN_PCT_MIN = 0.40
+RULE1_AWAY_WIN_PCT_MIN = 0.40  # 40%
 
 # RULE 2: Extreme Position Gap
 RULE2_POSITION_GAP_MIN = 7
 
-# RULE 3: Home Win Mismatch (UPDATED: >= 0.50 not > 0.50)
-RULE3_HOME_WIN_PCT_MIN = 0.50
-RULE3_AWAY_WIN_PCT_MAX = 0.30
+# RULE 3: Home Win Mismatch
+RULE3_HOME_WIN_PCT_MIN = 0.50  # 50%
+RULE3_AWAY_WIN_PCT_MAX = 0.30  # 30%
 
 # RULE 4: Goals Mismatch
 RULE4_HOME_GOALS_MIN = 1.5
@@ -246,19 +244,49 @@ def main():
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # Season Statistics - FIXED: No division by 100
-        st.markdown('<div class="section-header">📊 SEASON STATISTICS</div>', unsafe_allow_html=True)
+        # Season Statistics - RAW DATA INPUT (Wins and Total Matches)
+        st.markdown('<div class="section-header">📊 SEASON STATISTICS (RAW DATA)</div>', unsafe_allow_html=True)
         
         col_stats1, col_stats2 = st.columns(2)
         with col_stats1:
             st.markdown(f'<div class="team-label">🏠 {home_team}</div>', unsafe_allow_html=True)
-            home_win_pct_season = st.number_input("Win % (season)", 0.0, 1.0, 0.50, 0.01, key="home_win_pct")
+            
+            # RAW INPUT: Wins and Total Matches
+            col_wins1, col_total1 = st.columns(2)
+            with col_wins1:
+                home_wins = st.number_input("Wins", 0, 50, 6, key="home_wins")
+            with col_total1:
+                home_total_matches = st.number_input("Total Matches", 1, 50, 12, key="home_total")
+            
+            # Calculate percentage automatically
+            home_win_pct = home_wins / home_total_matches if home_total_matches > 0 else 0
+            
+            # Display calculated percentage (read-only feedback)
+            st.caption(f"📈 = {home_win_pct:.1%} win rate")
+            
+            st.markdown("---")
+            
             home_goals_scored = st.number_input("Goals Scored Avg", 0.0, 3.0, 1.20, 0.05, key="home_goals")
             home_goals_conceded = st.number_input("Goals Conceded Avg", 0.0, 3.0, 1.40, 0.05, key="home_conceded")
         
         with col_stats2:
             st.markdown(f'<div class="team-label">✈️ {away_team}</div>', unsafe_allow_html=True)
-            away_win_pct_season = st.number_input("Win % (season)", 0.0, 1.0, 0.17, 0.01, key="away_win_pct")
+            
+            # RAW INPUT: Wins and Total Matches
+            col_wins2, col_total2 = st.columns(2)
+            with col_wins2:
+                away_wins = st.number_input("Wins", 0, 50, 2, key="away_wins")
+            with col_total2:
+                away_total_matches = st.number_input("Total Matches", 1, 50, 12, key="away_total")
+            
+            # Calculate percentage automatically
+            away_win_pct = away_wins / away_total_matches if away_total_matches > 0 else 0
+            
+            # Display calculated percentage (read-only feedback)
+            st.caption(f"📈 = {away_win_pct:.1%} win rate")
+            
+            st.markdown("---")
+            
             away_goals_scored = st.number_input("Goals Scored Avg", 0.0, 3.0, 1.20, 0.05, key="away_goals")
             away_goals_conceded = st.number_input("Goals Conceded Avg", 0.0, 3.0, 1.30, 0.05, key="away_conceded")
         
@@ -275,15 +303,16 @@ def main():
             h2h_away_wins = st.number_input(f"{away_team} Wins", 0, 6, 2, key="h2h_away")
         
         st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="raw-data-note">📌 Win percentages are calculated automatically from Wins / Total Matches</div>', unsafe_allow_html=True)
         
         # Analyze button
         analyze = st.button("🔍 ANALYZE", use_container_width=True, type="primary")
         
         if analyze:
-            # Check ALL rules (not just first one)
-            rule1 = (h2h_draws <= RULE1_H2H_DRAWS_MAX) and (away_win_pct_season >= RULE1_AWAY_WIN_PCT_MIN)
+            # Check ALL rules using calculated percentages
+            rule1 = (h2h_draws <= RULE1_H2H_DRAWS_MAX) and (away_win_pct >= RULE1_AWAY_WIN_PCT_MIN)
             rule2 = (position_gap >= RULE2_POSITION_GAP_MIN)
-            rule3 = (home_win_pct_season >= RULE3_HOME_WIN_PCT_MIN) and (away_win_pct_season < RULE3_AWAY_WIN_PCT_MAX)
+            rule3 = (home_win_pct >= RULE3_HOME_WIN_PCT_MIN) and (away_win_pct < RULE3_AWAY_WIN_PCT_MAX)
             rule4 = (home_goals_scored > RULE4_HOME_GOALS_MIN) and (away_goals_conceded > RULE4_AWAY_CONCEDED_MIN)
             
             # Determine if ANY rule triggered
@@ -305,11 +334,11 @@ def main():
             st.markdown(f"### 🎯 {home_team} vs {away_team}")
             st.markdown("---")
             
-            # Display input summary
+            # Display input summary (with calculated percentages)
             st.markdown("**📊 INPUT SUMMARY:**")
             st.markdown(f"🏆 Position Gap: {position_gap}")
-            st.markdown(f"🏠 {home_team}: Win % {home_win_pct_season:.0%} | Goals {home_goals_scored:.2f} | Conceded {home_goals_conceded:.2f}")
-            st.markdown(f"✈️ {away_team}: Win % {away_win_pct_season:.0%} | Goals {away_goals_scored:.2f} | Conceded {away_goals_conceded:.2f}")
+            st.markdown(f"🏠 {home_team}: {home_wins}-{home_total_matches - home_wins}-0 | {home_win_pct:.1%} win rate | Goals {home_goals_scored:.2f} | Conceded {home_goals_conceded:.2f}")
+            st.markdown(f"✈️ {away_team}: {away_wins}-{away_total_matches - away_wins}-0 | {away_win_pct:.1%} win rate | Goals {away_goals_scored:.2f} | Conceded {away_goals_conceded:.2f}")
             st.markdown(f"🤝 H2H: {home_team} {h2h_home_wins} - {h2h_draws} - {away_team} {h2h_away_wins}")
             
             st.markdown("---")
@@ -319,9 +348,9 @@ def main():
             
             # RULE 1
             if rule1:
-                st.markdown(f"✅ **RULE 1:** H2H Draws ≤ 1 AND Away Win % ≥ 40% → {h2h_draws} ≤ 1 AND {away_win_pct_season:.0%} ≥ 40%")
+                st.markdown(f"✅ **RULE 1:** H2H Draws ≤ 1 AND Away Win % ≥ 40% → {h2h_draws} ≤ 1 AND {away_win_pct:.0%} ≥ 40%")
             else:
-                st.markdown(f"❌ **RULE 1:** H2H Draws ≤ 1 AND Away Win % ≥ 40% → {h2h_draws} ≤ 1 AND {away_win_pct_season:.0%} ≥ 40%")
+                st.markdown(f"❌ **RULE 1:** H2H Draws ≤ 1 AND Away Win % ≥ 40% → {h2h_draws} ≤ 1 AND {away_win_pct:.0%} ≥ 40%")
             
             # RULE 2
             if rule2:
@@ -329,11 +358,11 @@ def main():
             else:
                 st.markdown(f"❌ **RULE 2:** Position Gap ≥ 7 → {position_gap} ≥ 7")
             
-            # RULE 3 - FIXED: using >= not >
+            # RULE 3
             if rule3:
-                st.markdown(f"✅ **RULE 3:** Home Win % ≥ 50% AND Away Win % < 30% → {home_win_pct_season:.0%} ≥ 50% AND {away_win_pct_season:.0%} < 30%")
+                st.markdown(f"✅ **RULE 3:** Home Win % ≥ 50% AND Away Win % < 30% → {home_win_pct:.0%} ≥ 50% AND {away_win_pct:.0%} < 30%")
             else:
-                st.markdown(f"❌ **RULE 3:** Home Win % ≥ 50% AND Away Win % < 30% → {home_win_pct_season:.0%} ≥ 50% AND {away_win_pct_season:.0%} < 30%")
+                st.markdown(f"❌ **RULE 3:** Home Win % ≥ 50% AND Away Win % < 30% → {home_win_pct:.0%} ≥ 50% AND {away_win_pct:.0%} < 30%")
             
             # RULE 4
             if rule4:
