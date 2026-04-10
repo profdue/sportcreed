@@ -110,6 +110,7 @@ st.markdown("""
         border-top: 1px solid #10b981;
         border-right: 1px solid #10b981;
         border-bottom: 1px solid #10b981;
+        color: white !important;
     }
     
     .result-skip {
