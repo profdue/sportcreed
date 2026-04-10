@@ -270,19 +270,23 @@ def main():
             
             no_draw_original = rule1 or rule2 or rule3
             
+            # Determine which rule triggered
+            if rule1:
+                trigger_reason = f"{home_team} home win % {home_win_pct:.0f}% > 50%"
+            elif rule2:
+                trigger_reason = f"{away_team} away win % {away_win_pct:.0f}% > 33%"
+            elif rule3:
+                trigger_reason = f"H2H {home_team} wins {h2h_home_wins} ≥ 3"
+            else:
+                trigger_reason = None
+            
             # Position gap override
             position_gap = abs(home_position - away_position)
             override_draw = (position_gap == 2 or position_gap == 3)
             
-            # Determine reason
-            if rule1:
-                reason = f"{home_team} home win % {home_win_pct:.0f}% > 50%"
-            elif rule2:
-                reason = f"{away_team} away win % {away_win_pct:.0f}% > 33%"
-            elif rule3:
-                reason = f"H2H {home_team} wins {h2h_home_wins} ≥ 3"
-            else:
-                reason = "No strong signals for a winner"
+            # Build skip reason for no triggers
+            if not no_draw_original:
+                skip_reason = f"Home win % {home_win_pct:.0f}% ≤ 50%, Away win % {away_win_pct:.0f}% ≤ 33%, H2H home wins {h2h_home_wins} < 3"
             
             # Final prediction
             if override_draw and no_draw_original:
@@ -291,7 +295,7 @@ def main():
                 <div class="result-skip">
                     <strong>⚠️ SKIP</strong><br><br>
                     🎯 No bet<br>
-                    📝 Reason: Position gap {position_gap} overrides No Draw signal
+                    📝 Reason: Position gap {position_gap} overrides ({trigger_reason})
                 </div>
                 """, unsafe_allow_html=True)
             elif no_draw_original:
@@ -301,18 +305,27 @@ def main():
                     <strong>🔒 LOCK</strong><br><br>
                     🎯 Bet: No Draw (Home or Away win)<br>
                     📊 Stake: <span class="stake-highlight">1.0%</span><br>
-                    📝 Reason: {reason}
+                    📝 Reason: {trigger_reason}
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 # SKIP: Draw likely
-                st.markdown(f"""
-                <div class="result-skip">
-                    <strong>⚠️ SKIP</strong><br><br>
-                    🎯 No bet<br>
-                    📝 Reason: {reason}
-                </div>
-                """, unsafe_allow_html=True)
+                if position_gap == 2 or position_gap == 3:
+                    st.markdown(f"""
+                    <div class="result-skip">
+                        <strong>⚠️ SKIP</strong><br><br>
+                        🎯 No bet<br>
+                        📝 Reason: Position gap {position_gap} → Draw likely
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="result-skip">
+                        <strong>⚠️ SKIP</strong><br><br>
+                        🎯 No bet<br>
+                        📝 Reason: {skip_reason}
+                    </div>
+                    """, unsafe_allow_html=True)
     
     st.markdown("""
     <div class="footer">
