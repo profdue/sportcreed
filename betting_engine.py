@@ -12,7 +12,7 @@
 #   Position_Gap ≥ 7
 # 
 # RULE 3: Home Win Mismatch
-#   Home_Win_Pct_Season > 0.50 AND Away_Win_Pct_Season < 0.30
+#   Home_Win_Pct_Season ≥ 0.50 AND Away_Win_Pct_Season < 0.30
 # 
 # RULE 4: Goals Mismatch
 #   Home_Avg_Goals_Scored > 1.5 AND Away_Avg_Goals_Conceded > 1.5
@@ -176,6 +176,15 @@ st.markdown("""
         font-size: 0.7rem;
         color: #94a3b8 !important;
     }
+    
+    .rule-triggered {
+        color: #10b981 !important;
+        font-weight: bold;
+    }
+    
+    .rule-not-triggered {
+        color: #ef4444 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -183,18 +192,18 @@ st.markdown("""
 # CONSTANTS
 # ============================================================================
 
-# RULE 1
+# RULE 1: Away Team Strength
 RULE1_H2H_DRAWS_MAX = 1
 RULE1_AWAY_WIN_PCT_MIN = 0.40
 
-# RULE 2
+# RULE 2: Extreme Position Gap
 RULE2_POSITION_GAP_MIN = 7
 
-# RULE 3
+# RULE 3: Home Win Mismatch (UPDATED: >= 0.50 not > 0.50)
 RULE3_HOME_WIN_PCT_MIN = 0.50
 RULE3_AWAY_WIN_PCT_MAX = 0.30
 
-# RULE 4
+# RULE 4: Goals Mismatch
 RULE4_HOME_GOALS_MIN = 1.5
 RULE4_AWAY_CONCEDED_MIN = 1.5
 
@@ -237,33 +246,33 @@ def main():
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # Season Statistics
+        # Season Statistics - FIXED: No division by 100
         st.markdown('<div class="section-header">📊 SEASON STATISTICS</div>', unsafe_allow_html=True)
         
         col_stats1, col_stats2 = st.columns(2)
         with col_stats1:
             st.markdown(f'<div class="team-label">🏠 {home_team}</div>', unsafe_allow_html=True)
-            home_win_pct_season = st.number_input("Win % (season)", 0.0, 1.0, 0.55, 0.05, key="home_win_pct") / 100.0
-            home_goals_scored = st.number_input("Goals Scored Avg", 0.0, 3.0, 1.60, 0.05, key="home_goals")
+            home_win_pct_season = st.number_input("Win % (season)", 0.0, 1.0, 0.50, 0.01, key="home_win_pct")
+            home_goals_scored = st.number_input("Goals Scored Avg", 0.0, 3.0, 1.20, 0.05, key="home_goals")
             home_goals_conceded = st.number_input("Goals Conceded Avg", 0.0, 3.0, 1.40, 0.05, key="home_conceded")
         
         with col_stats2:
             st.markdown(f'<div class="team-label">✈️ {away_team}</div>', unsafe_allow_html=True)
-            away_win_pct_season = st.number_input("Win % (season)", 0.0, 1.0, 0.25, 0.05, key="away_win_pct") / 100.0
+            away_win_pct_season = st.number_input("Win % (season)", 0.0, 1.0, 0.17, 0.01, key="away_win_pct")
             away_goals_scored = st.number_input("Goals Scored Avg", 0.0, 3.0, 1.20, 0.05, key="away_goals")
             away_goals_conceded = st.number_input("Goals Conceded Avg", 0.0, 3.0, 1.30, 0.05, key="away_conceded")
         
         st.markdown("<hr>", unsafe_allow_html=True)
         
         # H2H
-        st.markdown('<div class="section-header">🤝 HEAD TO HEAD (Last 5 Matches)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🤝 HEAD TO HEAD (Last 6 Matches)</div>', unsafe_allow_html=True)
         col_h2h1, col_h2h2, col_h2h3 = st.columns(3)
         with col_h2h1:
-            h2h_home_wins = st.number_input(f"{home_team} Wins", 0, 5, 2, key="h2h_home")
+            h2h_home_wins = st.number_input(f"{home_team} Wins", 0, 6, 2, key="h2h_home")
         with col_h2h2:
-            h2h_draws = st.number_input("Draws", 0, 5, 1, key="h2h_draws")
+            h2h_draws = st.number_input("Draws", 0, 6, 1, key="h2h_draws")
         with col_h2h3:
-            h2h_away_wins = st.number_input(f"{away_team} Wins", 0, 5, 2, key="h2h_away")
+            h2h_away_wins = st.number_input(f"{away_team} Wins", 0, 6, 2, key="h2h_away")
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -271,33 +280,25 @@ def main():
         analyze = st.button("🔍 ANALYZE", use_container_width=True, type="primary")
         
         if analyze:
-            # Check all rules
+            # Check ALL rules (not just first one)
             rule1 = (h2h_draws <= RULE1_H2H_DRAWS_MAX) and (away_win_pct_season >= RULE1_AWAY_WIN_PCT_MIN)
             rule2 = (position_gap >= RULE2_POSITION_GAP_MIN)
-            rule3 = (home_win_pct_season > RULE3_HOME_WIN_PCT_MIN) and (away_win_pct_season < RULE3_AWAY_WIN_PCT_MAX)
+            rule3 = (home_win_pct_season >= RULE3_HOME_WIN_PCT_MIN) and (away_win_pct_season < RULE3_AWAY_WIN_PCT_MAX)
             rule4 = (home_goals_scored > RULE4_HOME_GOALS_MIN) and (away_goals_conceded > RULE4_AWAY_CONCEDED_MIN)
             
-            # Determine which rule triggered
-            triggered = False
-            rule_name = None
-            rule_detail = None
+            # Determine if ANY rule triggered
+            triggered = rule1 or rule2 or rule3 or rule4
             
+            # Build list of triggered rules for display
+            triggered_rules = []
             if rule1:
-                triggered = True
-                rule_name = "Away Team Strength"
-                rule_detail = f"H2H Draws ({h2h_draws}) ≤ 1 AND Away Win % ({away_win_pct_season:.0%}) ≥ 40%"
-            elif rule2:
-                triggered = True
-                rule_name = "Extreme Position Gap"
-                rule_detail = f"Position Gap ({position_gap}) ≥ 7"
-            elif rule3:
-                triggered = True
-                rule_name = "Home Win Mismatch"
-                rule_detail = f"Home Win % ({home_win_pct_season:.0%}) > 50% AND Away Win % ({away_win_pct_season:.0%}) < 30%"
-            elif rule4:
-                triggered = True
-                rule_name = "Goals Mismatch"
-                rule_detail = f"Home Goals ({home_goals_scored:.2f}) > 1.5 AND Away Conceded ({away_goals_conceded:.2f}) > 1.5"
+                triggered_rules.append("Away Team Strength")
+            if rule2:
+                triggered_rules.append("Extreme Position Gap")
+            if rule3:
+                triggered_rules.append("Home Win Mismatch")
+            if rule4:
+                triggered_rules.append("Goals Mismatch")
             
             st.markdown('<div class="result-box">', unsafe_allow_html=True)
             
@@ -316,21 +317,25 @@ def main():
             # Show rule checks
             st.markdown("**🔍 RULE CHECKS (ANY triggers → DRAW prediction is WRONG):**")
             
+            # RULE 1
             if rule1:
                 st.markdown(f"✅ **RULE 1:** H2H Draws ≤ 1 AND Away Win % ≥ 40% → {h2h_draws} ≤ 1 AND {away_win_pct_season:.0%} ≥ 40%")
             else:
                 st.markdown(f"❌ **RULE 1:** H2H Draws ≤ 1 AND Away Win % ≥ 40% → {h2h_draws} ≤ 1 AND {away_win_pct_season:.0%} ≥ 40%")
             
+            # RULE 2
             if rule2:
                 st.markdown(f"✅ **RULE 2:** Position Gap ≥ 7 → {position_gap} ≥ 7")
             else:
                 st.markdown(f"❌ **RULE 2:** Position Gap ≥ 7 → {position_gap} ≥ 7")
             
+            # RULE 3 - FIXED: using >= not >
             if rule3:
-                st.markdown(f"✅ **RULE 3:** Home Win % > 50% AND Away Win % < 30% → {home_win_pct_season:.0%} > 50% AND {away_win_pct_season:.0%} < 30%")
+                st.markdown(f"✅ **RULE 3:** Home Win % ≥ 50% AND Away Win % < 30% → {home_win_pct_season:.0%} ≥ 50% AND {away_win_pct_season:.0%} < 30%")
             else:
-                st.markdown(f"❌ **RULE 3:** Home Win % > 50% AND Away Win % < 30% → {home_win_pct_season:.0%} > 50% AND {away_win_pct_season:.0%} < 30%")
+                st.markdown(f"❌ **RULE 3:** Home Win % ≥ 50% AND Away Win % < 30% → {home_win_pct_season:.0%} ≥ 50% AND {away_win_pct_season:.0%} < 30%")
             
+            # RULE 4
             if rule4:
                 st.markdown(f"✅ **RULE 4:** Home Goals > 1.5 AND Away Conceded > 1.5 → {home_goals_scored:.2f} > 1.5 AND {away_goals_conceded:.2f} > 1.5")
             else:
@@ -339,13 +344,14 @@ def main():
             st.markdown("---")
             
             if triggered:
+                rules_text = ", ".join(triggered_rules)
                 st.markdown(f"""
                 <div class="result-bet">
                     <strong>🔒 LOCK</strong><br><br>
-                    🎯 Rule triggered: {rule_name}<br>
-                    📝 {rule_detail}<br>
+                    🎯 Rules triggered: {rules_text}<br>
+                    📝 {len(triggered_rules)} rule(s) triggered → Forebet's DRAW prediction is WRONG<br>
                     <br>
-                    🎯 Conclusion: Forebet's DRAW prediction is <strong>WRONG</strong><br>
+                    🎯 Conclusion: <strong>Bet against the draw</strong><br>
                     🎯 Bet: <strong>No Draw (Home or Away win)</strong><br>
                     📊 Stake: <span class="stake-highlight">1.0%</span>
                 </div>
