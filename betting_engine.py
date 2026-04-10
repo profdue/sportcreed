@@ -122,6 +122,7 @@ st.markdown("""
         border-top: 1px solid #ef4444;
         border-right: 1px solid #ef4444;
         border-bottom: 1px solid #ef4444;
+        color: white !important;
     }
     
     .stake-highlight {
