@@ -125,7 +125,7 @@ st.markdown("""
     
     .stake-highlight {
         background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        color: #0f172a !important;
+        color: #ffffff; !important;
         padding: 0.2rem 0.7rem;
         border-radius: 20px;
         font-weight: bold;
