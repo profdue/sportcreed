@@ -1,215 +1,23 @@
-# grokbet_poisson_zip.py
-# GROKBET – NO DRAW PREDICTOR (Poisson + Zero-Inflation)
-# 
-# Based on the complete logic from the final production version.
-# 
-# Core features:
-# - League-specific parameters (avg goals, thresholds, ZIP factors)
-# - Zero-Inflation Adjustment for 0-0 draws
-# - Value betting integration (edge calculation)
-# - Kelly Criterion stake sizing
-# - Clear decision matrix
+"""
+Complete "No Draw" Prediction System
+With Team-Specific Rolling Averages and Poisson Distribution
+Production Version - Streamlit App
+"""
 
 import streamlit as st
 import numpy as np
+import pandas as pd
 from scipy.stats import poisson
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
 
 st.set_page_config(
-    page_title="GrokBet - No Draw Predictor",
+    page_title="No Draw Predictor",
     page_icon="🎯",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
-
-# ============================================================================
-# CUSTOM CSS
-# ============================================================================
-
-st.markdown("""
-<style>
-    .main .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        max-width: 1200px;
-    }
-    
-    .main-header {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
-        padding: 1.5rem 2rem;
-        border-radius: 16px;
-        margin-bottom: 1.5rem;
-        border: 2px solid #fbbf24;
-        text-align: center;
-    }
-    
-    .main-header h1 {
-        margin: 0;
-        font-size: 1.8rem;
-        background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-    
-    .main-header p {
-        margin: 0.5rem 0 0 0;
-        color: #fbbf24 !important;
-        font-size: 0.85rem;
-        font-weight: bold;
-    }
-    
-    .badge {
-        display: inline-block;
-        background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        border-radius: 20px;
-        padding: 0.25rem 1rem;
-        font-size: 0.7rem;
-        color: #0f172a !important;
-        font-weight: bold;
-        margin-top: 0.5rem;
-    }
-    
-    .input-card {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-radius: 16px;
-        padding: 1.5rem;
-        border: 1px solid #fbbf24;
-        margin-bottom: 1.5rem;
-    }
-    
-    .section-header {
-        font-size: 0.8rem;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        color: #fbbf24 !important;
-        margin-bottom: 1rem;
-        font-weight: bold;
-    }
-    
-    .team-label {
-        color: #000000 !important;
-        font-weight: bold !important;
-        background: #fbbf24 !important;
-        padding: 0.25rem 0.8rem !important;
-        border-radius: 8px !important;
-        display: inline-block !important;
-        margin-bottom: 0.5rem !important;
-        font-size: 0.85rem !important;
-    }
-    
-    .result-box {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        border-radius: 20px;
-        padding: 1.5rem;
-        border: 2px solid #fbbf24;
-        margin-top: 1.5rem;
-        animation: slideUp 0.4s ease-out;
-    }
-    
-    @keyframes slideUp {
-        from { opacity: 0; transform: translateY(20px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    
-    .result-no-draw {
-        background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%);
-        border-left: 6px solid #10b981;
-        padding: 1.25rem;
-        border-radius: 12px;
-        margin: 0.75rem 0;
-        border-top: 1px solid #10b981;
-        border-right: 1px solid #10b981;
-        border-bottom: 1px solid #10b981;
-    }
-    
-    .result-draw {
-        background: linear-gradient(135deg, #1e293b 0%, #2a1a1a 100%);
-        border-left: 6px solid #f97316;
-        padding: 1.25rem;
-        border-radius: 12px;
-        margin: 0.75rem 0;
-        border-top: 1px solid #f97316;
-        border-right: 1px solid #f97316;
-        border-bottom: 1px solid #f97316;
-    }
-    
-    .stake-highlight {
-        background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        color: #0f172a !important;
-        padding: 0.2rem 0.7rem;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 0.8rem;
-        display: inline-block;
-    }
-    
-    hr {
-        margin: 1rem 0;
-        border: none;
-        height: 1px;
-        background: linear-gradient(90deg, transparent, #fbbf24, transparent);
-    }
-    
-    .stButton > button {
-        background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        color: #0f172a !important;
-        font-weight: bold;
-        border: none;
-        border-radius: 12px;
-        padding: 0.7rem;
-        width: 100%;
-        font-size: 1rem;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(251, 191, 36, 0.5);
-    }
-    
-    .stNumberInput > div > div > input {
-        background: #0f172a;
-        border-color: #fbbf24;
-        color: #fbbf24 !important;
-        font-weight: bold;
-    }
-    
-    .stSelectbox > div > div {
-        background: #0f172a;
-        border-color: #fbbf24;
-        color: #fbbf24 !important;
-    }
-    
-    .footer {
-        text-align: center;
-        padding: 1rem;
-        margin-top: 1rem;
-        border-top: 1px solid #fbbf24;
-        font-size: 0.7rem;
-        color: #94a3b8 !important;
-    }
-    
-    .metric-card {
-        background: linear-gradient(135deg, #0f172a 0%, #1a1a2e 100%);
-        border-radius: 12px;
-        padding: 0.75rem;
-        text-align: center;
-        border: 1px solid #fbbf24;
-    }
-    
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: bold;
-        color: #fbbf24;
-    }
-    
-    .metric-label {
-        font-size: 0.7rem;
-        color: #94a3b8;
-        text-transform: uppercase;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # ============================================================================
 # SECTION 1: LEAGUE DATABASE (2025/26 Season)
@@ -217,41 +25,51 @@ st.markdown("""
 
 LEAGUE_DATABASE = {
     # Top European Leagues
-    "Premier League (England)": {"avg_goals": 2.84, "threshold": 0.22, "zip_factor": 0.05},
-    "Serie A (Italy)": {"avg_goals": 2.65, "threshold": 0.24, "zip_factor": 0.06},
-    "La Liga (Spain)": {"avg_goals": 2.62, "threshold": 0.24, "zip_factor": 0.06},
-    "Bundesliga (Germany)": {"avg_goals": 3.10, "threshold": 0.19, "zip_factor": 0.04},
-    "Ligue 1 (France)": {"avg_goals": 2.96, "threshold": 0.20, "zip_factor": 0.04},
-    "Primeira Liga (Portugal)": {"avg_goals": 2.50, "threshold": 0.25, "zip_factor": 0.07},
-    "Eredivisie (Netherlands)": {"avg_goals": 3.00, "threshold": 0.19, "zip_factor": 0.04},
+    "Premier League": {"avg_goals": 2.84, "threshold": 0.22, "zip_factor": 0.05, "color": "#37003C"},
+    "Serie A": {"avg_goals": 2.65, "threshold": 0.24, "zip_factor": 0.06, "color": "#0D2B42"},
+    "La Liga": {"avg_goals": 2.62, "threshold": 0.24, "zip_factor": 0.06, "color": "#FFD700"},
+    "Bundesliga": {"avg_goals": 3.10, "threshold": 0.19, "zip_factor": 0.04, "color": "#E1000F"},
+    "Ligue 1": {"avg_goals": 2.96, "threshold": 0.20, "zip_factor": 0.04, "color": "#1A5B9C"},
+    "Primeira Liga": {"avg_goals": 2.50, "threshold": 0.25, "zip_factor": 0.07, "color": "#008000"},
+    "Eredivisie": {"avg_goals": 3.00, "threshold": 0.19, "zip_factor": 0.04, "color": "#FF6600"},
     
-    # Global High-Scoring Leagues
-    "Singapore Premier League": {"avg_goals": 3.63, "threshold": 0.15, "zip_factor": 0.02},
-    "Malaysia Super League": {"avg_goals": 3.42, "threshold": 0.16, "zip_factor": 0.02},
-    "Qatar Stars League": {"avg_goals": 3.32, "threshold": 0.16, "zip_factor": 0.02},
-    "Dutch Eerste Divisie": {"avg_goals": 3.31, "threshold": 0.16, "zip_factor": 0.02},
-    "Iceland Besta deild": {"avg_goals": 3.30, "threshold": 0.17, "zip_factor": 0.02},
-    "Swiss Super League": {"avg_goals": 3.28, "threshold": 0.17, "zip_factor": 0.03},
-    "Denmark Superliga": {"avg_goals": 3.22, "threshold": 0.17, "zip_factor": 0.03},
-    "USA Major League Soccer": {"avg_goals": 3.10, "threshold": 0.18, "zip_factor": 0.03},
+    # High-Scoring Leagues
+    "Singapore Premier": {"avg_goals": 3.63, "threshold": 0.15, "zip_factor": 0.02, "color": "#E31A1A"},
+    "Malaysia Super": {"avg_goals": 3.42, "threshold": 0.16, "zip_factor": 0.02, "color": "#1A4D2E"},
+    "Qatar Stars": {"avg_goals": 3.32, "threshold": 0.16, "zip_factor": 0.02, "color": "#8A1F1F"},
+    "Dutch Eerste Divisie": {"avg_goals": 3.31, "threshold": 0.16, "zip_factor": 0.02, "color": "#FF7F00"},
+    "Iceland Besta deild": {"avg_goals": 3.30, "threshold": 0.17, "zip_factor": 0.02, "color": "#004C97"},
+    "Swiss Super": {"avg_goals": 3.28, "threshold": 0.17, "zip_factor": 0.03, "color": "#E1000F"},
+    "Denmark Superliga": {"avg_goals": 3.22, "threshold": 0.17, "zip_factor": 0.03, "color": "#1E5B3C"},
+    "USA MLS": {"avg_goals": 3.10, "threshold": 0.18, "zip_factor": 0.03, "color": "#1A2B4C"},
 }
 
-DEFAULT_LEAGUE = {"avg_goals": 2.70, "threshold": 0.22, "zip_factor": 0.05}
+DEFAULT_LEAGUE = {"avg_goals": 2.70, "threshold": 0.22, "zip_factor": 0.05, "color": "#333333"}
+
 
 # ============================================================================
 # SECTION 2: CORE MATHEMATICAL FUNCTIONS
 # ============================================================================
 
-def calculate_xg(
-    home_attack: float,
-    home_defense: float,
-    away_attack: float,
-    away_defense: float,
+def calculate_expected_goals(
+    home_attack_avg: float,
+    home_defense_avg: float,
+    away_attack_avg: float,
+    away_defense_avg: float,
     league_avg: float
 ) -> Tuple[float, float]:
-    """Calculate Expected Goals for home and away teams."""
-    home_xg = (home_attack * away_defense) / league_avg
-    away_xg = (away_attack * home_defense) / league_avg
+    """
+    Calculate expected goals using the Dixon-Coles method.
+    
+    Formula: xG = (Attack_Avg × Defense_Avg) / League_Avg
+    """
+    home_xg = (home_attack_avg * away_defense_avg) / league_avg
+    away_xg = (away_attack_avg * home_defense_avg) / league_avg
+    
+    # Clamp to realistic range
+    home_xg = max(0.2, min(4.5, home_xg))
+    away_xg = max(0.2, min(4.5, away_xg))
+    
     return home_xg, away_xg
 
 
@@ -301,27 +119,57 @@ def calculate_draw_probability(
     if zip_factor > 0:
         matrix = apply_zero_inflation(matrix, zip_factor)
     
+    # Sum of diagonal = draw probability
     draw_prob = np.trace(matrix)
+    
     return min(draw_prob, 1.0)
 
 
+def calculate_score_probabilities(
+    home_xg: float,
+    away_xg: float,
+    max_goals: int = 4
+) -> Dict[Tuple[int, int], float]:
+    """Calculate probabilities for specific scorelines."""
+    prob_home = [poisson.pmf(i, home_xg) for i in range(max_goals + 1)]
+    prob_away = [poisson.pmf(i, away_xg) for i in range(max_goals + 1)]
+    
+    # Normalize
+    prob_home = np.array(prob_home) / np.sum(prob_home)
+    prob_away = np.array(prob_away) / np.sum(prob_away)
+    
+    scores = {}
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+            scores[(h, a)] = prob_home[h] * prob_away[a]
+    
+    return dict(sorted(scores.items(), key=lambda x: -x[1])[:10])
+
+
+# ============================================================================
+# SECTION 3: VALUE BETTING FUNCTIONS
+# ============================================================================
+
 def calculate_no_draw_odds(home_odds: float, away_odds: float) -> float:
     """Calculate implied 'No Draw' odds from 1X2 market."""
+    if home_odds <= 0 or away_odds <= 0:
+        return 0
     return 1 / ((1/home_odds) + (1/away_odds))
 
 
-def calculate_expected_value(model_prob: float, decimal_odds: float) -> float:
-    """Calculate Expected Value for a bet."""
+def calculate_edge(model_prob: float, decimal_odds: float) -> float:
+    """Calculate expected value edge."""
+    if decimal_odds <= 0:
+        return 0
     implied_prob = 1 / decimal_odds
     return model_prob - implied_prob
 
 
-def kelly_fraction(
-    probability: float,
-    decimal_odds: float,
-    quarter_kelly: bool = True
-) -> float:
+def kelly_fraction(probability: float, decimal_odds: float, quarter: bool = True) -> float:
     """Calculate Kelly Criterion stake fraction."""
+    if decimal_odds <= 1:
+        return 0.0
+    
     b = decimal_odds - 1
     p = probability
     q = 1 - p
@@ -331,57 +179,75 @@ def kelly_fraction(
     
     kelly = (p * b - q) / b
     
-    if quarter_kelly:
+    if quarter:
         kelly = kelly * 0.25
     
     return min(max(kelly, 0.0), 0.25)
 
 
 # ============================================================================
-# SECTION 3: MAIN PREDICTION FUNCTION
+# SECTION 4: MAIN PREDICTION FUNCTION
 # ============================================================================
 
 def predict_no_draw(
-    home_attack: float,
-    home_defense: float,
-    away_attack: float,
-    away_defense: float,
+    home_goals_scored_avg: float,
+    home_goals_conceded_avg: float,
+    away_goals_scored_avg: float,
+    away_goals_conceded_avg: float,
     league_name: str = None,
-    custom_league_avg: float = None,
-    custom_threshold: float = None,
+    league_avg_goals: float = None,
+    home_xg_avg: float = None,
+    away_xg_avg: float = None,
     use_zip: bool = True,
+    custom_threshold: float = None,
     home_odds: float = None,
     away_odds: float = None,
-    bankroll: float = None
+    bankroll: float = None,
+    use_xg_if_available: bool = True
 ) -> Dict:
-    """Main prediction function for 'No Draw' outcome."""
+    """
+    Predict whether a match will NOT end in a draw.
+    """
     
-    # Get league parameters
+    # ===== Step 1: Get league parameters =====
     if league_name and league_name in LEAGUE_DATABASE:
         league = LEAGUE_DATABASE[league_name]
-        league_avg = custom_league_avg or league["avg_goals"]
+        league_avg = league_avg_goals or league["avg_goals"]
         threshold = custom_threshold or league["threshold"]
         zip_factor = league["zip_factor"] if use_zip else 0.0
     else:
-        league_avg = custom_league_avg or DEFAULT_LEAGUE["avg_goals"]
+        league_avg = league_avg_goals or DEFAULT_LEAGUE["avg_goals"]
         threshold = custom_threshold or DEFAULT_LEAGUE["threshold"]
         zip_factor = DEFAULT_LEAGUE["zip_factor"] if use_zip else 0.0
     
-    # Calculate Expected Goals
-    home_xg, away_xg = calculate_xg(
+    # ===== Step 2: Choose best available stat =====
+    if use_xg_if_available and home_xg_avg is not None and away_xg_avg is not None:
+        home_attack = home_xg_avg
+        away_attack = away_xg_avg
+        home_defense = home_goals_conceded_avg
+        away_defense = away_goals_conceded_avg
+        stat_source = "xG (Advanced)"
+    else:
+        home_attack = home_goals_scored_avg
+        away_attack = away_goals_scored_avg
+        home_defense = home_goals_conceded_avg
+        away_defense = away_goals_conceded_avg
+        stat_source = "Goals (Basic)"
+    
+    # ===== Step 3: Calculate Expected Goals =====
+    home_xg, away_xg = calculate_expected_goals(
         home_attack, home_defense,
         away_attack, away_defense,
         league_avg
     )
     
-    # Calculate Draw Probability
-    draw_prob = calculate_draw_probability(home_xg, away_xg, zip_factor, max_goals=7)
+    # ===== Step 4: Calculate Draw Probability =====
+    draw_prob = calculate_draw_probability(home_xg, away_xg, zip_factor)
     no_draw_prob = 1 - draw_prob
     
-    # Decision Logic
+    # ===== Step 5: Decision Logic =====
     prediction = "NO DRAW" if draw_prob < threshold else "DRAW LIKELY"
     
-    # Confidence Level
     if draw_prob < threshold * 0.7:
         confidence = "HIGH"
     elif draw_prob < threshold:
@@ -389,250 +255,368 @@ def predict_no_draw(
     else:
         confidence = "LOW"
     
-    # Value Betting (if odds provided)
+    # ===== Step 6: Value Betting =====
     value_bet = None
     recommended_stake = None
-    recommended_stake_pct = None
     edge = None
     
     if home_odds and away_odds and home_odds > 0 and away_odds > 0:
         no_draw_odds = calculate_no_draw_odds(home_odds, away_odds)
-        edge = calculate_expected_value(no_draw_prob, no_draw_odds)
+        edge = calculate_edge(no_draw_prob, no_draw_odds)
         
         if edge > 0.05 and prediction == "NO DRAW":
-            value_bet = "YES"
+            value_bet = "YES (5%+ edge)"
             if bankroll and bankroll > 0:
                 kelly = kelly_fraction(no_draw_prob, no_draw_odds)
                 recommended_stake = round(bankroll * kelly, 2)
-                recommended_stake_pct = round(kelly * 100, 1)
+        elif edge > 0 and prediction == "NO DRAW":
+            value_bet = "YES (small edge)"
         else:
             value_bet = "NO"
+    
+    # ===== Step 7: Calculate score probabilities =====
+    top_scores = calculate_score_probabilities(home_xg, away_xg)
     
     return {
         "league": league_name or "Custom",
         "league_avg_goals": round(league_avg, 2),
-        "threshold_used": round(threshold * 100, 1),
-        "zip_factor_used": zip_factor if use_zip else 0.0,
+        "stat_source": stat_source,
+        "threshold": f"{threshold * 100:.1f}%",
+        
+        "home_goals_avg": round(home_goals_scored_avg, 2),
+        "home_conceded_avg": round(home_goals_conceded_avg, 2),
+        "away_goals_avg": round(away_goals_scored_avg, 2),
+        "away_conceded_avg": round(away_goals_conceded_avg, 2),
+        
         "home_xg": round(home_xg, 2),
         "away_xg": round(away_xg, 2),
         "total_xg": round(home_xg + away_xg, 2),
-        "draw_probability": round(draw_prob * 100, 1),
-        "no_draw_probability": round(no_draw_prob * 100, 1),
+        
+        "draw_probability": draw_prob,
+        "no_draw_probability": no_draw_prob,
+        
         "prediction": prediction,
         "confidence": confidence,
+        
         "value_bet": value_bet,
-        "edge_percentage": round(edge * 100, 1) if edge is not None else None,
-        "recommended_stake_usd": recommended_stake,
-        "recommended_stake_pct": recommended_stake_pct,
+        "edge": edge,
+        "recommended_stake": recommended_stake,
+        
+        "top_scores": top_scores,
+        "zip_factor_used": zip_factor,
     }
 
 
 # ============================================================================
-# SECTION 4: MAIN APP
+# SECTION 5: UI COMPONENTS
+# ============================================================================
+
+def render_prediction_card(result: Dict, home_team: str, away_team: str):
+    """Render the prediction result in a beautiful card."""
+    
+    # Determine colors based on prediction
+    if result["prediction"] == "NO DRAW":
+        pred_color = "#10b981"  # Green
+        pred_bg = "linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%)"
+        border_color = "#10b981"
+    else:
+        pred_color = "#f97316"  # Orange
+        pred_bg = "linear-gradient(135deg, #1e293b 0%, #3a2a1a 100%)"
+        border_color = "#f97316"
+    
+    # Confidence badge
+    if result["confidence"] == "HIGH":
+        confidence_badge = "🟢 HIGH"
+        confidence_color = "#10b981"
+    elif result["confidence"] == "MEDIUM":
+        confidence_badge = "🟡 MEDIUM"
+        confidence_color = "#fbbf24"
+    else:
+        confidence_badge = "🔴 LOW"
+        confidence_color = "#ef4444"
+    
+    # Draw probability gauge (0-100%)
+    draw_pct = result["draw_probability"] * 100
+    
+    st.markdown(f"""
+    <style>
+    .prediction-card {{
+        background: {pred_bg};
+        border-left: 6px solid {border_color};
+        border-radius: 16px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }}
+    .prediction-title {{
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: {pred_color};
+        margin-bottom: 0.5rem;
+    }}
+    .prediction-subtitle {{
+        font-size: 0.85rem;
+        color: #94a3b8;
+        margin-bottom: 1rem;
+    }}
+    .stat-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin: 1rem 0;
+    }}
+    .stat-card {{
+        background: #0f172a;
+        border-radius: 12px;
+        padding: 0.75rem;
+        text-align: center;
+        border: 1px solid #334155;
+    }}
+    .stat-label {{
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        color: #94a3b8;
+    }}
+    .stat-value {{
+        font-size: 1.25rem;
+        font-weight: bold;
+        color: #fbbf24;
+    }}
+    .stat-value-critical {{
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: {pred_color};
+    }}
+    .gauge-container {{
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+    }}
+    .gauge-bar {{
+        background: {pred_color};
+        height: 8px;
+        border-radius: 4px;
+        width: {draw_pct}%;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown(f"""
+    <div class="prediction-card">
+        <div class="prediction-title">{result['prediction']}</div>
+        <div class="prediction-subtitle">Confidence: {confidence_badge}</div>
+        
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-label">DRAW PROBABILITY</div>
+                <div class="stat-value-critical">{draw_pct:.1f}%</div>
+                <div class="gauge-container"><div class="gauge-bar"></div></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">NO DRAW PROBABILITY</div>
+                <div class="stat-value-critical">{(1-draw_pct/100)*100:.1f}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">TOTAL xG</div>
+                <div class="stat-value">{result['total_xg']}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Expected Goals display
+    st.markdown("**🎯 EXPECTED GOALS**")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(f"{home_team} xG", f"{result['home_xg']:.2f}")
+    with col2:
+        st.metric(f"{away_team} xG", f"{result['away_xg']:.2f}")
+    
+    # Most likely scores
+    st.markdown("**📊 MOST LIKELY SCORES**")
+    score_cols = st.columns(5)
+    for i, ((h, a), prob) in enumerate(list(result['top_scores'].items())[:5]):
+        with score_cols[i]:
+            st.metric(f"{h}-{a}", f"{prob*100:.1f}%")
+
+
+def render_betting_card(result: Dict):
+    """Render betting recommendation."""
+    if result["value_bet"] and result["value_bet"].startswith("YES") and result["prediction"] == "NO DRAW":
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%); border-left: 6px solid #fbbf24; border-radius: 12px; padding: 1rem; margin: 1rem 0;">
+            <strong>💰 VALUE BET OPPORTUNITY</strong><br>
+            Edge: {result['edge']*100:.1f}%<br>
+            Recommended Stake: ${result['recommended_stake']:.2f} (if bankroll entered)
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("⚠️ No value bet detected. Consider skipping or reducing stake.")
+
+
+def render_team_inputs(home_team: str, away_team: str, is_home: bool):
+    """Render input fields for a team."""
+    if is_home:
+        label = f"🏠 {home_team}"
+        default_scored = 1.60
+        default_conceded = 1.20
+    else:
+        label = f"✈️ {away_team}"
+        default_scored = 1.30
+        default_conceded = 1.40
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        scored = st.number_input(f"{label} Goals Scored", 0.0, 4.0, default_scored, 0.05, key=f"{home_team if is_home else away_team}_scored")
+    with col2:
+        conceded = st.number_input(f"{label} Goals Conceded", 0.0, 4.0, default_conceded, 0.05, key=f"{home_team if is_home else away_team}_conceded")
+    
+    return scored, conceded
+
+
+# ============================================================================
+# SECTION 6: MAIN APP
 # ============================================================================
 
 def main():
-    st.markdown("""
-    <div class="main-header">
-        <h1>🎯 GrokBet - No Draw Predictor</h1>
-        <p>Poisson Distribution + Zero-Inflation Adjustment</p>
-        <div class="badge">BET WHEN DRAW PROBABILITY &lt; LEAGUE THRESHOLD</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.title("🎯 No Draw Predictor")
+    st.caption("Predicts when a football match is unlikely to end in a draw | Poisson + ZIP Model")
     
-    with st.container():
-        st.markdown('<div class="input-card">', unsafe_allow_html=True)
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Settings")
         
-        # Team names
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown('<div class="section-header">🏠 HOME TEAM</div>', unsafe_allow_html=True)
-            home_team = st.text_input("Team Name", "Bayern Munich", label_visibility="collapsed")
-        with col2:
-            st.markdown('<div class="section-header">✈️ AWAY TEAM</div>', unsafe_allow_html=True)
-            away_team = st.text_input("Team Name", "Darmstadt", label_visibility="collapsed")
+        league_options = list(LEAGUE_DATABASE.keys()) + ["Custom League"]
+        selected_league = st.selectbox("Select League", league_options)
         
-        st.markdown("<hr>", unsafe_allow_html=True)
-        
-        # League selection
-        st.markdown('<div class="section-header">🏆 LEAGUE SETTINGS</div>', unsafe_allow_html=True)
-        
-        league_options = list(LEAGUE_DATABASE.keys()) + ["Custom"]
-        selected_league = st.selectbox("Select League", league_options, index=3)  # Bundesliga default
-        
-        use_zip = st.checkbox("Apply Zero-Inflation Adjustment (ZIP)", value=True)
-        
-        if selected_league == "Custom":
-            col_avg, col_thresh, col_zip = st.columns(3)
-            with col_avg:
-                custom_avg = st.number_input("League Avg Goals", 2.0, 4.0, 2.70, 0.05)
-            with col_thresh:
-                custom_thresh = st.number_input("Draw Threshold %", 10, 35, 22, 1) / 100.0
-            with col_zip:
-                custom_zip = st.number_input("ZIP Factor", 0.0, 0.10, 0.05, 0.01)
-            league_name = None
-            league_avg = custom_avg
-            league_threshold = custom_thresh
-            league_zip = custom_zip
+        if selected_league == "Custom League":
+            league_avg = st.number_input("League Avg Goals/Game", 2.0, 4.0, 2.70, 0.05)
+            threshold = st.slider("Draw Threshold", 0.10, 0.35, 0.22, 0.01)
+            zip_factor = st.slider("ZIP Factor", 0.00, 0.10, 0.05, 0.01)
+            league_name = "Custom"
+            league_avg_val = league_avg
+            threshold_val = threshold
+            zip_val = zip_factor
         else:
+            league_data = LEAGUE_DATABASE[selected_league]
             league_name = selected_league
-            league_avg = None
-            league_threshold = None
-            league_zip = None
+            league_avg_val = league_data["avg_goals"]
+            threshold_val = league_data["threshold"]
+            zip_val = league_data["zip_factor"]
         
-        st.markdown("<hr>", unsafe_allow_html=True)
+        st.divider()
         
-        # Team statistics
-        st.markdown('<div class="section-header">📊 TEAM STATISTICS (Last 5-10 Matches)</div>', unsafe_allow_html=True)
+        st.subheader("💰 Bankroll Management")
+        use_bankroll = st.checkbox("Use Bankroll Management", value=False)
+        bankroll = None
+        if use_bankroll:
+            bankroll = st.number_input("Bankroll ($)", 100, 10000, 1000, 100)
         
-        col_stats1, col_stats2 = st.columns(2)
-        with col_stats1:
-            st.markdown(f'<div class="team-label">🏠 {home_team}</div>', unsafe_allow_html=True)
-            home_attack = st.number_input("Goals Scored Per Game", 0.5, 4.0, 3.57, 0.05, key="home_attack")
-            home_defense = st.number_input("Goals Conceded Per Game", 0.5, 4.0, 0.85, 0.05, key="home_defense")
+        st.divider()
         
-        with col_stats2:
-            st.markdown(f'<div class="team-label">✈️ {away_team}</div>', unsafe_allow_html=True)
-            away_attack = st.number_input("Goals Scored Per Game", 0.5, 4.0, 0.75, 0.05, key="away_attack")
-            away_defense = st.number_input("Goals Conceded Per Game", 0.5, 4.0, 2.10, 0.05, key="away_defense")
+        st.subheader("📊 Advanced Options")
+        use_zip = st.checkbox("Apply ZIP Adjustment", value=True)
+        use_xg = st.checkbox("Use xG Data (if available)", value=False)
         
-        st.markdown("<hr>", unsafe_allow_html=True)
-        
-        # Odds and bankroll (optional)
-        st.markdown('<div class="section-header">💰 BETTING SETTINGS (Optional)</div>', unsafe_allow_html=True)
-        
-        col_odds1, col_odds2, col_bank = st.columns(3)
-        with col_odds1:
-            home_odds = st.number_input(f"{home_team} Win Odds", 1.01, 15.0, 1.25, 0.05, key="home_odds")
-        with col_odds2:
-            away_odds = st.number_input(f"{away_team} Win Odds", 1.01, 15.0, 8.00, 0.05, key="away_odds")
-        with col_bank:
-            bankroll = st.number_input("Bankroll (USD)", 0, 10000, 1000, 100, key="bankroll")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Analyze button
-        analyze = st.button("🔍 ANALYZE MATCH", use_container_width=True, type="primary")
-        
-        if analyze:
-            # Get league parameters
-            if selected_league == "Custom":
-                final_league_name = "Custom"
-                final_league_avg = league_avg
-                final_threshold = league_threshold
-                final_zip = league_zip if use_zip else 0.0
-            else:
-                final_league_name = selected_league
-                final_league_avg = None
-                final_threshold = None
-                final_zip = None
-            
-            # Make prediction
-            result = predict_no_draw(
-                home_attack=home_attack,
-                home_defense=home_defense,
-                away_attack=away_attack,
-                away_defense=away_defense,
-                league_name=final_league_name,
-                custom_league_avg=final_league_avg,
-                custom_threshold=final_threshold,
-                use_zip=use_zip,
-                home_odds=home_odds if home_odds > 0 else None,
-                away_odds=away_odds if away_odds > 0 else None,
-                bankroll=bankroll if bankroll > 0 else None
-            )
-            
-            st.markdown('<div class="result-box">', unsafe_allow_html=True)
-            
-            st.markdown(f"### 🎯 {home_team} vs {away_team}")
-            st.markdown("---")
-            
-            # Key metrics row
-            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            with col_m1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{result['home_xg']}</div>
-                    <div class="metric-label">🏠 HOME xG</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_m2:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{result['away_xg']}</div>
-                    <div class="metric-label">✈️ AWAY xG</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_m3:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{result['total_xg']}</div>
-                    <div class="metric-label">📊 TOTAL xG</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_m4:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{result['draw_probability']}%</div>
-                    <div class="metric-label">🎲 DRAW PROB</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # League info
-            st.markdown(f"""
-            **🏆 League:** {result['league']}  
-            **📈 League Avg Goals:** {result['league_avg_goals']} | **🎯 Threshold:** {result['threshold_used']}% | **🔧 ZIP Factor:** {result['zip_factor_used']}
-            """)
-            
-            st.markdown("---")
-            
-            # Decision
-            if result['prediction'] == "NO DRAW":
-                confidence_color = "#10b981" if result['confidence'] == "HIGH" else "#fbbf24" if result['confidence'] == "MEDIUM" else "#f97316"
-                st.markdown(f"""
-                <div class="result-no-draw">
-                    <strong>🔒 NO DRAW PREDICTED</strong><br><br>
-                    📊 Draw Probability: <strong>{result['draw_probability']}%</strong><br>
-                    📊 No Draw Probability: <strong>{result['no_draw_probability']}%</strong><br>
-                    🎯 League Threshold: <strong>{result['threshold_used']}%</strong><br>
-                    📈 Confidence: <strong style="color:{confidence_color}">{result['confidence']}</strong><br>
-                    <br>
-                    🎯 <strong>CONCLUSION: Bet against the draw (Home or Away win)</strong>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Value betting recommendation
-                if result['value_bet'] == "YES":
-                    stake_text = f"${result['recommended_stake_usd']} ({result['recommended_stake_pct']}% of bankroll)" if result['recommended_stake_usd'] else "Use quarter-Kelly formula"
-                    st.markdown(f"""
-                    <div style="background: linear-gradient(135deg, #1a3a2a 0%, #1e293b 100%); padding: 1rem; border-radius: 12px; margin-top: 0.75rem;">
-                        <strong>💰 VALUE BET DETECTED</strong><br>
-                        📈 Edge: <strong>{result['edge_percentage']}%</strong><br>
-                        🎯 Recommended Stake: <strong>{stake_text}</strong>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-            else:
-                st.markdown(f"""
-                <div class="result-draw">
-                    <strong>⚠️ DRAW LIKELY</strong><br><br>
-                    📊 Draw Probability: <strong>{result['draw_probability']}%</strong><br>
-                    📊 No Draw Probability: <strong>{result['no_draw_probability']}%</strong><br>
-                    🎯 League Threshold: <strong>{result['threshold_used']}%</strong><br>
-                    <br>
-                    🎯 <strong>CONCLUSION: Skip betting. Draw is likely.</strong>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("Thresholds are league-specific. ZIP factors adjust for 0-0 draws.")
     
-    st.markdown("""
-    <div class="footer">
-        🎯 GrokBet - No Draw Predictor | Poisson Distribution + Zero-Inflation Adjustment | Value Betting Integration
-    </div>
-    """, unsafe_allow_html=True)
+    # Main content
+    col1, col2 = st.columns(2)
+    with col1:
+        home_team = st.text_input("Home Team Name", "Bayern Munich")
+    with col2:
+        away_team = st.text_input("Away Team Name", "Darmstadt")
+    
+    st.divider()
+    
+    st.subheader("📊 Team Statistics (Last 5-6 Matches)")
+    
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.markdown(f"**🏠 {home_team}**")
+        home_scored, home_conceded = render_team_inputs(home_team, away_team, True)
+        
+        if use_xg:
+            home_xg = st.number_input(f"{home_team} xG Avg", 0.5, 3.0, 1.80, 0.05, key="home_xg")
+        else:
+            home_xg = None
+    with col_right:
+        st.markdown(f"**✈️ {away_team}**")
+        away_scored, away_conceded = render_team_inputs(home_team, away_team, False)
+        
+        if use_xg:
+            away_xg = st.number_input(f"{away_team} xG Avg", 0.5, 3.0, 1.20, 0.05, key="away_xg")
+        else:
+            away_xg = None
+    
+    st.divider()
+    
+    st.subheader("💰 Bookmaker Odds (Optional)")
+    col_odds1, col_odds2 = st.columns(2)
+    with col_odds1:
+        home_odds = st.number_input(f"{home_team} Win Odds", 1.01, 100.0, 1.40, 0.05)
+    with col_odds2:
+        away_odds = st.number_input(f"{away_team} Win Odds", 1.01, 100.0, 7.50, 0.05)
+    
+    # Predict button
+    if st.button("🔮 PREDICT", type="primary", use_container_width=True):
+        with st.spinner("Calculating..."):
+            result = predict_no_draw(
+                home_goals_scored_avg=home_scored,
+                home_goals_conceded_avg=home_conceded,
+                away_goals_scored_avg=away_scored,
+                away_goals_conceded_avg=away_conceded,
+                league_name=league_name if league_name != "Custom" else None,
+                league_avg_goals=league_avg_val if league_name == "Custom" else None,
+                home_xg_avg=home_xg,
+                away_xg_avg=away_xg,
+                use_zip=use_zip,
+                custom_threshold=threshold_val if league_name == "Custom" else None,
+                home_odds=home_odds,
+                away_odds=away_odds,
+                bankroll=bankroll,
+                use_xg_if_available=use_xg
+            )
+        
+        # Display results
+        render_prediction_card(result, home_team, away_team)
+        
+        st.divider()
+        
+        # Betting recommendation
+        if result["value_bet"] and result["value_bet"].startswith("YES") and result["prediction"] == "NO DRAW":
+            st.success(f"✅ VALUE BET: {result['value_bet']} (Edge: {result['edge']*100:.1f}%)")
+            if result["recommended_stake"]:
+                st.info(f"💰 Recommended Stake: ${result['recommended_stake']:.2f}")
+        elif result["prediction"] == "NO DRAW":
+            st.warning(f"⚠️ No value edge detected (Edge: {result['edge']*100:.1f}%). Consider smaller stake.")
+        else:
+            st.info("📝 No bet recommended. Draw likely.")
+        
+        # Show debug info in expander
+        with st.expander("📊 Detailed Statistics"):
+            col_d1, col_d2, col_d3 = st.columns(3)
+            with col_d1:
+                st.metric("League Avg Goals", result['league_avg_goals'])
+                st.metric("Threshold", result['threshold'])
+                st.metric("ZIP Factor", result['zip_factor_used'])
+            with col_d2:
+                st.metric("Home Attack", result['home_goals_avg'])
+                st.metric("Home Defense", result['home_conceded_avg'])
+                st.metric("Home xG", result['home_xg'])
+            with col_d3:
+                st.metric("Away Attack", result['away_goals_avg'])
+                st.metric("Away Defense", result['away_conceded_avg'])
+                st.metric("Away xG", result['away_xg'])
+            
+            st.markdown("**Most Likely Scores**")
+            score_df = pd.DataFrame([
+                {"Score": f"{h}-{a}", "Probability": f"{p*100:.2f}%"}
+                for (h, a), p in list(result['top_scores'].items())[:10]
+            ])
+            st.dataframe(score_df, use_container_width=True, hide_index=True)
+
 
 if __name__ == "__main__":
     main()
