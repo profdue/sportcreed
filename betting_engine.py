@@ -1,8 +1,6 @@
 """
-Complete "No Draw" Prediction System
-With Team-Specific Rolling Averages and Poisson Distribution
-No Scipy Required - Pure Python + Numpy
-Production Version - Streamlit App
+Professional No Draw Prediction System
+With Game State Adjustment, Clean Sheet Conflict Resolution, and Accuracy-First Betting
 """
 
 import streamlit as st
@@ -10,10 +8,9 @@ import numpy as np
 import pandas as pd
 import math
 from typing import Dict, Tuple, Optional, List
-from datetime import datetime, timedelta
 
 st.set_page_config(
-    page_title="No Draw Predictor",
+    page_title="Professional No Draw Predictor",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -52,31 +49,24 @@ DEFAULT_LEAGUE = {"avg_goals": 2.70, "threshold": 0.22, "zip_factor": 0.05, "col
 # ============================================================================
 
 def poisson_pmf(k: int, lam: float) -> float:
-    """
-    Poisson Probability Mass Function - Pure Python implementation.
-    
-    P(X = k) = (λ^k * e^(-λ)) / k!
-    """
+    """Poisson Probability Mass Function - Pure Python implementation."""
     if lam <= 0:
         return 1.0 if k == 0 else 0.0
     
-    # Calculate using log to avoid overflow
     log_p = (k * math.log(lam)) - lam - math.lgamma(k + 1)
     return math.exp(log_p)
 
 
 def math_lgamma(n: int) -> float:
-    """Log gamma approximation for integers (Lanczos approximation)."""
+    """Log gamma approximation for integers."""
     if n <= 1:
         return 0.0
     
-    # Lanczos approximation for log gamma
     x = n
     log_gamma = (x - 0.5) * math.log(x) - x + 0.5 * math.log(2 * math.pi) + 1/(12 * x)
     return log_gamma
 
 
-# Add lgamma to math if not available
 if not hasattr(math, 'lgamma'):
     math.lgamma = math_lgamma
 
@@ -84,36 +74,50 @@ if not hasattr(math, 'lgamma'):
 def poisson_probabilities(lam: float, max_goals: int = 7) -> List[float]:
     """Calculate Poisson probabilities for 0 to max_goals."""
     probs = [poisson_pmf(i, lam) for i in range(max_goals + 1)]
-    
-    # Normalize to sum to 1.0
     total = sum(probs)
     if total > 0:
         probs = [p / total for p in probs]
-    
     return probs
 
 
 # ============================================================================
-# SECTION 3: CORE MATHEMATICAL FUNCTIONS
+# SECTION 3: STRENGTH COEFFICIENTS (Professional Standard)
 # ============================================================================
 
-def calculate_expected_goals(
-    home_attack_avg: float,
-    home_defense_avg: float,
-    away_attack_avg: float,
-    away_defense_avg: float,
-    league_avg: float
+def calculate_strength_coefficients(
+    team_goals_avg: float,
+    team_conceded_avg: float,
+    league_avg_goals: float
 ) -> Tuple[float, float]:
     """
-    Calculate expected goals using the Dixon-Coles method.
+    Calculate attack and defense strength coefficients relative to league average.
     
-    Formula: xG = (Attack_Avg × Defense_Avg) / League_Avg
+    Attack Strength = Team Goals / League Avg Goals
+    Defense Strength = Team Conceded / League Avg Goals
+    
+    > 1.0 = better than average, < 1.0 = worse than average
     """
-    if league_avg <= 0:
-        league_avg = 2.70
+    attack_strength = team_goals_avg / league_avg_goals if league_avg_goals > 0 else 1.0
+    defense_strength = team_conceded_avg / league_avg_goals if league_avg_goals > 0 else 1.0
     
-    home_xg = (home_attack_avg * away_defense_avg) / league_avg
-    away_xg = (away_attack_avg * home_defense_avg) / league_avg
+    return attack_strength, defense_strength
+
+
+def calculate_expected_goals_pro(
+    home_attack_strength: float,
+    home_defense_strength: float,
+    away_attack_strength: float,
+    away_defense_strength: float,
+    league_avg_goals: float
+) -> Tuple[float, float]:
+    """
+    Calculate expected goals using professional strength coefficients.
+    
+    Home_xG = Home_Attack × Away_Defense × League_Avg
+    Away_xG = Away_Attack × Home_Defense × League_Avg
+    """
+    home_xg = home_attack_strength * away_defense_strength * league_avg_goals
+    away_xg = away_attack_strength * home_defense_strength * league_avg_goals
     
     # Clamp to realistic range
     home_xg = max(0.2, min(4.5, home_xg))
@@ -121,6 +125,232 @@ def calculate_expected_goals(
     
     return home_xg, away_xg
 
+
+# ============================================================================
+# SECTION 4: GAME STATE ADJUSTMENT (Volatility Filter)
+# ============================================================================
+
+def calculate_volatility_adjustment(
+    possession: float,
+    assists: int,
+    games_played: int,
+    goals_scored: float
+) -> float:
+    """
+    Determine if a team is "Surgical" (repeatable) or "Lucky" (volatile).
+    
+    Returns adjustment factor (0.85 to 1.15)
+    """
+    assists_per_game = assists / games_played if games_played > 0 else 0
+    goals_per_game = goals_scored
+    
+    # Assist-to-goal ratio (how many goals are assisted)
+    assist_ratio = assists_per_game / goals_per_game if goals_per_game > 0 else 0
+    
+    # Possession-based adjustment
+    if possession >= 55 and assist_ratio >= 0.6:
+        # Surgical team - trust the xG
+        return 1.05
+    elif possession <= 45 and assist_ratio <= 0.4:
+        # Lucky team - downgrade xG
+        return 0.85
+    else:
+        # Neutral - trust the model
+        return 1.0
+
+
+def apply_volatility_filter(
+    home_xg: float,
+    away_xg: float,
+    home_possession: float,
+    home_assists: int,
+    home_games: int,
+    home_goals: float,
+    away_possession: float,
+    away_assists: int,
+    away_games: int,
+    away_goals: float
+) -> Tuple[float, float, str, str]:
+    """
+    Apply game state adjustment to expected goals.
+    Returns adjusted xG and team classifications.
+    """
+    home_adj = calculate_volatility_adjustment(
+        home_possession, home_assists, home_games, home_goals
+    )
+    away_adj = calculate_volatility_adjustment(
+        away_possession, away_assists, away_games, away_goals
+    )
+    
+    home_classification = "Surgical" if home_adj > 1.02 else "Lucky" if home_adj < 0.98 else "Neutral"
+    away_classification = "Surgical" if away_adj > 1.02 else "Lucky" if away_adj < 0.98 else "Neutral"
+    
+    home_xg_adj = home_xg * home_adj
+    away_xg_adj = away_xg * away_adj
+    
+    return home_xg_adj, away_xg_adj, home_classification, away_classification
+
+
+# ============================================================================
+# SECTION 5: CLEAN SHEET CONFLICT RESOLUTION
+# ============================================================================
+
+def calculate_clean_sheet_probability(
+    xg_conceded: float,
+    max_goals: int = 7
+) -> float:
+    """
+    Calculate probability of a clean sheet from Poisson distribution.
+    P(clean sheet) = P(opponent scores 0 goals) = Poisson(0, xg_conceded)
+    """
+    return poisson_pmf(0, xg_conceded)
+
+
+def detect_clean_sheet_conflict(
+    underdog_xg: float,
+    favorite_clean_sheet_pct: float,
+    underdog_threshold: float = 0.8,
+    favorite_cs_threshold: float = 0.20
+) -> Tuple[bool, str]:
+    """
+    Detect conflict between Poisson math and raw clean sheet data.
+    
+    Returns: (conflict_detected, recommended_bet)
+    """
+    if underdog_xg > underdog_threshold and favorite_clean_sheet_pct < favorite_cs_threshold:
+        return True, "BTTS Yes"
+    return False, None
+
+
+# ============================================================================
+# SECTION 6: DOUBLE-SIDED FILTER (Coefficient Alignment)
+# ============================================================================
+
+def check_coefficient_alignment(
+    home_attack_strength: float,
+    away_defense_strength: float,
+    away_attack_strength: float,
+    home_defense_strength: float,
+    threshold: float = 1.0
+) -> Tuple[bool, str, str]:
+    """
+    Check if coefficients align for the same outcome.
+    
+    Returns: (aligned, home_alignment, away_alignment)
+    """
+    home_alignment = "HIGH" if home_attack_strength > threshold and away_defense_strength > threshold else "LOW"
+    away_alignment = "HIGH" if away_attack_strength > threshold and home_defense_strength > threshold else "LOW"
+    
+    # Both align for the same outcome? No - they are opposing.
+    # For total goals, we check if both attack strengths are high
+    both_attacks_high = home_attack_strength > threshold and away_attack_strength > threshold
+    both_defenses_low = home_defense_strength < threshold and away_defense_strength < threshold
+    
+    aligned = both_attacks_high or both_defenses_low
+    
+    return aligned, home_alignment, away_alignment
+
+
+# ============================================================================
+# SECTION 7: ACCURACY-FIRST BET RECOMMENDATION
+# ============================================================================
+
+def recommend_accuracy_bet(
+    home_xg: float,
+    away_xg: float,
+    total_xg: float,
+    home_attack_strength: float,
+    away_attack_strength: float,
+    home_defense_strength: float,
+    away_defense_strength: float,
+    home_clean_sheet_pct: float,
+    away_clean_sheet_pct: float,
+    home_classification: str,
+    away_classification: str,
+    coefficients_aligned: bool
+) -> Dict:
+    """
+    Recommend the highest-accuracy bet based on model outputs.
+    """
+    combined_cs_pct = home_clean_sheet_pct + away_clean_sheet_pct
+    conflict, conflict_bet = detect_clean_sheet_conflict(
+        min(home_xg, away_xg),
+        max(home_clean_sheet_pct, away_clean_sheet_pct)
+    )
+    
+    recommendations = []
+    
+    # Rule 1: Low total goals
+    if total_xg < 1.8:
+        recommendations.append({
+            "bet": "Under 2.5 Goals",
+            "confidence": "HIGH",
+            "reason": f"Total xG ({total_xg:.2f}) < 1.8"
+        })
+    
+    # Rule 2: High total goals
+    if total_xg > 3.0:
+        recommendations.append({
+            "bet": "Over 2.5 Goals or Asian Over 2.0",
+            "confidence": "HIGH",
+            "reason": f"Total xG ({total_xg:.2f}) > 3.0"
+        })
+    
+    # Rule 3: Clean sheet conflict
+    if conflict:
+        recommendations.append({
+            "bet": conflict_bet,
+            "confidence": "VERY HIGH",
+            "reason": f"Underdog xG ({min(home_xg, away_xg):.2f}) > 0.8 AND Favorite CS% ({max(home_clean_sheet_pct, away_clean_sheet_pct)*100:.1f}%) < 20%"
+        })
+    
+    # Rule 4: Combined clean sheet low = BTTS
+    if combined_cs_pct < 0.30:
+        recommendations.append({
+            "bet": "BTTS Yes",
+            "confidence": "HIGH",
+            "reason": f"Combined Clean Sheet % ({combined_cs_pct*100:.1f}%) < 30%"
+        })
+    
+    # Rule 5: Strong attack vs weak defense
+    if home_attack_strength > 1.15 and away_defense_strength > 1.0:
+        recommendations.append({
+            "bet": f"Home Team Over 1.5 Goals",
+            "confidence": "MEDIUM",
+            "reason": f"Home Attack ({home_attack_strength:.2f}) × Away Defense ({away_defense_strength:.2f})"
+        })
+    
+    if away_attack_strength > 1.15 and home_defense_strength > 1.0:
+        recommendations.append({
+            "bet": f"Away Team Over 1.5 Goals",
+            "confidence": "MEDIUM",
+            "reason": f"Away Attack ({away_attack_strength:.2f}) × Home Defense ({home_defense_strength:.2f})"
+        })
+    
+    # Rule 6: Coefficient alignment for total goals
+    if coefficients_aligned and total_xg > 2.5:
+        recommendations.append({
+            "bet": "Over 2.5 Goals",
+            "confidence": "HIGH",
+            "reason": "Both coefficients align for high scoring"
+        })
+    
+    # Sort by confidence
+    confidence_order = {"VERY HIGH": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    recommendations.sort(key=lambda x: confidence_order.get(x["confidence"], 4))
+    
+    return {
+        "recommendations": recommendations,
+        "combined_cs_pct": combined_cs_pct,
+        "conflict_detected": conflict,
+        "conflict_bet": conflict_bet,
+        "coefficients_aligned": coefficients_aligned
+    }
+
+
+# ============================================================================
+# SECTION 8: POISSON MATRIX AND DRAW PROBABILITY
+# ============================================================================
 
 def poisson_probability_matrix(
     home_xg: float,
@@ -131,7 +361,6 @@ def poisson_probability_matrix(
     prob_home = poisson_probabilities(home_xg, max_goals)
     prob_away = poisson_probabilities(away_xg, max_goals)
     
-    # Create outer product matrix
     matrix = np.zeros((max_goals + 1, max_goals + 1))
     for i in range(max_goals + 1):
         for j in range(max_goals + 1):
@@ -170,7 +399,6 @@ def calculate_draw_probability(
     if zip_factor > 0:
         matrix = apply_zero_inflation(matrix, zip_factor)
     
-    # Sum of diagonal = draw probability
     draw_prob = sum(matrix[i, i] for i in range(max_goals + 1))
     
     return min(draw_prob, 1.0)
@@ -194,195 +422,175 @@ def calculate_score_probabilities(
 
 
 # ============================================================================
-# SECTION 4: VALUE BETTING FUNCTIONS
+# SECTION 9: MAIN PREDICTION FUNCTION
 # ============================================================================
 
-def calculate_no_draw_odds(home_odds: float, away_odds: float) -> float:
-    """Calculate implied 'No Draw' odds from 1X2 market."""
-    if home_odds <= 0 or away_odds <= 0:
-        return 0
-    return 1 / ((1/home_odds) + (1/away_odds))
-
-
-def calculate_edge(model_prob: float, decimal_odds: float) -> float:
-    """Calculate expected value edge."""
-    if decimal_odds <= 0:
-        return 0
-    implied_prob = 1 / decimal_odds
-    return model_prob - implied_prob
-
-
-def kelly_fraction(probability: float, decimal_odds: float, quarter: bool = True) -> float:
-    """Calculate Kelly Criterion stake fraction."""
-    if decimal_odds <= 1:
-        return 0.0
+def predict_match(
+    # Core statistics
+    home_goals_scored: float,
+    home_goals_conceded: float,
+    away_goals_scored: float,
+    away_goals_conceded: float,
+    home_games_played: int = 30,
+    away_games_played: int = 30,
     
-    b = decimal_odds - 1
-    p = probability
-    q = 1 - p
+    # Advanced statistics (for game state adjustment)
+    home_possession: float = 50.0,
+    away_possession: float = 50.0,
+    home_assists: int = 30,
+    away_assists: int = 30,
+    home_clean_sheets: int = 5,
+    away_clean_sheets: int = 5,
     
-    if p * b - q <= 0:
-        return 0.0
-    
-    kelly = (p * b - q) / b
-    
-    if quarter:
-        kelly = kelly * 0.25
-    
-    return min(max(kelly, 0.0), 0.25)
-
-
-# ============================================================================
-# SECTION 5: MAIN PREDICTION FUNCTION
-# ============================================================================
-
-def predict_no_draw(
-    home_goals_scored_avg: float,
-    home_goals_conceded_avg: float,
-    away_goals_scored_avg: float,
-    away_goals_conceded_avg: float,
+    # League context
     league_name: str = None,
     league_avg_goals: float = None,
-    home_xg_avg: float = None,
-    away_xg_avg: float = None,
+    
+    # Model parameters
     use_zip: bool = True,
-    custom_threshold: float = None,
-    home_odds: float = None,
-    away_odds: float = None,
-    bankroll: float = None,
-    use_xg_if_available: bool = True
+    use_volatility_filter: bool = True,
+    
+    # Team names
+    home_team: str = "Home Team",
+    away_team: str = "Away Team"
 ) -> Dict:
     """
-    Predict whether a match will NOT end in a draw.
+    Professional match prediction with all expert overlays.
     """
     
     # ===== Step 1: Get league parameters =====
     if league_name and league_name in LEAGUE_DATABASE:
         league = LEAGUE_DATABASE[league_name]
         league_avg = league_avg_goals or league["avg_goals"]
-        threshold = custom_threshold or league["threshold"]
+        threshold = league["threshold"]
         zip_factor = league["zip_factor"] if use_zip else 0.0
     else:
         league_avg = league_avg_goals or DEFAULT_LEAGUE["avg_goals"]
-        threshold = custom_threshold or DEFAULT_LEAGUE["threshold"]
+        threshold = DEFAULT_LEAGUE["threshold"]
         zip_factor = DEFAULT_LEAGUE["zip_factor"] if use_zip else 0.0
     
-    # ===== Step 2: Choose best available stat =====
-    if use_xg_if_available and home_xg_avg is not None and away_xg_avg is not None:
-        home_attack = home_xg_avg
-        away_attack = away_xg_avg
-        home_defense = home_goals_conceded_avg
-        away_defense = away_goals_conceded_avg
-        stat_source = "xG (Advanced)"
-    else:
-        home_attack = home_goals_scored_avg
-        away_attack = away_goals_scored_avg
-        home_defense = home_goals_conceded_avg
-        away_defense = away_goals_conceded_avg
-        stat_source = "Goals (Basic)"
+    # Calculate per-game averages
+    home_goals_avg = home_goals_scored / home_games_played if home_games_played > 0 else 1.0
+    home_conceded_avg = home_goals_conceded / home_games_played if home_games_played > 0 else 1.0
+    away_goals_avg = away_goals_scored / away_games_played if away_games_played > 0 else 1.0
+    away_conceded_avg = away_goals_conceded / away_games_played if away_games_played > 0 else 1.0
     
-    # ===== Step 3: Calculate Expected Goals =====
-    home_xg, away_xg = calculate_expected_goals(
-        home_attack, home_defense,
-        away_attack, away_defense,
+    # ===== Step 2: Calculate strength coefficients =====
+    home_attack_strength, home_defense_strength = calculate_strength_coefficients(
+        home_goals_avg, home_conceded_avg, league_avg
+    )
+    away_attack_strength, away_defense_strength = calculate_strength_coefficients(
+        away_goals_avg, away_conceded_avg, league_avg
+    )
+    
+    # ===== Step 3: Calculate base expected goals =====
+    home_xg, away_xg = calculate_expected_goals_pro(
+        home_attack_strength, home_defense_strength,
+        away_attack_strength, away_defense_strength,
         league_avg
     )
     
-    # ===== Step 4: Calculate Draw Probability =====
+    # ===== Step 4: Apply volatility filter (game state adjustment) =====
+    home_classification = "Neutral"
+    away_classification = "Neutral"
+    
+    if use_volatility_filter:
+        home_xg, away_xg, home_classification, away_classification = apply_volatility_filter(
+            home_xg, away_xg,
+            home_possession, home_assists, home_games_played, home_goals_avg,
+            away_possession, away_assists, away_games_played, away_goals_avg
+        )
+    
+    total_xg = home_xg + away_xg
+    
+    # ===== Step 5: Calculate clean sheet probabilities =====
+    home_clean_sheet_prob = calculate_clean_sheet_probability(away_xg)
+    away_clean_sheet_prob = calculate_clean_sheet_probability(home_xg)
+    home_clean_sheet_pct_raw = home_clean_sheets / home_games_played if home_games_played > 0 else 0.1
+    away_clean_sheet_pct_raw = away_clean_sheets / away_games_played if away_games_played > 0 else 0.1
+    
+    # ===== Step 6: Check coefficient alignment =====
+    coefficients_aligned, home_alignment, away_alignment = check_coefficient_alignment(
+        home_attack_strength, away_defense_strength,
+        away_attack_strength, home_defense_strength
+    )
+    
+    # ===== Step 7: Calculate draw probability =====
     draw_prob = calculate_draw_probability(home_xg, away_xg, zip_factor)
     no_draw_prob = 1 - draw_prob
     
-    # ===== Step 5: Decision Logic =====
-    prediction = "NO DRAW" if draw_prob < threshold else "DRAW LIKELY"
+    # ===== Step 8: Get accuracy-first bet recommendations =====
+    bet_recommendations = recommend_accuracy_bet(
+        home_xg, away_xg, total_xg,
+        home_attack_strength, away_attack_strength,
+        home_defense_strength, away_defense_strength,
+        home_clean_sheet_pct_raw, away_clean_sheet_pct_raw,
+        home_classification, away_classification,
+        coefficients_aligned
+    )
     
-    if draw_prob < threshold * 0.7:
-        confidence = "HIGH"
-    elif draw_prob < threshold:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
-    
-    # ===== Step 6: Value Betting =====
-    value_bet = None
-    recommended_stake = None
-    edge = None
-    
-    if home_odds and away_odds and home_odds > 0 and away_odds > 0:
-        no_draw_odds = calculate_no_draw_odds(home_odds, away_odds)
-        edge = calculate_edge(no_draw_prob, no_draw_odds)
-        
-        if edge > 0.05 and prediction == "NO DRAW":
-            value_bet = "YES (5%+ edge)"
-            if bankroll and bankroll > 0:
-                kelly = kelly_fraction(no_draw_prob, no_draw_odds)
-                recommended_stake = round(bankroll * kelly, 2)
-        elif edge > 0 and prediction == "NO DRAW":
-            value_bet = "YES (small edge)"
-        else:
-            value_bet = "NO"
-    
-    # ===== Step 7: Calculate score probabilities =====
+    # ===== Step 9: Calculate score probabilities =====
     top_scores = calculate_score_probabilities(home_xg, away_xg)
     
     return {
+        # Input summary
+        "home_team": home_team,
+        "away_team": away_team,
         "league": league_name or "Custom",
         "league_avg_goals": round(league_avg, 2),
-        "stat_source": stat_source,
-        "threshold": f"{threshold * 100:.1f}%",
         
-        "home_goals_avg": round(home_goals_scored_avg, 2),
-        "home_conceded_avg": round(home_goals_conceded_avg, 2),
-        "away_goals_avg": round(away_goals_scored_avg, 2),
-        "away_conceded_avg": round(away_goals_conceded_avg, 2),
+        # Strength coefficients
+        "home_attack_strength": round(home_attack_strength, 2),
+        "home_defense_strength": round(home_defense_strength, 2),
+        "away_attack_strength": round(away_attack_strength, 2),
+        "away_defense_strength": round(away_defense_strength, 2),
+        "home_classification": home_classification,
+        "away_classification": away_classification,
+        "coefficients_aligned": coefficients_aligned,
+        "home_alignment": home_alignment,
+        "away_alignment": away_alignment,
         
+        # Expected goals
         "home_xg": round(home_xg, 2),
         "away_xg": round(away_xg, 2),
-        "total_xg": round(home_xg + away_xg, 2),
+        "total_xg": round(total_xg, 2),
         
+        # Probabilities
         "draw_probability": draw_prob,
         "no_draw_probability": no_draw_prob,
+        "home_clean_sheet_prob": home_clean_sheet_prob,
+        "away_clean_sheet_prob": away_clean_sheet_prob,
+        "home_clean_sheet_pct_raw": home_clean_sheet_pct_raw,
+        "away_clean_sheet_pct_raw": away_clean_sheet_pct_raw,
         
-        "prediction": prediction,
-        "confidence": confidence,
+        # Bet recommendations
+        "bet_recommendations": bet_recommendations,
         
-        "value_bet": value_bet,
-        "edge": edge,
-        "recommended_stake": recommended_stake,
-        
+        # Score probabilities
         "top_scores": top_scores,
-        "zip_factor_used": zip_factor,
+        
+        # Decision
+        "draw_prediction": "NO DRAW" if draw_prob < threshold else "DRAW LIKELY",
     }
 
 
 # ============================================================================
-# SECTION 6: UI COMPONENTS
+# SECTION 10: UI COMPONENTS
 # ============================================================================
 
-def render_prediction_card(result: Dict, home_team: str, away_team: str):
-    """Render the prediction result in a beautiful card."""
+def render_prediction_card(result: Dict):
+    """Render the prediction result."""
     
     # Determine colors based on prediction
-    if result["prediction"] == "NO DRAW":
-        pred_color = "#10b981"  # Green
+    if result["draw_prediction"] == "NO DRAW":
+        pred_color = "#10b981"
         pred_bg = "linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%)"
         border_color = "#10b981"
     else:
-        pred_color = "#f97316"  # Orange
+        pred_color = "#f97316"
         pred_bg = "linear-gradient(135deg, #1e293b 0%, #3a2a1a 100%)"
         border_color = "#f97316"
     
-    # Confidence badge
-    if result["confidence"] == "HIGH":
-        confidence_badge = "🟢 HIGH"
-        confidence_color = "#10b981"
-    elif result["confidence"] == "MEDIUM":
-        confidence_badge = "🟡 MEDIUM"
-        confidence_color = "#fbbf24"
-    else:
-        confidence_badge = "🔴 LOW"
-        confidence_color = "#ef4444"
-    
-    # Draw probability gauge (0-100%)
     draw_pct = result["draw_probability"] * 100
     
     st.markdown(f"""
@@ -400,11 +608,6 @@ def render_prediction_card(result: Dict, home_team: str, away_team: str):
         font-weight: bold;
         color: {pred_color};
         margin-bottom: 0.5rem;
-    }}
-    .prediction-subtitle {{
-        font-size: 0.85rem;
-        color: #94a3b8;
-        margin-bottom: 1rem;
     }}
     .stat-grid {{
         display: grid;
@@ -434,12 +637,6 @@ def render_prediction_card(result: Dict, home_team: str, away_team: str):
         font-weight: bold;
         color: {pred_color};
     }}
-    .gauge-container {{
-        background: #1e293b;
-        border-radius: 12px;
-        padding: 0.5rem;
-        margin: 0.5rem 0;
-    }}
     .gauge-bar {{
         background: {pred_color};
         height: 8px;
@@ -451,84 +648,87 @@ def render_prediction_card(result: Dict, home_team: str, away_team: str):
     
     st.markdown(f"""
     <div class="prediction-card">
-        <div class="prediction-title">{result['prediction']}</div>
-        <div class="prediction-subtitle">Confidence: {confidence_badge}</div>
+        <div class="prediction-title">{result['draw_prediction']}</div>
         
         <div class="stat-grid">
             <div class="stat-card">
                 <div class="stat-label">DRAW PROBABILITY</div>
                 <div class="stat-value-critical">{draw_pct:.1f}%</div>
-                <div class="gauge-container"><div class="gauge-bar"></div></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">NO DRAW PROBABILITY</div>
-                <div class="stat-value-critical">{(1-draw_pct/100)*100:.1f}%</div>
+                <div style="background:#1e293b; border-radius:12px; padding:0.5rem; margin-top:0.5rem;"><div class="gauge-bar"></div></div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">TOTAL xG</div>
                 <div class="stat-value">{result['total_xg']}</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">HOME xG</div>
+                <div class="stat-value">{result['home_xg']}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">AWAY xG</div>
+                <div class="stat-value">{result['away_xg']}</div>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    # Expected Goals display
-    st.markdown("**🎯 EXPECTED GOALS**")
+    # Strength coefficients
+    st.markdown("**📊 STRENGTH COEFFICIENTS**")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric(f"{result['home_team']} Attack", f"{result['home_attack_strength']:.2f}", 
+                  delta="Above avg" if result['home_attack_strength'] > 1 else "Below avg")
+    with col2:
+        st.metric(f"{result['home_team']} Defense", f"{result['home_defense_strength']:.2f}",
+                  delta="Above avg" if result['home_defense_strength'] < 1 else "Below avg")
+    with col3:
+        st.metric(f"{result['away_team']} Attack", f"{result['away_attack_strength']:.2f}",
+                  delta="Above avg" if result['away_attack_strength'] > 1 else "Below avg")
+    with col4:
+        st.metric(f"{result['away_team']} Defense", f"{result['away_defense_strength']:.2f}",
+                  delta="Above avg" if result['away_defense_strength'] < 1 else "Below avg")
+    
+    # Game state classification
+    st.markdown("**🎮 GAME STATE CLASSIFICATION**")
     col1, col2 = st.columns(2)
     with col1:
-        st.metric(f"{home_team} xG", f"{result['home_xg']:.2f}")
+        st.info(f"{result['home_team']}: **{result['home_classification']}**")
     with col2:
-        st.metric(f"{away_team} xG", f"{result['away_xg']:.2f}")
+        st.info(f"{result['away_team']}: **{result['away_classification']}**")
+    
+    # Bet recommendations
+    st.markdown("---")
+    st.markdown("## 🎯 ACCURACY-FIRST BET RECOMMENDATIONS")
+    
+    if result["bet_recommendations"]["recommendations"]:
+        for rec in result["bet_recommendations"]["recommendations"]:
+            if rec["confidence"] == "VERY HIGH":
+                st.success(f"✅ **{rec['bet']}** - {rec['confidence']} confidence")
+                st.caption(f"📝 {rec['reason']}")
+            elif rec["confidence"] == "HIGH":
+                st.info(f"📌 **{rec['bet']}** - {rec['confidence']} confidence")
+                st.caption(f"📝 {rec['reason']}")
+            else:
+                st.warning(f"⚠️ **{rec['bet']}** - {rec['confidence']} confidence")
+                st.caption(f"📝 {rec['reason']}")
+    else:
+        st.warning("No strong recommendations. Consider skipping this match.")
     
     # Most likely scores
-    st.markdown("**📊 MOST LIKELY SCORES**")
-    score_cols = st.columns(5)
-    for i, ((h, a), prob) in enumerate(list(result['top_scores'].items())[:5]):
-        with score_cols[i]:
-            st.metric(f"{h}-{a}", f"{prob*100:.1f}%")
-
-
-def render_betting_card(result: Dict):
-    """Render betting recommendation."""
-    if result["value_bet"] and result["value_bet"].startswith("YES") and result["prediction"] == "NO DRAW":
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%); border-left: 6px solid #fbbf24; border-radius: 12px; padding: 1rem; margin: 1rem 0;">
-            <strong>💰 VALUE BET OPPORTUNITY</strong><br>
-            Edge: {result['edge']*100:.1f}%<br>
-            Recommended Stake: ${result['recommended_stake']:.2f} (if bankroll entered)
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.info("⚠️ No value bet detected. Consider skipping or reducing stake.")
-
-
-def render_team_inputs(home_team: str, away_team: str, is_home: bool):
-    """Render input fields for a team."""
-    if is_home:
-        label = f"🏠 {home_team}"
-        default_scored = 1.60
-        default_conceded = 1.20
-    else:
-        label = f"✈️ {away_team}"
-        default_scored = 1.30
-        default_conceded = 1.40
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        scored = st.number_input(f"{label} Goals Scored", 0.0, 4.0, default_scored, 0.05, key=f"{home_team if is_home else away_team}_scored")
-    with col2:
-        conceded = st.number_input(f"{label} Goals Conceded", 0.0, 4.0, default_conceded, 0.05, key=f"{home_team if is_home else away_team}_conceded")
-    
-    return scored, conceded
+    with st.expander("📊 Most Likely Scorelines"):
+        score_cols = st.columns(5)
+        for i, ((h, a), prob) in enumerate(list(result['top_scores'].items())[:5]):
+            with score_cols[i]:
+                st.metric(f"{h}-{a}", f"{prob*100:.1f}%")
 
 
 # ============================================================================
-# SECTION 7: MAIN APP
+# SECTION 11: MAIN APP
 # ============================================================================
 
 def main():
-    st.title("🎯 No Draw Predictor")
-    st.caption("Predicts when a football match is unlikely to end in a draw | Poisson + ZIP Model (No Scipy)")
+    st.title("🎯 Professional No Draw Predictor")
+    st.caption("Accuracy-First Betting | Poisson + Strength Coefficients + Game State Adjustment")
     
     # Sidebar
     with st.sidebar:
@@ -539,130 +739,76 @@ def main():
         
         if selected_league == "Custom League":
             league_avg = st.number_input("League Avg Goals/Game", 2.0, 4.0, 2.70, 0.05)
-            threshold = st.slider("Draw Threshold", 0.10, 0.35, 0.22, 0.01)
-            zip_factor = st.slider("ZIP Factor", 0.00, 0.10, 0.05, 0.01)
             league_name = "Custom"
             league_avg_val = league_avg
-            threshold_val = threshold
-            zip_val = zip_factor
         else:
             league_data = LEAGUE_DATABASE[selected_league]
             league_name = selected_league
             league_avg_val = league_data["avg_goals"]
-            threshold_val = league_data["threshold"]
-            zip_val = league_data["zip_factor"]
-        
-        st.divider()
-        
-        st.subheader("💰 Bankroll Management")
-        use_bankroll = st.checkbox("Use Bankroll Management", value=False)
-        bankroll = None
-        if use_bankroll:
-            bankroll = st.number_input("Bankroll ($)", 100, 10000, 1000, 100)
         
         st.divider()
         
         st.subheader("📊 Advanced Options")
         use_zip = st.checkbox("Apply ZIP Adjustment", value=True)
-        use_xg = st.checkbox("Use xG Data (if available)", value=False)
-        
-        st.caption("Thresholds are league-specific. ZIP factors adjust for 0-0 draws.")
+        use_volatility = st.checkbox("Apply Game State Adjustment", value=True)
     
     # Main content
     col1, col2 = st.columns(2)
     with col1:
-        home_team = st.text_input("Home Team Name", "Bayern Munich")
+        home_team = st.text_input("Home Team Name", "Liverpool")
     with col2:
-        away_team = st.text_input("Away Team Name", "Darmstadt")
+        away_team = st.text_input("Away Team Name", "Everton")
     
     st.divider()
     
-    st.subheader("📊 Team Statistics (Last 5-6 Matches)")
+    # Team statistics
+    st.subheader("📊 Team Statistics (Season Totals)")
     
     col_left, col_right = st.columns(2)
+    
     with col_left:
         st.markdown(f"**🏠 {home_team}**")
-        home_scored, home_conceded = render_team_inputs(home_team, away_team, True)
-        
-        if use_xg:
-            home_xg = st.number_input(f"{home_team} xG Avg", 0.5, 3.0, 1.80, 0.05, key="home_xg")
-        else:
-            home_xg = None
+        home_games = st.number_input("Games Played", 1, 50, 31, key="home_games")
+        home_scored = st.number_input("Goals Scored", 0, 150, 65, key="home_scored")
+        home_conceded = st.number_input("Goals Conceded", 0, 150, 45, key="home_conceded")
+        home_clean_sheets = st.number_input("Clean Sheets", 0, 50, 7, key="home_cs")
+        home_possession = st.slider("Possession %", 30, 70, 55, key="home_pos")
+        home_assists = st.number_input("Assists", 0, 150, 48, key="home_assists")
+    
     with col_right:
         st.markdown(f"**✈️ {away_team}**")
-        away_scored, away_conceded = render_team_inputs(home_team, away_team, False)
-        
-        if use_xg:
-            away_xg = st.number_input(f"{away_team} xG Avg", 0.5, 3.0, 1.20, 0.05, key="away_xg")
-        else:
-            away_xg = None
-    
-    st.divider()
-    
-    st.subheader("💰 Bookmaker Odds (Optional)")
-    col_odds1, col_odds2 = st.columns(2)
-    with col_odds1:
-        home_odds = st.number_input(f"{home_team} Win Odds", 1.01, 100.0, 1.40, 0.05)
-    with col_odds2:
-        away_odds = st.number_input(f"{away_team} Win Odds", 1.01, 100.0, 7.50, 0.05)
+        away_games = st.number_input("Games Played", 1, 50, 31, key="away_games")
+        away_scored = st.number_input("Goals Scored", 0, 150, 40, key="away_scored")
+        away_conceded = st.number_input("Goals Conceded", 0, 150, 50, key="away_conceded")
+        away_clean_sheets = st.number_input("Clean Sheets", 0, 50, 5, key="away_cs")
+        away_possession = st.slider("Possession %", 30, 70, 48, key="away_pos")
+        away_assists = st.number_input("Assists", 0, 150, 30, key="away_assists")
     
     # Predict button
     if st.button("🔮 PREDICT", type="primary", use_container_width=True):
         with st.spinner("Calculating..."):
-            result = predict_no_draw(
-                home_goals_scored_avg=home_scored,
-                home_goals_conceded_avg=home_conceded,
-                away_goals_scored_avg=away_scored,
-                away_goals_conceded_avg=away_conceded,
+            result = predict_match(
+                home_goals_scored=home_scored,
+                home_goals_conceded=home_conceded,
+                away_goals_scored=away_scored,
+                away_goals_conceded=away_conceded,
+                home_games_played=home_games,
+                away_games_played=away_games,
+                home_possession=home_possession,
+                away_possession=away_possession,
+                home_assists=home_assists,
+                away_assists=away_assists,
+                home_clean_sheets=home_clean_sheets,
+                away_clean_sheets=away_clean_sheets,
                 league_name=league_name if league_name != "Custom" else None,
                 league_avg_goals=league_avg_val if league_name == "Custom" else None,
-                home_xg_avg=home_xg,
-                away_xg_avg=away_xg,
                 use_zip=use_zip,
-                custom_threshold=threshold_val if league_name == "Custom" else None,
-                home_odds=home_odds,
-                away_odds=away_odds,
-                bankroll=bankroll,
-                use_xg_if_available=use_xg
+                use_volatility_filter=use_volatility,
+                home_team=home_team,
+                away_team=away_team
             )
         
-        # Display results
-        render_prediction_card(result, home_team, away_team)
-        
-        st.divider()
-        
-        # Betting recommendation
-        if result["value_bet"] and result["value_bet"].startswith("YES") and result["prediction"] == "NO DRAW":
-            st.success(f"✅ VALUE BET: {result['value_bet']} (Edge: {result['edge']*100:.1f}%)")
-            if result["recommended_stake"]:
-                st.info(f"💰 Recommended Stake: ${result['recommended_stake']:.2f}")
-        elif result["prediction"] == "NO DRAW":
-            st.warning(f"⚠️ No value edge detected (Edge: {result['edge']*100:.1f}%). Consider smaller stake.")
-        else:
-            st.info("📝 No bet recommended. Draw likely.")
-        
-        # Show debug info in expander
-        with st.expander("📊 Detailed Statistics"):
-            col_d1, col_d2, col_d3 = st.columns(3)
-            with col_d1:
-                st.metric("League Avg Goals", result['league_avg_goals'])
-                st.metric("Threshold", result['threshold'])
-                st.metric("ZIP Factor", result['zip_factor_used'])
-            with col_d2:
-                st.metric("Home Attack", result['home_goals_avg'])
-                st.metric("Home Defense", result['home_conceded_avg'])
-                st.metric("Home xG", result['home_xg'])
-            with col_d3:
-                st.metric("Away Attack", result['away_goals_avg'])
-                st.metric("Away Defense", result['away_conceded_avg'])
-                st.metric("Away xG", result['away_xg'])
-            
-            st.markdown("**Most Likely Scores**")
-            score_df = pd.DataFrame([
-                {"Score": f"{h}-{a}", "Probability": f"{p*100:.2f}%"}
-                for (h, a), p in list(result['top_scores'].items())[:10]
-            ])
-            st.dataframe(score_df, use_container_width=True, hide_index=True)
+        render_prediction_card(result)
 
 
 if __name__ == "__main__":
