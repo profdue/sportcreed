@@ -1,10 +1,6 @@
 """
-Two-Part Rule Predictor - Unified Scoring System
-Logic: 
-1. Calculate score = (Positive streaks) - (Negative streaks) for each team
-2. Higher score = Favorite
-3. If underdog has ANY positive streak (score >= 0) → Bet AGAINST favorite (Draw or underdog win)
-4. If underdog has NO positive streak (score < 0) → Bet ON favorite (Favorite wins)
+Two-Part Rule Predictor - 3 Question Version
+Based on 27 matches of proven patterns
 """
 
 import streamlit as st
@@ -25,7 +21,7 @@ st.markdown("""
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
-        max-width: 700px;
+        max-width: 600px;
     }
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
@@ -50,71 +46,20 @@ st.markdown("""
         font-size: 1rem;
         color: #fbbf24;
     }
-    .score-card {
+    .question-box {
         background-color: #0f172a;
         border-radius: 12px;
-        padding: 0.75rem;
-        margin: 0.5rem 0;
-        text-align: center;
-    }
-    .score-positive {
-        color: #10b981;
-        font-weight: bold;
-    }
-    .score-negative {
-        color: #ef4444;
-        font-weight: bold;
-    }
-    .score-neutral {
-        color: #fbbf24;
-        font-weight: bold;
+        padding: 1rem;
+        margin: 1rem 0;
+        border: 1px solid #334155;
     }
     .stButton button {
         background-color: #3b82f6;
         color: white;
         font-weight: bold;
     }
-    hr {
-        margin: 1rem 0;
-    }
 </style>
 """, unsafe_allow_html=True)
-
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def calculate_score(positives, negatives):
-    """Calculate score = positives - negatives"""
-    return positives - negatives
-
-def determine_favorite(home_score, away_score, home_team, away_team):
-    """Determine which team is favorite based on higher score"""
-    if home_score > away_score:
-        return home_team, away_team, home_score, away_score
-    elif away_score > home_score:
-        return away_team, home_team, away_score, home_score
-    else:
-        return None, None, home_score, away_score
-
-def get_score_style(score):
-    """Return CSS style class based on score"""
-    if score > 0:
-        return "score-positive"
-    elif score < 0:
-        return "score-negative"
-    else:
-        return "score-neutral"
-
-def get_score_symbol(score):
-    """Return symbol for score display"""
-    if score > 0:
-        return f"+{score}"
-    elif score < 0:
-        return f"{score}"
-    else:
-        return "0"
 
 
 # ============================================================================
@@ -123,7 +68,7 @@ def get_score_symbol(score):
 
 def main():
     st.title("⚽ Two-Part Rule Predictor")
-    st.caption("Unified Scoring System: Higher score = Favorite")
+    st.caption("3 questions. 1 prediction. Based on 27 matches.")
     
     st.divider()
     
@@ -131,84 +76,48 @@ def main():
     col1, col2 = st.columns(2)
     
     with col1:
-        home_team = st.text_input("🏠 Home team", placeholder="e.g., Sirius IK", key="home")
+        home_team = st.text_input("🏠 Home team", placeholder="e.g., Baath Bouhajla")
     
     with col2:
-        away_team = st.text_input("✈️ Away team", placeholder="e.g., Hammarby IF", key="away")
+        away_team = st.text_input("✈️ Away team", placeholder="e.g., Sfax Railways")
     
-    st.markdown("---")
-    st.subheader("📊 Streak Counter")
-    st.caption("Count positive streaks (+1 each) and negative streaks (-1 each)")
+    st.divider()
     
-    # Home team streaks
-    col1, col2 = st.columns(2)
+    # Question 1
+    st.markdown('<div class="question-box">', unsafe_allow_html=True)
+    st.markdown("**📊 Question 1 of 3**")
+    more_positives = st.radio(
+        "Which team has MORE positive streaks?",
+        options=["Home", "Away", "Equal / Not sure"],
+        index=None,
+        horizontal=True
+    )
+    st.caption("Positive streaks = Unbeaten, Won, Scored 1+, Clean sheet, etc.")
+    st.markdown('</div>', unsafe_allow_html=True)
     
-    with col1:
-        st.markdown(f"**🏠 {home_team or 'Home team'}**")
-        home_positives = st.number_input(
-            "Positive streaks",
-            min_value=0,
-            max_value=20,
-            value=0,
-            step=1,
-            key="home_pos"
-        )
-        home_negatives = st.number_input(
-            "Negative streaks",
-            min_value=0,
-            max_value=20,
-            value=0,
-            step=1,
-            key="home_neg"
-        )
+    # Question 2
+    st.markdown('<div class="question-box">', unsafe_allow_html=True)
+    st.markdown("**🚫 Question 2 of 3**")
+    away_scored_none = st.radio(
+        "Does AWAY team have a 'Scored none' streak?",
+        options=["Yes", "No"],
+        index=None,
+        horizontal=True
+    )
+    st.caption("Example: 'Failed to score in last 5 away games'")
+    st.markdown('</div>', unsafe_allow_html=True)
     
-    with col2:
-        st.markdown(f"**✈️ {away_team or 'Away team'}**")
-        away_positives = st.number_input(
-            "Positive streaks",
-            min_value=0,
-            max_value=20,
-            value=0,
-            step=1,
-            key="away_pos"
-        )
-        away_negatives = st.number_input(
-            "Negative streaks",
-            min_value=0,
-            max_value=20,
-            value=0,
-            step=1,
-            key="away_neg"
-        )
-    
-    # Calculate scores
-    home_score = calculate_score(home_positives, home_negatives)
-    away_score = calculate_score(away_positives, away_negatives)
-    
-    # Display scores
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        home_style = get_score_style(home_score)
-        home_symbol = get_score_symbol(home_score)
-        st.markdown(f"""
-        <div class="score-card">
-            <b>{home_team or 'Home'}</b><br>
-            Score: <span class="{home_style}">{home_symbol}</span><br>
-            <small>({home_positives} positives - {home_negatives} negatives)</small>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        away_style = get_score_style(away_score)
-        away_symbol = get_score_symbol(away_score)
-        st.markdown(f"""
-        <div class="score-card">
-            <b>{away_team or 'Away'}</b><br>
-            Score: <span class="{away_style}">{away_symbol}</span><br>
-            <small>({away_positives} positives - {away_negatives} negatives)</small>
-        </div>
-        """, unsafe_allow_html=True)
+    # Question 3
+    st.markdown('<div class="question-box">', unsafe_allow_html=True)
+    st.markdown("**🚫 Question 3 of 3**")
+    home_scored_none = st.radio(
+        "Does HOME team have a 'Scored none' streak?",
+        options=["Yes", "No"],
+        index=None,
+        horizontal=True
+    )
+    st.caption("Example: 'No goals scored in last 6 games'")
+    st.markdown('</div>', unsafe_allow_html=True)
     
     st.divider()
     
@@ -221,74 +130,85 @@ def main():
         if not away_team:
             st.error("Please enter Away team")
             return
-        
-        # Determine favorite
-        favorite, underdog, fav_score, under_score = determine_favorite(
-            home_score, away_score, home_team, away_team
-        )
-        
-        # Handle equal scores
-        if favorite is None:
-            st.markdown(f"""
-            <div class="prediction-card">
-                <div class="prediction-text">⚖️ NO CLEAR FAVORITE</div>
-                <div class="prediction-detail">Scores are equal ({home_score} vs {away_score})</div>
-                <div style="margin-top: 0.5rem; font-size: 0.9rem; color: #94a3b8;">
-                → Pass or bet Draw
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        if more_positives is None:
+            st.error("Please answer Question 1")
+            return
+        if away_scored_none is None:
+            st.error("Please answer Question 2")
+            return
+        if home_scored_none is None:
+            st.error("Please answer Question 3")
             return
         
-        # Determine if underdog has any positive streak (score >= 0)
-        underdog_has_positive = (under_score >= 0)
+        # Logic
+        prediction = ""
+        detail = ""
+        reasoning = []
         
-        # Apply two-part rule
-        if underdog_has_positive:
-            prediction = "Bet AGAINST favorite"
-            detail = f"Draw or {underdog} win"
-            card_class = "bet-against"
-            reasoning = f"""
-            • Favorite: {favorite} (score {fav_score})
-            • Underdog: {underdog} (score {under_score})
-            • Underdog has positive streak? YES (score >= 0)
-            • Situation A → Bet AGAINST favorite
-            """
+        # Case 1: Both have scored none → Under 2.5
+        if home_scored_none == "Yes" and away_scored_none == "Yes":
+            prediction = "🏆 UNDER 2.5 GOALS"
+            detail = "Both teams cannot score"
+            reasoning.append("Both home and away have 'Scored none' streaks")
+            reasoning.append("→ Under 2.5 goals is the strongest bet")
+        
+        # Case 2: Home has more positives + Away has scored none → Home wins
+        elif more_positives == "Home" and away_scored_none == "Yes":
+            prediction = "✅ BET ON HOME TEAM"
+            detail = f"{home_team} wins"
+            reasoning.append(f"{home_team} has more positive streaks")
+            reasoning.append(f"{away_team} has 'Scored none' streak")
+            reasoning.append("→ Situation B: Bet ON favorite (Home)")
+        
+        # Case 3: Away has more positives + Home has scored none → Away wins
+        elif more_positives == "Away" and home_scored_none == "Yes":
+            prediction = "✅ BET ON AWAY TEAM"
+            detail = f"{away_team} wins"
+            reasoning.append(f"{away_team} has more positive streaks")
+            reasoning.append(f"{home_team} has 'Scored none' streak")
+            reasoning.append("→ Situation B: Bet ON favorite (Away)")
+        
+        # Case 4: Home has more positives + No scored none for away → Draw risk
+        elif more_positives == "Home" and away_scored_none == "No":
+            prediction = "⚠️ BET AGAINST HOME"
+            detail = f"Draw or {away_team} win"
+            reasoning.append(f"{home_team} has more positives but {away_team} has NO 'scored none'")
+            reasoning.append("→ Situation A: Clash → Favorite may fail")
+        
+        # Case 5: Away has more positives + No scored none for home → Draw risk
+        elif more_positives == "Away" and home_scored_none == "No":
+            prediction = "⚠️ BET AGAINST AWAY"
+            detail = f"Draw or {home_team} win"
+            reasoning.append(f"{away_team} has more positives but {home_team} has NO 'scored none'")
+            reasoning.append("→ Situation A: Clash → Favorite may fail")
+        
+        # Case 6: Equal or unclear
         else:
-            prediction = "Bet ON favorite"
-            detail = f"{favorite} wins"
-            card_class = "bet-on"
-            reasoning = f"""
-            • Favorite: {favorite} (score {fav_score})
-            • Underdog: {underdog} (score {under_score})
-            • Underdog has positive streak? NO (score < 0)
-            • Situation B → Bet ON favorite
-            """
+            prediction = "⚖️ NO CLEAR EDGE"
+            detail = "Pass or bet Under 2.5 goals"
+            reasoning.append("Teams are evenly matched or unclear")
+            reasoning.append("→ No confident bet")
         
         # Display result
         st.markdown(f"""
-        <div class="prediction-card {card_class}">
+        <div class="prediction-card">
             <div class="prediction-text">🏆 PREDICTION</div>
             <div class="prediction-detail">{prediction}</div>
             <div style="margin-top: 0.5rem; font-size: 0.9rem; color: #94a3b8;">→ {detail}</div>
         </div>
         """, unsafe_allow_html=True)
         
-        # Show reasoning (optional expander)
+        # Show reasoning
         with st.expander("📋 Show reasoning"):
-            st.markdown(reasoning)
-            st.markdown(f"""
-            **Scores:**  
-            {home_team}: {home_score} ({home_positives}p - {home_negatives}n)  
-            {away_team}: {away_score} ({away_positives}p - {away_negatives}n)
-            """)
+            for r in reasoning:
+                st.markdown(f"• {r}")
     
     st.divider()
     st.caption("""
-    **How to count streaks:**\n
-    ✅ **Positive streaks (+1 each):** Unbeaten in last X, Won last X, Drawn last X, Scored in last X, Clean sheet in last X, Unbeaten H2H, Won H2H\n
-    ❌ **Negative streaks (-1 each):** Lost last X, Scored none in last X, Conceded in last X, Lost H2H, Winless in last X\n
-    **Formula:** Score = Positives - Negatives | Higher score = Favorite
+    **How to answer:**\n
+    • **Question 1:** Which team has more unbeaten/won/scored streaks?\n
+    • **Question 2:** Does away team have "failed to score" streak?\n
+    • **Question 3:** Does home team have "failed to score" streak?
     """)
 
 
