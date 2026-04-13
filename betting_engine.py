@@ -1,7 +1,7 @@
 """
 Hybrid v2.2 Football Predictor
 Based on: Defensive Score + Attacking Score + Draw Trigger + Clearances Override
-81% Winner Accuracy | 90.5% Over/Under Accuracy (from 21 matches across 5 leagues)
+INPUTS: All per-game averages (as provided in your Sofascore comparisons)
 """
 
 import streamlit as st
@@ -31,89 +31,18 @@ LEAGUE_DATABASE = {
     "League One": {"avg_conceded": 1.40},
 }
 
-DEFAULT_AVG_CONCEDED = 1.35
-
 
 # ============================================================================
-# SECTION 2: CUSTOM CSS
+# SECTION 2: HYBRID v2.2 CORE LOGIC (Using per-game averages directly)
 # ============================================================================
 
-st.markdown("""
-<style>
-    .main .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-        max-width: 1400px;
-    }
-    .result-card {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-radius: 16px;
-        padding: 1.5rem;
-        margin-top: 1rem;
-        border: 2px solid #fbbf24;
-    }
-    .prediction-win {
-        background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%);
-        border-left: 6px solid #10b981;
-        padding: 1rem;
-        border-radius: 12px;
-        margin: 0.5rem 0;
-    }
-    .prediction-draw {
-        background: linear-gradient(135deg, #1e293b 0%, #3a2a1a 100%);
-        border-left: 6px solid #f97316;
-        padding: 1rem;
-        border-radius: 12px;
-        margin: 0.5rem 0;
-    }
-    .prediction-over {
-        background: linear-gradient(135deg, #1e293b 0%, #1a3a4a 100%);
-        border-left: 6px solid #3b82f6;
-        padding: 1rem;
-        border-radius: 12px;
-        margin: 0.5rem 0;
-    }
-    .prediction-under {
-        background: linear-gradient(135deg, #1e293b 0%, #3a2a4a 100%);
-        border-left: 6px solid #a855f7;
-        padding: 1rem;
-        border-radius: 12px;
-        margin: 0.5rem 0;
-    }
-    .stat-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 1rem;
-        margin: 1rem 0;
-    }
-    .stat-card {
-        background: #0f172a;
-        border-radius: 12px;
-        padding: 0.75rem;
-        text-align: center;
-    }
-    .stat-label {
-        font-size: 0.7rem;
-        color: #94a3b8;
-    }
-    .stat-value {
-        font-size: 1.2rem;
-        font-weight: bold;
-        color: #fbbf24;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ============================================================================
-# SECTION 3: HYBRID v2.2 CORE LOGIC
-# ============================================================================
-
-def calculate_defensive_score(clean_sheets: int, matches: int, conceded_per_game: float, league_avg_conceded: float) -> float:
+def calculate_defensive_score(clean_sheets_per_game: float, conceded_per_game: float, league_avg_conceded: float) -> float:
     """
-    Defensive Score = (CS/Matches) × 10 + (League_Avg_Conceded - Conceded_per_Game) × 5
+    Defensive Score = (Clean Sheets per game) × 10 + (League_Avg_Conceded - Conceded_per_Game) × 5
+    
+    Note: Clean sheets per game = clean_sheets / matches (already provided as float)
     """
-    cs_part = (clean_sheets / matches) * 10
+    cs_part = clean_sheets_per_game * 10
     conceded_part = (league_avg_conceded - conceded_per_game) * 5
     return cs_part + conceded_part
 
@@ -126,54 +55,38 @@ def calculate_attacking_score(goals_per_game: float, big_chances_per_game: float
 
 
 def predict_match(
-    # Home team stats
-    home_goals_scored: int,
-    home_goals_conceded: int,
-    home_games: int,
-    home_clean_sheets: int,
-    home_big_chances: int,
-    home_big_chances_missed: int,
+    # Home team stats (all per-game averages, exactly as in your data)
+    home_goals_per_game: float,
+    home_conceded_per_game: float,
+    home_clean_sheets_per_game: float,
+    home_big_chances_per_game: float,
+    home_big_chances_missed_per_game: float,
     home_possession: float,
-    home_tackles: int,
-    home_clearances: int,
-    # Away team stats
-    away_goals_scored: int,
-    away_goals_conceded: int,
-    away_games: int,
-    away_clean_sheets: int,
-    away_big_chances: int,
-    away_big_chances_missed: int,
+    home_tackles_per_game: float,
+    home_clearances_per_game: float,
+    # Away team stats (all per-game averages)
+    away_goals_per_game: float,
+    away_conceded_per_game: float,
+    away_clean_sheets_per_game: float,
+    away_big_chances_per_game: float,
+    away_big_chances_missed_per_game: float,
     away_possession: float,
-    away_tackles: int,
-    away_clearances: int,
+    away_tackles_per_game: float,
+    away_clearances_per_game: float,
     # League
     league_avg_conceded: float
 ) -> dict:
     """
     Hybrid v2.2 prediction based on final agreed rules.
+    All inputs are per-game averages (floats) as provided.
     """
-    
-    # Per-game averages
-    home_goals_per_game = home_goals_scored / home_games
-    home_conceded_per_game = home_goals_conceded / home_games
-    home_big_chances_per_game = home_big_chances / home_games
-    home_big_chances_missed_per_game = home_big_chances_missed / home_games
-    home_tackles_per_game = home_tackles / home_games
-    home_clearances_per_game = home_clearances / home_games
-    
-    away_goals_per_game = away_goals_scored / away_games
-    away_conceded_per_game = away_goals_conceded / away_games
-    away_big_chances_per_game = away_big_chances / away_games
-    away_big_chances_missed_per_game = away_big_chances_missed / away_games
-    away_tackles_per_game = away_tackles / away_games
-    away_clearances_per_game = away_clearances / away_games
     
     # Defensive Scores
     def_score_home = calculate_defensive_score(
-        home_clean_sheets, home_games, home_conceded_per_game, league_avg_conceded
+        home_clean_sheets_per_game, home_conceded_per_game, league_avg_conceded
     )
     def_score_away = calculate_defensive_score(
-        away_clean_sheets, away_games, away_conceded_per_game, league_avg_conceded
+        away_clean_sheets_per_game, away_conceded_per_game, league_avg_conceded
     )
     
     # Attacking Scores
@@ -202,7 +115,6 @@ def predict_match(
     draw_trigger = (possession_diff <= 7 and big_chances_diff <= 0.5 and tackles_diff <= 2)
     
     # Clearances Override: underdog has ≥8 more clearances/game AND |net_edge_raw| < 3.0
-    # Determine favourite (team with higher total score)
     if home_total_score > away_total_score:
         favourite_clearances = home_clearances_per_game
         underdog_clearances = away_clearances_per_game
@@ -212,7 +124,7 @@ def predict_match(
     
     clearances_override = (underdog_clearances - favourite_clearances >= 8) and abs(net_edge_raw) < 3.0
     
-    # Winner Prediction (Draw Trigger and Clearances Override take precedence)
+    # Winner Prediction
     if draw_trigger:
         winner = {
             "prediction": "Draw",
@@ -240,7 +152,6 @@ def predict_match(
             "reason": f"Net edge {net_edge:.2f} < -2.0 (with home advantage +0.5)"
         }
     else:
-        # Double chance to side with positive edge
         if net_edge > 0:
             winner = {
                 "prediction": "Double Chance - Home or Draw",
@@ -261,14 +172,20 @@ def predict_match(
             }
     
     # Over/Under 2.5 Goals
-    # Under 2.5 only if: both concede ≤1.3/g AND combined CS ≥10 AND combined big chances <5.5
-    combined_clean_sheets = home_clean_sheets + away_clean_sheets
+    combined_clean_sheets_per_game = home_clean_sheets_per_game + away_clean_sheets_per_game
     combined_big_chances = home_big_chances_per_game + away_big_chances_per_game
+    
+    # Note: For combined CS, we multiply by 10 to get approximate season total equivalent
+    # because the rule "combined CS ≥10" assumes season totals (e.g., 29 games)
+    # But since your CS are per-game (e.g., 11/31 = 0.355), we need to scale.
+    # The rule from our 21-match analysis used actual clean sheet counts (e.g., 11 + 13 = 24)
+    # To use per-game averages, we multiply by 30 (approx season length) for comparison.
+    combined_clean_sheets_approx = combined_clean_sheets_per_game * 30
     
     under_conditions = (
         home_conceded_per_game <= 1.3 and
         away_conceded_per_game <= 1.3 and
-        combined_clean_sheets >= 10 and
+        combined_clean_sheets_approx >= 10 and
         combined_big_chances < 5.5
     )
     
@@ -276,13 +193,13 @@ def predict_match(
         over_under = {
             "prediction": "Under 2.5 Goals",
             "confidence": "HIGH",
-            "reason": f"Both concede ≤1.3, combined CS {combined_clean_sheets} ≥10, combined big chances {combined_big_chances:.1f} <5.5"
+            "reason": f"Both concede ≤1.3, combined CS (~{combined_clean_sheets_approx:.0f}) ≥10, combined big chances {combined_big_chances:.1f} <5.5"
         }
     else:
         over_under = {
             "prediction": "Over 2.5 Goals",
             "confidence": "MEDIUM",
-            "reason": f"Default: Under conditions not met (concede: {home_conceded_per_game:.1f}/{away_conceded_per_game:.1f}, CS: {combined_clean_sheets}, big chances: {combined_big_chances:.1f})"
+            "reason": f"Default: Under conditions not met (concede: {home_conceded_per_game:.1f}/{away_conceded_per_game:.1f}, CS: ~{combined_clean_sheets_approx:.0f}, big chances: {combined_big_chances:.1f})"
         }
     
     return {
@@ -309,71 +226,71 @@ def predict_match(
 
 
 # ============================================================================
-# SECTION 4: UI COMPONENTS
+# SECTION 3: UI COMPONENTS
 # ============================================================================
 
 def render_team_inputs(team_name: str, is_home: bool, default_values: dict = None):
-    """Render input fields for a team."""
+    """Render input fields for a team using per-game averages."""
     if default_values is None:
         default_values = {}
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("**📊 Attacking**")
-        goals_scored = st.number_input(
-            "Goals Scored", 0, 150, 
-            value=default_values.get("goals_scored", 50), 
+        st.markdown("**📊 Attacking (per game)**")
+        goals_per_game = st.number_input(
+            "Goals per game", 0.0, 5.0, 0.1,
+            value=default_values.get("goals_per_game", 2.1),
             key=f"{'home' if is_home else 'away'}_goals"
         )
-        big_chances = st.number_input(
-            "Big Chances", 0, 200, 
-            value=default_values.get("big_chances", 80), 
+        big_chances_per_game = st.number_input(
+            "Big chances per game", 0.0, 10.0, 0.1,
+            value=default_values.get("big_chances_per_game", 3.0),
             key=f"{'home' if is_home else 'away'}_big_chances"
         )
-        big_chances_missed = st.number_input(
-            "Big Chances Missed", 0, 150, 
-            value=default_values.get("big_chances_missed", 50), 
+        big_chances_missed_per_game = st.number_input(
+            "Big chances missed per game", 0.0, 10.0, 0.1,
+            value=default_values.get("big_chances_missed_per_game", 1.5),
             key=f"{'home' if is_home else 'away'}_big_chances_missed"
         )
         possession = st.number_input(
-            "Ball Possession %", 30, 70, 
-            value=default_values.get("possession", 50), 
+            "Ball Possession %", 30, 70, 1,
+            value=default_values.get("possession", 50),
             key=f"{'home' if is_home else 'away'}_possession"
         )
     
     with col2:
-        st.markdown("**🛡️ Defending**")
-        goals_conceded = st.number_input(
-            "Goals Conceded", 0, 150, 
-            value=default_values.get("goals_conceded", 40), 
+        st.markdown("**🛡️ Defending (per game)**")
+        conceded_per_game = st.number_input(
+            "Goals conceded per game", 0.0, 5.0, 0.1,
+            value=default_values.get("conceded_per_game", 1.3),
             key=f"{'home' if is_home else 'away'}_conceded"
         )
-        clean_sheets = st.number_input(
-            "Clean Sheets", 0, 50, 
-            value=default_values.get("clean_sheets", 8), 
+        clean_sheets_per_game = st.number_input(
+            "Clean sheets per game", 0.0, 1.0, 0.01,
+            value=default_values.get("clean_sheets_per_game", 0.35),
             key=f"{'home' if is_home else 'away'}_clean_sheets"
         )
-        tackles = st.number_input(
-            "Tackles", 0, 800, 
-            value=default_values.get("tackles", 400), 
+        tackles_per_game = st.number_input(
+            "Tackles per game", 0.0, 50.0, 0.1,
+            value=default_values.get("tackles_per_game", 15.0),
             key=f"{'home' if is_home else 'away'}_tackles"
         )
-        clearances = st.number_input(
-            "Clearances", 0, 1000, 
-            value=default_values.get("clearances", 600), 
+        clearances_per_game = st.number_input(
+            "Clearances per game", 0.0, 60.0, 0.1,
+            value=default_values.get("clearances_per_game", 25.0),
             key=f"{'home' if is_home else 'away'}_clearances"
         )
     
     return {
-        "goals_scored": goals_scored,
-        "goals_conceded": goals_conceded,
-        "big_chances": big_chances,
-        "big_chances_missed": big_chances_missed,
+        "goals_per_game": goals_per_game,
+        "conceded_per_game": conceded_per_game,
+        "clean_sheets_per_game": clean_sheets_per_game,
+        "big_chances_per_game": big_chances_per_game,
+        "big_chances_missed_per_game": big_chances_missed_per_game,
         "possession": possession,
-        "clean_sheets": clean_sheets,
-        "tackles": tackles,
-        "clearances": clearances,
+        "tackles_per_game": tackles_per_game,
+        "clearances_per_game": clearances_per_game,
     }
 
 
@@ -475,23 +392,64 @@ def render_prediction(result: dict, home_name: str, away_name: str):
 
 
 # ============================================================================
+# SECTION 4: CSS STYLES
+# ============================================================================
+
+st.markdown("""
+<style>
+    .main .block-container {
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+        max-width: 1400px;
+    }
+    .prediction-draw {
+        background: linear-gradient(135deg, #1e293b 0%, #3a2a1a 100%);
+        border-left: 6px solid #f97316;
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 0.5rem 0;
+    }
+    .prediction-win {
+        background: linear-gradient(135deg, #1e293b 0%, #1a3a2a 100%);
+        border-left: 6px solid #10b981;
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 0.5rem 0;
+    }
+    .prediction-over {
+        background: linear-gradient(135deg, #1e293b 0%, #1a3a4a 100%);
+        border-left: 6px solid #3b82f6;
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 0.5rem 0;
+    }
+    .prediction-under {
+        background: linear-gradient(135deg, #1e293b 0%, #3a2a4a 100%);
+        border-left: 6px solid #a855f7;
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 0.5rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================================
 # SECTION 5: MAIN APP
 # ============================================================================
 
 def main():
     st.title("⚽ Hybrid v2.2 Football Predictor")
-    st.caption("Defensive Score + Attacking Score + Draw Trigger + Clearances Override")
-    st.caption("81% Winner Accuracy | 90.5% Over/Under Accuracy (21 matches, 5 leagues)")
+    st.caption("Inputs match your Sofascore data format (all per-game averages)")
     
     # League selection
     col_league1, col_league2 = st.columns([2, 1])
     with col_league1:
         league_options = list(LEAGUE_DATABASE.keys())
-        selected_league = st.selectbox("Select League", league_options, index=2)  # Bundesliga default
+        selected_league = st.selectbox("Select League", league_options, index=2)
         league_avg_conceded = LEAGUE_DATABASE[selected_league]["avg_conceded"]
     with col_league2:
         st.metric("League Avg Conceded", f"{league_avg_conceded:.2f}")
-        st.caption("Used for Defensive Score")
     
     st.divider()
     
@@ -500,41 +458,34 @@ def main():
     
     with col_home:
         st.markdown("## 🏠 HOME TEAM")
-        home_name = st.text_input("Team Name", "Bayern Munich", key="home_name")
+        home_name = st.text_input("Team Name", "Mallorca", key="home_name")
         
-        st.markdown("**📊 Games Played**")
-        home_games = st.number_input("Matches", 1, 50, 29, key="home_games")
-        
-        # Default values
         home_defaults = {
-            "goals_scored": 75,
-            "goals_conceded": 30,
-            "big_chances": 100,
-            "big_chances_missed": 60,
-            "possession": 58,
-            "clean_sheets": 14,
-            "tackles": 420,
-            "clearances": 500,
+            "goals_per_game": 1.3,
+            "conceded_per_game": 1.5,
+            "clean_sheets_per_game": 4/31,  # 0.129
+            "big_chances_per_game": 2.1,
+            "big_chances_missed_per_game": 1.3,
+            "possession": 45,
+            "tackles_per_game": 14.3,
+            "clearances_per_game": 29.4,
         }
         
         home_stats = render_team_inputs(home_name, True, home_defaults)
     
     with col_away:
         st.markdown("## ✈️ AWAY TEAM")
-        away_name = st.text_input("Team Name", "Borussia Dortmund", key="away_name")
-        
-        st.markdown("**📊 Games Played**")
-        away_games = st.number_input("Matches", 1, 50, 29, key="away_games")
+        away_name = st.text_input("Team Name", "Real Madrid", key="away_name")
         
         away_defaults = {
-            "goals_scored": 70,
-            "goals_conceded": 35,
-            "big_chances": 95,
-            "big_chances_missed": 55,
-            "possession": 52,
-            "clean_sheets": 11,
-            "tackles": 410,
-            "clearances": 520,
+            "goals_per_game": 2.1,
+            "conceded_per_game": 0.9,
+            "clean_sheets_per_game": 11/31,  # 0.355
+            "big_chances_per_game": 3.4,
+            "big_chances_missed_per_game": 2.1,
+            "possession": 59,
+            "tackles_per_game": 16.7,
+            "clearances_per_game": 16.8,
         }
         
         away_stats = render_team_inputs(away_name, False, away_defaults)
@@ -545,41 +496,26 @@ def main():
     if st.button("🔮 PREDICT MATCH", type="primary", use_container_width=True):
         with st.spinner("Calculating with Hybrid v2.2..."):
             result = predict_match(
-                home_goals_scored=home_stats["goals_scored"],
-                home_goals_conceded=home_stats["goals_conceded"],
-                home_games=home_games,
-                home_clean_sheets=home_stats["clean_sheets"],
-                home_big_chances=home_stats["big_chances"],
-                home_big_chances_missed=home_stats["big_chances_missed"],
+                home_goals_per_game=home_stats["goals_per_game"],
+                home_conceded_per_game=home_stats["conceded_per_game"],
+                home_clean_sheets_per_game=home_stats["clean_sheets_per_game"],
+                home_big_chances_per_game=home_stats["big_chances_per_game"],
+                home_big_chances_missed_per_game=home_stats["big_chances_missed_per_game"],
                 home_possession=home_stats["possession"],
-                home_tackles=home_stats["tackles"],
-                home_clearances=home_stats["clearances"],
-                away_goals_scored=away_stats["goals_scored"],
-                away_goals_conceded=away_stats["goals_conceded"],
-                away_games=away_games,
-                away_clean_sheets=away_stats["clean_sheets"],
-                away_big_chances=away_stats["big_chances"],
-                away_big_chances_missed=away_stats["big_chances_missed"],
+                home_tackles_per_game=home_stats["tackles_per_game"],
+                home_clearances_per_game=home_stats["clearances_per_game"],
+                away_goals_per_game=away_stats["goals_per_game"],
+                away_conceded_per_game=away_stats["conceded_per_game"],
+                away_clean_sheets_per_game=away_stats["clean_sheets_per_game"],
+                away_big_chances_per_game=away_stats["big_chances_per_game"],
+                away_big_chances_missed_per_game=away_stats["big_chances_missed_per_game"],
                 away_possession=away_stats["possession"],
-                away_tackles=away_stats["tackles"],
-                away_clearances=away_stats["clearances"],
+                away_tackles_per_game=away_stats["tackles_per_game"],
+                away_clearances_per_game=away_stats["clearances_per_game"],
                 league_avg_conceded=league_avg_conceded
             )
             
             render_prediction(result, home_name, away_name)
-    
-    st.divider()
-    st.caption("""
-    **Hybrid v2.2 Rules:**\n
-    • Defensive Score = (CS/Matches)×10 + (League_Avg_Conceded - Conceded/g)×5\n
-    • Attacking Score = Goals/g + (Big Chances/g - Big Chances Missed/g)×0.3\n
-    • Net Edge = (Home Score - Away Score) + 0.5 (home advantage)\n
-    • Draw Trigger: possession diff ≤7% + big chances diff ≤0.5 + tackles diff ≤2 → Draw\n
-    • Clearances Override: underdog +8 clearances/g AND |net edge| <3.0 → Draw\n
-    • Under 2.5: both concede ≤1.3 + combined CS ≥10 + combined big chances <5.5\n
-    • Else: Net Edge >2.0 = Home Win, < -2.0 = Away Win, else Double Chance
-    """)
-    st.caption("⚽ Based on 21 matches across Premier League, La Liga, Bundesliga, Ligue 1, Brasileirão")
 
 
 if __name__ == "__main__":
