@@ -1,13 +1,13 @@
 """
-Winner Prediction System
-Situations A, B, C
-Accuracy: ~78-80% across 27 matches
+Streak Counter Predictor
+Score = Positives - Negatives
+Higher score = Bet ON favorite | Lower score = Bet AGAINST favorite
 """
 
 import streamlit as st
 
 st.set_page_config(
-    page_title="Winner Prediction System",
+    page_title="Streak Counter Predictor",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -22,7 +22,24 @@ st.markdown("""
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
-        max-width: 600px;
+        max-width: 700px;
+    }
+    .score-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border-radius: 16px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        border: 1px solid #334155;
+    }
+    .score-positive {
+        color: #10b981;
+        font-size: 2rem;
+        font-weight: bold;
+    }
+    .score-negative {
+        color: #ef4444;
+        font-size: 2rem;
+        font-weight: bold;
     }
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
@@ -32,28 +49,66 @@ st.markdown("""
         border: 1px solid #334155;
         text-align: center;
     }
-    .bet-against {
-        border-left: 6px solid #ef4444;
-    }
-    .bet-on {
-        border-left: 6px solid #10b981;
-    }
-    .situation-tag {
+    .streak-list {
+        background: #0f172a;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        margin: 0.3rem 0;
         font-size: 0.8rem;
-        color: #94a3b8;
-        margin-bottom: 0.5rem;
-    }
-    .prediction-text {
-        font-size: 1.2rem;
-        font-weight: bold;
-        margin-bottom: 0.5rem;
-    }
-    .prediction-detail {
-        font-size: 1rem;
-        color: #fbbf24;
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# STREAK COUNTER LOGIC
+# ============================================================================
+
+def calculate_score(positives: int, negatives: int) -> int:
+    """Score = Positives - Negatives"""
+    return positives - negatives
+
+
+def predict(home_name: str, away_name: str, home_positives: int, home_negatives: int, away_positives: int, away_negatives: int) -> dict:
+    """Higher score = Favorite = Bet ON"""
+    
+    home_score = calculate_score(home_positives, home_negatives)
+    away_score = calculate_score(away_positives, away_negatives)
+    
+    if home_score > away_score:
+        favorite = home_name
+        favorite_score = home_score
+        underdog = away_name
+        underdog_score = away_score
+        bet = f"Bet ON favorite → {favorite} wins"
+    elif away_score > home_score:
+        favorite = away_name
+        favorite_score = away_score
+        underdog = home_name
+        underdog_score = home_score
+        bet = f"Bet ON favorite → {favorite} wins"
+    else:
+        # Scores are equal
+        favorite = "Draw or underdog"
+        favorite_score = home_score
+        underdog = ""
+        underdog_score = away_score
+        bet = "Scores equal → Consider Draw or underdog"
+    
+    return {
+        "home_name": home_name,
+        "away_name": away_name,
+        "home_score": home_score,
+        "away_score": away_score,
+        "favorite": favorite,
+        "favorite_score": favorite_score,
+        "underdog": underdog,
+        "underdog_score": underdog_score,
+        "bet": bet,
+        "home_is_favorite": home_score > away_score,
+        "away_is_favorite": away_score > home_score,
+        "scores_equal": home_score == away_score
+    }
 
 
 # ============================================================================
@@ -61,85 +116,98 @@ st.markdown("""
 # ============================================================================
 
 def main():
-    st.title("⚽ Winner Prediction System")
-    st.caption("Situations A, B, C | ~78-80% accuracy across 27 matches")
+    st.title("⚽ Streak Counter Predictor")
+    st.caption("Score = Positives - Negatives | Higher score = Bet ON favorite")
     
     st.divider()
     
-    # Inputs
-    favorite_team = st.text_input("Favorite team", placeholder="e.g., CSKA", key="favorite")
-    underdog_team = st.text_input("Underdog team", placeholder="e.g., Levski", key="underdog")
+    # Team inputs
+    col1, col2 = st.columns(2)
+    with col1:
+        home_name = st.text_input("Home team", "FK Tukums 2000", key="home_name")
+    with col2:
+        away_name = st.text_input("Away team", "Rigas Futbola skola", key="away_name")
     
-    st.markdown("---")
+    st.divider()
     
-    underdog_positive = st.radio(
-        "Does underdog have ANY positive streak?",
-        options=["Yes", "No"],
-        index=None,
-        horizontal=True,
-        help="Unbeaten, winning, drawing, scoring, H2H unbeaten, or away positive streak"
-    )
+    # Home team streaks
+    st.markdown(f"### 🏠 {home_name}")
+    col1, col2 = st.columns(2)
+    with col1:
+        home_positives = st.number_input("Positive streaks (+1 each)", min_value=0, max_value=50, value=0, key="home_positives")
+    with col2:
+        home_negatives = st.number_input("Negative streaks (-1 each)", min_value=0, max_value=50, value=2, key="home_negatives")
     
-    favorite_scored_none = st.radio(
-        "Does favorite have 'Scored none' streak?",
-        options=["Yes", "No"],
-        index=None,
-        horizontal=True,
-        help="Failed to score in last 3+ games"
-    )
+    st.divider()
+    
+    # Away team streaks
+    st.markdown(f"### ✈️ {away_name}")
+    col1, col2 = st.columns(2)
+    with col1:
+        away_positives = st.number_input("Positive streaks (+1 each)", min_value=0, max_value=50, value=9, key="away_positives")
+    with col2:
+        away_negatives = st.number_input("Negative streaks (-1 each)", min_value=0, max_value=50, value=0, key="away_negatives")
     
     st.divider()
     
     # Predict button
     if st.button("PREDICT", type="primary", use_container_width=True):
-        # Validation
-        if not favorite_team:
-            st.error("Please enter Favorite team")
-            return
-        if not underdog_team:
-            st.error("Please enter Underdog team")
-            return
-        if underdog_positive is None:
-            st.error("Please select Yes or No for underdog positive streak")
-            return
-        if favorite_scored_none is None:
-            st.error("Please select Yes or No for favorite 'Scored none' streak")
-            return
+        result = predict(
+            home_name, away_name,
+            home_positives, home_negatives,
+            away_positives, away_negatives
+        )
         
-        # Logic: Situation C has priority (first check)
-        if favorite_scored_none == "Yes":
-            situation = "C"
-            prediction = "Bet AGAINST favorite"
-            detail = f"Draw or {underdog_team} win"
-            card_class = "bet-against"
-        elif underdog_positive == "Yes":
-            situation = "A"
-            prediction = "Bet AGAINST favorite"
-            detail = f"Draw or {underdog_team} win"
-            card_class = "bet-against"
-        else:
-            situation = "B"
-            prediction = "Bet ON favorite"
-            detail = f"{favorite_team} wins"
-            card_class = "bet-on"
+        # Display scores
+        col1, col2 = st.columns(2)
+        with col1:
+            score_class = "score-positive" if result['home_score'] >= 0 else "score-negative"
+            st.markdown(f"""
+            <div class="score-card">
+                <strong>{result['home_name']}</strong><br>
+                Positives: +{home_positives}<br>
+                Negatives: -{home_negatives}<br>
+                <span class="{score_class}">Score: {result['home_score']}</span>
+            </div>
+            """, unsafe_allow_html=True)
         
-        # Display result
+        with col2:
+            score_class = "score-positive" if result['away_score'] >= 0 else "score-negative"
+            st.markdown(f"""
+            <div class="score-card">
+                <strong>{result['away_name']}</strong><br>
+                Positives: +{away_positives}<br>
+                Negatives: -{away_negatives}<br>
+                <span class="{score_class}">Score: {result['away_score']}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Display prediction
         st.markdown(f"""
-        <div class="prediction-card {card_class}">
-            <div class="situation-tag">Situation {situation}</div>
-            <div class="prediction-text">🏆 {prediction}</div>
-            <div class="prediction-detail">→ {detail}</div>
+        <div class="prediction-card">
+            <div style="font-size: 1.2rem; font-weight: bold; margin-bottom: 0.5rem;">🏆 PREDICTION</div>
+            <div style="font-size: 1rem; color: #fbbf24;">{result['bet']}</div>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Show reasoning (optional)
+        with st.expander("Show reasoning"):
+            st.markdown(f"**Formula:** Score = Positives - Negatives")
+            st.markdown(f"**{result['home_name']}:** {home_positives} positives - {home_negatives} negatives = **{result['home_score']}**")
+            st.markdown(f"**{result['away_name']}:** {away_positives} positives - {away_negatives} negatives = **{result['away_score']}**")
+            if result['home_score'] > result['away_score']:
+                st.markdown(f"**Higher score = {result['home_name']}** → Bet ON {result['home_name']}")
+            elif result['away_score'] > result['home_score']:
+                st.markdown(f"**Higher score = {result['away_name']}** → Bet ON {result['away_name']}")
+            else:
+                st.markdown(f"**Scores equal** → Consider Draw or underdog")
     
     st.divider()
     st.caption("""
-    **Situations:**\n
-    • **Situation A (Clash):** Favorite positive + Underdog positive → Bet AGAINST favorite (Draw or underdog win)\n
-    • **Situation B (Pure negative underdog):** Favorite positive + Underdog NO positive → Bet ON favorite (Favorite wins)\n
-    • **Situation C:** Favorite has "Scored none" streak (3+ games) → Bet AGAINST favorite (Draw or underdog win)
+    **Positive streaks (+1 each):** Unbeaten, Won, Drawn, Scored, Clean sheet, Unbeaten H2H, Won H2H\n
+    **Negative streaks (-1 each):** Lost, Scored none, Conceded, Lost H2H, Winless\n
+    **Formula:** Score = Positives - Negatives | Higher score = Favorite = Bet ON
     """)
-    st.caption("Positive streaks: Unbeaten, Winning, Drawing, Scoring 1+, Clean sheet, H2H unbeaten, Away positive")
 
 
 if __name__ == "__main__":
