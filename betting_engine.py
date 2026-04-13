@@ -1,16 +1,13 @@
 """
-Winner Predictor - Final Version
-3 Situations based on 27 matches (78-80% accuracy)
-
-Situation A: Underdog has positive streak → Bet AGAINST favorite
-Situation B: Underdog has NO positive streak → Bet ON favorite
-Situation C: Favorite has "Scored none" streak → Bet AGAINST favorite
+Winner Prediction System
+Situations A, B, C
+Accuracy: ~78-80% across 27 matches
 """
 
 import streamlit as st
 
 st.set_page_config(
-    page_title="Winner Predictor",
+    page_title="Winner Prediction System",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -25,7 +22,7 @@ st.markdown("""
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
-        max-width: 550px;
+        max-width: 600px;
     }
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
@@ -41,31 +38,19 @@ st.markdown("""
     .bet-on {
         border-left: 6px solid #10b981;
     }
+    .situation-tag {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-bottom: 0.5rem;
+    }
     .prediction-text {
-        font-size: 1.3rem;
+        font-size: 1.2rem;
         font-weight: bold;
         margin-bottom: 0.5rem;
     }
     .prediction-detail {
         font-size: 1rem;
         color: #fbbf24;
-        margin-top: 0.5rem;
-    }
-    .favorite-box {
-        background-color: #0f172a;
-        border-radius: 12px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        border: 1px solid #334155;
-    }
-    hr {
-        margin: 1rem 0;
-    }
-    .stButton button {
-        background-color: #3b82f6;
-        color: white;
-        font-weight: bold;
-        width: 100%;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -76,48 +61,37 @@ st.markdown("""
 # ============================================================================
 
 def main():
-    st.title("⚽ Winner Predictor")
-    st.caption("3 situations. 1 prediction. Based on 27 matches.")
+    st.title("⚽ Winner Prediction System")
+    st.caption("Situations A, B, C | ~78-80% accuracy across 27 matches")
     
     st.divider()
     
-    # Team inputs
-    col1, col2 = st.columns(2)
+    # Inputs
+    favorite_team = st.text_input("Favorite team", placeholder="e.g., CSKA", key="favorite")
+    underdog_team = st.text_input("Underdog team", placeholder="e.g., Levski", key="underdog")
     
-    with col1:
-        favorite_team = st.text_input("🏆 Favorite team", placeholder="e.g., EM Mahdia")
+    st.markdown("---")
     
-    with col2:
-        underdog_team = st.text_input("🐕 Underdog team", placeholder="e.g., Chebba")
-    
-    st.divider()
-    
-    # Question 1
-    st.markdown("### 📊 Question 1 of 2")
     underdog_positive = st.radio(
-        "Does the UNDERDOG have ANY positive streak?",
+        "Does underdog have ANY positive streak?",
         options=["Yes", "No"],
         index=None,
-        horizontal=True
+        horizontal=True,
+        help="Unbeaten, winning, drawing, scoring, H2H unbeaten, or away positive streak"
     )
-    st.caption("Positive streaks = Unbeaten, Won, Drawn, Scored 1+, Clean sheet, H2H unbeaten")
     
-    st.divider()
-    
-    # Question 2
-    st.markdown("### 🚫 Question 2 of 2")
     favorite_scored_none = st.radio(
-        "Does the FAVORITE have a 'Scored none' streak (3+ games)?",
+        "Does favorite have 'Scored none' streak?",
         options=["Yes", "No"],
         index=None,
-        horizontal=True
+        horizontal=True,
+        help="Failed to score in last 3+ games"
     )
-    st.caption("Example: 'Failed to score in last 3 matches' or 'No goals in last 5 games'")
     
     st.divider()
     
     # Predict button
-    if st.button("🔮 PREDICT"):
+    if st.button("PREDICT", type="primary", use_container_width=True):
         # Validation
         if not favorite_team:
             st.error("Please enter Favorite team")
@@ -126,64 +100,47 @@ def main():
             st.error("Please enter Underdog team")
             return
         if underdog_positive is None:
-            st.error("Please answer Question 1")
+            st.error("Please select Yes or No for underdog positive streak")
             return
         if favorite_scored_none is None:
-            st.error("Please answer Question 2")
+            st.error("Please select Yes or No for favorite 'Scored none' streak")
             return
         
-        # Logic
+        # Logic: Situation C has priority (first check)
         if favorite_scored_none == "Yes":
-            # Situation C
-            prediction = "⚠️ BET AGAINST FAVORITE"
+            situation = "C"
+            prediction = "Bet AGAINST favorite"
             detail = f"Draw or {underdog_team} win"
             card_class = "bet-against"
-            reasoning = f"""
-            • Favorite: {favorite_team} has 'Scored none' streak
-            • Situation C → Bet AGAINST favorite
-            """
         elif underdog_positive == "Yes":
-            # Situation A
-            prediction = "⚠️ BET AGAINST FAVORITE"
+            situation = "A"
+            prediction = "Bet AGAINST favorite"
             detail = f"Draw or {underdog_team} win"
             card_class = "bet-against"
-            reasoning = f"""
-            • Underdog: {underdog_team} has positive streak
-            • Favorite: {favorite_team} has NO 'Scored none' streak
-            • Situation A (Clash) → Bet AGAINST favorite
-            """
         else:
-            # Situation B
-            prediction = "✅ BET ON FAVORITE"
+            situation = "B"
+            prediction = "Bet ON favorite"
             detail = f"{favorite_team} wins"
             card_class = "bet-on"
-            reasoning = f"""
-            • Underdog: {underdog_team} has NO positive streak
-            • Favorite: {favorite_team} has NO 'Scored none' streak
-            • Situation B (Pure negative underdog) → Bet ON favorite
-            """
         
         # Display result
         st.markdown(f"""
         <div class="prediction-card {card_class}">
-            <div class="prediction-text">{prediction}</div>
+            <div class="situation-tag">Situation {situation}</div>
+            <div class="prediction-text">🏆 {prediction}</div>
             <div class="prediction-detail">→ {detail}</div>
         </div>
         """, unsafe_allow_html=True)
-        
-        # Show reasoning
-        with st.expander("📋 Show reasoning"):
-            st.markdown(reasoning)
     
     st.divider()
     st.caption("""
-    **How to answer:**\n
-    • **Question 1:** Does underdog have ANY unbeaten, won, drawn, or scored streak?\n
-    • **Question 2:** Does favorite have "Failed to score in last X" (3+ games)?\n
-    • **Situation A:** Underdog positive → Bet AGAINST favorite\n
-    • **Situation B:** Underdog NO positive + Favorite NO scored none → Bet ON favorite\n
-    • **Situation C:** Favorite has scored none → Bet AGAINST favorite
+    **Situations:**\n
+    • **Situation A (Clash):** Favorite positive + Underdog positive → Bet AGAINST favorite (Draw or underdog win)\n
+    • **Situation B (Pure negative underdog):** Favorite positive + Underdog NO positive → Bet ON favorite (Favorite wins)\n
+    • **Situation C:** Favorite has "Scored none" streak (3+ games) → Bet AGAINST favorite (Draw or underdog win)
     """)
+    st.caption("Positive streaks: Unbeaten, Winning, Drawing, Scoring 1+, Clean sheet, H2H unbeaten, Away positive")
+
 
 if __name__ == "__main__":
     main()
