@@ -1,7 +1,7 @@
 """
 Integrated xG Football Predictor
 Logic: Base xG + Clean Sheets + Interceptions + Saves
-No extra stats. No clearances. No added rules.
+Inputs aligned in straight rows for easy data entry
 """
 
 import streamlit as st
@@ -23,7 +23,7 @@ st.markdown("""
     .main .block-container {
         padding-top: 1rem;
         padding-bottom: 1rem;
-        max-width: 1000px;
+        max-width: 1200px;
     }
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
@@ -40,12 +40,15 @@ st.markdown("""
         font-size: 0.8rem;
         color: #94a3b8;
     }
+    .stNumberInput > div {
+        width: 100%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================================
-# CORE LOGIC (ONLY WHAT YOU SPECIFIED)
+# CORE LOGIC
 # ============================================================================
 
 def calculate_base_xg(home_goals: float, home_conceded: float, away_goals: float, away_conceded: float) -> tuple:
@@ -67,15 +70,9 @@ def apply_modifiers(
     home_conceded: float,
     away_conceded: float
 ) -> dict:
-    """
-    Apply ONLY the three specified modifiers:
-    1. Clean Sheet Factor (>10 clean sheets each → ×0.90)
-    2. Interception Penalty (diff ≥5 → opponent -0.15)
-    3. Save Penalty (>3 saves AND <1 conceded → opponent -0.10)
-    """
+    """Apply ONLY the three specified modifiers."""
     adjustments = []
     
-    # Copy base values
     home_xg_adj = home_xg
     away_xg_adj = away_xg
     
@@ -96,7 +93,7 @@ def apply_modifiers(
         home_xg_adj -= 0.10
         adjustments.append(f"Saves: Away ({away_saves:.1f}) >3.0 & conceded ({away_conceded:.1f}) <1.0 → Home xG -0.10")
     
-    # Floor (safety net - xG never 0)
+    # Floor (safety net)
     home_xg_adj = max(0.2, home_xg_adj)
     away_xg_adj = max(0.2, away_xg_adj)
     
@@ -107,7 +104,6 @@ def apply_modifiers(
     else:
         cs_factor = 1.0
     
-    # Apply CS factor to individual xG
     home_xg_final = home_xg_adj * cs_factor
     away_xg_final = away_xg_adj * cs_factor
     total_xg_final = home_xg_final + away_xg_final
@@ -140,16 +136,12 @@ def predict_match(
     away_saves: float,
     max_goals: int = 5
 ) -> dict:
-    """
-    Complete prediction using only the specified logic.
-    """
+    """Complete prediction using only the specified logic."""
     
-    # Step 1: Base xG
     base_home_xg, base_away_xg = calculate_base_xg(
         home_goals, home_conceded, away_goals, away_conceded
     )
     
-    # Step 2: Apply modifiers
     modifiers = apply_modifiers(
         base_home_xg, base_away_xg,
         home_clean_sheets, away_clean_sheets,
@@ -162,7 +154,7 @@ def predict_match(
     away_xg = modifiers["away_xg_final"]
     total_xg = modifiers["total_xg_final"]
     
-    # Step 3: Over/Under decision
+    # Over/Under decision
     if total_xg > 2.5:
         over_under = "Over 2.5 Goals"
     elif total_xg < 2.5:
@@ -170,7 +162,7 @@ def predict_match(
     else:
         over_under = "Under 2.5 Goals (Lean)"
     
-    # Step 4: Poisson probabilities
+    # Poisson probabilities
     home_probs = [poisson_probability(home_xg, k) for k in range(max_goals + 1)]
     away_probs = [poisson_probability(away_xg, k) for k in range(max_goals + 1)]
     
@@ -190,10 +182,8 @@ def predict_match(
             else:
                 away_win += prob
     
-    # Most likely scoreline
     most_likely = max(scorelines, key=scorelines.get)
     
-    # Winner prediction
     if home_win > away_win and home_win > draw:
         winner = "Home Win"
     elif away_win > home_win and away_win > draw:
@@ -220,122 +210,7 @@ def predict_match(
 
 
 # ============================================================================
-# UI COMPONENTS
-# ============================================================================
-
-def render_team_inputs(team_name: str, is_home: bool, default_values: dict = None):
-    """Render input fields for a team."""
-    if default_values is None:
-        default_values = {}
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**⚽ Attacking**")
-        goals_per_game = st.number_input(
-            "Goals scored per game",
-            min_value=0.0, max_value=5.0, step=0.1,
-            value=default_values.get("goals_per_game", 1.5),
-            key=f"{'home' if is_home else 'away'}_goals"
-        )
-        
-        st.markdown("**🛡️ Defensive Activity**")
-        interceptions_per_game = st.number_input(
-            "Interceptions per game",
-            min_value=0.0, max_value=50.0, step=0.1,
-            value=default_values.get("interceptions", 25.0),
-            key=f"{'home' if is_home else 'away'}_interceptions"
-        )
-        saves_per_game = st.number_input(
-            "Saves per game",
-            min_value=0.0, max_value=10.0, step=0.1,
-            value=default_values.get("saves", 2.5),
-            key=f"{'home' if is_home else 'away'}_saves"
-        )
-    
-    with col2:
-        st.markdown("**🛡️ Defending**")
-        conceded_per_game = st.number_input(
-            "Goals conceded per game",
-            min_value=0.0, max_value=5.0, step=0.1,
-            value=default_values.get("conceded_per_game", 1.2),
-            key=f"{'home' if is_home else 'away'}_conceded"
-        )
-        clean_sheets = st.number_input(
-            "Clean sheets (season total)",
-            min_value=0, max_value=50, step=1,
-            value=default_values.get("clean_sheets", 10),
-            key=f"{'home' if is_home else 'away'}_clean_sheets"
-        )
-    
-    return {
-        "goals_per_game": goals_per_game,
-        "conceded_per_game": conceded_per_game,
-        "clean_sheets": clean_sheets,
-        "interceptions": interceptions_per_game,
-        "saves": saves_per_game,
-    }
-
-
-def render_prediction(result: dict, home_name: str, away_name: str):
-    """Render prediction results."""
-    
-    st.markdown(f"### 🎯 {home_name} vs {away_name}")
-    
-    # xG display
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(f"{home_name} xG (base)", result['base_home_xg'])
-        st.metric(f"{home_name} xG (final)", result['home_xg'])
-    with col2:
-        st.metric(f"{away_name} xG (base)", result['base_away_xg'])
-        st.metric(f"{away_name} xG (final)", result['away_xg'])
-    with col3:
-        st.metric("Total xG", result['total_xg'])
-    
-    # Adjustments
-    if result['adjustments']:
-        st.markdown("**📝 Adjustments Applied:**")
-        for adj in result['adjustments']:
-            st.markdown(f"<div class='adjustment-list'>• {adj}</div>", unsafe_allow_html=True)
-    
-    st.divider()
-    
-    # Over/Under
-    st.markdown("### 📈 Over/Under 2.5 Prediction")
-    st.markdown(f"""
-    <div class="prediction-card">
-        <strong>🔵 {result['over_under']}</strong><br>
-        Total expected goals: {result['total_xg']}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Winner probabilities
-    st.markdown("### 🏆 Match Outcome Probabilities")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(f"{home_name} Win", f"{result['home_win_prob']}%")
-    with col2:
-        st.metric("Draw", f"{result['draw_prob']}%")
-    with col3:
-        st.metric(f"{away_name} Win", f"{result['away_win_prob']}%")
-    
-    st.markdown(f"""
-    <div class="prediction-card">
-        <strong>✅ Most likely: {result['winner']}</strong><br>
-        Most likely score: {result['most_likely_score']} ({result['most_likely_prob']}%)
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Top scorelines
-    with st.expander("📊 Top 5 Most Likely Scorelines"):
-        for score, prob in result['top_scorelines'].items():
-            st.write(f"{score}: {prob * 100:.1f}%")
-
-
-# ============================================================================
-# MAIN APP
+# UI COMPONENTS - ALIGNED IN STRAIGHT ROWS
 # ============================================================================
 
 def main():
@@ -344,36 +219,89 @@ def main():
     
     st.divider()
     
-    # Team inputs
-    col_home, col_away = st.columns(2)
+    # Team Name Row
+    col1, col2 = st.columns(2)
+    with col1:
+        home_name = st.text_input("🏠 HOME TEAM NAME", "Home Team", key="home_name")
+    with col2:
+        away_name = st.text_input("✈️ AWAY TEAM NAME", "Away Team", key="away_name")
     
-    with col_home:
-        st.markdown("## 🏠 HOME TEAM")
-        home_name = st.text_input("Team Name", "Home Team", key="home_name")
-        
-        home_defaults = {
-            "goals_per_game": 1.4,
-            "conceded_per_game": 0.8,
-            "clean_sheets": 11,
-            "interceptions": 32.7,
-            "saves": 2.3,
-        }
-        
-        home_stats = render_team_inputs(home_name, True, home_defaults)
+    st.divider()
     
-    with col_away:
-        st.markdown("## ✈️ AWAY TEAM")
-        away_name = st.text_input("Team Name", "Away Team", key="away_name")
-        
-        away_defaults = {
-            "goals_per_game": 2.2,
-            "conceded_per_game": 0.7,
-            "clean_sheets": 12,
-            "interceptions": 27.8,
-            "saves": 2.1,
-        }
-        
-        away_stats = render_team_inputs(away_name, False, away_defaults)
+    # Row 1: Goals (Attacking)
+    col1, col2 = st.columns(2)
+    with col1:
+        home_goals = st.number_input(
+            f"🏠 {home_name} - Goals scored per game",
+            min_value=0.0, max_value=5.0, step=0.1, value=1.4,
+            key="home_goals"
+        )
+    with col2:
+        away_goals = st.number_input(
+            f"✈️ {away_name} - Goals scored per game",
+            min_value=0.0, max_value=5.0, step=0.1, value=2.2,
+            key="away_goals"
+        )
+    
+    # Row 2: Goals Conceded (Defending)
+    col1, col2 = st.columns(2)
+    with col1:
+        home_conceded = st.number_input(
+            f"🏠 {home_name} - Goals conceded per game",
+            min_value=0.0, max_value=5.0, step=0.1, value=0.8,
+            key="home_conceded"
+        )
+    with col2:
+        away_conceded = st.number_input(
+            f"✈️ {away_name} - Goals conceded per game",
+            min_value=0.0, max_value=5.0, step=0.1, value=0.7,
+            key="away_conceded"
+        )
+    
+    # Row 3: Clean Sheets
+    col1, col2 = st.columns(2)
+    with col1:
+        home_clean_sheets = st.number_input(
+            f"🏠 {home_name} - Clean sheets (season total)",
+            min_value=0, max_value=50, step=1, value=11,
+            key="home_clean_sheets"
+        )
+    with col2:
+        away_clean_sheets = st.number_input(
+            f"✈️ {away_name} - Clean sheets (season total)",
+            min_value=0, max_value=50, step=1, value=12,
+            key="away_clean_sheets"
+        )
+    
+    # Row 4: Interceptions
+    col1, col2 = st.columns(2)
+    with col1:
+        home_interceptions = st.number_input(
+            f"🏠 {home_name} - Interceptions per game",
+            min_value=0.0, max_value=50.0, step=0.1, value=32.7,
+            key="home_interceptions"
+        )
+    with col2:
+        away_interceptions = st.number_input(
+            f"✈️ {away_name} - Interceptions per game",
+            min_value=0.0, max_value=50.0, step=0.1, value=27.8,
+            key="away_interceptions"
+        )
+    
+    # Row 5: Saves
+    col1, col2 = st.columns(2)
+    with col1:
+        home_saves = st.number_input(
+            f"🏠 {home_name} - Saves per game",
+            min_value=0.0, max_value=10.0, step=0.1, value=2.3,
+            key="home_saves"
+        )
+    with col2:
+        away_saves = st.number_input(
+            f"✈️ {away_name} - Saves per game",
+            min_value=0.0, max_value=10.0, step=0.1, value=2.1,
+            key="away_saves"
+        )
     
     st.divider()
     
@@ -381,19 +309,71 @@ def main():
     if st.button("🔮 PREDICT MATCH", type="primary", use_container_width=True):
         with st.spinner("Calculating..."):
             result = predict_match(
-                home_goals=home_stats["goals_per_game"],
-                home_conceded=home_stats["conceded_per_game"],
-                home_clean_sheets=home_stats["clean_sheets"],
-                home_interceptions=home_stats["interceptions"],
-                home_saves=home_stats["saves"],
-                away_goals=away_stats["goals_per_game"],
-                away_conceded=away_stats["conceded_per_game"],
-                away_clean_sheets=away_stats["clean_sheets"],
-                away_interceptions=away_stats["interceptions"],
-                away_saves=away_stats["saves"]
+                home_goals=home_goals,
+                home_conceded=home_conceded,
+                home_clean_sheets=home_clean_sheets,
+                home_interceptions=home_interceptions,
+                home_saves=home_saves,
+                away_goals=away_goals,
+                away_conceded=away_conceded,
+                away_clean_sheets=away_clean_sheets,
+                away_interceptions=away_interceptions,
+                away_saves=away_saves
             )
             
-            render_prediction(result, home_name, away_name)
+            # Display Results
+            st.markdown(f"### 🎯 {home_name} vs {away_name}")
+            
+            # xG display
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(f"{home_name} xG (base)", result['base_home_xg'])
+                st.metric(f"{home_name} xG (final)", result['home_xg'])
+            with col2:
+                st.metric(f"{away_name} xG (base)", result['base_away_xg'])
+                st.metric(f"{away_name} xG (final)", result['away_xg'])
+            with col3:
+                st.metric("Total xG", result['total_xg'])
+            
+            # Adjustments
+            if result['adjustments']:
+                st.markdown("**📝 Adjustments Applied:**")
+                for adj in result['adjustments']:
+                    st.markdown(f"<div class='adjustment-list'>• {adj}</div>", unsafe_allow_html=True)
+            
+            st.divider()
+            
+            # Over/Under
+            st.markdown("### 📈 Over/Under 2.5 Prediction")
+            st.markdown(f"""
+            <div class="prediction-card">
+                <strong>🔵 {result['over_under']}</strong><br>
+                Total expected goals: {result['total_xg']}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Winner probabilities
+            st.markdown("### 🏆 Match Outcome Probabilities")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(f"{home_name} Win", f"{result['home_win_prob']}%")
+            with col2:
+                st.metric("Draw", f"{result['draw_prob']}%")
+            with col3:
+                st.metric(f"{away_name} Win", f"{result['away_win_prob']}%")
+            
+            st.markdown(f"""
+            <div class="prediction-card">
+                <strong>✅ Most likely: {result['winner']}</strong><br>
+                Most likely score: {result['most_likely_score']} ({result['most_likely_prob']}%)
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Top scorelines
+            with st.expander("📊 Top 5 Most Likely Scorelines"):
+                for score, prob in result['top_scorelines'].items():
+                    st.write(f"{score}: {prob * 100:.1f}%")
     
     st.divider()
     st.caption("""
