@@ -206,11 +206,9 @@ def predict_match(
     if home_total_score > away_total_score:
         favourite_clearances = home_clearances_per_game
         underdog_clearances = away_clearances_per_game
-        favourite_is_home = True
     else:
         favourite_clearances = away_clearances_per_game
         underdog_clearances = home_clearances_per_game
-        favourite_is_home = False
     
     clearances_override = (underdog_clearances - favourite_clearances >= 8) and abs(net_edge_raw) < 3.0
     
@@ -385,8 +383,6 @@ def render_prediction(result: dict, home_name: str, away_name: str):
     st.markdown(f"### 🎯 {home_name} vs {away_name}")
     
     # Stats Summary
-    st.markdown('<div class="stat-grid">', unsafe_allow_html=True)
-    
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric(f"{home_name} Goals/g", result['home_goals_per_game'])
@@ -553,8 +549,8 @@ def main():
                 home_goals_conceded=home_stats["goals_conceded"],
                 home_games=home_games,
                 home_clean_sheets=home_stats["clean_sheets"],
-                home_big_changes=home_stats["big_chances"],
-                home_big_changes_missed=home_stats["big_chances_missed"],
+                home_big_chances=home_stats["big_chances"],
+                home_big_chances_missed=home_stats["big_chances_missed"],
                 home_possession=home_stats["possession"],
                 home_tackles=home_stats["tackles"],
                 home_clearances=home_stats["clearances"],
@@ -562,8 +558,8 @@ def main():
                 away_goals_conceded=away_stats["goals_conceded"],
                 away_games=away_games,
                 away_clean_sheets=away_stats["clean_sheets"],
-                away_big_changes=away_stats["big_chances"],
-                away_big_changes_missed=away_stats["big_chances_missed"],
+                away_big_chances=away_stats["big_chances"],
+                away_big_chances_missed=away_stats["big_chances_missed"],
                 away_possession=away_stats["possession"],
                 away_tackles=away_stats["tackles"],
                 away_clearances=away_stats["clearances"],
