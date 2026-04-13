@@ -1,16 +1,16 @@
 """
 Complete "No Draw" Prediction System
 With Team-Specific Rolling Averages and Poisson Distribution
+No Scipy Required - Pure Python + Numpy
 Production Version - Streamlit App
 """
 
 import streamlit as st
 import numpy as np
 import pandas as pd
-from scipy.stats import poisson
+import math
 from typing import Dict, Tuple, Optional, List
 from datetime import datetime, timedelta
-import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="No Draw Predictor",
@@ -48,7 +48,53 @@ DEFAULT_LEAGUE = {"avg_goals": 2.70, "threshold": 0.22, "zip_factor": 0.05, "col
 
 
 # ============================================================================
-# SECTION 2: CORE MATHEMATICAL FUNCTIONS
+# SECTION 2: PURE PYTHON POISSON (No Scipy)
+# ============================================================================
+
+def poisson_pmf(k: int, lam: float) -> float:
+    """
+    Poisson Probability Mass Function - Pure Python implementation.
+    
+    P(X = k) = (λ^k * e^(-λ)) / k!
+    """
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    
+    # Calculate using log to avoid overflow
+    log_p = (k * math.log(lam)) - lam - math.lgamma(k + 1)
+    return math.exp(log_p)
+
+
+def math_lgamma(n: int) -> float:
+    """Log gamma approximation for integers (Lanczos approximation)."""
+    if n <= 1:
+        return 0.0
+    
+    # Lanczos approximation for log gamma
+    x = n
+    log_gamma = (x - 0.5) * math.log(x) - x + 0.5 * math.log(2 * math.pi) + 1/(12 * x)
+    return log_gamma
+
+
+# Add lgamma to math if not available
+if not hasattr(math, 'lgamma'):
+    math.lgamma = math_lgamma
+
+
+def poisson_probabilities(lam: float, max_goals: int = 7) -> List[float]:
+    """Calculate Poisson probabilities for 0 to max_goals."""
+    probs = [poisson_pmf(i, lam) for i in range(max_goals + 1)]
+    
+    # Normalize to sum to 1.0
+    total = sum(probs)
+    if total > 0:
+        probs = [p / total for p in probs]
+    
+    return probs
+
+
+# ============================================================================
+# SECTION 3: CORE MATHEMATICAL FUNCTIONS
 # ============================================================================
 
 def calculate_expected_goals(
@@ -63,6 +109,9 @@ def calculate_expected_goals(
     
     Formula: xG = (Attack_Avg × Defense_Avg) / League_Avg
     """
+    if league_avg <= 0:
+        league_avg = 2.70
+    
     home_xg = (home_attack_avg * away_defense_avg) / league_avg
     away_xg = (away_attack_avg * home_defense_avg) / league_avg
     
@@ -79,14 +128,16 @@ def poisson_probability_matrix(
     max_goals: int = 7
 ) -> np.ndarray:
     """Generate the goal probability matrix using Poisson distribution."""
-    prob_home = [poisson.pmf(i, home_xg) for i in range(max_goals + 1)]
-    prob_away = [poisson.pmf(i, away_xg) for i in range(max_goals + 1)]
+    prob_home = poisson_probabilities(home_xg, max_goals)
+    prob_away = poisson_probabilities(away_xg, max_goals)
     
-    # Normalize to ensure sum = 1.0
-    prob_home = np.array(prob_home) / np.sum(prob_home)
-    prob_away = np.array(prob_away) / np.sum(prob_away)
+    # Create outer product matrix
+    matrix = np.zeros((max_goals + 1, max_goals + 1))
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            matrix[i, j] = prob_home[i] * prob_away[j]
     
-    return np.outer(prob_home, prob_away)
+    return matrix
 
 
 def apply_zero_inflation(
@@ -120,7 +171,7 @@ def calculate_draw_probability(
         matrix = apply_zero_inflation(matrix, zip_factor)
     
     # Sum of diagonal = draw probability
-    draw_prob = np.trace(matrix)
+    draw_prob = sum(matrix[i, i] for i in range(max_goals + 1))
     
     return min(draw_prob, 1.0)
 
@@ -131,12 +182,8 @@ def calculate_score_probabilities(
     max_goals: int = 4
 ) -> Dict[Tuple[int, int], float]:
     """Calculate probabilities for specific scorelines."""
-    prob_home = [poisson.pmf(i, home_xg) for i in range(max_goals + 1)]
-    prob_away = [poisson.pmf(i, away_xg) for i in range(max_goals + 1)]
-    
-    # Normalize
-    prob_home = np.array(prob_home) / np.sum(prob_home)
-    prob_away = np.array(prob_away) / np.sum(prob_away)
+    prob_home = poisson_probabilities(home_xg, max_goals)
+    prob_away = poisson_probabilities(away_xg, max_goals)
     
     scores = {}
     for h in range(max_goals + 1):
@@ -147,7 +194,7 @@ def calculate_score_probabilities(
 
 
 # ============================================================================
-# SECTION 3: VALUE BETTING FUNCTIONS
+# SECTION 4: VALUE BETTING FUNCTIONS
 # ============================================================================
 
 def calculate_no_draw_odds(home_odds: float, away_odds: float) -> float:
@@ -186,7 +233,7 @@ def kelly_fraction(probability: float, decimal_odds: float, quarter: bool = True
 
 
 # ============================================================================
-# SECTION 4: MAIN PREDICTION FUNCTION
+# SECTION 5: MAIN PREDICTION FUNCTION
 # ============================================================================
 
 def predict_no_draw(
@@ -308,7 +355,7 @@ def predict_no_draw(
 
 
 # ============================================================================
-# SECTION 5: UI COMPONENTS
+# SECTION 6: UI COMPONENTS
 # ============================================================================
 
 def render_prediction_card(result: Dict, home_team: str, away_team: str):
@@ -476,12 +523,12 @@ def render_team_inputs(home_team: str, away_team: str, is_home: bool):
 
 
 # ============================================================================
-# SECTION 6: MAIN APP
+# SECTION 7: MAIN APP
 # ============================================================================
 
 def main():
     st.title("🎯 No Draw Predictor")
-    st.caption("Predicts when a football match is unlikely to end in a draw | Poisson + ZIP Model")
+    st.caption("Predicts when a football match is unlikely to end in a draw | Poisson + ZIP Model (No Scipy)")
     
     # Sidebar
     with st.sidebar:
