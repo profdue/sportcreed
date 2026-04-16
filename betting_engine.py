@@ -1,7 +1,7 @@
 """
 Winner Predictor - Checkbox Version
 Based on actual terms from match previews
-Classic UI Design with Team Cards
+App determines favorite/underdog from streaks
 """
 
 import streamlit as st
@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS - CLASSIC DESIGN
+# CUSTOM CSS
 # ============================================================================
 
 st.markdown("""
@@ -25,7 +25,6 @@ st.markdown("""
         max-width: 1200px;
     }
     
-    /* Team Card */
     .team-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border-radius: 16px;
@@ -50,7 +49,6 @@ st.markdown("""
         margin: 0.5rem 0;
     }
     
-    /* Prediction Card */
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border-radius: 16px;
@@ -83,7 +81,6 @@ st.markdown("""
         margin-top: 0.5rem;
     }
     
-    /* Button */
     .stButton button {
         background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
         color: #0f172a;
@@ -100,10 +97,6 @@ st.markdown("""
         color: #0f172a;
     }
     
-    .stCheckbox label {
-        font-size: 0.85rem;
-    }
-    
     hr {
         margin: 1rem 0;
     }
@@ -112,12 +105,31 @@ st.markdown("""
 
 
 # ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def calculate_score(positives, negatives):
+    """Calculate team score = positives - negatives"""
+    return positives - negatives
+
+
+def determine_favorite(home_score, away_score, home_team, away_team):
+    """Determine favorite based on higher score"""
+    if home_score > away_score:
+        return home_team, away_team, home_score, away_score
+    elif away_score > home_score:
+        return away_team, home_team, away_score, home_score
+    else:
+        return None, None, home_score, away_score
+
+
+# ============================================================================
 # MAIN APP
 # ============================================================================
 
 def main():
     st.title("⚽ Winner Predictor")
-    st.caption("Check the streaks that appear in the match preview")
+    st.caption("Check streaks for both teams. App determines favorite and predicts.")
     
     st.divider()
     
@@ -127,113 +139,99 @@ def main():
     with col1:
         st.markdown("""
         <div class="team-card">
-            <div class="team-header">🏆 FAVORITE</div>
+            <div class="team-header">🏠 HOME TEAM</div>
         </div>
         """, unsafe_allow_html=True)
-        favorite = st.text_input("Team name", placeholder="e.g., CSKA Sofia", key="favorite", label_visibility="collapsed")
+        home_team = st.text_input("Home team name", placeholder="e.g., CSKA Sofia", key="home", label_visibility="collapsed")
     
     with col2:
         st.markdown("""
         <div class="team-card">
-            <div class="team-header">🐕 UNDERDOG</div>
+            <div class="team-header">✈️ AWAY TEAM</div>
         </div>
         """, unsafe_allow_html=True)
-        underdog = st.text_input("Team name", placeholder="e.g., Levski Sofia", key="underdog", label_visibility="collapsed")
+        away_team = st.text_input("Away team name", placeholder="e.g., Levski Sofia", key="away", label_visibility="collapsed")
     
     st.divider()
     
     # ========================================================================
-    # FAVORITE STREAKS SECTION
+    # HOME TEAM STREAKS
     # ========================================================================
     
-    st.markdown(f"### 📋 {favorite or 'FAVORITE'} - Check ALL streaks that appear")
+    st.markdown(f"### 📋 {home_team or 'HOME TEAM'} - Check ALL streaks that appear")
     
-    fav_col_left, fav_col_right = st.columns(2)
+    home_col_left, home_col_right = st.columns(2)
     
-    with fav_col_left:
+    with home_col_left:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
         
-        fav_unbeaten = st.checkbox("Unbeaten (last X matches)", key="fav_unbeaten")
-        fav_won = st.checkbox("Won (last X matches)", key="fav_won")
-        fav_scored_1 = st.checkbox("Scored 1+ (last X matches)", key="fav_scored_1")
-        fav_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="fav_scored_2")
-        fav_clean_sheet = st.checkbox("Clean sheet (last X matches)", key="fav_clean_sheet")
-        fav_undefeated_ht = st.checkbox("Undefeated at half time", key="fav_undefeated_ht")
-        fav_ht_ft_wins = st.checkbox("HT/FT wins", key="fav_ht_ft_wins")
-        fav_unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="fav_unbeaten_h2h")
-        fav_won_h2h = st.checkbox("Won H2H (last X matches)", key="fav_won_h2h")
+        home_unbeaten = st.checkbox("Unbeaten (last X matches)", key="home_unbeaten")
+        home_won = st.checkbox("Won (last X matches)", key="home_won")
+        home_scored_1 = st.checkbox("Scored 1+ (last X matches)", key="home_scored_1")
+        home_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="home_scored_2")
+        home_clean_sheet = st.checkbox("Clean sheet (last X matches)", key="home_clean_sheet")
+        home_undefeated_ht = st.checkbox("Undefeated at half time", key="home_undefeated_ht")
+        home_ht_ft_wins = st.checkbox("HT/FT wins", key="home_ht_ft_wins")
+        home_unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="home_unbeaten_h2h")
+        home_won_h2h = st.checkbox("Won H2H (last X matches)", key="home_won_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
-    with fav_col_right:
+    with home_col_right:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
         
-        fav_winless = st.checkbox("Winless (last X matches)", key="fav_winless")
-        fav_lost = st.checkbox("Lost (last X matches)", key="fav_lost")
-        fav_conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="fav_conceded_1")
-        fav_lost_ht = st.checkbox("Lost at half time", key="fav_lost_ht")
-        fav_lost_by_2 = st.checkbox("Lost by 2+ goals", key="fav_lost_by_2")
-        fav_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="fav_lost_h2h")
-        fav_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="fav_winless_h2h")
+        home_winless = st.checkbox("Winless (last X matches)", key="home_winless")
+        home_lost = st.checkbox("Lost (last X matches)", key="home_lost")
+        home_scored_none = st.checkbox("Scored none (last X matches)", key="home_scored_none")
+        home_conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="home_conceded_1")
+        home_lost_ht = st.checkbox("Lost at half time", key="home_lost_ht")
+        home_lost_by_2 = st.checkbox("Lost by 2+ goals", key="home_lost_by_2")
+        home_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="home_lost_h2h")
+        home_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="home_winless_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.divider()
     
     # ========================================================================
-    # UNDERDOG STREAKS SECTION
+    # AWAY TEAM STREAKS
     # ========================================================================
     
-    st.markdown(f"### 📋 {underdog or 'UNDERDOG'} - Check ALL streaks that appear")
+    st.markdown(f"### 📋 {away_team or 'AWAY TEAM'} - Check ALL streaks that appear")
     
-    under_col_left, under_col_right = st.columns(2)
+    away_col_left, away_col_right = st.columns(2)
     
-    with under_col_left:
+    with away_col_left:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
         
-        under_unbeaten = st.checkbox("Unbeaten (last X matches)", key="under_unbeaten")
-        under_won = st.checkbox("Won (last X matches)", key="under_won")
-        under_scored_1 = st.checkbox("Scored 1+ (last X matches)", key="under_scored_1")
-        under_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="under_scored_2")
-        under_clean_sheet = st.checkbox("Clean sheet (last X matches)", key="under_clean_sheet")
-        under_undefeated_ht = st.checkbox("Undefeated at half time", key="under_undefeated_ht")
-        under_ht_ft_wins = st.checkbox("HT/FT wins", key="under_ht_ft_wins")
-        under_unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="under_unbeaten_h2h")
-        under_won_h2h = st.checkbox("Won H2H (last X matches)", key="under_won_h2h")
+        away_unbeaten = st.checkbox("Unbeaten (last X matches)", key="away_unbeaten")
+        away_won = st.checkbox("Won (last X matches)", key="away_won")
+        away_scored_1 = st.checkbox("Scored 1+ (last X matches)", key="away_scored_1")
+        away_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="away_scored_2")
+        away_clean_sheet = st.checkbox("Clean sheet (last X matches)", key="away_clean_sheet")
+        away_undefeated_ht = st.checkbox("Undefeated at half time", key="away_undefeated_ht")
+        away_ht_ft_wins = st.checkbox("HT/FT wins", key="away_ht_ft_wins")
+        away_unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="away_unbeaten_h2h")
+        away_won_h2h = st.checkbox("Won H2H (last X matches)", key="away_won_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
-    with under_col_right:
+    with away_col_right:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
         
-        under_winless = st.checkbox("Winless (last X matches)", key="under_winless")
-        under_lost = st.checkbox("Lost (last X matches)", key="under_lost")
-        under_scored_none = st.checkbox("Scored none (last X matches)", key="under_scored_none")
-        under_conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="under_conceded_1")
-        under_lost_ht = st.checkbox("Lost at half time", key="under_lost_ht")
-        under_lost_by_2 = st.checkbox("Lost by 2+ goals", key="under_lost_by_2")
-        under_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="under_lost_h2h")
-        under_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="under_winless_h2h")
+        away_winless = st.checkbox("Winless (last X matches)", key="away_winless")
+        away_lost = st.checkbox("Lost (last X matches)", key="away_lost")
+        away_scored_none = st.checkbox("Scored none (last X matches)", key="away_scored_none")
+        away_conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="away_conceded_1")
+        away_lost_ht = st.checkbox("Lost at half time", key="away_lost_ht")
+        away_lost_by_2 = st.checkbox("Lost by 2+ goals", key="away_lost_by_2")
+        away_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="away_lost_h2h")
+        away_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="away_winless_h2h")
         
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    st.divider()
-    
-    # ========================================================================
-    # FAVORITE SCORED NONE (SPECIAL)
-    # ========================================================================
-    
-    st.markdown(f"### 🚫 SPECIAL - Check if appears")
-    
-    col_special, col_empty = st.columns([1, 1])
-    with col_special:
-        st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown(f'<div class="section-header">Does {favorite or "FAVORITE"} have "Scored none"?</div>', unsafe_allow_html=True)
-        favorite_scored_none = st.checkbox("Scored none (last X matches)", key="favorite_scored_none")
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.divider()
@@ -243,63 +241,81 @@ def main():
     # ========================================================================
     
     if st.button("🔮 PREDICT", type="primary", use_container_width=False):
-        if not favorite or not underdog:
+        if not home_team or not away_team:
             st.error("❌ Please enter both team names")
         else:
-            # Calculate favorite positives
-            favorite_positives = sum([
-                fav_unbeaten, fav_won, fav_scored_1, fav_scored_2, fav_clean_sheet,
-                fav_undefeated_ht, fav_ht_ft_wins, fav_unbeaten_h2h, fav_won_h2h
+            # Calculate home team score
+            home_positives = sum([
+                home_unbeaten, home_won, home_scored_1, home_scored_2, home_clean_sheet,
+                home_undefeated_ht, home_ht_ft_wins, home_unbeaten_h2h, home_won_h2h
             ])
             
-            # Calculate favorite negatives
-            favorite_negatives = sum([
-                fav_winless, fav_lost, fav_conceded_1, fav_lost_ht, fav_lost_by_2,
-                fav_lost_h2h, fav_winless_h2h
+            home_negatives = sum([
+                home_winless, home_lost, home_scored_none, home_conceded_1, home_lost_ht,
+                home_lost_by_2, home_lost_h2h, home_winless_h2h
             ])
             
-            # Calculate underdog positives
-            underdog_positives = sum([
-                under_unbeaten, under_won, under_scored_1, under_scored_2, under_clean_sheet,
-                under_undefeated_ht, under_ht_ft_wins, under_unbeaten_h2h, under_won_h2h
+            home_score = home_positives - home_negatives
+            
+            # Calculate away team score
+            away_positives = sum([
+                away_unbeaten, away_won, away_scored_1, away_scored_2, away_clean_sheet,
+                away_undefeated_ht, away_ht_ft_wins, away_unbeaten_h2h, away_won_h2h
             ])
             
-            # Calculate underdog negatives
-            underdog_negatives = sum([
-                under_winless, under_lost, under_scored_none, under_conceded_1, under_lost_ht,
-                under_lost_by_2, under_lost_h2h, under_winless_h2h
+            away_negatives = sum([
+                away_winless, away_lost, away_scored_none, away_conceded_1, away_lost_ht,
+                away_lost_by_2, away_lost_h2h, away_winless_h2h
             ])
             
-            favorite_has_positives = favorite_positives >= 1
-            underdog_has_positives = underdog_positives >= 1
+            away_score = away_positives - away_negatives
             
-            # ================================================================
+            # Determine favorite and underdog
+            favorite, underdog, fav_score, under_score = determine_favorite(
+                home_score, away_score, home_team, away_team
+            )
+            
+            # Check for special "Scored none" condition on the favorite
+            # First, determine which team is favorite to check their "scored none" box
+            if favorite == home_team:
+                favorite_scored_none = home_scored_none
+                favorite_positives = home_positives
+                underdog_positives = away_positives
+            elif favorite == away_team:
+                favorite_scored_none = away_scored_none
+                favorite_positives = away_positives
+                underdog_positives = home_positives
+            else:
+                favorite_scored_none = False
+                favorite_positives = 0
+                underdog_positives = 0
+            
             # THREE SITUATION LOGIC (A, B, C)
-            # ================================================================
-            
-            if favorite_scored_none:
-                # Situation C: Favorite has "Scored none" streak
+            if favorite is None:
+                prediction = "⚠️ CAUTION"
+                detail = "No clear favorite (scores are equal)"
+                card_class = "bet-caution"
+                reason = f"Scores are equal: {home_team} {home_score} vs {away_team} {away_score}"
+                
+            elif favorite_scored_none:
                 prediction = "⚠️ BET AGAINST FAVORITE"
                 detail = f"Draw or {underdog} win"
                 card_class = "bet-against"
                 reason = f"Situation C: {favorite} has 'Scored none' streak → Bet AGAINST"
                 
-            elif underdog_has_positives:
-                # Situation A: Underdog has positive streaks (Clash)
+            elif underdog_positives >= 1:
                 prediction = "⚠️ BET AGAINST FAVORITE"
                 detail = f"Draw or {underdog} win"
                 card_class = "bet-against"
                 reason = f"Situation A: {underdog} has {underdog_positives} positive streak(s) → Clash → Bet AGAINST"
                 
-            elif favorite_has_positives:
-                # Situation B: Favorite has positives, Underdog has NO positives
+            elif favorite_positives >= 1:
                 prediction = "✅ BET ON FAVORITE"
                 detail = f"{favorite} wins"
                 card_class = "bet-on"
                 reason = f"Situation B: {favorite} has {favorite_positives} positive(s), {underdog} has 0 positives → Bet ON"
                 
             else:
-                # No clear favorite (both weak)
                 prediction = "⚠️ CAUTION"
                 detail = "Consider Draw or Under 2.5 goals"
                 card_class = "bet-caution"
@@ -312,8 +328,8 @@ def main():
                 <div class="prediction-detail">→ {detail}</div>
                 <div style="margin-top: 0.75rem; font-size: 0.75rem; color: #94a3b8;">📝 {reason}</div>
                 <div style="margin-top: 0.5rem; font-size: 0.7rem; color: #64748b;">
-                    📊 {favorite}: {favorite_positives} positives | {favorite_negatives} negatives<br>
-                    📊 {underdog}: {underdog_positives} positives | {underdog_negatives} negatives
+                    📊 {home_team}: {home_positives} positives | {home_negatives} negatives = Score {home_score}<br>
+                    📊 {away_team}: {away_positives} positives | {away_negatives} negatives = Score {away_score}
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -326,9 +342,9 @@ def main():
     
     **Negative streaks:** Winless, Lost, Scored none, Conceded 1+, Lost at HT, Lost by 2+, Lost H2H, Winless H2H
     
-    **Logic:** Situation A (Underdog positive) → Bet AGAINST | Situation B (Only favorite positive) → Bet ON | Situation C (Favorite scored none) → Bet AGAINST
+    **How it works:** App calculates score (positives - negatives) for each team. Higher score = Favorite.
+    Then applies 3-situation logic to predict.
     """)
-
 
 if __name__ == "__main__":
     main()
