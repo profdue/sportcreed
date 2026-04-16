@@ -1,7 +1,6 @@
 """
-Winner Predictor - Checkbox Version
-Based on actual terms from match previews
-App determines favorite/underdog from streaks
+Winner Predictor - Final Version
+Pick exact phrases from preview. System handles duplicates and logic.
 """
 
 import streamlit as st
@@ -22,7 +21,7 @@ st.markdown("""
     .main .block-container {
         padding-top: 1rem;
         padding-bottom: 1rem;
-        max-width: 1200px;
+        max-width: 1000px;
     }
     
     .team-card {
@@ -30,7 +29,7 @@ st.markdown("""
         border-radius: 16px;
         padding: 1.25rem;
         border: 1px solid #334155;
-        height: 100%;
+        margin-bottom: 1.5rem;
     }
     
     .team-header {
@@ -42,11 +41,11 @@ st.markdown("""
         border-bottom: 1px solid #334155;
     }
     
-    .section-header {
-        font-size: 0.9rem;
-        font-weight: bold;
-        color: #fbbf24;
-        margin: 0.5rem 0;
+    .streak-row {
+        background-color: #0f172a;
+        border-radius: 8px;
+        padding: 0.5rem;
+        margin-bottom: 0.5rem;
     }
     
     .prediction-card {
@@ -92,39 +91,163 @@ st.markdown("""
         padding: 0.75rem;
     }
     
-    .stButton button:hover {
-        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-        color: #0f172a;
+    .add-button {
+        background-color: #334155 !important;
+        color: white !important;
+        font-size: 0.8rem !important;
+        padding: 0.3rem !important;
     }
     
     hr {
         margin: 1rem 0;
-    }
-    
-    .stCheckbox label {
-        font-size: 0.8rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================================
+# PHRASE MAPPING (All phrases from your matches)
+# ============================================================================
+
+PHRASE_MAP = {
+    # Unbeaten / Undefeated / No losses
+    "Unbeaten in last X matches (overall)": "OVERALL_UNBEATEN",
+    "Undefeated in last X matches (overall)": "OVERALL_UNBEATEN",
+    "Haven't lost in last X matches (overall)": "OVERALL_UNBEATEN",
+    "No losses in last X matches (overall)": "OVERALL_UNBEATEN",
+    "Record of X consecutive games with no losses": "OVERALL_UNBEATEN",
+    
+    "Unbeaten in last X home matches": "HOME_UNBEATEN",
+    "Undefeated in last X home matches": "HOME_UNBEATEN",
+    "Haven't lost in last X home matches": "HOME_UNBEATEN",
+    "No losses in last X home matches": "HOME_UNBEATEN",
+    
+    "Unbeaten in last X away matches": "AWAY_UNBEATEN",
+    "Undefeated in last X away matches": "AWAY_UNBEATEN",
+    "Haven't lost in last X away matches": "AWAY_UNBEATEN",
+    "No losses in last X away matches": "AWAY_UNBEATEN",
+    
+    "Unbeaten in last X H2H matches": "H2H_UNBEATEN",
+    "Undefeated in last X H2H matches": "H2H_UNBEATEN",
+    "Haven't lost in last X H2H matches": "H2H_UNBEATEN",
+    "No losses in last X H2H matches": "H2H_UNBEATEN",
+    
+    # Won / Victories
+    "Won last X matches (overall)": "OVERALL_WON",
+    "Victories in last X matches": "OVERALL_WON",
+    "Successful run of X wins": "OVERALL_WON",
+    
+    "Won last X home matches": "HOME_WON",
+    "Won last X away matches": "AWAY_WON",
+    "Won last X H2H matches": "H2H_WON",
+    "Won by 2+ goals in last X H2H": "H2H_WON_BY_2",
+    "Won by 3+ goals in last X away": "AWAY_WON_BY_3",
+    
+    # Scored
+    "Scored 1+ in last X matches": "OVERALL_SCORED_1",
+    "Scored in last X matches": "OVERALL_SCORED_1",
+    "Found the net in last X matches": "OVERALL_SCORED_1",
+    "Scored 2+ in last X matches": "OVERALL_SCORED_2",
+    
+    # Clean sheet
+    "Clean sheet in last X matches (overall)": "OVERALL_CLEAN_SHEET",
+    "Kept a clean sheet in last X matches": "OVERALL_CLEAN_SHEET",
+    "Did not concede in last X matches": "OVERALL_CLEAN_SHEET",
+    "Clean sheet in last X home matches": "HOME_CLEAN_SHEET",
+    "Clean sheet in last X H2H matches": "H2H_CLEAN_SHEET",
+    
+    # Half time
+    "Undefeated at half time in last X matches": "HT_UNDEFEATED",
+    "Draws at half time in last X matches": "HT_UNDEFEATED",
+    "Won at half time and full time": "HT_FT_WINS",
+    "Lost at half time in last X matches": "HT_LOST",
+    "Trailing at half time": "HT_LOST",
+    
+    # Negative - Winless
+    "Winless: won only X of last Y matches": "OVERALL_WINLESS",
+    "Won only X of last Y matches": "OVERALL_WINLESS",
+    "Just X wins in last Y matches": "OVERALL_WINLESS",
+    "Poor run of only X wins": "OVERALL_WINLESS",
+    "Won only X of last Y home matches": "HOME_WINLESS",
+    "Won only X of last Y away matches": "AWAY_WINLESS",
+    
+    # Negative - Lost
+    "Lost last X matches (overall)": "OVERALL_LOST",
+    "Defeats in last X matches": "OVERALL_LOST",
+    "Suffered X straight losses": "OVERALL_LOST",
+    "Lost last X home matches": "HOME_LOST",
+    "Lost last X away matches": "AWAY_LOST",
+    "Lost by 2+ goals in last X away": "AWAY_LOST_BY_2",
+    
+    # Negative - Scored none
+    "Scored none in last X matches": "OVERALL_SCORED_NONE",
+    "Failed to score in last X matches": "OVERALL_SCORED_NONE",
+    "No goals in last X matches": "OVERALL_SCORED_NONE",
+    "Blanked in last X matches": "OVERALL_SCORED_NONE",
+    "Scored none in last X home matches": "HOME_SCORED_NONE",
+    "Scored none in last X away matches": "AWAY_SCORED_NONE",
+    
+    # Negative - Conceded
+    "Conceded 1+ in last X matches": "OVERALL_CONCEDED_1",
+    "No clean sheet in last X matches": "OVERALL_CONCEDED_1",
+    
+    # Negative - H2H
+    "Lost H2H in last X matches": "H2H_LOST",
+    "Winless H2H in last X matches": "H2H_WINLESS",
+}
+
+# All phrases for dropdown
+ALL_PHRASES = sorted(list(PHRASE_MAP.keys()))
+
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
-def calculate_score(positives, negatives):
-    """Calculate team score = positives - negatives"""
-    return positives - negatives
-
-
-def determine_favorite(home_score, away_score, home_team, away_team):
-    """Determine favorite based on higher score"""
-    if home_score > away_score:
-        return home_team, away_team, home_score, away_score
-    elif away_score > home_score:
-        return away_team, home_team, away_score, home_score
+def add_streak(selected_phrases, new_phrase):
+    """Add a streak, handling duplicates via mapping"""
+    if not new_phrase or new_phrase == "None":
+        return selected_phrases
+    
+    new_category = PHRASE_MAP.get(new_phrase)
+    
+    # Check if this category already exists
+    existing_categories = [PHRASE_MAP.get(p) for p in selected_phrases if p != "None"]
+    
+    if new_category in existing_categories:
+        # Duplicate - don't add
+        return selected_phrases
     else:
-        return None, None, home_score, away_score
+        # New category - add
+        return selected_phrases + [new_phrase]
+
+
+def calculate_score_from_phrases(phrases):
+    """Calculate score from selected phrases"""
+    positives = 0
+    negatives = 0
+    
+    for phrase in phrases:
+        if phrase == "None":
+            continue
+        category = PHRASE_MAP.get(phrase, "")
+        
+        # Positive categories
+        if category in ["OVERALL_UNBEATEN", "HOME_UNBEATEN", "AWAY_UNBEATEN", "H2H_UNBEATEN",
+                        "OVERALL_WON", "HOME_WON", "AWAY_WON", "H2H_WON", "H2H_WON_BY_2", "AWAY_WON_BY_3",
+                        "OVERALL_SCORED_1", "OVERALL_SCORED_2",
+                        "OVERALL_CLEAN_SHEET", "HOME_CLEAN_SHEET", "H2H_CLEAN_SHEET",
+                        "HT_UNDEFEATED", "HT_FT_WINS"]:
+            positives += 1
+        
+        # Negative categories
+        elif category in ["OVERALL_WINLESS", "HOME_WINLESS", "AWAY_WINLESS",
+                          "OVERALL_LOST", "HOME_LOST", "AWAY_LOST", "AWAY_LOST_BY_2",
+                          "OVERALL_SCORED_NONE", "HOME_SCORED_NONE", "AWAY_SCORED_NONE",
+                          "OVERALL_CONCEDED_1", "HT_LOST", "H2H_LOST", "H2H_WINLESS"]:
+            negatives += 1
+    
+    return positives, negatives, positives - negatives
 
 
 # ============================================================================
@@ -133,28 +256,16 @@ def determine_favorite(home_score, away_score, home_team, away_team):
 
 def main():
     st.title("⚽ Winner Predictor")
-    st.caption("Check streaks for both teams. App determines favorite and predicts.")
+    st.caption("Pick exact phrases from the preview. System handles duplicates.")
     
     st.divider()
     
-    # Team name inputs
+    # Team names
     col1, col2 = st.columns(2)
-    
     with col1:
-        st.markdown("""
-        <div class="team-card">
-            <div class="team-header">🏠 HOME TEAM</div>
-        </div>
-        """, unsafe_allow_html=True)
-        home_team = st.text_input("Home team name", placeholder="e.g., Mbarara City", key="home", label_visibility="collapsed")
-    
+        home_team = st.text_input("🏠 HOME TEAM", placeholder="e.g., Slavia Sofia II")
     with col2:
-        st.markdown("""
-        <div class="team-card">
-            <div class="team-header">✈️ AWAY TEAM</div>
-        </div>
-        """, unsafe_allow_html=True)
-        away_team = st.text_input("Away team name", placeholder="e.g., Police FC", key="away", label_visibility="collapsed")
+        away_team = st.text_input("✈️ AWAY TEAM", placeholder="e.g., Rilski Sportist")
     
     st.divider()
     
@@ -162,40 +273,36 @@ def main():
     # HOME TEAM STREAKS
     # ========================================================================
     
-    st.markdown(f"### 📋 {home_team or 'HOME TEAM'} - Check ALL streaks that appear")
+    st.markdown(f"### 📋 {home_team or 'HOME TEAM'}")
     
-    home_col_left, home_col_right = st.columns(2)
+    if 'home_phrases' not in st.session_state:
+        st.session_state.home_phrases = []
     
-    with home_col_left:
-        st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
-        
-        home_unbeaten = st.checkbox("Overall: Unbeaten / Undefeated (last X matches)", key="home_unbeaten")
-        home_won = st.checkbox("Overall: Won (last X matches)", key="home_won")
-        home_scored_1 = st.checkbox("Overall: Scored 1+ / Scored in last X", key="home_scored_1")
-        home_scored_2 = st.checkbox("Overall: Scored 2+ (last X matches)", key="home_scored_2")
-        home_clean_sheet = st.checkbox("Overall: Clean sheet / Did not concede", key="home_clean_sheet")
-        home_undefeated_ht = st.checkbox("Overall: Undefeated at HT / Draws at HT", key="home_undefeated_ht")
-        home_ht_ft_wins = st.checkbox("Overall: HT/FT wins", key="home_ht_ft_wins")
-        home_unbeaten_h2h = st.checkbox("H2H only: Unbeaten / Undefeated vs this opponent", key="home_unbeaten_h2h")
-        home_won_h2h = st.checkbox("H2H only: Won H2H (last X matches)", key="home_won_h2h")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Display existing streaks
+    for i, phrase in enumerate(st.session_state.home_phrases):
+        if phrase != "None":
+            st.markdown(f'<div class="streak-row">✅ {phrase}</div>', unsafe_allow_html=True)
     
-    with home_col_right:
-        st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
-        
-        home_winless = st.checkbox("Overall: Winless / Won only X of last Y", key="home_winless")
-        home_lost = st.checkbox("Overall: Lost (last X matches)", key="home_lost")
-        home_scored_none = st.checkbox("Overall: Scored none / Failed to score", key="home_scored_none")
-        home_conceded_1 = st.checkbox("Overall: Conceded 1+ / No clean sheet", key="home_conceded_1")
-        home_lost_ht = st.checkbox("Overall: Lost at half time", key="home_lost_ht")
-        home_lost_by_2 = st.checkbox("Overall: Lost by 2+ goals", key="home_lost_by_2")
-        home_lost_h2h = st.checkbox("H2H only: Lost H2H (last X matches)", key="home_lost_h2h")
-        home_winless_h2h = st.checkbox("H2H only: Winless H2H (last X matches)", key="home_winless_h2h")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Add new streak
+    col_add, col_remove = st.columns([3, 1])
+    with col_add:
+        new_phrase = st.selectbox(
+            "Add streak (select exact phrase from preview)",
+            options=["None"] + ALL_PHRASES,
+            key="home_new"
+        )
+    with col_remove:
+        if st.button("🗑 Remove last", key="home_remove"):
+            if st.session_state.home_phrases:
+                st.session_state.home_phrases.pop()
+            st.rerun()
+    
+    if st.button("➕ Add this streak", key="home_add"):
+        if new_phrase and new_phrase != "None":
+            st.session_state.home_phrases = add_streak(
+                st.session_state.home_phrases, new_phrase
+            )
+            st.rerun()
     
     st.divider()
     
@@ -203,149 +310,119 @@ def main():
     # AWAY TEAM STREAKS
     # ========================================================================
     
-    st.markdown(f"### 📋 {away_team or 'AWAY TEAM'} - Check ALL streaks that appear")
+    st.markdown(f"### 📋 {away_team or 'AWAY TEAM'}")
     
-    away_col_left, away_col_right = st.columns(2)
+    if 'away_phrases' not in st.session_state:
+        st.session_state.away_phrases = []
     
-    with away_col_left:
-        st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
-        
-        away_unbeaten = st.checkbox("Overall: Unbeaten / Undefeated (last X matches)", key="away_unbeaten")
-        away_won = st.checkbox("Overall: Won (last X matches)", key="away_won")
-        away_scored_1 = st.checkbox("Overall: Scored 1+ / Scored in last X", key="away_scored_1")
-        away_scored_2 = st.checkbox("Overall: Scored 2+ (last X matches)", key="away_scored_2")
-        away_clean_sheet = st.checkbox("Overall: Clean sheet / Did not concede", key="away_clean_sheet")
-        away_undefeated_ht = st.checkbox("Overall: Undefeated at HT / Draws at HT", key="away_undefeated_ht")
-        away_ht_ft_wins = st.checkbox("Overall: HT/FT wins", key="away_ht_ft_wins")
-        away_unbeaten_h2h = st.checkbox("H2H only: Unbeaten / Undefeated vs this opponent", key="away_unbeaten_h2h")
-        away_won_h2h = st.checkbox("H2H only: Won H2H (last X matches)", key="away_won_h2h")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Display existing streaks
+    for i, phrase in enumerate(st.session_state.away_phrases):
+        if phrase != "None":
+            st.markdown(f'<div class="streak-row">✅ {phrase}</div>', unsafe_allow_html=True)
     
-    with away_col_right:
-        st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
-        
-        away_winless = st.checkbox("Overall: Winless / Won only X of last Y", key="away_winless")
-        away_lost = st.checkbox("Overall: Lost (last X matches)", key="away_lost")
-        away_scored_none = st.checkbox("Overall: Scored none / Failed to score", key="away_scored_none")
-        away_conceded_1 = st.checkbox("Overall: Conceded 1+ / No clean sheet", key="away_conceded_1")
-        away_lost_ht = st.checkbox("Overall: Lost at half time", key="away_lost_ht")
-        away_lost_by_2 = st.checkbox("Overall: Lost by 2+ goals", key="away_lost_by_2")
-        away_lost_h2h = st.checkbox("H2H only: Lost H2H (last X matches)", key="away_lost_h2h")
-        away_winless_h2h = st.checkbox("H2H only: Winless H2H (last X matches)", key="away_winless_h2h")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Add new streak
+    col_add, col_remove = st.columns([3, 1])
+    with col_add:
+        new_phrase = st.selectbox(
+            "Add streak (select exact phrase from preview)",
+            options=["None"] + ALL_PHRASES,
+            key="away_new"
+        )
+    with col_remove:
+        if st.button("🗑 Remove last", key="away_remove"):
+            if st.session_state.away_phrases:
+                st.session_state.away_phrases.pop()
+            st.rerun()
+    
+    if st.button("➕ Add this streak", key="away_add"):
+        if new_phrase and new_phrase != "None":
+            st.session_state.away_phrases = add_streak(
+                st.session_state.away_phrases, new_phrase
+            )
+            st.rerun()
     
     st.divider()
     
     # ========================================================================
-    # PREDICTION BUTTON & LOGIC
+    # PREDICT
     # ========================================================================
     
-    if st.button("🔮 PREDICT", type="primary", use_container_width=False):
+    if st.button("🔮 PREDICT", type="primary"):
         if not home_team or not away_team:
             st.error("❌ Please enter both team names")
         else:
-            # Calculate home team score
-            home_positives = sum([
-                home_unbeaten, home_won, home_scored_1, home_scored_2, home_clean_sheet,
-                home_undefeated_ht, home_ht_ft_wins, home_unbeaten_h2h, home_won_h2h
-            ])
+            # Calculate scores
+            home_pos, home_neg, home_score = calculate_score_from_phrases(st.session_state.home_phrases)
+            away_pos, away_neg, away_score = calculate_score_from_phrases(st.session_state.away_phrases)
             
-            home_negatives = sum([
-                home_winless, home_lost, home_scored_none, home_conceded_1, home_lost_ht,
-                home_lost_by_2, home_lost_h2h, home_winless_h2h
-            ])
-            
-            home_score = home_positives - home_negatives
-            
-            # Calculate away team score
-            away_positives = sum([
-                away_unbeaten, away_won, away_scored_1, away_scored_2, away_clean_sheet,
-                away_undefeated_ht, away_ht_ft_wins, away_unbeaten_h2h, away_won_h2h
-            ])
-            
-            away_negatives = sum([
-                away_winless, away_lost, away_scored_none, away_conceded_1, away_lost_ht,
-                away_lost_by_2, away_lost_h2h, away_winless_h2h
-            ])
-            
-            away_score = away_positives - away_negatives
-            
-            # Determine favorite and underdog
-            favorite, underdog, fav_score, under_score = determine_favorite(
-                home_score, away_score, home_team, away_team
-            )
-            
-            # Check for special "Scored none" condition on the favorite
-            if favorite == home_team:
-                favorite_scored_none = home_scored_none
-                favorite_positives = home_positives
-                underdog_positives = away_positives
-            elif favorite == away_team:
-                favorite_scored_none = away_scored_none
-                favorite_positives = away_positives
-                underdog_positives = home_positives
+            # Determine favorite
+            if home_score > away_score:
+                favorite, underdog = home_team, away_team
+                fav_score, under_score = home_score, away_score
+                underdog_positives = away_pos
+                favorite_scored_none = any("Scored none" in p for p in st.session_state.away_phrases)
+            elif away_score > home_score:
+                favorite, underdog = away_team, home_team
+                fav_score, under_score = away_score, home_score
+                underdog_positives = home_pos
+                favorite_scored_none = any("Scored none" in p for p in st.session_state.home_phrases)
             else:
-                favorite_scored_none = False
-                favorite_positives = 0
+                favorite, underdog = None, None
+                fav_score = under_score = home_score
                 underdog_positives = 0
+                favorite_scored_none = False
             
-            # THREE SITUATION LOGIC (A, B, C)
+            # Three situation logic
             if favorite is None:
                 prediction = "⚠️ CAUTION"
                 detail = "No clear favorite (scores are equal)"
                 card_class = "bet-caution"
                 reason = f"Scores are equal: {home_team} {home_score} vs {away_team} {away_score}"
-                
             elif favorite_scored_none:
                 prediction = "⚠️ BET AGAINST FAVORITE"
                 detail = f"Draw or {underdog} win"
                 card_class = "bet-against"
                 reason = f"Situation C: {favorite} has 'Scored none' streak → Bet AGAINST"
-                
             elif underdog_positives >= 1:
                 prediction = "⚠️ BET AGAINST FAVORITE"
                 detail = f"Draw or {underdog} win"
                 card_class = "bet-against"
-                reason = f"Situation A: {underdog} has {underdog_positives} positive streak(s) → Clash → Bet AGAINST"
-                
-            elif favorite_positives >= 1:
+                reason = f"Situation A: {underdog} has {underdog_positives} positive(s) → Clash → Bet AGAINST"
+            elif fav_score > under_score:
                 prediction = "✅ BET ON FAVORITE"
                 detail = f"{favorite} wins"
                 card_class = "bet-on"
-                reason = f"Situation B: {favorite} has {favorite_positives} positive(s), {underdog} has 0 positives → Bet ON"
-                
+                reason = f"Situation B: {favorite} has higher score ({fav_score}) → Bet ON"
             else:
                 prediction = "⚠️ CAUTION"
-                detail = "Consider Draw or Under 2.5 goals"
+                detail = "Consider Draw or Under 2.5"
                 card_class = "bet-caution"
-                reason = f"No clear favorite: {favorite} has {favorite_positives} positives, {underdog} has {underdog_positives} positives"
+                reason = "No clear pattern"
             
-            # Display prediction card
+            # Display
             st.markdown(f"""
             <div class="prediction-card {card_class}">
                 <div class="prediction-text">{prediction}</div>
                 <div class="prediction-detail">→ {detail}</div>
                 <div style="margin-top: 0.75rem; font-size: 0.75rem; color: #94a3b8;">📝 {reason}</div>
                 <div style="margin-top: 0.5rem; font-size: 0.7rem; color: #64748b;">
-                    📊 {home_team}: {home_positives} positives | {home_negatives} negatives = Score {home_score}<br>
-                    📊 {away_team}: {away_positives} positives | {away_negatives} negatives = Score {away_score}
+                    📊 {home_team}: {home_pos} positives | {home_neg} negatives = Score {home_score}<br>
+                    📊 {away_team}: {away_pos} positives | {away_neg} negatives = Score {away_score}
                 </div>
             </div>
             """, unsafe_allow_html=True)
     
     st.divider()
     st.caption("""
-    **How to use:** Read the match preview. Check EVERY streak that appears for BOTH teams.
+    **How to use:**
+    1. Read the match preview
+    2. For each streak you see, select the exact phrase from the dropdown
+    3. Click "Add this streak"
+    4. System automatically ignores duplicates (same meaning)
+    5. Repeat for all streaks in the preview
+    6. Click PREDICT
     
-    **"Overall"** = form vs all opponents (e.g., "Unbeaten in last 10 matches")
-    **"H2H only"** = form vs this specific opponent (e.g., "Unbeaten in last 6 vs Team X")
-    
-    **How it works:** App calculates score (positives - negatives) for each team. Higher score = Favorite.
-    Then applies 3-situation logic to predict.
+    **You don't need to think about what means what. Just pick what you see.**
     """)
 
 
