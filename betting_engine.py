@@ -170,15 +170,15 @@ def main():
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
         
-        home_unbeaten = st.checkbox("Unbeaten / Undefeated (last X matches)", key="home_unbeaten")
-        home_won = st.checkbox("Won (last X matches)", key="home_won")
-        home_scored_1 = st.checkbox("Scored 1+ / Scored in last X", key="home_scored_1")
-        home_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="home_scored_2")
-        home_clean_sheet = st.checkbox("Clean sheet / Did not concede", key="home_clean_sheet")
-        home_undefeated_ht = st.checkbox("Undefeated at HT / Draws at HT", key="home_undefeated_ht")
-        home_ht_ft_wins = st.checkbox("HT/FT wins", key="home_ht_ft_wins")
-        home_unbeaten_h2h = st.checkbox("Unbeaten H2H / Undefeated vs opponent / Haven't lost vs opponent", key="home_unbeaten_h2h")
-        home_won_h2h = st.checkbox("Won H2H (last X matches)", key="home_won_h2h")
+        home_unbeaten = st.checkbox("Overall: Unbeaten / Undefeated (last X matches)", key="home_unbeaten")
+        home_won = st.checkbox("Overall: Won (last X matches)", key="home_won")
+        home_scored_1 = st.checkbox("Overall: Scored 1+ / Scored in last X", key="home_scored_1")
+        home_scored_2 = st.checkbox("Overall: Scored 2+ (last X matches)", key="home_scored_2")
+        home_clean_sheet = st.checkbox("Overall: Clean sheet / Did not concede", key="home_clean_sheet")
+        home_undefeated_ht = st.checkbox("Overall: Undefeated at HT / Draws at HT", key="home_undefeated_ht")
+        home_ht_ft_wins = st.checkbox("Overall: HT/FT wins", key="home_ht_ft_wins")
+        home_unbeaten_h2h = st.checkbox("H2H only: Unbeaten / Undefeated vs this opponent", key="home_unbeaten_h2h")
+        home_won_h2h = st.checkbox("H2H only: Won H2H (last X matches)", key="home_won_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -186,14 +186,14 @@ def main():
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
         
-        home_winless = st.checkbox("Winless / Won only X of last Y", key="home_winless")
-        home_lost = st.checkbox("Lost (last X matches)", key="home_lost")
-        home_scored_none = st.checkbox("Scored none / Failed to score", key="home_scored_none")
-        home_conceded_1 = st.checkbox("Conceded 1+ / No clean sheet", key="home_conceded_1")
-        home_lost_ht = st.checkbox("Lost at half time", key="home_lost_ht")
-        home_lost_by_2 = st.checkbox("Lost by 2+ goals", key="home_lost_by_2")
-        home_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="home_lost_h2h")
-        home_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="home_winless_h2h")
+        home_winless = st.checkbox("Overall: Winless / Won only X of last Y", key="home_winless")
+        home_lost = st.checkbox("Overall: Lost (last X matches)", key="home_lost")
+        home_scored_none = st.checkbox("Overall: Scored none / Failed to score", key="home_scored_none")
+        home_conceded_1 = st.checkbox("Overall: Conceded 1+ / No clean sheet", key="home_conceded_1")
+        home_lost_ht = st.checkbox("Overall: Lost at half time", key="home_lost_ht")
+        home_lost_by_2 = st.checkbox("Overall: Lost by 2+ goals", key="home_lost_by_2")
+        home_lost_h2h = st.checkbox("H2H only: Lost H2H (last X matches)", key="home_lost_h2h")
+        home_winless_h2h = st.checkbox("H2H only: Winless H2H (last X matches)", key="home_winless_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -211,15 +211,15 @@ def main():
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
         
-        away_unbeaten = st.checkbox("Unbeaten / Undefeated (last X matches)", key="away_unbeaten")
-        away_won = st.checkbox("Won (last X matches)", key="away_won")
-        away_scored_1 = st.checkbox("Scored 1+ / Scored in last X", key="away_scored_1")
-        away_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="away_scored_2")
-        away_clean_sheet = st.checkbox("Clean sheet / Did not concede", key="away_clean_sheet")
-        away_undefeated_ht = st.checkbox("Undefeated at HT / Draws at HT", key="away_undefeated_ht")
-        away_ht_ft_wins = st.checkbox("HT/FT wins", key="away_ht_ft_wins")
-        away_unbeaten_h2h = st.checkbox("Unbeaten H2H / Undefeated vs opponent / Haven't lost vs opponent", key="away_unbeaten_h2h")
-        away_won_h2h = st.checkbox("Won H2H (last X matches)", key="away_won_h2h")
+        away_unbeaten = st.checkbox("Overall: Unbeaten / Undefeated (last X matches)", key="away_unbeaten")
+        away_won = st.checkbox("Overall: Won (last X matches)", key="away_won")
+        away_scored_1 = st.checkbox("Overall: Scored 1+ / Scored in last X", key="away_scored_1")
+        away_scored_2 = st.checkbox("Overall: Scored 2+ (last X matches)", key="away_scored_2")
+        away_clean_sheet = st.checkbox("Overall: Clean sheet / Did not concede", key="away_clean_sheet")
+        away_undefeated_ht = st.checkbox("Overall: Undefeated at HT / Draws at HT", key="away_undefeated_ht")
+        away_ht_ft_wins = st.checkbox("Overall: HT/FT wins", key="away_ht_ft_wins")
+        away_unbeaten_h2h = st.checkbox("H2H only: Unbeaten / Undefeated vs this opponent", key="away_unbeaten_h2h")
+        away_won_h2h = st.checkbox("H2H only: Won H2H (last X matches)", key="away_won_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -227,14 +227,14 @@ def main():
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
         
-        away_winless = st.checkbox("Winless / Won only X of last Y", key="away_winless")
-        away_lost = st.checkbox("Lost (last X matches)", key="away_lost")
-        away_scored_none = st.checkbox("Scored none / Failed to score", key="away_scored_none")
-        away_conceded_1 = st.checkbox("Conceded 1+ / No clean sheet", key="away_conceded_1")
-        away_lost_ht = st.checkbox("Lost at half time", key="away_lost_ht")
-        away_lost_by_2 = st.checkbox("Lost by 2+ goals", key="away_lost_by_2")
-        away_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="away_lost_h2h")
-        away_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="away_winless_h2h")
+        away_winless = st.checkbox("Overall: Winless / Won only X of last Y", key="away_winless")
+        away_lost = st.checkbox("Overall: Lost (last X matches)", key="away_lost")
+        away_scored_none = st.checkbox("Overall: Scored none / Failed to score", key="away_scored_none")
+        away_conceded_1 = st.checkbox("Overall: Conceded 1+ / No clean sheet", key="away_conceded_1")
+        away_lost_ht = st.checkbox("Overall: Lost at half time", key="away_lost_ht")
+        away_lost_by_2 = st.checkbox("Overall: Lost by 2+ goals", key="away_lost_by_2")
+        away_lost_h2h = st.checkbox("H2H only: Lost H2H (last X matches)", key="away_lost_h2h")
+        away_winless_h2h = st.checkbox("H2H only: Winless H2H (last X matches)", key="away_winless_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -341,9 +341,8 @@ def main():
     st.caption("""
     **How to use:** Read the match preview. Check EVERY streak that appears for BOTH teams.
     
-    **Positive streaks:** Unbeaten/Undefeated, Won, Scored 1+/Scored in last X, Scored 2+, Clean sheet/Did not concede, Undefeated at HT/Draws at HT, HT/FT wins, Unbeaten H2H/Haven't lost vs opponent, Won H2H
-    
-    **Negative streaks:** Winless/Won only X of last Y, Lost, Scored none/Failed to score, Conceded 1+/No clean sheet, Lost at HT, Lost by 2+, Lost H2H, Winless H2H
+    **"Overall"** = form vs all opponents (e.g., "Unbeaten in last 10 matches")
+    **"H2H only"** = form vs this specific opponent (e.g., "Unbeaten in last 6 vs Team X")
     
     **How it works:** App calculates score (positives - negatives) for each team. Higher score = Favorite.
     Then applies 3-situation logic to predict.
