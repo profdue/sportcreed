@@ -43,35 +43,8 @@ st.markdown("""
         border-bottom: 1px solid #334155;
     }
     
-    /* Stat Grid */
-    .stat-grid {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 0.5rem;
-        margin-top: 0.5rem;
-    }
-    
-    .stat-item {
-        background: #0f172a;
-        border-radius: 8px;
-        padding: 0.4rem 0.5rem;
-        text-align: center;
-    }
-    
-    .stat-label {
-        font-size: 0.7rem;
-        color: #94a3b8;
-    }
-    
-    .stat-value {
-        font-size: 0.85rem;
-        font-weight: bold;
-        color: #fbbf24;
-    }
-    
-    /* Section Header */
     .section-header {
-        font-size: 1rem;
+        font-size: 0.9rem;
         font-weight: bold;
         color: #fbbf24;
         margin: 0.5rem 0;
@@ -93,6 +66,10 @@ st.markdown("""
     
     .bet-on {
         border-left: 6px solid #10b981;
+    }
+    
+    .bet-caution {
+        border-left: 6px solid #f59e0b;
     }
     
     .prediction-text {
@@ -123,7 +100,6 @@ st.markdown("""
         color: #0f172a;
     }
     
-    /* Checkbox styling */
     .stCheckbox label {
         font-size: 0.85rem;
     }
@@ -166,116 +142,193 @@ def main():
     
     st.divider()
     
-    # Underdog streaks section
-    st.markdown(f"### 📋 {underdog or 'UNDERDOG'} - Check ALL streaks that appear")
+    # ========================================================================
+    # FAVORITE STREAKS SECTION
+    # ========================================================================
     
-    col_left, col_right = st.columns(2)
+    st.markdown(f"### 📋 {favorite or 'FAVORITE'} - Check ALL streaks that appear")
     
-    with col_left:
+    fav_col_left, fav_col_right = st.columns(2)
+    
+    with fav_col_left:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">✅ POSITIVE STREAKS (+1 each)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
         
-        unbeaten = st.checkbox("Unbeaten (last X matches)", key="unbeaten")
-        won = st.checkbox("Won (last X matches)", key="won")
-        scored_1 = st.checkbox("Scored 1+ (last X matches)", key="scored_1")
-        scored_2 = st.checkbox("Scored 2+ (last X matches)", key="scored_2")
-        clean_sheet = st.checkbox("Clean sheet (last X matches)", key="clean_sheet")
-        undefeated_ht = st.checkbox("Undefeated at half time", key="undefeated_ht")
-        ht_ft_wins = st.checkbox("HT/FT wins", key="ht_ft_wins")
-        unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="unbeaten_h2h")
-        won_h2h = st.checkbox("Won H2H (last X matches)", key="won_h2h")
+        fav_unbeaten = st.checkbox("Unbeaten (last X matches)", key="fav_unbeaten")
+        fav_won = st.checkbox("Won (last X matches)", key="fav_won")
+        fav_scored_1 = st.checkbox("Scored 1+ (last X matches)", key="fav_scored_1")
+        fav_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="fav_scored_2")
+        fav_clean_sheet = st.checkbox("Clean sheet (last X matches)", key="fav_clean_sheet")
+        fav_undefeated_ht = st.checkbox("Undefeated at half time", key="fav_undefeated_ht")
+        fav_ht_ft_wins = st.checkbox("HT/FT wins", key="fav_ht_ft_wins")
+        fav_unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="fav_unbeaten_h2h")
+        fav_won_h2h = st.checkbox("Won H2H (last X matches)", key="fav_won_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
-    with col_right:
+    with fav_col_right:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">❌ NEGATIVE STREAKS (-1 each)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
         
-        winless = st.checkbox("Winless (last X matches)", key="winless")
-        lost = st.checkbox("Lost (last X matches)", key="lost")
-        scored_none = st.checkbox("Scored none (last X matches)", key="scored_none_underdog")
-        conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="conceded_1")
-        lost_ht = st.checkbox("Lost at half time", key="lost_ht")
-        lost_by_2 = st.checkbox("Lost by 2+ goals", key="lost_by_2")
-        lost_h2h = st.checkbox("Lost H2H (last X matches)", key="lost_h2h")
-        winless_h2h = st.checkbox("Winless H2H (last X matches)", key="winless_h2h")
+        fav_winless = st.checkbox("Winless (last X matches)", key="fav_winless")
+        fav_lost = st.checkbox("Lost (last X matches)", key="fav_lost")
+        fav_conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="fav_conceded_1")
+        fav_lost_ht = st.checkbox("Lost at half time", key="fav_lost_ht")
+        fav_lost_by_2 = st.checkbox("Lost by 2+ goals", key="fav_lost_by_2")
+        fav_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="fav_lost_h2h")
+        fav_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="fav_winless_h2h")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.divider()
     
-    # Favorite scored none
-    st.markdown(f"### 🚫 {favorite or 'FAVORITE'} - Check if appears")
+    # ========================================================================
+    # UNDERDOG STREAKS SECTION
+    # ========================================================================
     
-    col_center, col_empty = st.columns([1, 1])
-    with col_center:
+    st.markdown(f"### 📋 {underdog or 'UNDERDOG'} - Check ALL streaks that appear")
+    
+    under_col_left, under_col_right = st.columns(2)
+    
+    with under_col_left:
         st.markdown('<div class="team-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">✅ POSITIVE STREAKS</div>', unsafe_allow_html=True)
+        
+        under_unbeaten = st.checkbox("Unbeaten (last X matches)", key="under_unbeaten")
+        under_won = st.checkbox("Won (last X matches)", key="under_won")
+        under_scored_1 = st.checkbox("Scored 1+ (last X matches)", key="under_scored_1")
+        under_scored_2 = st.checkbox("Scored 2+ (last X matches)", key="under_scored_2")
+        under_clean_sheet = st.checkbox("Clean sheet (last X matches)", key="under_clean_sheet")
+        under_undefeated_ht = st.checkbox("Undefeated at half time", key="under_undefeated_ht")
+        under_ht_ft_wins = st.checkbox("HT/FT wins", key="under_ht_ft_wins")
+        under_unbeaten_h2h = st.checkbox("Unbeaten H2H (last X matches)", key="under_unbeaten_h2h")
+        under_won_h2h = st.checkbox("Won H2H (last X matches)", key="under_won_h2h")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with under_col_right:
+        st.markdown('<div class="team-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">❌ NEGATIVE STREAKS</div>', unsafe_allow_html=True)
+        
+        under_winless = st.checkbox("Winless (last X matches)", key="under_winless")
+        under_lost = st.checkbox("Lost (last X matches)", key="under_lost")
+        under_scored_none = st.checkbox("Scored none (last X matches)", key="under_scored_none")
+        under_conceded_1 = st.checkbox("Conceded 1+ (last X matches)", key="under_conceded_1")
+        under_lost_ht = st.checkbox("Lost at half time", key="under_lost_ht")
+        under_lost_by_2 = st.checkbox("Lost by 2+ goals", key="under_lost_by_2")
+        under_lost_h2h = st.checkbox("Lost H2H (last X matches)", key="under_lost_h2h")
+        under_winless_h2h = st.checkbox("Winless H2H (last X matches)", key="under_winless_h2h")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.divider()
+    
+    # ========================================================================
+    # FAVORITE SCORED NONE (SPECIAL)
+    # ========================================================================
+    
+    st.markdown(f"### 🚫 SPECIAL - Check if appears")
+    
+    col_special, col_empty = st.columns([1, 1])
+    with col_special:
+        st.markdown('<div class="team-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-header">Does {favorite or "FAVORITE"} have "Scored none"?</div>', unsafe_allow_html=True)
         favorite_scored_none = st.checkbox("Scored none (last X matches)", key="favorite_scored_none")
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.divider()
     
-    # Predict button
+    # ========================================================================
+    # PREDICTION BUTTON & LOGIC
+    # ========================================================================
+    
     if st.button("🔮 PREDICT", type="primary", use_container_width=False):
         if not favorite or not underdog:
             st.error("❌ Please enter both team names")
         else:
-            # Count underdog positives
+            # Calculate favorite positives
+            favorite_positives = sum([
+                fav_unbeaten, fav_won, fav_scored_1, fav_scored_2, fav_clean_sheet,
+                fav_undefeated_ht, fav_ht_ft_wins, fav_unbeaten_h2h, fav_won_h2h
+            ])
+            
+            # Calculate favorite negatives
+            favorite_negatives = sum([
+                fav_winless, fav_lost, fav_conceded_1, fav_lost_ht, fav_lost_by_2,
+                fav_lost_h2h, fav_winless_h2h
+            ])
+            
+            # Calculate underdog positives
             underdog_positives = sum([
-                unbeaten, won, scored_1, scored_2, clean_sheet,
-                undefeated_ht, ht_ft_wins, unbeaten_h2h, won_h2h
+                under_unbeaten, under_won, under_scored_1, under_scored_2, under_clean_sheet,
+                under_undefeated_ht, under_ht_ft_wins, under_unbeaten_h2h, under_won_h2h
             ])
             
-            # Count underdog negatives
+            # Calculate underdog negatives
             underdog_negatives = sum([
-                winless, lost, scored_none, conceded_1, lost_ht,
-                lost_by_2, lost_h2h, winless_h2h
+                under_winless, under_lost, under_scored_none, under_conceded_1, under_lost_ht,
+                under_lost_by_2, under_lost_h2h, under_winless_h2h
             ])
             
-            underdog_score = underdog_positives - underdog_negatives
+            favorite_has_positives = favorite_positives >= 1
+            underdog_has_positives = underdog_positives >= 1
             
-            # Prediction logic
+            # ================================================================
+            # THREE SITUATION LOGIC (A, B, C)
+            # ================================================================
+            
             if favorite_scored_none:
+                # Situation C: Favorite has "Scored none" streak
                 prediction = "⚠️ BET AGAINST FAVORITE"
                 detail = f"Draw or {underdog} win"
                 card_class = "bet-against"
-                reason = f"Favorite has 'Scored none' streak → Situation C"
-            elif underdog_positives >= 1:
+                reason = f"Situation C: {favorite} has 'Scored none' streak → Bet AGAINST"
+                
+            elif underdog_has_positives:
+                # Situation A: Underdog has positive streaks (Clash)
                 prediction = "⚠️ BET AGAINST FAVORITE"
                 detail = f"Draw or {underdog} win"
                 card_class = "bet-against"
-                reason = f"Underdog has {underdog_positives} positive streak(s) → Situation A"
-            elif favorite_positives >= 4:
+                reason = f"Situation A: {underdog} has {underdog_positives} positive streak(s) → Clash → Bet AGAINST"
+                
+            elif favorite_has_positives:
+                # Situation B: Favorite has positives, Underdog has NO positives
                 prediction = "✅ BET ON FAVORITE"
                 detail = f"{favorite} wins"
                 card_class = "bet-on"
-                reason = f"Favorite has {favorite_positives} positives, underdog has 0 → Situation B"
+                reason = f"Situation B: {favorite} has {favorite_positives} positive(s), {underdog} has 0 positives → Bet ON"
+                
             else:
+                # No clear favorite (both weak)
                 prediction = "⚠️ CAUTION"
-                detail = "Consider Draw or Under 2.5"
-                card_class = "bet-against"
-                reason = f"Low confidence: Favorite positives {favorite_positives}, Underdog positives {underdog_positives}"
+                detail = "Consider Draw or Under 2.5 goals"
+                card_class = "bet-caution"
+                reason = f"No clear favorite: {favorite} has {favorite_positives} positives, {underdog} has {underdog_positives} positives"
             
-            # Display prediction
+            # Display prediction card
             st.markdown(f"""
             <div class="prediction-card {card_class}">
                 <div class="prediction-text">{prediction}</div>
                 <div class="prediction-detail">→ {detail}</div>
                 <div style="margin-top: 0.75rem; font-size: 0.75rem; color: #94a3b8;">📝 {reason}</div>
                 <div style="margin-top: 0.5rem; font-size: 0.7rem; color: #64748b;">
-                    Underdog: {underdog_positives} positives | {underdog_negatives} negatives = Score {underdog_score}
+                    📊 {favorite}: {favorite_positives} positives | {favorite_negatives} negatives<br>
+                    📊 {underdog}: {underdog_positives} positives | {underdog_negatives} negatives
                 </div>
             </div>
             """, unsafe_allow_html=True)
     
     st.divider()
     st.caption("""
-    **How to use:** Read the match preview. Check EVERY streak that appears for the underdog.
-    Then check if favorite has 'Scored none' streak. Click PREDICT.
+    **How to use:** Read the match preview. Check EVERY streak that appears for BOTH teams.
     
     **Positive streaks:** Unbeaten, Won, Scored 1+, Scored 2+, Clean sheet, Undefeated at HT, HT/FT wins, Unbeaten H2H, Won H2H
+    
     **Negative streaks:** Winless, Lost, Scored none, Conceded 1+, Lost at HT, Lost by 2+, Lost H2H, Winless H2H
+    
+    **Logic:** Situation A (Underdog positive) → Bet AGAINST | Situation B (Only favorite positive) → Bet ON | Situation C (Favorite scored none) → Bet AGAINST
     """)
+
 
 if __name__ == "__main__":
     main()
