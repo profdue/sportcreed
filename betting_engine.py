@@ -1,22 +1,24 @@
 """
-Streak Predictor - Expected Goals System (Over/Under Only)
+Expected Goals Predictor - Over 2.5 / Under 2.5 Strict System
 Based on statistical analysis of home/away averages, H2H history, and league context.
 
 Core Formula:
 Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2
 
-Decision Thresholds:
-- < 2.10 → Strong Under 2.5
-- 2.10 – 2.50 → Lean Under 2.5 or Over 1.5 (check H2H)
-- 2.51 – 2.90 → Lean Over 1.5
-- > 2.90 → Strong Over 2.5
+Strict Decision Rules (Follow in Order):
+1. Expected Goals < 2.20 → Under 2.5 (High)
+2. Expected Goals > 2.80 → Over 2.5 (High)
+3. Expected Goals 2.20 – 2.80 → Check H2H Over 2.5%
+4. H2H Over 2.5% > 50% → Over 2.5 (Medium-High)
+5. H2H Over 2.5% < 40% → Under 2.5 (Medium-High)
+6. H2H Over 2.5% 40-50% → Check BTTS%
+7. BTTS% > 55% + Expected Goals > 2.40 → Over 2.5 (Medium)
+8. BTTS% < 40% → Under 2.5 (Medium)
+9. All else (borderline) → Under 2.5 (Low - default)
 
-Supporting Filters:
-- H2H Over 1.5% (>65% = Over 1.5 safe)
-- H2H Over 2.5% (>50% = Over 2.5 likely)
-- H2H BTTS% (>50% = goals expected)
-- League baseline (goals/game)
-- BTTS% (<35% = Under lean)
+Secondary Suggestion (Over 1.5 only):
+- Only suggest when Expected Goals ≥ 2.20 AND H2H Over 1.5 ≥ 65%
+- Never make Over 1.5 main recommendation
 """
 
 import streamlit as st
@@ -28,7 +30,7 @@ from typing import Optional, Tuple
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(
-    page_title="Streak Predictor - Expected Goals",
+    page_title="Expected Goals Predictor - Over/Under 2.5",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -52,31 +54,44 @@ st.markdown("""
         text-align: center;
         border: 1px solid #334155;
     }
-    .prediction-strong-over {
-        font-size: 2rem;
+    .prediction-over {
+        font-size: 2.5rem;
         font-weight: 800;
         color: #10b981;
     }
-    .prediction-lean-over {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #fbbf24;
-    }
-    .prediction-strong-under {
-        font-size: 2rem;
+    .prediction-under {
+        font-size: 2.5rem;
         font-weight: 800;
         color: #ef4444;
-    }
-    .prediction-lean-under {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #f97316;
     }
     .expected-goals {
         font-size: 2rem;
         font-weight: 800;
         color: #60a5fa;
         margin: 0.5rem 0;
+    }
+    .confidence-high {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #10b981;
+        margin-top: 0.5rem;
+    }
+    .confidence-medium {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #fbbf24;
+        margin-top: 0.5rem;
+    }
+    .confidence-low {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #f97316;
+        margin-top: 0.5rem;
+    }
+    .secondary {
+        font-size: 0.9rem;
+        color: #94a3b8;
+        margin-top: 0.5rem;
     }
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
@@ -94,10 +109,6 @@ st.markdown("""
         font-size: 1.5rem;
         font-weight: 700;
         color: #fbbf24;
-    }
-    .stat-label {
-        font-size: 0.7rem;
-        color: #94a3b8;
     }
     .h2h-table {
         background: #0f172a;
@@ -132,11 +143,13 @@ st.markdown("""
     hr {
         margin: 1rem 0;
     }
-    .metric-card {
+    .step-box {
         background: #1e293b;
-        border-radius: 12px;
-        padding: 0.75rem;
-        text-align: center;
+        border-radius: 8px;
+        padding: 0.5rem;
+        margin: 0.25rem 0;
+        font-family: monospace;
+        font-size: 0.8rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -147,20 +160,16 @@ st.markdown("""
 # ============================================================================
 @dataclass
 class TeamStats:
-    """Team statistical data"""
     name: str
     avg_scored_home: float = 0.0
     avg_scored_away: float = 0.0
     avg_conceded_home: float = 0.0
     avg_conceded_away: float = 0.0
     btts_percent: float = 0.0
-    over15_percent: float = 0.0
-    over25_percent: float = 0.0
 
 
 @dataclass
 class H2HStats:
-    """Head-to-head statistics"""
     matches_played: int = 0
     over15_percent: float = 0.0
     over25_percent: float = 0.0
@@ -170,61 +179,48 @@ class H2HStats:
 
 @dataclass
 class LeagueContext:
-    """League baseline information"""
     name: str
     avg_goals_per_game: float
     is_low_scoring: bool = False
-    is_high_scoring: bool = False
 
 
 @dataclass
 class PredictionResult:
-    prediction: str  # "Strong Over 2.5", "Lean Over 1.5", "Lean Under 2.5", "Strong Under 2.5"
-    confidence: str  # "High", "Medium", "Low"
+    main_bet: str  # "Over 2.5" or "Under 2.5"
+    confidence: str  # "High", "Medium-High", "Medium", "Low"
+    secondary: Optional[str]  # "Over 1.5" or None
     expected_goals: float
     reasoning: list
-    details: dict
+    decision_path: list
 
 
 # ============================================================================
 # LEAGUE DATA
 # ============================================================================
 LEAGUE_CONTEXT = {
-    "Ligue 2": LeagueContext("Ligue 2", 2.45, is_low_scoring=False, is_high_scoring=False),
-    "Ukraine": LeagueContext("Ukraine Premier League", 2.30, is_low_scoring=False, is_high_scoring=False),
-    "Ethiopia": LeagueContext("Ethiopian Premier League", 1.80, is_low_scoring=True, is_high_scoring=False),
-    "Argentina": LeagueContext("Argentine Liga Profesional", 1.90, is_low_scoring=True, is_high_scoring=False),
-    "Bundesliga": LeagueContext("Bundesliga", 3.10, is_low_scoring=False, is_high_scoring=True),
-    "Premier League": LeagueContext("Premier League", 2.80, is_low_scoring=False, is_high_scoring=False),
-    "Serie A": LeagueContext("Serie A", 2.60, is_low_scoring=False, is_high_scoring=False),
-    "La Liga": LeagueContext("La Liga", 2.50, is_low_scoring=False, is_high_scoring=False),
-    "Ligue 1": LeagueContext("Ligue 1", 2.70, is_low_scoring=False, is_high_scoring=False),
-    "Eredivisie": LeagueContext("Eredivisie", 3.20, is_low_scoring=False, is_high_scoring=True),
-    "Default": LeagueContext("Default", 2.50, is_low_scoring=False, is_high_scoring=False),
+    "Ligue 2": LeagueContext("Ligue 2", 2.45, is_low_scoring=False),
+    "Ukraine Premier League": LeagueContext("Ukraine Premier League", 2.30, is_low_scoring=False),
+    "Ethiopian Premier League": LeagueContext("Ethiopian Premier League", 1.80, is_low_scoring=True),
+    "Argentine Liga Profesional": LeagueContext("Argentine Liga Profesional", 1.90, is_low_scoring=True),
+    "Bundesliga": LeagueContext("Bundesliga", 3.10, is_low_scoring=False),
+    "Premier League": LeagueContext("Premier League", 2.80, is_low_scoring=False),
+    "Serie A": LeagueContext("Serie A", 2.60, is_low_scoring=False),
+    "La Liga": LeagueContext("La Liga", 2.50, is_low_scoring=False),
+    "Ligue 1": LeagueContext("Ligue 1", 2.70, is_low_scoring=False),
+    "Eredivisie": LeagueContext("Eredivisie", 3.20, is_low_scoring=False),
+    "Default": LeagueContext("Default", 2.50, is_low_scoring=False),
 }
 
 
 # ============================================================================
 # CALCULATION FUNCTIONS
 # ============================================================================
-def calculate_expected_goals(home: TeamStats, away: TeamStats, is_home_match: bool = True) -> float:
+def calculate_expected_goals(home: TeamStats, away: TeamStats) -> float:
     """
     Calculate expected total goals using the formula:
     Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2
     """
-    if is_home_match:
-        home_score = home.avg_scored_home
-        home_concede = home.avg_conceded_home
-        away_score = away.avg_scored_away
-        away_concede = away.avg_conceded_away
-    else:
-        # If teams are swapped (away team playing at home)
-        home_score = away.avg_scored_home
-        home_concede = away.avg_conceded_home
-        away_score = home.avg_scored_away
-        away_concede = home.avg_conceded_away
-    
-    expected = (home_score + away_concede + away_score + home_concede) / 2
+    expected = (home.avg_scored_home + away.avg_conceded_away + away.avg_scored_away + home.avg_conceded_home) / 2
     return round(expected, 2)
 
 
@@ -236,84 +232,197 @@ def make_prediction(
     away_btts: float = 0.0
 ) -> PredictionResult:
     """
-    Make Over/Under prediction based on expected goals and supporting filters.
+    Make Over 2.5 / Under 2.5 prediction based on strict decision rules.
     """
     reasoning = []
-    details = {
-        "expected_goals": expected_goals,
-        "h2h_over15": h2h.over15_percent,
-        "h2h_over25": h2h.over25_percent,
-        "h2h_btts": h2h.btts_percent,
-        "league_avg": league.avg_goals_per_game,
-    }
+    decision_path = []
     
     avg_btts = (home_btts + away_btts) / 2 if home_btts > 0 and away_btts > 0 else h2h.btts_percent
     
-    reasoning.append(f"📊 **Expected Goals Calculation:** {expected_goals}")
-    reasoning.append(f"   • H2H Over 1.5: {h2h.over15_percent}%")
-    reasoning.append(f"   • H2H Over 2.5: {h2h.over25_percent}%")
-    reasoning.append(f"   • H2H BTTS: {h2h.btts_percent}%")
-    reasoning.append(f"   • League average: {league.avg_goals_per_game} goals/game")
+    reasoning.append(f"📊 **Input Summary:**")
+    reasoning.append(f"   • Expected Goals: {expected_goals}")
+    reasoning.append(f"   • H2H Over 2.5%: {h2h.over25_percent}%")
+    reasoning.append(f"   • H2H Over 1.5%: {h2h.over15_percent}%")
+    reasoning.append(f"   • H2H BTTS%: {h2h.btts_percent}%")
+    reasoning.append(f"   • League avg: {league.avg_goals_per_game} goals/game")
+    reasoning.append(f"   • League low-scoring: {league.is_low_scoring}")
+    reasoning.append(f"   • Avg BTTS%: {avg_btts}%")
     
-    # Decision logic
-    if expected_goals < 2.10:
-        if league.is_low_scoring or avg_btts < 35:
-            prediction = "Strong Under 2.5"
-            confidence = "High"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} < 2.10 + low scoring context → Strong Under 2.5**")
-        else:
-            prediction = "Lean Under 2.5"
-            confidence = "Medium"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} < 2.10 → Lean Under 2.5**")
-    
-    elif expected_goals <= 2.50:
-        # 2.10 - 2.50 range
-        if h2h.over25_percent > 50:
-            prediction = "Over 2.5"
-            confidence = "Medium"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + H2H Over 2.5 {h2h.over25_percent}% > 50% → Over 2.5**")
-        elif h2h.over15_percent > 65:
-            prediction = "Over 1.5"
-            confidence = "High"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + H2H Over 1.5 {h2h.over15_percent}% > 65% → Over 1.5**")
-        elif league.is_low_scoring or avg_btts < 35:
-            prediction = "Under 2.5"
-            confidence = "Medium"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + low scoring context → Under 2.5**")
-        else:
-            prediction = "Lean Over 1.5"
-            confidence = "Low"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} → Lean Over 1.5 (safest)**")
-    
-    elif expected_goals <= 2.90:
-        # 2.51 - 2.90 range
-        if h2h.over25_percent > 50:
-            prediction = "Strong Over 2.5"
-            confidence = "High"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + H2H Over 2.5 {h2h.over25_percent}% > 50% → Strong Over 2.5**")
-        else:
-            prediction = "Lean Over 1.5"
-            confidence = "Medium"
-            reasoning.append(f"\n✅ **Expected Goals {expected_goals} → Lean Over 1.5**")
-    
-    else:  # > 2.90
-        prediction = "Strong Over 2.5"
+    # ========================================================================
+    # STEP 1: Expected Goals < 2.20 → Under 2.5
+    # ========================================================================
+    if expected_goals < 2.20:
+        decision_path.append("Step 1: Expected Goals < 2.20")
+        main_bet = "Under 2.5"
         confidence = "High"
-        reasoning.append(f"\n✅ **Expected Goals {expected_goals} > 2.90 → Strong Over 2.5**")
+        reasoning.append(f"\n✅ **STEP 1:** Expected Goals {expected_goals} < 2.20")
+        reasoning.append(f"   → **Under 2.5** (High confidence)")
+        
+        # Check for secondary Over 1.5 suggestion
+        secondary = None
+        if expected_goals >= 2.20 and h2h.over15_percent >= 65:
+            secondary = "Over 1.5"
+            reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
+        
+        return PredictionResult(
+            main_bet=main_bet,
+            confidence=confidence,
+            secondary=secondary,
+            expected_goals=expected_goals,
+            reasoning=reasoning,
+            decision_path=decision_path
+        )
+    
+    # ========================================================================
+    # STEP 2: Expected Goals > 2.80 → Over 2.5
+    # ========================================================================
+    if expected_goals > 2.80:
+        decision_path.append("Step 2: Expected Goals > 2.80")
+        main_bet = "Over 2.5"
+        confidence = "High"
+        reasoning.append(f"\n✅ **STEP 2:** Expected Goals {expected_goals} > 2.80")
+        reasoning.append(f"   → **Over 2.5** (High confidence)")
+        
+        secondary = None
+        return PredictionResult(
+            main_bet=main_bet,
+            confidence=confidence,
+            secondary=secondary,
+            expected_goals=expected_goals,
+            reasoning=reasoning,
+            decision_path=decision_path
+        )
+    
+    # ========================================================================
+    # STEP 3: Expected Goals 2.20 – 2.80 → Go to Step 4
+    # ========================================================================
+    decision_path.append(f"Step 3: Expected Goals {expected_goals} in range 2.20-2.80")
+    reasoning.append(f"\n✅ **STEP 3:** Expected Goals {expected_goals} in range 2.20-2.80")
+    reasoning.append(f"   → Checking H2H Over 2.5%...")
+    
+    # ========================================================================
+    # STEP 4: H2H Over 2.5% > 50% → Over 2.5
+    # ========================================================================
+    if h2h.over25_percent > 50:
+        decision_path.append(f"Step 4: H2H Over 2.5% = {h2h.over25_percent}% > 50%")
+        main_bet = "Over 2.5"
+        confidence = "Medium-High"
+        reasoning.append(f"\n✅ **STEP 4:** H2H Over 2.5% = {h2h.over25_percent}% > 50%")
+        reasoning.append(f"   → **Over 2.5** (Medium-High confidence)")
+        
+        secondary = None
+        return PredictionResult(
+            main_bet=main_bet,
+            confidence=confidence,
+            secondary=secondary,
+            expected_goals=expected_goals,
+            reasoning=reasoning,
+            decision_path=decision_path
+        )
+    
+    # ========================================================================
+    # STEP 5: H2H Over 2.5% < 40% → Under 2.5
+    # ========================================================================
+    if h2h.over25_percent < 40:
+        decision_path.append(f"Step 5: H2H Over 2.5% = {h2h.over25_percent}% < 40%")
+        main_bet = "Under 2.5"
+        confidence = "Medium-High"
+        reasoning.append(f"\n✅ **STEP 5:** H2H Over 2.5% = {h2h.over25_percent}% < 40%")
+        reasoning.append(f"   → **Under 2.5** (Medium-High confidence)")
+        
+        secondary = None
+        if expected_goals >= 2.20 and h2h.over15_percent >= 65:
+            secondary = "Over 1.5"
+            reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
+        
+        return PredictionResult(
+            main_bet=main_bet,
+            confidence=confidence,
+            secondary=secondary,
+            expected_goals=expected_goals,
+            reasoning=reasoning,
+            decision_path=decision_path
+        )
+    
+    # ========================================================================
+    # STEP 6: H2H Over 2.5% between 40-50% → Go to Step 7
+    # ========================================================================
+    decision_path.append(f"Step 6: H2H Over 2.5% = {h2h.over25_percent}% in range 40-50%")
+    reasoning.append(f"\n✅ **STEP 6:** H2H Over 2.5% = {h2h.over25_percent}% in range 40-50%")
+    reasoning.append(f"   → Checking BTTS%...")
+    
+    # ========================================================================
+    # STEP 7: BTTS% > 55% + Expected Goals > 2.40 → Over 2.5
+    # ========================================================================
+    if avg_btts > 55 and expected_goals > 2.40:
+        decision_path.append(f"Step 7: BTTS% = {avg_btts}% > 55% AND Expected Goals {expected_goals} > 2.40")
+        main_bet = "Over 2.5"
+        confidence = "Medium"
+        reasoning.append(f"\n✅ **STEP 7:** BTTS% = {avg_btts}% > 55% AND Expected Goals {expected_goals} > 2.40")
+        reasoning.append(f"   → **Over 2.5** (Medium confidence)")
+        
+        secondary = None
+        return PredictionResult(
+            main_bet=main_bet,
+            confidence=confidence,
+            secondary=secondary,
+            expected_goals=expected_goals,
+            reasoning=reasoning,
+            decision_path=decision_path
+        )
+    
+    # ========================================================================
+    # STEP 8: BTTS% < 40% → Under 2.5
+    # ========================================================================
+    if avg_btts < 40:
+        decision_path.append(f"Step 8: BTTS% = {avg_btts}% < 40%")
+        main_bet = "Under 2.5"
+        confidence = "Medium"
+        reasoning.append(f"\n✅ **STEP 8:** BTTS% = {avg_btts}% < 40%")
+        reasoning.append(f"   → **Under 2.5** (Medium confidence)")
+        
+        secondary = None
+        if expected_goals >= 2.20 and h2h.over15_percent >= 65:
+            secondary = "Over 1.5"
+            reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
+        
+        return PredictionResult(
+            main_bet=main_bet,
+            confidence=confidence,
+            secondary=secondary,
+            expected_goals=expected_goals,
+            reasoning=reasoning,
+            decision_path=decision_path
+        )
+    
+    # ========================================================================
+    # STEP 9: All else (borderline) → Under 2.5 (default)
+    # ========================================================================
+    decision_path.append("Step 9: Borderline case - applying default")
+    main_bet = "Under 2.5"
+    confidence = "Low"
+    reasoning.append(f"\n✅ **STEP 9:** Borderline case (no clear signals)")
+    reasoning.append(f"   → **Under 2.5** (Default - Low confidence)")
+    
+    secondary = None
+    if expected_goals >= 2.20 and h2h.over15_percent >= 65:
+        secondary = "Over 1.5"
+        reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
     
     return PredictionResult(
-        prediction=prediction,
+        main_bet=main_bet,
         confidence=confidence,
+        secondary=secondary,
         expected_goals=expected_goals,
         reasoning=reasoning,
-        details=details
+        decision_path=decision_path
     )
 
 
 # ============================================================================
 # UI HELPER FUNCTIONS
 # ============================================================================
-def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> TeamStats:
+def team_stats_input(team_name: str, key_prefix: str) -> TeamStats:
     """Create input fields for team statistics"""
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
@@ -324,14 +433,12 @@ def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> T
         avg_scored_home = st.number_input(
             "Avg Goals Scored",
             min_value=0.0, max_value=5.0, value=1.2, step=0.05,
-            key=f"{key_prefix}_scored_home",
-            help="Average goals scored when playing at home"
+            key=f"{key_prefix}_scored_home"
         )
         avg_conceded_home = st.number_input(
             "Avg Goals Conceded",
             min_value=0.0, max_value=5.0, value=1.0, step=0.05,
-            key=f"{key_prefix}_conceded_home",
-            help="Average goals conceded when playing at home"
+            key=f"{key_prefix}_conceded_home"
         )
     
     with col2:
@@ -339,26 +446,20 @@ def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> T
         avg_scored_away = st.number_input(
             "Avg Goals Scored",
             min_value=0.0, max_value=5.0, value=0.8, step=0.05,
-            key=f"{key_prefix}_scored_away",
-            help="Average goals scored when playing away"
+            key=f"{key_prefix}_scored_away"
         )
         avg_conceded_away = st.number_input(
             "Avg Goals Conceded",
             min_value=0.0, max_value=5.0, value=1.4, step=0.05,
-            key=f"{key_prefix}_conceded_away",
-            help="Average goals conceded when playing away"
+            key=f"{key_prefix}_conceded_away"
         )
     
-    col3, col4 = st.columns(2)
-    with col3:
-        btts_percent = st.number_input(
-            "BTTS %",
-            min_value=0, max_value=100, value=45, step=5,
-            key=f"{key_prefix}_btts",
-            help="Percentage of matches where both teams scored"
-        )
-    with col4:
-        st.markdown(" ")  # placeholder
+    btts_percent = st.number_input(
+        "BTTS %",
+        min_value=0, max_value=100, value=45, step=5,
+        key=f"{key_prefix}_btts",
+        help="Percentage of matches where both teams scored"
+    )
     
     return TeamStats(
         name=team_name,
@@ -374,42 +475,28 @@ def h2h_stats_input() -> H2HStats:
     """Create input fields for head-to-head statistics"""
     st.markdown("<div class='h2h-table'><p style='font-weight:700; text-align:center;'>📊 HEAD-TO-HEAD HISTORY</p>", unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         matches_played = st.number_input(
             "Matches Played",
             min_value=0, max_value=20, value=6, step=1,
             key="h2h_matches"
         )
-    with col2:
         over15_percent = st.number_input(
             "Over 1.5 %",
             min_value=0, max_value=100, value=55, step=5,
-            key="h2h_over15",
-            help="Percentage of H2H matches with 2+ goals"
+            key="h2h_over15"
         )
-    with col3:
+    with col2:
         over25_percent = st.number_input(
             "Over 2.5 %",
             min_value=0, max_value=100, value=35, step=5,
-            key="h2h_over25",
-            help="Percentage of H2H matches with 3+ goals"
+            key="h2h_over25"
         )
-    
-    col4, col5 = st.columns(2)
-    with col4:
         btts_percent = st.number_input(
             "BTTS %",
             min_value=0, max_value=100, value=40, step=5,
-            key="h2h_btts",
-            help="Percentage of H2H matches where both teams scored"
-        )
-    with col5:
-        avg_goals = st.number_input(
-            "Avg Goals",
-            min_value=0.0, max_value=6.0, value=2.2, step=0.1,
-            key="h2h_avg_goals",
-            help="Average total goals in H2H matches"
+            key="h2h_btts"
         )
     
     st.markdown("</div>", unsafe_allow_html=True)
@@ -419,7 +506,7 @@ def h2h_stats_input() -> H2HStats:
         over15_percent=float(over15_percent),
         over25_percent=float(over25_percent),
         btts_percent=float(btts_percent),
-        avg_goals=avg_goals
+        avg_goals=0.0
     )
 
 
@@ -430,8 +517,7 @@ def league_context_input() -> LeagueContext:
         "League / Competition",
         options=league_names,
         index=0,
-        key="league_select",
-        help="Select the league to apply baseline averages"
+        key="league_select"
     )
     return LEAGUE_CONTEXT[selected_league]
 
@@ -441,12 +527,12 @@ def league_context_input() -> LeagueContext:
 # ============================================================================
 def main():
     st.title("⚽ Expected Goals Predictor")
-    st.caption("Over/Under System | Statistical Model | 100% Data-Driven")
+    st.caption("Over 2.5 / Under 2.5 Strict System | Statistical Model")
     
     st.markdown("""
     <div class="league-note">
         📊 <strong>Formula:</strong> Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2<br>
-        🎯 <strong>Thresholds:</strong> &lt;2.10 = Under | 2.10-2.50 = Lean | 2.51-2.90 = Over 1.5 | &gt;2.90 = Over 2.5
+        🎯 <strong>Strict Rules:</strong> &lt;2.20 = Under | &gt;2.80 = Over | Otherwise check H2H Over 2.5% | Borderline defaults to Under
     </div>
     """, unsafe_allow_html=True)
     
@@ -465,13 +551,13 @@ def main():
     
     # Home Team Stats
     st.subheader(f"🏠 {home_name} Statistics")
-    home_stats = team_stats_input(home_name, "home", is_home=True)
+    home_stats = team_stats_input(home_name, "home")
     
     st.divider()
     
     # Away Team Stats
     st.subheader(f"✈️ {away_name} Statistics")
-    away_stats = team_stats_input(away_name, "away", is_home=False)
+    away_stats = team_stats_input(away_name, "away")
     
     st.divider()
     
@@ -492,7 +578,7 @@ def main():
     # ========================================================================
     if st.button("🔮 PREDICT", type="primary"):
         # Calculate expected goals
-        expected_goals = calculate_expected_goals(home_stats, away_stats, is_home_match=True)
+        expected_goals = calculate_expected_goals(home_stats, away_stats)
         
         # Make prediction
         result = make_prediction(
@@ -504,61 +590,73 @@ def main():
         )
         
         # Display prediction card
-        if "Strong Over" in result.prediction:
-            pred_class = "prediction-strong-over"
+        if "Over" in result.main_bet:
+            pred_class = "prediction-over"
             pred_icon = "🔥"
-        elif "Lean Over" in result.prediction or "Over 1.5" in result.prediction or "Over 2.5" in result.prediction:
-            pred_class = "prediction-lean-over"
-            pred_icon = "📈"
-        elif "Strong Under" in result.prediction:
-            pred_class = "prediction-strong-under"
-            pred_icon = "❄️"
         else:
-            pred_class = "prediction-lean-under"
-            pred_icon = "📉"
+            pred_class = "prediction-under"
+            pred_icon = "❄️"
+        
+        confidence_class = f"confidence-{result.confidence.lower().replace('-', '')}"
+        
+        secondary_html = ""
+        if result.secondary:
+            secondary_html = f'<div class="secondary">📌 Secondary: {result.secondary}</div>'
         
         st.markdown(f"""
         <div class="prediction-card">
             <div class="expected-goals">⚽ Expected Goals: {result.expected_goals}</div>
-            <div class="{pred_class}">{pred_icon} {result.prediction}</div>
-            <div style="margin-top: 0.5rem; font-size: 0.9rem; color: #94a3b8;">
-                Confidence: {result.confidence}
-            </div>
+            <div class="{pred_class}">{pred_icon} {result.main_bet}</div>
+            <div class="{confidence_class}">Confidence: {result.confidence}</div>
+            {secondary_html}
         </div>
         """, unsafe_allow_html=True)
         
+        # Display decision path
+        with st.expander("📋 Decision Path", expanded=True):
+            for i, step in enumerate(result.decision_path, 1):
+                st.markdown(f'<div class="step-box">{i}. {step}</div>', unsafe_allow_html=True)
+        
         # Display detailed reasoning
-        with st.expander("📋 Detailed Analysis", expanded=True):
+        with st.expander("📊 Detailed Analysis", expanded=False):
             for line in result.reasoning:
                 if "✅" in line:
                     st.success(line)
+                elif "📌" in line:
+                    st.info(line)
                 elif "📊" in line:
                     st.info(line)
                 else:
                     st.write(line)
         
         # Display data table
-        with st.expander("📊 Data Summary", expanded=False):
+        with st.expander("📈 Data Summary", expanded=False):
             data = {
                 "Metric": [
                     f"{home_name} Avg Scored (Home)",
                     f"{home_name} Avg Conceded (Home)",
                     f"{away_name} Avg Scored (Away)",
                     f"{away_name} Avg Conceded (Away)",
+                    "Expected Goals",
                     "H2H Over 1.5%",
                     "H2H Over 2.5%",
                     "H2H BTTS%",
-                    "League Avg Goals/Game"
+                    "Avg BTTS%",
+                    "League Avg Goals/Game",
+                    "Low Scoring League?"
                 ],
                 "Value": [
                     f"{home_stats.avg_scored_home}",
                     f"{home_stats.avg_conceded_home}",
                     f"{away_stats.avg_scored_away}",
                     f"{away_stats.avg_conceded_away}",
+                    f"{expected_goals}",
                     f"{h2h_stats.over15_percent}%",
                     f"{h2h_stats.over25_percent}%",
                     f"{h2h_stats.btts_percent}%",
-                    f"{league_context.avg_goals_per_game}"
+                    f"{(home_stats.btts_percent + away_stats.btts_percent) / 2:.1f}%",
+                    f"{league_context.avg_goals_per_game}",
+                    "Yes" if league_context.is_low_scoring else "No"
                 ]
             }
             df = pd.DataFrame(data)
@@ -567,33 +665,33 @@ def main():
     # Footer
     st.divider()
     st.markdown("""
-    ### 📋 How to Use
+    ### 📋 Strict Decision Rules (Follow in Order)
+    
+    | Step | Condition | Decision | Confidence |
+    |------|-----------|----------|------------|
+    | 1 | Expected Goals **< 2.20** | **Under 2.5** | High |
+    | 2 | Expected Goals **> 2.80** | **Over 2.5** | High |
+    | 3 | Expected Goals 2.20 – 2.80 | Go to Step 4 | - |
+    | 4 | H2H Over 2.5% **> 50%** | **Over 2.5** | Medium-High |
+    | 5 | H2H Over 2.5% **< 40%** | **Under 2.5** | Medium-High |
+    | 6 | H2H Over 2.5% 40–50% | Go to Step 7 | - |
+    | 7 | BTTS% > 55% + Exp Goals > 2.40 | **Over 2.5** | Medium |
+    | 8 | BTTS% < 40% | **Under 2.5** | Medium |
+    | 9 | All else (borderline) | **Under 2.5** (default) | Low |
+    
+    ### 📌 Secondary Suggestion (Over 1.5)
+    
+    Only suggested when:
+    - Expected Goals ≥ 2.20 **AND**
+    - H2H Over 1.5% ≥ 65%
+    
+    ### 🎯 How to Use
     
     1. Enter **Home Team** and **Away Team** names
-    2. Enter each team's **statistics**:
-       - Average goals scored at home / away
-       - Average goals conceded at home / away
-       - BTTS percentage (optional)
-    3. Enter **Head-to-Head** statistics:
-       - Over 1.5%, Over 2.5%, BTTS%, Avg Goals
-    4. Select the **League** for baseline context
+    2. Enter each team's **home/away averages**
+    3. Enter **Head-to-Head percentages**
+    4. Select the **League**
     5. Click **PREDICT**
-    
-    ### 📊 Decision Thresholds
-    
-    | Expected Goals | Prediction | Confidence Trigger |
-    |----------------|------------|---------------------|
-    | < 2.10 | Strong Under 2.5 | + low BTTS or low-scoring league |
-    | 2.10 – 2.50 | Lean Under 2.5 / Over 1.5 | Check H2H Over 1.5% > 65% |
-    | 2.51 – 2.90 | Lean Over 1.5 | Safe play |
-    | > 2.90 | Strong Over 2.5 | + H2H Over 2.5% > 50% |
-    
-    ### 🎯 Supporting Filters
-    
-    - H2H Over 1.5% > 65% → Over 1.5 is very safe
-    - H2H Over 2.5% > 50% → Over 2.5 likely
-    - League low-scoring (<2.0) → Under 2.5 lean
-    - BTTS% < 35% → Under 2.5 lean
     """)
 
 if __name__ == "__main__":
