@@ -3,15 +3,15 @@ Expected Goals Predictor - Over 2.5 / Under 2.5 System
 Based on the philosophy that ALL signals must align for a confident bet.
 
 Core Principle:
-- If 3 or more signals point the same way → that is the bet
+- If 3 or more of the 5 signals point the same way → that is the bet
 - If signals are mixed → NO BET (wait for clearer opportunity)
 
 The 5 Signals (in priority order):
-1. Expected Goals (<2.20 = Under, >2.80 = Over)
-2. Home team scoring avg (<0.90 = Under bias)
-3. Away team scoring avg (<0.70 = Under bias)
+1. Expected Goals (<2.20 = Under, >2.50 = Over)
+2. Home scoring avg (<0.90 = Under, >1.30 = Over)
+3. Away scoring avg (<0.70 = Under, >1.10 = Over)
 4. H2H Over 2.5% (<40% = Under, >55% = Over)
-5. League avg goals (<2.00 = Under bias)
+5. League avg goals (<2.00 = Under, >2.50 = Over)
 
 Decision Rule:
 - Count how many signals point to Under
@@ -213,7 +213,7 @@ LEAGUE_CONTEXT = {
     "Serie A": LeagueContext("Serie A", 2.60),
     "La Liga": LeagueContext("La Liga", 2.50),
     "Ligue 1": LeagueContext("Ligue 1", 2.70),
-    "Premier League": LeagueContext("Premier League", 2.80),
+    "Premier League": LeagueContext("Premier League", 2.75),
     "Bundesliga": LeagueContext("Bundesliga", 3.10),
     "Eredivisie": LeagueContext("Eredivisie", 3.20),
     "Default": LeagueContext("Default", 2.50),
@@ -241,18 +241,18 @@ def evaluate_signals(
     under_count = 0
     over_count = 0
     
-    # Signal 1: Expected Goals
+    # Signal 1: Expected Goals (UPDATED: Over threshold changed from 2.80 to 2.50)
     if expected_goals < 2.20:
         direction = "Under"
         under_count += 1
         explanation = f"Expected Goals {expected_goals} < 2.20"
-    elif expected_goals > 2.80:
+    elif expected_goals > 2.50:
         direction = "Over"
         over_count += 1
-        explanation = f"Expected Goals {expected_goals} > 2.80"
+        explanation = f"Expected Goals {expected_goals} > 2.50"
     else:
         direction = "Neutral"
-        explanation = f"Expected Goals {expected_goals} in 2.20-2.80 range (neutral)"
+        explanation = f"Expected Goals {expected_goals} in 2.20-2.50 range (neutral)"
     
     signals.append(SignalResult("Expected Goals", expected_goals, direction, explanation))
     
@@ -304,18 +304,18 @@ def evaluate_signals(
     else:
         signals.append(SignalResult("H2H Over 2.5%", 0, "Neutral", "No H2H data provided"))
     
-    # Signal 5: League avg goals
+    # Signal 5: League avg goals (UPDATED: Over threshold changed from 2.80 to 2.50)
     if league.avg_goals_per_game < 2.00:
         direction = "Under"
         under_count += 1
         explanation = f"League avg {league.avg_goals_per_game} goals/game (< 2.00)"
-    elif league.avg_goals_per_game > 2.80:
+    elif league.avg_goals_per_game > 2.50:
         direction = "Over"
         over_count += 1
-        explanation = f"League avg {league.avg_goals_per_game} goals/game (> 2.80)"
+        explanation = f"League avg {league.avg_goals_per_game} goals/game (> 2.50)"
     else:
         direction = "Neutral"
-        explanation = f"League avg {league.avg_goals_per_game} goals/game (neutral range 2.00-2.80)"
+        explanation = f"League avg {league.avg_goals_per_game} goals/game (neutral range 2.00-2.50)"
     
     signals.append(SignalResult("League Average", league.avg_goals_per_game, direction, explanation))
     
@@ -387,13 +387,13 @@ def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> T
         with col1:
             avg_scored_home = st.number_input(
                 "🏠 Avg Goals Scored at HOME",
-                min_value=0.0, max_value=5.0, value=0.85, step=0.05,
+                min_value=0.0, max_value=5.0, value=1.44, step=0.05,
                 key=f"{key_prefix}_scored_home"
             )
         with col2:
             avg_conceded_home = st.number_input(
                 "🏠 Avg Goals Conceded at HOME",
-                min_value=0.0, max_value=5.0, value=0.69, step=0.05,
+                min_value=0.0, max_value=5.0, value=1.06, step=0.05,
                 key=f"{key_prefix}_conceded_home"
             )
         return TeamStats(
@@ -410,13 +410,13 @@ def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> T
         with col1:
             avg_scored_away = st.number_input(
                 "✈️ Avg Goals Scored AWAY",
-                min_value=0.0, max_value=5.0, value=1.00, step=0.05,
+                min_value=0.0, max_value=5.0, value=1.06, step=0.05,
                 key=f"{key_prefix}_scored_away"
             )
         with col2:
             avg_conceded_away = st.number_input(
                 "✈️ Avg Goals Conceded AWAY",
-                min_value=0.0, max_value=5.0, value=1.08, step=0.05,
+                min_value=0.0, max_value=5.0, value=1.81, step=0.05,
                 key=f"{key_prefix}_conceded_away"
             )
         return TeamStats(
@@ -437,12 +437,12 @@ def h2h_stats_input() -> H2HStats:
     with col1:
         matches_played = st.number_input(
             "Matches Played",
-            min_value=0, max_value=20, value=6, step=1,
+            min_value=0, max_value=20, value=10, step=1,
             key="h2h_matches"
         )
         over25_percent = st.number_input(
             "Over 2.5 %",
-            min_value=0, max_value=100, value=24, step=5,
+            min_value=0, max_value=100, value=57, step=5,
             key="h2h_over25"
         )
     with col2:
@@ -466,7 +466,7 @@ def league_context_input() -> LeagueContext:
     selected_league = st.selectbox(
         "League / Competition",
         options=league_names,
-        index=0,
+        index=9,  # Premier League index
         key="league_select"
     )
     return LEAGUE_CONTEXT[selected_league]
@@ -477,17 +477,17 @@ def league_context_input() -> LeagueContext:
 # ============================================================================
 def main():
     st.title("⚽ Expected Goals Predictor")
-    st.caption("Over 2.5 / Under 2.5 | Signal Alignment System")
+    st.caption("Over 2.5 / Under 2.5 | Signal Alignment System | Updated Thresholds (Over > 2.50)")
     
     st.markdown("""
     <div class="league-note">
         📊 <strong>Core Principle:</strong> Bet only when 3 or more of the 5 signals point the same direction.<br>
-        🎯 <strong>The 5 Signals:</strong><br>
-        &nbsp;&nbsp;&nbsp;1. Expected Goals (&lt;2.20 = Under, &gt;2.80 = Over)<br>
+        🎯 <strong>The 5 Signals (UPDATED THRESHOLDS):</strong><br>
+        &nbsp;&nbsp;&nbsp;1. Expected Goals (&lt;2.20 = Under, &gt;2.50 = Over)<br>
         &nbsp;&nbsp;&nbsp;2. Home scoring avg (&lt;0.90 = Under, &gt;1.30 = Over)<br>
         &nbsp;&nbsp;&nbsp;3. Away scoring avg (&lt;0.70 = Under, &gt;1.10 = Over)<br>
         &nbsp;&nbsp;&nbsp;4. H2H Over 2.5% (&lt;40% = Under, &gt;55% = Over)<br>
-        &nbsp;&nbsp;&nbsp;5. League avg goals (&lt;2.00 = Under, &gt;2.80 = Over)
+        &nbsp;&nbsp;&nbsp;5. League avg goals (&lt;2.00 = Under, &gt;2.50 = Over)
     </div>
     """, unsafe_allow_html=True)
     
@@ -498,9 +498,9 @@ def main():
     # ========================================================================
     col1, col2 = st.columns(2)
     with col1:
-        home_name = st.text_input("🏠 Home Team", "Bahir Dar Kenema FC", key="home_name")
+        home_name = st.text_input("🏠 Home Team", "Bournemouth", key="home_name")
     with col2:
-        away_name = st.text_input("✈️ Away Team", "Sheger Ketema", key="away_name")
+        away_name = st.text_input("✈️ Away Team", "Leeds United", key="away_name")
     
     st.divider()
     
@@ -619,15 +619,15 @@ def main():
     | OVER ≥ 3 | Bet **Over 2.5** |
     | Neither ≥ 3 | **NO BET** (signals conflict) |
     
-    ### 📊 The 5 Signals
+    ### 📊 The 5 Signals (UPDATED THRESHOLDS)
     
     | Signal | Under Threshold | Over Threshold |
     |--------|----------------|----------------|
-    | Expected Goals | < 2.20 | > 2.80 |
+    | Expected Goals | < 2.20 | > 2.50 |
     | Home Scoring Avg | < 0.90 | > 1.30 |
     | Away Scoring Avg | < 0.70 | > 1.10 |
     | H2H Over 2.5% | < 40% | > 55% |
-    | League Avg Goals | < 2.00 | > 2.80 |
+    | League Avg Goals | < 2.00 | > 2.50 |
     """)
 
 if __name__ == "__main__":
