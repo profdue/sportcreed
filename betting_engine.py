@@ -3,7 +3,12 @@ Expected Goals Predictor - Over 2.5 / Under 2.5 Strict System
 Based on statistical analysis of home/away averages, H2H history, and league context.
 
 Core Formula:
-Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2
+Expected Goals = (Home_Scored_Home_Avg + Away_Conceded_Away_Avg + Away_Scored_Away_Avg + Home_Conceded_Home_Avg) / 2
+
+Input Rules:
+- Home Team: Use HOME row only (Scored + Conceded)
+- Away Team: Use AWAY row only (Scored + Conceded)
+- Ignore the other numbers (the "double" stats are for reference only)
 
 Strict Decision Rules (Follow in Order):
 1. Expected Goals < 2.20 → Under 2.5 (High)
@@ -18,7 +23,6 @@ Strict Decision Rules (Follow in Order):
 
 Secondary Suggestion (Over 1.5 only):
 - Only suggest when Expected Goals ≥ 2.20 AND H2H Over 1.5 ≥ 65%
-- Never make Over 1.5 main recommendation
 """
 
 import streamlit as st
@@ -76,6 +80,12 @@ st.markdown("""
         color: #10b981;
         margin-top: 0.5rem;
     }
+    .confidence-medium-high {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #10b981;
+        margin-top: 0.5rem;
+    }
     .confidence-medium {
         font-size: 1rem;
         font-weight: 600;
@@ -125,6 +135,15 @@ st.markdown("""
         color: #94a3b8;
         margin-bottom: 1rem;
     }
+    .input-note {
+        background: #1e293b;
+        border-radius: 8px;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+        font-size: 0.8rem;
+        color: #fbbf24;
+        text-align: center;
+    }
     h1 {
         background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
         -webkit-background-clip: text;
@@ -160,25 +179,27 @@ st.markdown("""
 # ============================================================================
 @dataclass
 class TeamStats:
+    """Team statistical data - ONLY the relevant numbers for calculation"""
     name: str
-    avg_scored_home: float = 0.0
-    avg_scored_away: float = 0.0
-    avg_conceded_home: float = 0.0
-    avg_conceded_away: float = 0.0
+    avg_scored_home: float = 0.0      # Home team's home scoring
+    avg_conceded_home: float = 0.0    # Home team's home conceding
+    avg_scored_away: float = 0.0      # Away team's away scoring
+    avg_conceded_away: float = 0.0    # Away team's away conceding
     btts_percent: float = 0.0
 
 
 @dataclass
 class H2HStats:
+    """Head-to-head statistics"""
     matches_played: int = 0
     over15_percent: float = 0.0
     over25_percent: float = 0.0
     btts_percent: float = 0.0
-    avg_goals: float = 0.0
 
 
 @dataclass
 class LeagueContext:
+    """League baseline information"""
     name: str
     avg_goals_per_game: float
     is_low_scoring: bool = False
@@ -208,6 +229,8 @@ LEAGUE_CONTEXT = {
     "La Liga": LeagueContext("La Liga", 2.50, is_low_scoring=False),
     "Ligue 1": LeagueContext("Ligue 1", 2.70, is_low_scoring=False),
     "Eredivisie": LeagueContext("Eredivisie", 3.20, is_low_scoring=False),
+    "Serie B": LeagueContext("Serie B", 2.40, is_low_scoring=False),
+    "Championship": LeagueContext("Championship", 2.60, is_low_scoring=False),
     "Default": LeagueContext("Default", 2.50, is_low_scoring=False),
 }
 
@@ -217,8 +240,11 @@ LEAGUE_CONTEXT = {
 # ============================================================================
 def calculate_expected_goals(home: TeamStats, away: TeamStats) -> float:
     """
-    Calculate expected total goals using the formula:
-    Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2
+    Calculate expected total goals using the correct 4 numbers:
+    - Home team's home scoring average
+    - Home team's home conceding average
+    - Away team's away scoring average
+    - Away team's away conceding average
     """
     expected = (home.avg_scored_home + away.avg_conceded_away + away.avg_scored_away + home.avg_conceded_home) / 2
     return round(expected, 2)
@@ -422,53 +448,74 @@ def make_prediction(
 # ============================================================================
 # UI HELPER FUNCTIONS
 # ============================================================================
-def team_stats_input(team_name: str, key_prefix: str) -> TeamStats:
-    """Create input fields for team statistics"""
+def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> TeamStats:
+    """
+    Create input fields for team statistics.
+    For Home Team: Enter HOME stats only.
+    For Away Team: Enter AWAY stats only.
+    """
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("<p style='text-align:center; font-weight:700;'>🏠 HOME</p>", unsafe_allow_html=True)
-        avg_scored_home = st.number_input(
-            "Avg Goals Scored",
-            min_value=0.0, max_value=5.0, value=1.2, step=0.05,
-            key=f"{key_prefix}_scored_home"
+    if is_home:
+        st.markdown("<div class='input-note'>📌 Enter HOME team's HOME stats only</div>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            avg_scored_home = st.number_input(
+                "🏠 Avg Goals Scored at HOME",
+                min_value=0.0, max_value=5.0, value=1.2, step=0.05,
+                key=f"{key_prefix}_scored_home",
+                help="Home team's average goals scored when playing at home"
+            )
+        with col2:
+            avg_conceded_home = st.number_input(
+                "🏠 Avg Goals Conceded at HOME",
+                min_value=0.0, max_value=5.0, value=1.0, step=0.05,
+                key=f"{key_prefix}_conceded_home",
+                help="Home team's average goals conceded when playing at home"
+            )
+        btts_percent = st.number_input(
+            "BTTS % (Overall)",
+            min_value=0, max_value=100, value=45, step=5,
+            key=f"{key_prefix}_btts"
         )
-        avg_conceded_home = st.number_input(
-            "Avg Goals Conceded",
-            min_value=0.0, max_value=5.0, value=1.0, step=0.05,
-            key=f"{key_prefix}_conceded_home"
+        return TeamStats(
+            name=team_name,
+            avg_scored_home=avg_scored_home,
+            avg_conceded_home=avg_conceded_home,
+            avg_scored_away=0.0,
+            avg_conceded_away=0.0,
+            btts_percent=float(btts_percent)
         )
-    
-    with col2:
-        st.markdown("<p style='text-align:center; font-weight:700;'>✈️ AWAY</p>", unsafe_allow_html=True)
-        avg_scored_away = st.number_input(
-            "Avg Goals Scored",
-            min_value=0.0, max_value=5.0, value=0.8, step=0.05,
-            key=f"{key_prefix}_scored_away"
+    else:
+        st.markdown("<div class='input-note'>📌 Enter AWAY team's AWAY stats only</div>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            avg_scored_away = st.number_input(
+                "✈️ Avg Goals Scored AWAY",
+                min_value=0.0, max_value=5.0, value=0.8, step=0.05,
+                key=f"{key_prefix}_scored_away",
+                help="Away team's average goals scored when playing away"
+            )
+        with col2:
+            avg_conceded_away = st.number_input(
+                "✈️ Avg Goals Conceded AWAY",
+                min_value=0.0, max_value=5.0, value=1.4, step=0.05,
+                key=f"{key_prefix}_conceded_away",
+                help="Away team's average goals conceded when playing away"
+            )
+        btts_percent = st.number_input(
+            "BTTS % (Overall)",
+            min_value=0, max_value=100, value=45, step=5,
+            key=f"{key_prefix}_btts"
         )
-        avg_conceded_away = st.number_input(
-            "Avg Goals Conceded",
-            min_value=0.0, max_value=5.0, value=1.4, step=0.05,
-            key=f"{key_prefix}_conceded_away"
+        return TeamStats(
+            name=team_name,
+            avg_scored_home=0.0,
+            avg_conceded_home=0.0,
+            avg_scored_away=avg_scored_away,
+            avg_conceded_away=avg_conceded_away,
+            btts_percent=float(btts_percent)
         )
-    
-    btts_percent = st.number_input(
-        "BTTS %",
-        min_value=0, max_value=100, value=45, step=5,
-        key=f"{key_prefix}_btts",
-        help="Percentage of matches where both teams scored"
-    )
-    
-    return TeamStats(
-        name=team_name,
-        avg_scored_home=avg_scored_home,
-        avg_scored_away=avg_scored_away,
-        avg_conceded_home=avg_conceded_home,
-        avg_conceded_away=avg_conceded_away,
-        btts_percent=float(btts_percent)
-    )
 
 
 def h2h_stats_input() -> H2HStats:
@@ -505,8 +552,7 @@ def h2h_stats_input() -> H2HStats:
         matches_played=matches_played,
         over15_percent=float(over15_percent),
         over25_percent=float(over25_percent),
-        btts_percent=float(btts_percent),
-        avg_goals=0.0
+        btts_percent=float(btts_percent)
     )
 
 
@@ -527,12 +573,15 @@ def league_context_input() -> LeagueContext:
 # ============================================================================
 def main():
     st.title("⚽ Expected Goals Predictor")
-    st.caption("Over 2.5 / Under 2.5 Strict System | Statistical Model")
+    st.caption("Over 2.5 / Under 2.5 Strict System | Corrected Input Logic")
     
     st.markdown("""
     <div class="league-note">
-        📊 <strong>Formula:</strong> Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2<br>
-        🎯 <strong>Strict Rules:</strong> &lt;2.20 = Under | &gt;2.80 = Over | Otherwise check H2H Over 2.5% | Borderline defaults to Under
+        📊 <strong>Formula:</strong> Expected Goals = (Home_Scored_Home + Away_Conceded_Away + Away_Scored_Away + Home_Conceded_Home) / 2<br>
+        🎯 <strong>Correct Inputs:</strong><br>
+        &nbsp;&nbsp;&nbsp;• Home Team → Use <strong>HOME</strong> stats only<br>
+        &nbsp;&nbsp;&nbsp;• Away Team → Use <strong>AWAY</strong> stats only<br>
+        &nbsp;&nbsp;&nbsp;• Ignore the other numbers (the "double" stats are for reference only)
     </div>
     """, unsafe_allow_html=True)
     
@@ -550,14 +599,16 @@ def main():
     st.divider()
     
     # Home Team Stats
-    st.subheader(f"🏠 {home_name} Statistics")
-    home_stats = team_stats_input(home_name, "home")
+    st.subheader(f"🏠 {home_name} (HOME Team)")
+    st.caption("Enter ONLY the HOME statistics for this team")
+    home_stats = team_stats_input(home_name, "home", is_home=True)
     
     st.divider()
     
     # Away Team Stats
-    st.subheader(f"✈️ {away_name} Statistics")
-    away_stats = team_stats_input(away_name, "away")
+    st.subheader(f"✈️ {away_name} (AWAY Team)")
+    st.caption("Enter ONLY the AWAY statistics for this team")
+    away_stats = team_stats_input(away_name, "away", is_home=False)
     
     st.divider()
     
@@ -577,7 +628,7 @@ def main():
     # PREDICT BUTTON
     # ========================================================================
     if st.button("🔮 PREDICT", type="primary"):
-        # Calculate expected goals
+        # Calculate expected goals using ONLY the correct 4 numbers
         expected_goals = calculate_expected_goals(home_stats, away_stats)
         
         # Make prediction
@@ -612,6 +663,22 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
+        # Display the 4 numbers used
+        with st.expander("📐 Calculation Details", expanded=True):
+            st.markdown(f"""
+            <div class="step-box">
+            <strong>Formula:</strong> (Home_Scored_Home + Away_Conceded_Away + Away_Scored_Away + Home_Conceded_Home) / 2
+            </div>
+            <div class="step-box">
+            <strong>Numbers used:</strong><br>
+            • {home_name} Avg Scored at HOME: {home_stats.avg_scored_home}<br>
+            • {away_name} Avg Conceded AWAY: {away_stats.avg_conceded_away}<br>
+            • {away_name} Avg Scored AWAY: {away_stats.avg_scored_away}<br>
+            • {home_name} Avg Conceded at HOME: {home_stats.avg_conceded_home}<br>
+            <strong>= ({home_stats.avg_scored_home} + {away_stats.avg_conceded_away} + {away_stats.avg_scored_away} + {home_stats.avg_conceded_home}) / 2 = {expected_goals}</strong>
+            </div>
+            """, unsafe_allow_html=True)
+        
         # Display decision path
         with st.expander("📋 Decision Path", expanded=True):
             for i, step in enumerate(result.decision_path, 1):
@@ -624,8 +691,6 @@ def main():
                     st.success(line)
                 elif "📌" in line:
                     st.info(line)
-                elif "📊" in line:
-                    st.info(line)
                 else:
                     st.write(line)
         
@@ -633,10 +698,10 @@ def main():
         with st.expander("📈 Data Summary", expanded=False):
             data = {
                 "Metric": [
-                    f"{home_name} Avg Scored (Home)",
-                    f"{home_name} Avg Conceded (Home)",
-                    f"{away_name} Avg Scored (Away)",
-                    f"{away_name} Avg Conceded (Away)",
+                    f"{home_name} Avg Scored (HOME) - Used",
+                    f"{home_name} Avg Conceded (HOME) - Used",
+                    f"{away_name} Avg Scored (AWAY) - Used",
+                    f"{away_name} Avg Conceded (AWAY) - Used",
                     "Expected Goals",
                     "H2H Over 1.5%",
                     "H2H Over 2.5%",
@@ -685,13 +750,14 @@ def main():
     - Expected Goals ≥ 2.20 **AND**
     - H2H Over 1.5% ≥ 65%
     
-    ### 🎯 How to Use
+    ### 🎯 Correct Input Rules
     
-    1. Enter **Home Team** and **Away Team** names
-    2. Enter each team's **home/away averages**
-    3. Enter **Head-to-Head percentages**
-    4. Select the **League**
-    5. Click **PREDICT**
+    | Team | Use These Stats Only |
+    |------|---------------------|
+    | **Home Team** | HOME goals scored + HOME goals conceded |
+    | **Away Team** | AWAY goals scored + AWAY goals conceded |
+    
+    **Ignore all other numbers** (the "double" stats are for reference only)
     """)
 
 if __name__ == "__main__":
