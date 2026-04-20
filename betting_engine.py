@@ -15,25 +15,11 @@ Checkmate Safeguards (Red Flags):
 2. If Away team scores < 0.70 away → Strong Under bias
 3. If H2H has < 8 matches → Reduce confidence by one level
 4. If Expected Goals and H2H disagree strongly → Trust the lower one
-
-Strict Decision Rules (Follow in Order):
-1. Expected Goals < 2.20 → Under 2.5 (High)
-2. Expected Goals > 2.80 → Over 2.5 (High)
-3. Expected Goals 2.20 – 2.80 → Check H2H Over 2.5%
-4. H2H Over 2.5% > 55% → Over 2.5 (Medium) + Checkmate may downgrade
-5. H2H Over 2.5% < 40% → Under 2.5 (Medium-High)
-6. H2H Over 2.5% 40-55% → Check BTTS%
-7. BTTS% > 55% + Expected Goals > 2.40 → Over 2.5 (Medium)
-8. BTTS% < 40% → Under 2.5 (Medium)
-9. All else (borderline) → Under 2.5 (Low - default)
-
-Secondary Suggestion (Over 1.5 only):
-- Only suggest when Expected Goals ≥ 2.20 AND H2H Over 1.5 ≥ 65%
 """
 
 import streamlit as st
 import pandas as pd
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
 
 # ============================================================================
@@ -122,6 +108,7 @@ st.markdown("""
         border-radius: 8px;
         font-size: 0.85rem;
         color: #fca5a5;
+        text-align: left;
     }
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
@@ -184,6 +171,7 @@ st.markdown("""
         margin: 0.25rem 0;
         font-family: monospace;
         font-size: 0.8rem;
+        text-align: left;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -237,8 +225,8 @@ class PredictionResult:
     secondary: Optional[str]  # "Over 1.5" or None
     expected_goals: float
     checkmate: CheckmateFlags
-    reasoning: list
-    decision_path: list
+    reasoning: List[str]
+    decision_path: List[str]
 
 
 # ============================================================================
@@ -324,7 +312,7 @@ def apply_checkmate_to_prediction(
         # Strong Under bias triggers
         if checkmate.home_scoring_low or checkmate.away_scoring_low:
             if "Over" in main_bet:
-                main_bet = "Lean Over 2.5" if "Strong" not in main_bet else "Lean Over 2.5"
+                main_bet = "Lean Over 2.5"
                 confidence = "Medium"
             # Under bets remain but may have confidence adjusted
         
