@@ -1,430 +1,600 @@
 """
-Winner Predictor - Final Version
-Pick exact phrases from preview. System handles duplicates and logic.
+Streak Predictor - Expected Goals System (Over/Under Only)
+Based on statistical analysis of home/away averages, H2H history, and league context.
+
+Core Formula:
+Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2
+
+Decision Thresholds:
+- < 2.10 → Strong Under 2.5
+- 2.10 – 2.50 → Lean Under 2.5 or Over 1.5 (check H2H)
+- 2.51 – 2.90 → Lean Over 1.5
+- > 2.90 → Strong Over 2.5
+
+Supporting Filters:
+- H2H Over 1.5% (>65% = Over 1.5 safe)
+- H2H Over 2.5% (>50% = Over 2.5 likely)
+- H2H BTTS% (>50% = goals expected)
+- League baseline (goals/game)
+- BTTS% (<35% = Under lean)
 """
 
 import streamlit as st
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
+# ============================================================================
+# PAGE CONFIG
+# ============================================================================
 st.set_page_config(
-    page_title="Winner Predictor",
+    page_title="Streak Predictor - Expected Goals",
     page_icon="⚽",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="collapsed"
 )
 
 # ============================================================================
-# CUSTOM CSS
+# CSS STYLES
 # ============================================================================
-
 st.markdown("""
 <style>
     .main .block-container {
-        padding-top: 1rem;
-        padding-bottom: 1rem;
-        max-width: 1000px;
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 900px;
     }
-    
-    .team-card {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-radius: 16px;
-        padding: 1.25rem;
-        border: 1px solid #334155;
-        margin-bottom: 1.5rem;
-    }
-    
-    .team-header {
-        font-size: 1.25rem;
-        font-weight: bold;
-        color: #fbbf24;
-        margin-bottom: 1rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 1px solid #334155;
-    }
-    
-    .streak-row {
-        background-color: #0f172a;
-        border-radius: 8px;
-        padding: 0.5rem;
-        margin-bottom: 0.5rem;
-    }
-    
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-radius: 16px;
-        padding: 1.5rem;
-        margin-top: 1.5rem;
+        border-radius: 24px;
+        padding: 2rem;
+        margin: 1.5rem 0;
         text-align: center;
         border: 1px solid #334155;
     }
-    
-    .bet-against {
-        border-left: 6px solid #ef4444;
+    .prediction-strong-over {
+        font-size: 2rem;
+        font-weight: 800;
+        color: #10b981;
     }
-    
-    .bet-on {
-        border-left: 6px solid #10b981;
-    }
-    
-    .bet-caution {
-        border-left: 6px solid #f59e0b;
-    }
-    
-    .prediction-text {
-        font-size: 1.3rem;
-        font-weight: bold;
-    }
-    
-    .prediction-detail {
-        font-size: 1rem;
+    .prediction-lean-over {
+        font-size: 1.8rem;
+        font-weight: 700;
         color: #fbbf24;
-        margin-top: 0.5rem;
     }
-    
-    .stButton button {
-        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
-        color: #0f172a;
-        font-weight: bold;
-        font-size: 1rem;
-        width: 100%;
-        border: none;
+    .prediction-strong-under {
+        font-size: 2rem;
+        font-weight: 800;
+        color: #ef4444;
+    }
+    .prediction-lean-under {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #f97316;
+    }
+    .expected-goals {
+        font-size: 2rem;
+        font-weight: 800;
+        color: #60a5fa;
+        margin: 0.5rem 0;
+    }
+    .team-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+        border-radius: 16px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        text-align: center;
+    }
+    .team-name {
+        font-size: 1.2rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+    }
+    .stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #fbbf24;
+    }
+    .stat-label {
+        font-size: 0.7rem;
+        color: #94a3b8;
+    }
+    .h2h-table {
+        background: #0f172a;
         border-radius: 12px;
-        padding: 0.75rem;
+        padding: 1rem;
+        margin: 1rem 0;
     }
-    
-    .add-button {
-        background-color: #334155 !important;
-        color: white !important;
-        font-size: 0.8rem !important;
-        padding: 0.3rem !important;
+    .league-note {
+        background: #0f172a;
+        border-radius: 8px;
+        padding: 0.5rem;
+        text-align: center;
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-bottom: 1rem;
     }
-    
+    h1 {
+        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 800;
+    }
+    .stButton button {
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        color: white;
+        font-weight: 700;
+        border-radius: 12px;
+        padding: 0.6rem 1rem;
+        border: none;
+        width: 100%;
+    }
     hr {
         margin: 1rem 0;
+    }
+    .metric-card {
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 0.75rem;
+        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================================
-# PHRASE MAPPING (All phrases from your matches)
+# DATA MODELS
 # ============================================================================
+@dataclass
+class TeamStats:
+    """Team statistical data"""
+    name: str
+    avg_scored_home: float = 0.0
+    avg_scored_away: float = 0.0
+    avg_conceded_home: float = 0.0
+    avg_conceded_away: float = 0.0
+    btts_percent: float = 0.0
+    over15_percent: float = 0.0
+    over25_percent: float = 0.0
 
-PHRASE_MAP = {
-    # Unbeaten / Undefeated / No losses
-    "Unbeaten in last X matches (overall)": "OVERALL_UNBEATEN",
-    "Undefeated in last X matches (overall)": "OVERALL_UNBEATEN",
-    "Haven't lost in last X matches (overall)": "OVERALL_UNBEATEN",
-    "No losses in last X matches (overall)": "OVERALL_UNBEATEN",
-    "Record of X consecutive games with no losses": "OVERALL_UNBEATEN",
-    
-    "Unbeaten in last X home matches": "HOME_UNBEATEN",
-    "Undefeated in last X home matches": "HOME_UNBEATEN",
-    "Haven't lost in last X home matches": "HOME_UNBEATEN",
-    "No losses in last X home matches": "HOME_UNBEATEN",
-    
-    "Unbeaten in last X away matches": "AWAY_UNBEATEN",
-    "Undefeated in last X away matches": "AWAY_UNBEATEN",
-    "Haven't lost in last X away matches": "AWAY_UNBEATEN",
-    "No losses in last X away matches": "AWAY_UNBEATEN",
-    
-    "Unbeaten in last X H2H matches": "H2H_UNBEATEN",
-    "Undefeated in last X H2H matches": "H2H_UNBEATEN",
-    "Haven't lost in last X H2H matches": "H2H_UNBEATEN",
-    "No losses in last X H2H matches": "H2H_UNBEATEN",
-    
-    # Won / Victories
-    "Won last X matches (overall)": "OVERALL_WON",
-    "Victories in last X matches": "OVERALL_WON",
-    "Successful run of X wins": "OVERALL_WON",
-    
-    "Won last X home matches": "HOME_WON",
-    "Won last X away matches": "AWAY_WON",
-    "Won last X H2H matches": "H2H_WON",
-    "Won by 2+ goals in last X H2H": "H2H_WON_BY_2",
-    "Won by 3+ goals in last X away": "AWAY_WON_BY_3",
-    
-    # Scored
-    "Scored 1+ in last X matches": "OVERALL_SCORED_1",
-    "Scored in last X matches": "OVERALL_SCORED_1",
-    "Found the net in last X matches": "OVERALL_SCORED_1",
-    "Scored 2+ in last X matches": "OVERALL_SCORED_2",
-    
-    # Clean sheet
-    "Clean sheet in last X matches (overall)": "OVERALL_CLEAN_SHEET",
-    "Kept a clean sheet in last X matches": "OVERALL_CLEAN_SHEET",
-    "Did not concede in last X matches": "OVERALL_CLEAN_SHEET",
-    "Clean sheet in last X home matches": "HOME_CLEAN_SHEET",
-    "Clean sheet in last X H2H matches": "H2H_CLEAN_SHEET",
-    
-    # Half time
-    "Undefeated at half time in last X matches": "HT_UNDEFEATED",
-    "Draws at half time in last X matches": "HT_UNDEFEATED",
-    "Won at half time and full time": "HT_FT_WINS",
-    "Lost at half time in last X matches": "HT_LOST",
-    "Trailing at half time": "HT_LOST",
-    
-    # Negative - Winless
-    "Winless: won only X of last Y matches": "OVERALL_WINLESS",
-    "Won only X of last Y matches": "OVERALL_WINLESS",
-    "Just X wins in last Y matches": "OVERALL_WINLESS",
-    "Poor run of only X wins": "OVERALL_WINLESS",
-    "Won only X of last Y home matches": "HOME_WINLESS",
-    "Won only X of last Y away matches": "AWAY_WINLESS",
-    
-    # Negative - Lost
-    "Lost last X matches (overall)": "OVERALL_LOST",
-    "Defeats in last X matches": "OVERALL_LOST",
-    "Suffered X straight losses": "OVERALL_LOST",
-    "Lost last X home matches": "HOME_LOST",
-    "Lost last X away matches": "AWAY_LOST",
-    "Lost by 2+ goals in last X away": "AWAY_LOST_BY_2",
-    
-    # Negative - Scored none
-    "Scored none in last X matches": "OVERALL_SCORED_NONE",
-    "Failed to score in last X matches": "OVERALL_SCORED_NONE",
-    "No goals in last X matches": "OVERALL_SCORED_NONE",
-    "Blanked in last X matches": "OVERALL_SCORED_NONE",
-    "Scored none in last X home matches": "HOME_SCORED_NONE",
-    "Scored none in last X away matches": "AWAY_SCORED_NONE",
-    
-    # Negative - Conceded
-    "Conceded 1+ in last X matches": "OVERALL_CONCEDED_1",
-    "No clean sheet in last X matches": "OVERALL_CONCEDED_1",
-    
-    # Negative - H2H
-    "Lost H2H in last X matches": "H2H_LOST",
-    "Winless H2H in last X matches": "H2H_WINLESS",
+
+@dataclass
+class H2HStats:
+    """Head-to-head statistics"""
+    matches_played: int = 0
+    over15_percent: float = 0.0
+    over25_percent: float = 0.0
+    btts_percent: float = 0.0
+    avg_goals: float = 0.0
+
+
+@dataclass
+class LeagueContext:
+    """League baseline information"""
+    name: str
+    avg_goals_per_game: float
+    is_low_scoring: bool = False
+    is_high_scoring: bool = False
+
+
+@dataclass
+class PredictionResult:
+    prediction: str  # "Strong Over 2.5", "Lean Over 1.5", "Lean Under 2.5", "Strong Under 2.5"
+    confidence: str  # "High", "Medium", "Low"
+    expected_goals: float
+    reasoning: list
+    details: dict
+
+
+# ============================================================================
+# LEAGUE DATA
+# ============================================================================
+LEAGUE_CONTEXT = {
+    "Ligue 2": LeagueContext("Ligue 2", 2.45, is_low_scoring=False, is_high_scoring=False),
+    "Ukraine": LeagueContext("Ukraine Premier League", 2.30, is_low_scoring=False, is_high_scoring=False),
+    "Ethiopia": LeagueContext("Ethiopian Premier League", 1.80, is_low_scoring=True, is_high_scoring=False),
+    "Argentina": LeagueContext("Argentine Liga Profesional", 1.90, is_low_scoring=True, is_high_scoring=False),
+    "Bundesliga": LeagueContext("Bundesliga", 3.10, is_low_scoring=False, is_high_scoring=True),
+    "Premier League": LeagueContext("Premier League", 2.80, is_low_scoring=False, is_high_scoring=False),
+    "Serie A": LeagueContext("Serie A", 2.60, is_low_scoring=False, is_high_scoring=False),
+    "La Liga": LeagueContext("La Liga", 2.50, is_low_scoring=False, is_high_scoring=False),
+    "Ligue 1": LeagueContext("Ligue 1", 2.70, is_low_scoring=False, is_high_scoring=False),
+    "Eredivisie": LeagueContext("Eredivisie", 3.20, is_low_scoring=False, is_high_scoring=True),
+    "Default": LeagueContext("Default", 2.50, is_low_scoring=False, is_high_scoring=False),
 }
 
-# All phrases for dropdown
-ALL_PHRASES = sorted(list(PHRASE_MAP.keys()))
-
 
 # ============================================================================
-# HELPER FUNCTIONS
+# CALCULATION FUNCTIONS
 # ============================================================================
-
-def add_streak(selected_phrases, new_phrase):
-    """Add a streak, handling duplicates via mapping"""
-    if not new_phrase or new_phrase == "None":
-        return selected_phrases
-    
-    new_category = PHRASE_MAP.get(new_phrase)
-    
-    # Check if this category already exists
-    existing_categories = [PHRASE_MAP.get(p) for p in selected_phrases if p != "None"]
-    
-    if new_category in existing_categories:
-        # Duplicate - don't add
-        return selected_phrases
+def calculate_expected_goals(home: TeamStats, away: TeamStats, is_home_match: bool = True) -> float:
+    """
+    Calculate expected total goals using the formula:
+    Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2
+    """
+    if is_home_match:
+        home_score = home.avg_scored_home
+        home_concede = home.avg_conceded_home
+        away_score = away.avg_scored_away
+        away_concede = away.avg_conceded_away
     else:
-        # New category - add
-        return selected_phrases + [new_phrase]
+        # If teams are swapped (away team playing at home)
+        home_score = away.avg_scored_home
+        home_concede = away.avg_conceded_home
+        away_score = home.avg_scored_away
+        away_concede = home.avg_conceded_away
+    
+    expected = (home_score + away_concede + away_score + home_concede) / 2
+    return round(expected, 2)
 
 
-def calculate_score_from_phrases(phrases):
-    """Calculate score from selected phrases"""
-    positives = 0
-    negatives = 0
+def make_prediction(
+    expected_goals: float,
+    h2h: H2HStats,
+    league: LeagueContext,
+    home_btts: float = 0.0,
+    away_btts: float = 0.0
+) -> PredictionResult:
+    """
+    Make Over/Under prediction based on expected goals and supporting filters.
+    """
+    reasoning = []
+    details = {
+        "expected_goals": expected_goals,
+        "h2h_over15": h2h.over15_percent,
+        "h2h_over25": h2h.over25_percent,
+        "h2h_btts": h2h.btts_percent,
+        "league_avg": league.avg_goals_per_game,
+    }
     
-    for phrase in phrases:
-        if phrase == "None":
-            continue
-        category = PHRASE_MAP.get(phrase, "")
-        
-        # Positive categories
-        if category in ["OVERALL_UNBEATEN", "HOME_UNBEATEN", "AWAY_UNBEATEN", "H2H_UNBEATEN",
-                        "OVERALL_WON", "HOME_WON", "AWAY_WON", "H2H_WON", "H2H_WON_BY_2", "AWAY_WON_BY_3",
-                        "OVERALL_SCORED_1", "OVERALL_SCORED_2",
-                        "OVERALL_CLEAN_SHEET", "HOME_CLEAN_SHEET", "H2H_CLEAN_SHEET",
-                        "HT_UNDEFEATED", "HT_FT_WINS"]:
-            positives += 1
-        
-        # Negative categories
-        elif category in ["OVERALL_WINLESS", "HOME_WINLESS", "AWAY_WINLESS",
-                          "OVERALL_LOST", "HOME_LOST", "AWAY_LOST", "AWAY_LOST_BY_2",
-                          "OVERALL_SCORED_NONE", "HOME_SCORED_NONE", "AWAY_SCORED_NONE",
-                          "OVERALL_CONCEDED_1", "HT_LOST", "H2H_LOST", "H2H_WINLESS"]:
-            negatives += 1
+    avg_btts = (home_btts + away_btts) / 2 if home_btts > 0 and away_btts > 0 else h2h.btts_percent
     
-    return positives, negatives, positives - negatives
+    reasoning.append(f"📊 **Expected Goals Calculation:** {expected_goals}")
+    reasoning.append(f"   • H2H Over 1.5: {h2h.over15_percent}%")
+    reasoning.append(f"   • H2H Over 2.5: {h2h.over25_percent}%")
+    reasoning.append(f"   • H2H BTTS: {h2h.btts_percent}%")
+    reasoning.append(f"   • League average: {league.avg_goals_per_game} goals/game")
+    
+    # Decision logic
+    if expected_goals < 2.10:
+        if league.is_low_scoring or avg_btts < 35:
+            prediction = "Strong Under 2.5"
+            confidence = "High"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} < 2.10 + low scoring context → Strong Under 2.5**")
+        else:
+            prediction = "Lean Under 2.5"
+            confidence = "Medium"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} < 2.10 → Lean Under 2.5**")
+    
+    elif expected_goals <= 2.50:
+        # 2.10 - 2.50 range
+        if h2h.over25_percent > 50:
+            prediction = "Over 2.5"
+            confidence = "Medium"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + H2H Over 2.5 {h2h.over25_percent}% > 50% → Over 2.5**")
+        elif h2h.over15_percent > 65:
+            prediction = "Over 1.5"
+            confidence = "High"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + H2H Over 1.5 {h2h.over15_percent}% > 65% → Over 1.5**")
+        elif league.is_low_scoring or avg_btts < 35:
+            prediction = "Under 2.5"
+            confidence = "Medium"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + low scoring context → Under 2.5**")
+        else:
+            prediction = "Lean Over 1.5"
+            confidence = "Low"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} → Lean Over 1.5 (safest)**")
+    
+    elif expected_goals <= 2.90:
+        # 2.51 - 2.90 range
+        if h2h.over25_percent > 50:
+            prediction = "Strong Over 2.5"
+            confidence = "High"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} + H2H Over 2.5 {h2h.over25_percent}% > 50% → Strong Over 2.5**")
+        else:
+            prediction = "Lean Over 1.5"
+            confidence = "Medium"
+            reasoning.append(f"\n✅ **Expected Goals {expected_goals} → Lean Over 1.5**")
+    
+    else:  # > 2.90
+        prediction = "Strong Over 2.5"
+        confidence = "High"
+        reasoning.append(f"\n✅ **Expected Goals {expected_goals} > 2.90 → Strong Over 2.5**")
+    
+    return PredictionResult(
+        prediction=prediction,
+        confidence=confidence,
+        expected_goals=expected_goals,
+        reasoning=reasoning,
+        details=details
+    )
+
+
+# ============================================================================
+# UI HELPER FUNCTIONS
+# ============================================================================
+def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> TeamStats:
+    """Create input fields for team statistics"""
+    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("<p style='text-align:center; font-weight:700;'>🏠 HOME</p>", unsafe_allow_html=True)
+        avg_scored_home = st.number_input(
+            "Avg Goals Scored",
+            min_value=0.0, max_value=5.0, value=1.2, step=0.05,
+            key=f"{key_prefix}_scored_home",
+            help="Average goals scored when playing at home"
+        )
+        avg_conceded_home = st.number_input(
+            "Avg Goals Conceded",
+            min_value=0.0, max_value=5.0, value=1.0, step=0.05,
+            key=f"{key_prefix}_conceded_home",
+            help="Average goals conceded when playing at home"
+        )
+    
+    with col2:
+        st.markdown("<p style='text-align:center; font-weight:700;'>✈️ AWAY</p>", unsafe_allow_html=True)
+        avg_scored_away = st.number_input(
+            "Avg Goals Scored",
+            min_value=0.0, max_value=5.0, value=0.8, step=0.05,
+            key=f"{key_prefix}_scored_away",
+            help="Average goals scored when playing away"
+        )
+        avg_conceded_away = st.number_input(
+            "Avg Goals Conceded",
+            min_value=0.0, max_value=5.0, value=1.4, step=0.05,
+            key=f"{key_prefix}_conceded_away",
+            help="Average goals conceded when playing away"
+        )
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        btts_percent = st.number_input(
+            "BTTS %",
+            min_value=0, max_value=100, value=45, step=5,
+            key=f"{key_prefix}_btts",
+            help="Percentage of matches where both teams scored"
+        )
+    with col4:
+        st.markdown(" ")  # placeholder
+    
+    return TeamStats(
+        name=team_name,
+        avg_scored_home=avg_scored_home,
+        avg_scored_away=avg_scored_away,
+        avg_conceded_home=avg_conceded_home,
+        avg_conceded_away=avg_conceded_away,
+        btts_percent=float(btts_percent)
+    )
+
+
+def h2h_stats_input() -> H2HStats:
+    """Create input fields for head-to-head statistics"""
+    st.markdown("<div class='h2h-table'><p style='font-weight:700; text-align:center;'>📊 HEAD-TO-HEAD HISTORY</p>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        matches_played = st.number_input(
+            "Matches Played",
+            min_value=0, max_value=20, value=6, step=1,
+            key="h2h_matches"
+        )
+    with col2:
+        over15_percent = st.number_input(
+            "Over 1.5 %",
+            min_value=0, max_value=100, value=55, step=5,
+            key="h2h_over15",
+            help="Percentage of H2H matches with 2+ goals"
+        )
+    with col3:
+        over25_percent = st.number_input(
+            "Over 2.5 %",
+            min_value=0, max_value=100, value=35, step=5,
+            key="h2h_over25",
+            help="Percentage of H2H matches with 3+ goals"
+        )
+    
+    col4, col5 = st.columns(2)
+    with col4:
+        btts_percent = st.number_input(
+            "BTTS %",
+            min_value=0, max_value=100, value=40, step=5,
+            key="h2h_btts",
+            help="Percentage of H2H matches where both teams scored"
+        )
+    with col5:
+        avg_goals = st.number_input(
+            "Avg Goals",
+            min_value=0.0, max_value=6.0, value=2.2, step=0.1,
+            key="h2h_avg_goals",
+            help="Average total goals in H2H matches"
+        )
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    return H2HStats(
+        matches_played=matches_played,
+        over15_percent=float(over15_percent),
+        over25_percent=float(over25_percent),
+        btts_percent=float(btts_percent),
+        avg_goals=avg_goals
+    )
+
+
+def league_context_input() -> LeagueContext:
+    """Create dropdown for league selection"""
+    league_names = list(LEAGUE_CONTEXT.keys())
+    selected_league = st.selectbox(
+        "League / Competition",
+        options=league_names,
+        index=0,
+        key="league_select",
+        help="Select the league to apply baseline averages"
+    )
+    return LEAGUE_CONTEXT[selected_league]
 
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
-
 def main():
-    st.title("⚽ Winner Predictor")
-    st.caption("Pick exact phrases from the preview. System handles duplicates.")
+    st.title("⚽ Expected Goals Predictor")
+    st.caption("Over/Under System | Statistical Model | 100% Data-Driven")
+    
+    st.markdown("""
+    <div class="league-note">
+        📊 <strong>Formula:</strong> Expected Goals = (Home_Scored_Avg + Away_Conceded_Avg + Away_Scored_Avg + Home_Conceded_Avg) / 2<br>
+        🎯 <strong>Thresholds:</strong> &lt;2.10 = Under | 2.10-2.50 = Lean | 2.51-2.90 = Over 1.5 | &gt;2.90 = Over 2.5
+    </div>
+    """, unsafe_allow_html=True)
     
     st.divider()
     
-    # Team names
+    # ========================================================================
+    # TEAM INPUTS
+    # ========================================================================
     col1, col2 = st.columns(2)
     with col1:
-        home_team = st.text_input("🏠 HOME TEAM", placeholder="e.g., Slavia Sofia II")
+        home_name = st.text_input("🏠 Home Team", "Home Team", key="home_name")
     with col2:
-        away_team = st.text_input("✈️ AWAY TEAM", placeholder="e.g., Rilski Sportist")
+        away_name = st.text_input("✈️ Away Team", "Away Team", key="away_name")
+    
+    st.divider()
+    
+    # Home Team Stats
+    st.subheader(f"🏠 {home_name} Statistics")
+    home_stats = team_stats_input(home_name, "home", is_home=True)
+    
+    st.divider()
+    
+    # Away Team Stats
+    st.subheader(f"✈️ {away_name} Statistics")
+    away_stats = team_stats_input(away_name, "away", is_home=False)
+    
+    st.divider()
+    
+    # Head-to-Head Stats
+    st.subheader("📊 Head-to-Head History")
+    h2h_stats = h2h_stats_input()
+    
+    st.divider()
+    
+    # League Context
+    st.subheader("🏆 League Context")
+    league_context = league_context_input()
     
     st.divider()
     
     # ========================================================================
-    # HOME TEAM STREAKS
+    # PREDICT BUTTON
     # ========================================================================
-    
-    st.markdown(f"### 📋 {home_team or 'HOME TEAM'}")
-    
-    if 'home_phrases' not in st.session_state:
-        st.session_state.home_phrases = []
-    
-    # Display existing streaks
-    for i, phrase in enumerate(st.session_state.home_phrases):
-        if phrase != "None":
-            st.markdown(f'<div class="streak-row">✅ {phrase}</div>', unsafe_allow_html=True)
-    
-    # Add new streak
-    col_add, col_remove = st.columns([3, 1])
-    with col_add:
-        new_phrase = st.selectbox(
-            "Add streak (select exact phrase from preview)",
-            options=["None"] + ALL_PHRASES,
-            key="home_new"
-        )
-    with col_remove:
-        if st.button("🗑 Remove last", key="home_remove"):
-            if st.session_state.home_phrases:
-                st.session_state.home_phrases.pop()
-            st.rerun()
-    
-    if st.button("➕ Add this streak", key="home_add"):
-        if new_phrase and new_phrase != "None":
-            st.session_state.home_phrases = add_streak(
-                st.session_state.home_phrases, new_phrase
-            )
-            st.rerun()
-    
-    st.divider()
-    
-    # ========================================================================
-    # AWAY TEAM STREAKS
-    # ========================================================================
-    
-    st.markdown(f"### 📋 {away_team or 'AWAY TEAM'}")
-    
-    if 'away_phrases' not in st.session_state:
-        st.session_state.away_phrases = []
-    
-    # Display existing streaks
-    for i, phrase in enumerate(st.session_state.away_phrases):
-        if phrase != "None":
-            st.markdown(f'<div class="streak-row">✅ {phrase}</div>', unsafe_allow_html=True)
-    
-    # Add new streak
-    col_add, col_remove = st.columns([3, 1])
-    with col_add:
-        new_phrase = st.selectbox(
-            "Add streak (select exact phrase from preview)",
-            options=["None"] + ALL_PHRASES,
-            key="away_new"
-        )
-    with col_remove:
-        if st.button("🗑 Remove last", key="away_remove"):
-            if st.session_state.away_phrases:
-                st.session_state.away_phrases.pop()
-            st.rerun()
-    
-    if st.button("➕ Add this streak", key="away_add"):
-        if new_phrase and new_phrase != "None":
-            st.session_state.away_phrases = add_streak(
-                st.session_state.away_phrases, new_phrase
-            )
-            st.rerun()
-    
-    st.divider()
-    
-    # ========================================================================
-    # PREDICT
-    # ========================================================================
-    
     if st.button("🔮 PREDICT", type="primary"):
-        if not home_team or not away_team:
-            st.error("❌ Please enter both team names")
+        # Calculate expected goals
+        expected_goals = calculate_expected_goals(home_stats, away_stats, is_home_match=True)
+        
+        # Make prediction
+        result = make_prediction(
+            expected_goals=expected_goals,
+            h2h=h2h_stats,
+            league=league_context,
+            home_btts=home_stats.btts_percent,
+            away_btts=away_stats.btts_percent
+        )
+        
+        # Display prediction card
+        if "Strong Over" in result.prediction:
+            pred_class = "prediction-strong-over"
+            pred_icon = "🔥"
+        elif "Lean Over" in result.prediction or "Over 1.5" in result.prediction or "Over 2.5" in result.prediction:
+            pred_class = "prediction-lean-over"
+            pred_icon = "📈"
+        elif "Strong Under" in result.prediction:
+            pred_class = "prediction-strong-under"
+            pred_icon = "❄️"
         else:
-            # Calculate scores
-            home_pos, home_neg, home_score = calculate_score_from_phrases(st.session_state.home_phrases)
-            away_pos, away_neg, away_score = calculate_score_from_phrases(st.session_state.away_phrases)
-            
-            # Determine favorite
-            if home_score > away_score:
-                favorite, underdog = home_team, away_team
-                fav_score, under_score = home_score, away_score
-                underdog_positives = away_pos
-                favorite_scored_none = any("Scored none" in p for p in st.session_state.away_phrases)
-            elif away_score > home_score:
-                favorite, underdog = away_team, home_team
-                fav_score, under_score = away_score, home_score
-                underdog_positives = home_pos
-                favorite_scored_none = any("Scored none" in p for p in st.session_state.home_phrases)
-            else:
-                favorite, underdog = None, None
-                fav_score = under_score = home_score
-                underdog_positives = 0
-                favorite_scored_none = False
-            
-            # Three situation logic
-            if favorite is None:
-                prediction = "⚠️ CAUTION"
-                detail = "No clear favorite (scores are equal)"
-                card_class = "bet-caution"
-                reason = f"Scores are equal: {home_team} {home_score} vs {away_team} {away_score}"
-            elif favorite_scored_none:
-                prediction = "⚠️ BET AGAINST FAVORITE"
-                detail = f"Draw or {underdog} win"
-                card_class = "bet-against"
-                reason = f"Situation C: {favorite} has 'Scored none' streak → Bet AGAINST"
-            elif underdog_positives >= 1:
-                prediction = "⚠️ BET AGAINST FAVORITE"
-                detail = f"Draw or {underdog} win"
-                card_class = "bet-against"
-                reason = f"Situation A: {underdog} has {underdog_positives} positive(s) → Clash → Bet AGAINST"
-            elif fav_score > under_score:
-                prediction = "✅ BET ON FAVORITE"
-                detail = f"{favorite} wins"
-                card_class = "bet-on"
-                reason = f"Situation B: {favorite} has higher score ({fav_score}) → Bet ON"
-            else:
-                prediction = "⚠️ CAUTION"
-                detail = "Consider Draw or Under 2.5"
-                card_class = "bet-caution"
-                reason = "No clear pattern"
-            
-            # Display
-            st.markdown(f"""
-            <div class="prediction-card {card_class}">
-                <div class="prediction-text">{prediction}</div>
-                <div class="prediction-detail">→ {detail}</div>
-                <div style="margin-top: 0.75rem; font-size: 0.75rem; color: #94a3b8;">📝 {reason}</div>
-                <div style="margin-top: 0.5rem; font-size: 0.7rem; color: #64748b;">
-                    📊 {home_team}: {home_pos} positives | {home_neg} negatives = Score {home_score}<br>
-                    📊 {away_team}: {away_pos} positives | {away_neg} negatives = Score {away_score}
-                </div>
+            pred_class = "prediction-lean-under"
+            pred_icon = "📉"
+        
+        st.markdown(f"""
+        <div class="prediction-card">
+            <div class="expected-goals">⚽ Expected Goals: {result.expected_goals}</div>
+            <div class="{pred_class}">{pred_icon} {result.prediction}</div>
+            <div style="margin-top: 0.5rem; font-size: 0.9rem; color: #94a3b8;">
+                Confidence: {result.confidence}
             </div>
-            """, unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display detailed reasoning
+        with st.expander("📋 Detailed Analysis", expanded=True):
+            for line in result.reasoning:
+                if "✅" in line:
+                    st.success(line)
+                elif "📊" in line:
+                    st.info(line)
+                else:
+                    st.write(line)
+        
+        # Display data table
+        with st.expander("📊 Data Summary", expanded=False):
+            data = {
+                "Metric": [
+                    f"{home_name} Avg Scored (Home)",
+                    f"{home_name} Avg Conceded (Home)",
+                    f"{away_name} Avg Scored (Away)",
+                    f"{away_name} Avg Conceded (Away)",
+                    "H2H Over 1.5%",
+                    "H2H Over 2.5%",
+                    "H2H BTTS%",
+                    "League Avg Goals/Game"
+                ],
+                "Value": [
+                    f"{home_stats.avg_scored_home}",
+                    f"{home_stats.avg_conceded_home}",
+                    f"{away_stats.avg_scored_away}",
+                    f"{away_stats.avg_conceded_away}",
+                    f"{h2h_stats.over15_percent}%",
+                    f"{h2h_stats.over25_percent}%",
+                    f"{h2h_stats.btts_percent}%",
+                    f"{league_context.avg_goals_per_game}"
+                ]
+            }
+            df = pd.DataFrame(data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
     
+    # Footer
     st.divider()
-    st.caption("""
-    **How to use:**
-    1. Read the match preview
-    2. For each streak you see, select the exact phrase from the dropdown
-    3. Click "Add this streak"
-    4. System automatically ignores duplicates (same meaning)
-    5. Repeat for all streaks in the preview
-    6. Click PREDICT
+    st.markdown("""
+    ### 📋 How to Use
     
-    **You don't need to think about what means what. Just pick what you see.**
+    1. Enter **Home Team** and **Away Team** names
+    2. Enter each team's **statistics**:
+       - Average goals scored at home / away
+       - Average goals conceded at home / away
+       - BTTS percentage (optional)
+    3. Enter **Head-to-Head** statistics:
+       - Over 1.5%, Over 2.5%, BTTS%, Avg Goals
+    4. Select the **League** for baseline context
+    5. Click **PREDICT**
+    
+    ### 📊 Decision Thresholds
+    
+    | Expected Goals | Prediction | Confidence Trigger |
+    |----------------|------------|---------------------|
+    | < 2.10 | Strong Under 2.5 | + low BTTS or low-scoring league |
+    | 2.10 – 2.50 | Lean Under 2.5 / Over 1.5 | Check H2H Over 1.5% > 65% |
+    | 2.51 – 2.90 | Lean Over 1.5 | Safe play |
+    | > 2.90 | Strong Over 2.5 | + H2H Over 2.5% > 50% |
+    
+    ### 🎯 Supporting Filters
+    
+    - H2H Over 1.5% > 65% → Over 1.5 is very safe
+    - H2H Over 2.5% > 50% → Over 2.5 likely
+    - League low-scoring (<2.0) → Under 2.5 lean
+    - BTTS% < 35% → Under 2.5 lean
     """)
-
 
 if __name__ == "__main__":
     main()
