@@ -1,5 +1,5 @@
 """
-Expected Goals Predictor - Over 2.5 / Under 2.5 Strict System
+Expected Goals Predictor - Over 2.5 / Under 2.5 Strict System with Checkmate Safeguards
 Based on statistical analysis of home/away averages, H2H history, and league context.
 
 Core Formula:
@@ -10,13 +10,19 @@ Input Rules:
 - Away Team: Use AWAY row only (Scored + Conceded)
 - Ignore the other numbers (the "double" stats are for reference only)
 
+Checkmate Safeguards (Red Flags):
+1. If Home team scores < 0.90 at home → Strong Under bias
+2. If Away team scores < 0.70 away → Strong Under bias
+3. If H2H has < 8 matches → Reduce confidence by one level
+4. If Expected Goals and H2H disagree strongly → Trust the lower one
+
 Strict Decision Rules (Follow in Order):
 1. Expected Goals < 2.20 → Under 2.5 (High)
 2. Expected Goals > 2.80 → Over 2.5 (High)
 3. Expected Goals 2.20 – 2.80 → Check H2H Over 2.5%
-4. H2H Over 2.5% > 50% → Over 2.5 (Medium-High)
+4. H2H Over 2.5% > 55% → Over 2.5 (Medium) + Checkmate may downgrade
 5. H2H Over 2.5% < 40% → Under 2.5 (Medium-High)
-6. H2H Over 2.5% 40-50% → Check BTTS%
+6. H2H Over 2.5% 40-55% → Check BTTS%
 7. BTTS% > 55% + Expected Goals > 2.40 → Over 2.5 (Medium)
 8. BTTS% < 40% → Under 2.5 (Medium)
 9. All else (borderline) → Under 2.5 (Low - default)
@@ -28,7 +34,7 @@ Secondary Suggestion (Over 1.5 only):
 import streamlit as st
 import pandas as pd
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 # ============================================================================
 # PAGE CONFIG
@@ -68,6 +74,11 @@ st.markdown("""
         font-weight: 800;
         color: #ef4444;
     }
+    .prediction-lean-over {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #fbbf24;
+    }
     .expected-goals {
         font-size: 2rem;
         font-weight: 800;
@@ -103,6 +114,15 @@ st.markdown("""
         color: #94a3b8;
         margin-top: 0.5rem;
     }
+    .checkmate-warning {
+        background: #7f1a1a;
+        border-left: 4px solid #ef4444;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        color: #fca5a5;
+    }
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
         border-radius: 16px;
@@ -114,11 +134,6 @@ st.markdown("""
         font-size: 1.2rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
-    }
-    .stat-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #fbbf24;
     }
     .h2h-table {
         background: #0f172a;
@@ -206,11 +221,22 @@ class LeagueContext:
 
 
 @dataclass
+class CheckmateFlags:
+    """Checkmate safeguard flags"""
+    home_scoring_low: bool = False      # Home scores < 0.90 at home
+    away_scoring_low: bool = False      # Away scores < 0.70 away
+    h2h_small_sample: bool = False      # H2H < 8 matches
+    exp_h2h_disagreement: bool = False  # Expected Goals and H2H disagree strongly
+    red_flags: List[str] = field(default_factory=list)
+
+
+@dataclass
 class PredictionResult:
-    main_bet: str  # "Over 2.5" or "Under 2.5"
+    main_bet: str  # "Over 2.5", "Lean Over 2.5", or "Under 2.5"
     confidence: str  # "High", "Medium-High", "Medium", "Low"
     secondary: Optional[str]  # "Over 1.5" or None
     expected_goals: float
+    checkmate: CheckmateFlags
     reasoning: list
     decision_path: list
 
@@ -239,40 +265,118 @@ LEAGUE_CONTEXT = {
 # CALCULATION FUNCTIONS
 # ============================================================================
 def calculate_expected_goals(home: TeamStats, away: TeamStats) -> float:
-    """
-    Calculate expected total goals using the correct 4 numbers:
-    - Home team's home scoring average
-    - Home team's home conceding average
-    - Away team's away scoring average
-    - Away team's away conceding average
-    """
+    """Calculate expected total goals using the correct 4 numbers"""
     expected = (home.avg_scored_home + away.avg_conceded_away + away.avg_scored_away + home.avg_conceded_home) / 2
     return round(expected, 2)
+
+
+def check_checkmate_flags(
+    home: TeamStats,
+    away: TeamStats,
+    h2h: H2HStats,
+    expected_goals: float
+) -> CheckmateFlags:
+    """Evaluate all Checkmate safeguard flags"""
+    red_flags = []
+    
+    # Flag 1: Home team scores < 0.90 at home
+    home_scoring_low = home.avg_scored_home < 0.90
+    if home_scoring_low:
+        red_flags.append(f"⚠️ Home team scores only {home.avg_scored_home:.2f} at home (< 0.90) → Strong Under bias")
+    
+    # Flag 2: Away team scores < 0.70 away
+    away_scoring_low = away.avg_scored_away < 0.70
+    if away_scoring_low:
+        red_flags.append(f"⚠️ Away team scores only {away.avg_scored_away:.2f} away (< 0.70) → Strong Under bias")
+    
+    # Flag 3: H2H sample size < 8 matches
+    h2h_small_sample = h2h.matches_played < 8
+    if h2h_small_sample:
+        red_flags.append(f"⚠️ H2H sample size only {h2h.matches_played} matches (< 8) → Reduce confidence")
+    
+    # Flag 4: Expected Goals and H2H disagree strongly
+    exp_h2h_disagreement = False
+    if expected_goals >= 2.40 and h2h.over25_percent < 40:
+        exp_h2h_disagreement = True
+        red_flags.append(f"⚠️ Expected Goals {expected_goals} suggests Over but H2H Over 2.5% = {h2h.over25_percent}% → Trust the lower (Under bias)")
+    elif expected_goals <= 2.30 and h2h.over25_percent > 55:
+        exp_h2h_disagreement = True
+        red_flags.append(f"⚠️ Expected Goals {expected_goals} suggests Under but H2H Over 2.5% = {h2h.over25_percent}% → Trust the lower (Under bias)")
+    
+    return CheckmateFlags(
+        home_scoring_low=home_scoring_low,
+        away_scoring_low=away_scoring_low,
+        h2h_small_sample=h2h_small_sample,
+        exp_h2h_disagreement=exp_h2h_disagreement,
+        red_flags=red_flags
+    )
+
+
+def apply_checkmate_to_prediction(
+    main_bet: str,
+    confidence: str,
+    checkmate: CheckmateFlags
+) -> Tuple[str, str]:
+    """Apply Checkmate safeguards to adjust prediction and confidence"""
+    
+    # If any red flags exist, adjust
+    if checkmate.red_flags:
+        # Strong Under bias triggers
+        if checkmate.home_scoring_low or checkmate.away_scoring_low:
+            if "Over" in main_bet:
+                main_bet = "Lean Over 2.5" if "Strong" not in main_bet else "Lean Over 2.5"
+                confidence = "Medium"
+            # Under bets remain but may have confidence adjusted
+        
+        # Small sample size reduces confidence
+        if checkmate.h2h_small_sample:
+            if confidence == "High":
+                confidence = "Medium-High"
+            elif confidence == "Medium-High":
+                confidence = "Medium"
+            elif confidence == "Medium":
+                confidence = "Low"
+        
+        # Disagreement: trust the lower (Under bias)
+        if checkmate.exp_h2h_disagreement:
+            if "Over" in main_bet:
+                main_bet = "Lean Over 2.5"
+                confidence = "Low"
+    
+    return main_bet, confidence
 
 
 def make_prediction(
     expected_goals: float,
     h2h: H2HStats,
     league: LeagueContext,
-    home_btts: float = 0.0,
-    away_btts: float = 0.0
+    home: TeamStats,
+    away: TeamStats
 ) -> PredictionResult:
     """
-    Make Over 2.5 / Under 2.5 prediction based on strict decision rules.
+    Make Over 2.5 / Under 2.5 prediction based on strict decision rules with Checkmate.
     """
     reasoning = []
     decision_path = []
     
-    avg_btts = (home_btts + away_btts) / 2 if home_btts > 0 and away_btts > 0 else h2h.btts_percent
+    avg_btts = (home.btts_percent + away.btts_percent) / 2
     
     reasoning.append(f"📊 **Input Summary:**")
     reasoning.append(f"   • Expected Goals: {expected_goals}")
     reasoning.append(f"   • H2H Over 2.5%: {h2h.over25_percent}%")
     reasoning.append(f"   • H2H Over 1.5%: {h2h.over15_percent}%")
     reasoning.append(f"   • H2H BTTS%: {h2h.btts_percent}%")
+    reasoning.append(f"   • {home.name} Home Scored: {home.avg_scored_home}")
+    reasoning.append(f"   • {away.name} Away Scored: {away.avg_scored_away}")
     reasoning.append(f"   • League avg: {league.avg_goals_per_game} goals/game")
-    reasoning.append(f"   • League low-scoring: {league.is_low_scoring}")
-    reasoning.append(f"   • Avg BTTS%: {avg_btts}%")
+    
+    # Calculate Checkmate flags
+    checkmate = check_checkmate_flags(home, away, h2h, expected_goals)
+    
+    if checkmate.red_flags:
+        reasoning.append(f"\n⚠️ **CHECKMATE SAFEGUARDS TRIGGERED:**")
+        for flag in checkmate.red_flags:
+            reasoning.append(f"   {flag}")
     
     # ========================================================================
     # STEP 1: Expected Goals < 2.20 → Under 2.5
@@ -290,11 +394,15 @@ def make_prediction(
             secondary = "Over 1.5"
             reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
         
+        # Apply Checkmate
+        main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+        
         return PredictionResult(
             main_bet=main_bet,
             confidence=confidence,
             secondary=secondary,
             expected_goals=expected_goals,
+            checkmate=checkmate,
             reasoning=reasoning,
             decision_path=decision_path
         )
@@ -310,11 +418,16 @@ def make_prediction(
         reasoning.append(f"   → **Over 2.5** (High confidence)")
         
         secondary = None
+        
+        # Apply Checkmate
+        main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+        
         return PredictionResult(
             main_bet=main_bet,
             confidence=confidence,
             secondary=secondary,
             expected_goals=expected_goals,
+            checkmate=checkmate,
             reasoning=reasoning,
             decision_path=decision_path
         )
@@ -327,21 +440,26 @@ def make_prediction(
     reasoning.append(f"   → Checking H2H Over 2.5%...")
     
     # ========================================================================
-    # STEP 4: H2H Over 2.5% > 50% → Over 2.5
+    # STEP 4: H2H Over 2.5% > 55% → Over 2.5
     # ========================================================================
-    if h2h.over25_percent > 50:
-        decision_path.append(f"Step 4: H2H Over 2.5% = {h2h.over25_percent}% > 50%")
+    if h2h.over25_percent > 55:
+        decision_path.append(f"Step 4: H2H Over 2.5% = {h2h.over25_percent}% > 55%")
         main_bet = "Over 2.5"
-        confidence = "Medium-High"
-        reasoning.append(f"\n✅ **STEP 4:** H2H Over 2.5% = {h2h.over25_percent}% > 50%")
-        reasoning.append(f"   → **Over 2.5** (Medium-High confidence)")
+        confidence = "Medium"
+        reasoning.append(f"\n✅ **STEP 4:** H2H Over 2.5% = {h2h.over25_percent}% > 55%")
+        reasoning.append(f"   → **Over 2.5** (Medium confidence)")
         
         secondary = None
+        
+        # Apply Checkmate (may downgrade to Lean Over)
+        main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+        
         return PredictionResult(
             main_bet=main_bet,
             confidence=confidence,
             secondary=secondary,
             expected_goals=expected_goals,
+            checkmate=checkmate,
             reasoning=reasoning,
             decision_path=decision_path
         )
@@ -361,20 +479,24 @@ def make_prediction(
             secondary = "Over 1.5"
             reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
         
+        # Apply Checkmate
+        main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+        
         return PredictionResult(
             main_bet=main_bet,
             confidence=confidence,
             secondary=secondary,
             expected_goals=expected_goals,
+            checkmate=checkmate,
             reasoning=reasoning,
             decision_path=decision_path
         )
     
     # ========================================================================
-    # STEP 6: H2H Over 2.5% between 40-50% → Go to Step 7
+    # STEP 6: H2H Over 2.5% between 40-55% → Go to Step 7
     # ========================================================================
-    decision_path.append(f"Step 6: H2H Over 2.5% = {h2h.over25_percent}% in range 40-50%")
-    reasoning.append(f"\n✅ **STEP 6:** H2H Over 2.5% = {h2h.over25_percent}% in range 40-50%")
+    decision_path.append(f"Step 6: H2H Over 2.5% = {h2h.over25_percent}% in range 40-55%")
+    reasoning.append(f"\n✅ **STEP 6:** H2H Over 2.5% = {h2h.over25_percent}% in range 40-55%")
     reasoning.append(f"   → Checking BTTS%...")
     
     # ========================================================================
@@ -388,11 +510,16 @@ def make_prediction(
         reasoning.append(f"   → **Over 2.5** (Medium confidence)")
         
         secondary = None
+        
+        # Apply Checkmate
+        main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+        
         return PredictionResult(
             main_bet=main_bet,
             confidence=confidence,
             secondary=secondary,
             expected_goals=expected_goals,
+            checkmate=checkmate,
             reasoning=reasoning,
             decision_path=decision_path
         )
@@ -412,11 +539,15 @@ def make_prediction(
             secondary = "Over 1.5"
             reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
         
+        # Apply Checkmate
+        main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+        
         return PredictionResult(
             main_bet=main_bet,
             confidence=confidence,
             secondary=secondary,
             expected_goals=expected_goals,
+            checkmate=checkmate,
             reasoning=reasoning,
             decision_path=decision_path
         )
@@ -435,11 +566,15 @@ def make_prediction(
         secondary = "Over 1.5"
         reasoning.append(f"\n📌 **Secondary:** Over 1.5 (H2H Over 1.5% = {h2h.over15_percent}% ≥ 65%)")
     
+    # Apply Checkmate
+    main_bet, confidence = apply_checkmate_to_prediction(main_bet, confidence, checkmate)
+    
     return PredictionResult(
         main_bet=main_bet,
         confidence=confidence,
         secondary=secondary,
         expected_goals=expected_goals,
+        checkmate=checkmate,
         reasoning=reasoning,
         decision_path=decision_path
     )
@@ -449,11 +584,7 @@ def make_prediction(
 # UI HELPER FUNCTIONS
 # ============================================================================
 def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> TeamStats:
-    """
-    Create input fields for team statistics.
-    For Home Team: Enter HOME stats only.
-    For Away Team: Enter AWAY stats only.
-    """
+    """Create input fields for team statistics - ONLY the relevant numbers"""
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
     if is_home:
@@ -463,15 +594,13 @@ def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> T
             avg_scored_home = st.number_input(
                 "🏠 Avg Goals Scored at HOME",
                 min_value=0.0, max_value=5.0, value=1.2, step=0.05,
-                key=f"{key_prefix}_scored_home",
-                help="Home team's average goals scored when playing at home"
+                key=f"{key_prefix}_scored_home"
             )
         with col2:
             avg_conceded_home = st.number_input(
                 "🏠 Avg Goals Conceded at HOME",
                 min_value=0.0, max_value=5.0, value=1.0, step=0.05,
-                key=f"{key_prefix}_conceded_home",
-                help="Home team's average goals conceded when playing at home"
+                key=f"{key_prefix}_conceded_home"
             )
         btts_percent = st.number_input(
             "BTTS % (Overall)",
@@ -493,15 +622,13 @@ def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> T
             avg_scored_away = st.number_input(
                 "✈️ Avg Goals Scored AWAY",
                 min_value=0.0, max_value=5.0, value=0.8, step=0.05,
-                key=f"{key_prefix}_scored_away",
-                help="Away team's average goals scored when playing away"
+                key=f"{key_prefix}_scored_away"
             )
         with col2:
             avg_conceded_away = st.number_input(
                 "✈️ Avg Goals Conceded AWAY",
                 min_value=0.0, max_value=5.0, value=1.4, step=0.05,
-                key=f"{key_prefix}_conceded_away",
-                help="Away team's average goals conceded when playing away"
+                key=f"{key_prefix}_conceded_away"
             )
         btts_percent = st.number_input(
             "BTTS % (Overall)",
@@ -573,15 +700,16 @@ def league_context_input() -> LeagueContext:
 # ============================================================================
 def main():
     st.title("⚽ Expected Goals Predictor")
-    st.caption("Over 2.5 / Under 2.5 Strict System | Corrected Input Logic")
+    st.caption("Over 2.5 / Under 2.5 Strict System with Checkmate Safeguards")
     
     st.markdown("""
     <div class="league-note">
         📊 <strong>Formula:</strong> Expected Goals = (Home_Scored_Home + Away_Conceded_Away + Away_Scored_Away + Home_Conceded_Home) / 2<br>
-        🎯 <strong>Correct Inputs:</strong><br>
-        &nbsp;&nbsp;&nbsp;• Home Team → Use <strong>HOME</strong> stats only<br>
-        &nbsp;&nbsp;&nbsp;• Away Team → Use <strong>AWAY</strong> stats only<br>
-        &nbsp;&nbsp;&nbsp;• Ignore the other numbers (the "double" stats are for reference only)
+        🛡️ <strong>Checkmate Safeguards:</strong><br>
+        &nbsp;&nbsp;&nbsp;• Home scores &lt; 0.90 at home → Strong Under bias<br>
+        &nbsp;&nbsp;&nbsp;• Away scores &lt; 0.70 away → Strong Under bias<br>
+        &nbsp;&nbsp;&nbsp;• H2H &lt; 8 matches → Reduce confidence<br>
+        &nbsp;&nbsp;&nbsp;• Expected Goals vs H2H disagree → Trust the lower
     </div>
     """, unsafe_allow_html=True)
     
@@ -600,14 +728,12 @@ def main():
     
     # Home Team Stats
     st.subheader(f"🏠 {home_name} (HOME Team)")
-    st.caption("Enter ONLY the HOME statistics for this team")
     home_stats = team_stats_input(home_name, "home", is_home=True)
     
     st.divider()
     
     # Away Team Stats
     st.subheader(f"✈️ {away_name} (AWAY Team)")
-    st.caption("Enter ONLY the AWAY statistics for this team")
     away_stats = team_stats_input(away_name, "away", is_home=False)
     
     st.divider()
@@ -628,7 +754,7 @@ def main():
     # PREDICT BUTTON
     # ========================================================================
     if st.button("🔮 PREDICT", type="primary"):
-        # Calculate expected goals using ONLY the correct 4 numbers
+        # Calculate expected goals
         expected_goals = calculate_expected_goals(home_stats, away_stats)
         
         # Make prediction
@@ -636,14 +762,18 @@ def main():
             expected_goals=expected_goals,
             h2h=h2h_stats,
             league=league_context,
-            home_btts=home_stats.btts_percent,
-            away_btts=away_stats.btts_percent
+            home=home_stats,
+            away=away_stats
         )
         
         # Display prediction card
         if "Over" in result.main_bet:
-            pred_class = "prediction-over"
-            pred_icon = "🔥"
+            if "Lean" in result.main_bet:
+                pred_class = "prediction-lean-over"
+                pred_icon = "📈"
+            else:
+                pred_class = "prediction-over"
+                pred_icon = "🔥"
         else:
             pred_class = "prediction-under"
             pred_icon = "❄️"
@@ -654,12 +784,17 @@ def main():
         if result.secondary:
             secondary_html = f'<div class="secondary">📌 Secondary: {result.secondary}</div>'
         
+        checkmate_html = ""
+        if result.checkmate.red_flags:
+            checkmate_html = '<div class="checkmate-warning">' + '<br>'.join(result.checkmate.red_flags) + '</div>'
+        
         st.markdown(f"""
         <div class="prediction-card">
             <div class="expected-goals">⚽ Expected Goals: {result.expected_goals}</div>
             <div class="{pred_class}">{pred_icon} {result.main_bet}</div>
             <div class="{confidence_class}">Confidence: {result.confidence}</div>
             {secondary_html}
+            {checkmate_html}
         </div>
         """, unsafe_allow_html=True)
         
@@ -675,7 +810,7 @@ def main():
             • {away_name} Avg Conceded AWAY: {away_stats.avg_conceded_away}<br>
             • {away_name} Avg Scored AWAY: {away_stats.avg_scored_away}<br>
             • {home_name} Avg Conceded at HOME: {home_stats.avg_conceded_home}<br>
-            <strong>= ({home_stats.avg_scored_home} + {away_stats.avg_conceded_away} + {away_stats.avg_scored_away} + {home_stats.avg_conceded_home}) / 2 = {expected_goals}</strong>
+            <strong>= ({home_stats.avg_scored_home} + {away_stats.avg_conceded_away} + {away_stats.avg_scored_away} + {home_stats.avg_conceded_home}) / 2 = {result.expected_goals}</strong>
             </div>
             """, unsafe_allow_html=True)
         
@@ -691,6 +826,8 @@ def main():
                     st.success(line)
                 elif "📌" in line:
                     st.info(line)
+                elif "⚠️" in line:
+                    st.warning(line)
                 else:
                     st.write(line)
         
@@ -706,9 +843,9 @@ def main():
                     "H2H Over 1.5%",
                     "H2H Over 2.5%",
                     "H2H BTTS%",
+                    "H2H Matches",
                     "Avg BTTS%",
-                    "League Avg Goals/Game",
-                    "Low Scoring League?"
+                    "League Avg Goals/Game"
                 ],
                 "Value": [
                     f"{home_stats.avg_scored_home}",
@@ -719,9 +856,9 @@ def main():
                     f"{h2h_stats.over15_percent}%",
                     f"{h2h_stats.over25_percent}%",
                     f"{h2h_stats.btts_percent}%",
+                    f"{h2h_stats.matches_played}",
                     f"{(home_stats.btts_percent + away_stats.btts_percent) / 2:.1f}%",
-                    f"{league_context.avg_goals_per_game}",
-                    "Yes" if league_context.is_low_scoring else "No"
+                    f"{league_context.avg_goals_per_game}"
                 ]
             }
             df = pd.DataFrame(data)
@@ -730,25 +867,28 @@ def main():
     # Footer
     st.divider()
     st.markdown("""
-    ### 📋 Strict Decision Rules (Follow in Order)
+    ### 📋 Strict Decision Rules with Checkmate Safeguards
     
-    | Step | Condition | Decision | Confidence |
-    |------|-----------|----------|------------|
-    | 1 | Expected Goals **< 2.20** | **Under 2.5** | High |
-    | 2 | Expected Goals **> 2.80** | **Over 2.5** | High |
-    | 3 | Expected Goals 2.20 – 2.80 | Go to Step 4 | - |
-    | 4 | H2H Over 2.5% **> 50%** | **Over 2.5** | Medium-High |
-    | 5 | H2H Over 2.5% **< 40%** | **Under 2.5** | Medium-High |
-    | 6 | H2H Over 2.5% 40–50% | Go to Step 7 | - |
-    | 7 | BTTS% > 55% + Exp Goals > 2.40 | **Over 2.5** | Medium |
-    | 8 | BTTS% < 40% | **Under 2.5** | Medium |
-    | 9 | All else (borderline) | **Under 2.5** (default) | Low |
+    | Step | Condition | Decision | Confidence | Checkmate Effect |
+    |------|-----------|----------|------------|------------------|
+    | 1 | Expected Goals **< 2.20** | **Under 2.5** | High | - |
+    | 2 | Expected Goals **> 2.80** | **Over 2.5** | High | - |
+    | 3 | Expected Goals 2.20 – 2.80 | Go to Step 4 | - | - |
+    | 4 | H2H Over 2.5% **> 55%** | **Over 2.5** | Medium | May downgrade to Lean |
+    | 5 | H2H Over 2.5% **< 40%** | **Under 2.5** | Medium-High | - |
+    | 6 | H2H Over 2.5% 40–55% | Go to Step 7 | - | - |
+    | 7 | BTTS% > 55% + Exp Goals > 2.40 | **Over 2.5** | Medium | May downgrade |
+    | 8 | BTTS% < 40% | **Under 2.5** | Medium | - |
+    | 9 | Borderline | **Under 2.5** (default) | Low | - |
     
-    ### 📌 Secondary Suggestion (Over 1.5)
+    ### 🛡️ Checkmate Safeguards (Red Flags)
     
-    Only suggested when:
-    - Expected Goals ≥ 2.20 **AND**
-    - H2H Over 1.5% ≥ 65%
+    | Condition | Effect |
+    |-----------|--------|
+    | Home team scores **< 0.90** at home | Strong Under bias → Downgrade Over bets |
+    | Away team scores **< 0.70** away | Strong Under bias → Downgrade Over bets |
+    | H2H sample size **< 8 matches** | Reduce confidence by one level |
+    | Expected Goals and H2H disagree strongly | Trust the lower (Under bias) |
     
     ### 🎯 Correct Input Rules
     
