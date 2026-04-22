@@ -1,38 +1,32 @@
 """
-Expected Goals Predictor - Final Professional Version
-Complete implementation with Two-Step Stability Trigger.
+Over 1.5 Goals Predictor - 3-Filter Strict System
+Based on statistical analysis of home/away SOT, scoring frequency, and clean sheet rates.
 
-STABILITY TRIGGER (HIGHEST PRIORITY - Bypasses all other logic):
-1. DEFENSIVE OUTLIER CHECK:
-   - IF Away_Conceded < 0.90 OR Home_Conceded < 0.75 → NO BET
-   
-2. NEGATIVE VOLATILITY CHECK (SCORING DROUGHT):
-   - IF Home_Scored_Last_3 == 0 OR Away_Scored_Last_3 == 0 → NO BET
+3-Filter Logic:
+- Filter 1: Combined SOT (Home SOT + Away SOT) ≥ 8.5
+- Filter 2: Both teams scoring frequency ≥ 80%
+- Filter 3: Both teams clean sheet rate ≤ 20%
 
-If Stability Trigger passes, then:
+Confidence Levels:
+- 3/3 Filters Pass → HIGH CONFIDENCE Over 1.5
+- 2/3 Filters Pass → MODERATE CONFIDENCE Over 1.5
+- 0-1/3 Filters Pass → AVOID / Under 1.5
 
-   Calculate Expected Goals = (Home_Scored_Home + Away_Conceded_Away + Away_Scored_Away + Home_Conceded_Home) / 2
-
-   IF Expected Goals > 2.20:
-       → OVER 1.5
-   ELSE IF Expected Goals < 2.20 AND League Avg < 2.00:
-       → UNDER 2.5
-   ELSE:
-       → NO BET
-
-Validated on 20+ matches with 100% accuracy.
+Tiebreaker (xG):
+- If 2/3 pass AND combined xG ≥ 2.4 → Upgrade to HIGH
+- If 2/3 pass AND combined xG < 2.0 → Downgrade to AVOID
 """
 
 import streamlit as st
 import pandas as pd
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List
 
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(
-    page_title="Expected Goals Predictor",
+    page_title="Over 1.5 Goals Predictor - 3-Filter System",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -56,34 +50,61 @@ st.markdown("""
         text-align: center;
         border: 1px solid #334155;
     }
-    .prediction-over15 {
-        font-size: 2rem;
+    .prediction-over {
+        font-size: 2.5rem;
         font-weight: 800;
         color: #10b981;
     }
-    .prediction-under25 {
-        font-size: 2rem;
+    .prediction-avoid {
+        font-size: 2.5rem;
         font-weight: 800;
         color: #ef4444;
     }
-    .prediction-nobet {
+    .prediction-moderate {
         font-size: 2rem;
         font-weight: 700;
-        color: #f59e0b;
+        color: #fbbf24;
     }
     .expected-goals {
-        font-size: 2rem;
+        font-size: 1.5rem;
         font-weight: 800;
         color: #60a5fa;
         margin: 0.5rem 0;
     }
-    .confidence {
+    .confidence-high {
         font-size: 1rem;
         font-weight: 600;
         color: #10b981;
         margin-top: 0.5rem;
     }
-    .stability-warning {
+    .confidence-moderate {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #fbbf24;
+        margin-top: 0.5rem;
+    }
+    .confidence-avoid {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #ef4444;
+        margin-top: 0.5rem;
+    }
+    .secondary {
+        font-size: 0.9rem;
+        color: #94a3b8;
+        margin-top: 0.5rem;
+    }
+    .filter-pass {
+        background: #064e3b;
+        border-left: 4px solid #10b981;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        color: #a7f3d0;
+        text-align: left;
+    }
+    .filter-fail {
         background: #7f1a1a;
         border-left: 4px solid #ef4444;
         padding: 0.75rem;
@@ -104,15 +125,6 @@ st.markdown("""
         font-size: 1.2rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
-    }
-    .league-note {
-        background: #0f172a;
-        border-radius: 8px;
-        padding: 0.5rem;
-        text-align: center;
-        font-size: 0.8rem;
-        color: #94a3b8;
-        margin-bottom: 1rem;
     }
     .input-note {
         background: #1e293b;
@@ -159,318 +171,312 @@ st.markdown("""
 # ============================================================================
 @dataclass
 class TeamStats:
+    """Team statistical data - using home/away splits only"""
     name: str
-    avg_scored_home: float = 0.0
-    avg_conceded_home: float = 0.0
-    avg_scored_away: float = 0.0
-    avg_conceded_away: float = 0.0
-    goals_last_3: int = 0
+    # For Home Team (use HOME stats only)
+    home_sot: float = 0.0           # Shots on target per game at home
+    home_scoring_freq: float = 0.0  # % of home matches they scored in
+    home_cs_rate: float = 0.0       # % of home matches they kept a clean sheet
+    home_xg: float = 0.0            # Expected goals per game at home (optional)
+    
+    # For Away Team (use AWAY stats only)
+    away_sot: float = 0.0           # Shots on target per game away
+    away_scoring_freq: float = 0.0  # % of away matches they scored in
+    away_cs_rate: float = 0.0       # % of away matches they kept a clean sheet
+    away_xg: float = 0.0            # Expected goals per game away (optional)
+    
+    # Flags to indicate which stats are being used
+    is_home: bool = True
 
 
 @dataclass
-class LeagueContext:
-    name: str
-    avg_goals_per_game: float
-
-
-@dataclass
-class StabilityResult:
-    passed: bool
-    reason: str
-    details: List[str]
+class FilterResults:
+    """Results of the 3 filters"""
+    filter1_pass: bool  # Combined SOT ≥ 8.5
+    filter2_pass: bool  # Both teams scoring frequency ≥ 80%
+    filter3_pass: bool  # Both teams clean sheet rate ≤ 20%
+    combined_sot: float
+    home_scoring_freq: float
+    away_scoring_freq: float
+    home_cs_rate: float
+    away_cs_rate: float
+    combined_xg: Optional[float] = None
 
 
 @dataclass
 class PredictionResult:
-    bet: str
-    confidence: str
-    expected_goals: float
-    stability: StabilityResult
+    main_bet: str  # "Over 1.5", "MODERATE Over 1.5", or "AVOID / Under 1.5"
+    confidence: str  # "High", "Moderate", "Avoid"
+    filters_passed: int
+    filter_results: FilterResults
     reasoning: List[str]
-
-
-# ============================================================================
-# LEAGUE DATA
-# ============================================================================
-LEAGUE_CONTEXT = {
-    "Egyptian Premier League": LeagueContext("Egyptian Premier League", 1.83),
-    "Argentine Liga Profesional": LeagueContext("Argentine Liga Profesional", 1.91),
-    "Nigerian Premier League": LeagueContext("Nigerian Premier League", 1.97),
-    "Persian Gulf Pro League": LeagueContext("Persian Gulf Pro League", 1.98),
-    "Ethiopian Premier League": LeagueContext("Ethiopian Premier League", 1.80),
-    "Armenian Premier League": LeagueContext("Armenian Premier League", 2.54),
-    "Indian Super League": LeagueContext("Indian Super League", 2.47),
-    "Czech FNL": LeagueContext("Czech FNL", 2.69),
-    "Italian Primavera": LeagueContext("Italian Primavera", 2.70),
-    "Indonesian Super League": LeagueContext("Indonesian Super League", 2.73),
-    "Saudi First Division": LeagueContext("Saudi First Division", 2.93),
-    "Polish 1. Liga": LeagueContext("Polish 1. Liga", 2.93),
-    "Turkish U19": LeagueContext("Turkish U19", 3.01),
-    "Bahrain First Division": LeagueContext("Bahrain First Division", 3.05),
-    "Venezuelan Primera": LeagueContext("Venezuelan Primera", 2.53),
-    "Brazil Women": LeagueContext("Brazil Women", 2.69),
-    "Paraguayan Division": LeagueContext("Paraguayan Division", 2.41),
-    "Premier League": LeagueContext("Premier League", 2.93),
-    "Default": LeagueContext("Default", 2.50),
-}
-
-
-# ============================================================================
-# STABILITY TRIGGER FUNCTIONS
-# ============================================================================
-def check_defensive_outlier(home: TeamStats, away: TeamStats) -> Tuple[bool, List[str]]:
-    """
-    DEFENSIVE OUTLIER CHECK:
-    IF Away_Conceded < 0.90 OR Home_Conceded < 0.75 → NO BET
-    """
-    triggered = False
-    reasons = []
-    
-    if away.avg_conceded_away < 0.90:
-        triggered = True
-        reasons.append(f"Away team concedes only {away.avg_conceded_away:.2f} per away game (< 0.90)")
-    
-    if home.avg_conceded_home < 0.75:
-        triggered = True
-        reasons.append(f"Home team concedes only {home.avg_conceded_home:.2f} at home (< 0.75)")
-    
-    return triggered, reasons
-
-
-def check_scoring_drought(home: TeamStats, away: TeamStats) -> Tuple[bool, List[str]]:
-    """
-    NEGATIVE VOLATILITY CHECK (SCORING DROUGHT):
-    IF Home_Scored_Last_3 == 0 OR Away_Scored_Last_3 == 0 → NO BET
-    """
-    triggered = False
-    reasons = []
-    
-    if home.goals_last_3 == 0:
-        triggered = True
-        reasons.append(f"Home team scored 0 goals in last 3 matches (scoring drought)")
-    
-    if away.goals_last_3 == 0:
-        triggered = True
-        reasons.append(f"Away team scored 0 goals in last 3 matches (scoring drought)")
-    
-    return triggered, reasons
-
-
-def check_stability(home: TeamStats, away: TeamStats) -> StabilityResult:
-    """
-    Unified Stability Trigger - Highest Priority
-    """
-    all_details = []
-    
-    # Check 1: Defensive Outlier
-    def_triggered, def_reasons = check_defensive_outlier(home, away)
-    if def_triggered:
-        return StabilityResult(
-            passed=False,
-            reason="DEFENSIVE OUTLIER",
-            details=def_reasons
-        )
-    
-    # Check 2: Scoring Drought
-    drought_triggered, drought_reasons = check_scoring_drought(home, away)
-    if drought_triggered:
-        return StabilityResult(
-            passed=False,
-            reason="NEGATIVE VOLATILITY (SCORING DROUGHT)",
-            details=drought_reasons
-        )
-    
-    return StabilityResult(
-        passed=True,
-        reason="Stability Trigger Passed",
-        details=["All stability checks passed"]
-    )
+    decision_path: List[str]
 
 
 # ============================================================================
 # CALCULATION FUNCTIONS
 # ============================================================================
-def calculate_expected_goals(home: TeamStats, away: TeamStats) -> float:
-    """Calculate expected total goals using the correct 4 numbers"""
-    expected = (home.avg_scored_home + away.avg_conceded_away + away.avg_scored_away + home.avg_conceded_home) / 2
-    return round(expected, 2)
+def calculate_combined_sot(home: TeamStats, away: TeamStats) -> float:
+    """Calculate combined shots on target"""
+    home_sot = home.home_sot if home.is_home else home.away_sot
+    away_sot = away.away_sot if not away.is_home else away.home_sot
+    return round(home_sot + away_sot, 2)
+
+
+def calculate_combined_xg(home: TeamStats, away: TeamStats) -> Optional[float]:
+    """Calculate combined xG if available"""
+    home_xg = home.home_xg if home.is_home else home.away_xg
+    away_xg = away.away_xg if not away.is_home else away.home_xg
+    
+    if home_xg > 0 and away_xg > 0:
+        return round(home_xg + away_xg, 2)
+    return None
+
+
+def evaluate_filters(
+    home: TeamStats,
+    away: TeamStats
+) -> FilterResults:
+    """Evaluate all 3 filters"""
+    
+    # Get the correct stats based on home/away
+    home_sot = home.home_sot if home.is_home else home.away_sot
+    away_sot = away.away_sot if not away.is_home else away.home_sot
+    combined_sot = home_sot + away_sot
+    
+    home_scoring_freq = home.home_scoring_freq if home.is_home else home.away_scoring_freq
+    away_scoring_freq = away.away_scoring_freq if not away.is_home else away.home_scoring_freq
+    
+    home_cs_rate = home.home_cs_rate if home.is_home else home.away_cs_rate
+    away_cs_rate = away.away_cs_rate if not away.is_home else away.home_cs_rate
+    
+    # Filter 1: Combined SOT ≥ 8.5
+    filter1_pass = combined_sot >= 8.5
+    
+    # Filter 2: Both teams scoring frequency ≥ 80%
+    filter2_pass = home_scoring_freq >= 80.0 and away_scoring_freq >= 80.0
+    
+    # Filter 3: Both teams clean sheet rate ≤ 20%
+    filter3_pass = home_cs_rate <= 20.0 and away_cs_rate <= 20.0
+    
+    # Combined xG (if available)
+    combined_xg = None
+    if home.home_xg > 0 and away.away_xg > 0:
+        home_xg = home.home_xg if home.is_home else home.away_xg
+        away_xg = away.away_xg if not away.is_home else away.home_xg
+        combined_xg = home_xg + away_xg
+    
+    return FilterResults(
+        filter1_pass=filter1_pass,
+        filter2_pass=filter2_pass,
+        filter3_pass=filter3_pass,
+        combined_sot=combined_sot,
+        home_scoring_freq=home_scoring_freq,
+        away_scoring_freq=away_scoring_freq,
+        home_cs_rate=home_cs_rate,
+        away_cs_rate=away_cs_rate,
+        combined_xg=combined_xg
+    )
 
 
 def make_prediction(
-    expected_goals: float,
-    league: LeagueContext,
     home: TeamStats,
-    away: TeamStats,
-    stability: StabilityResult
+    away: TeamStats
 ) -> PredictionResult:
     """
-    Make prediction based on the validated logic.
-    Only called if Stability Trigger passes.
+    Make Over 1.5 Goals prediction based on 3-Filter logic.
     """
     reasoning = []
+    decision_path = []
     
-    reasoning.append(f"📊 Expected Goals: {expected_goals}")
-    reasoning.append(f"📊 League Average: {league.avg_goals_per_game}")
+    # Evaluate filters
+    filters = evaluate_filters(home, away)
     
-    # ========================================================================
-    # OVER 1.5 CHECK
-    # ========================================================================
-    if expected_goals > 2.20:
-        reasoning.append(f"\n✅ Expected Goals {expected_goals} > 2.20")
-        reasoning.append(f"   → BET OVER 1.5")
-        reasoning.append(f"   • Validated on 10/10 matches (100%)")
+    filters_passed = sum([
+        filters.filter1_pass,
+        filters.filter2_pass,
+        filters.filter3_pass
+    ])
+    
+    reasoning.append(f"📊 **Input Summary:**")
+    reasoning.append(f"   • Combined SOT: {filters.combined_sot} (Threshold: ≥8.5)")
+    reasoning.append(f"   • {home.name} Scoring Frequency: {filters.home_scoring_freq}% (Threshold: ≥80%)")
+    reasoning.append(f"   • {away.name} Scoring Frequency: {filters.away_scoring_freq}% (Threshold: ≥80%)")
+    reasoning.append(f"   • {home.name} Clean Sheet Rate: {filters.home_cs_rate}% (Threshold: ≤20%)")
+    reasoning.append(f"   • {away.name} Clean Sheet Rate: {filters.away_cs_rate}% (Threshold: ≤20%)")
+    
+    if filters.combined_xg:
+        reasoning.append(f"   • Combined xG: {filters.combined_xg} (Tiebreaker threshold: ≥2.4)")
+    
+    # Display filter results
+    reasoning.append(f"\n📋 **3-Filter Results:**")
+    
+    if filters.filter1_pass:
+        reasoning.append(f"   ✅ Filter 1 PASS: Combined SOT {filters.combined_sot} ≥ 8.5")
+    else:
+        reasoning.append(f"   ❌ Filter 1 FAIL: Combined SOT {filters.combined_sot} < 8.5")
+    
+    if filters.filter2_pass:
+        reasoning.append(f"   ✅ Filter 2 PASS: Both scoring frequencies ≥ 80%")
+    else:
+        reasoning.append(f"   ❌ Filter 2 FAIL: {home.name} {filters.home_scoring_freq}% / {away.name} {filters.away_scoring_freq}%")
+    
+    if filters.filter3_pass:
+        reasoning.append(f"   ✅ Filter 3 PASS: Both clean sheet rates ≤ 20%")
+    else:
+        reasoning.append(f"   ❌ Filter 3 FAIL: {home.name} {filters.home_cs_rate}% / {away.name} {filters.away_cs_rate}%")
+    
+    reasoning.append(f"\n📊 **Filters Passed: {filters_passed}/3**")
+    
+    # Determine base prediction
+    if filters_passed == 3:
+        decision_path.append("3 of 3 filters passed")
+        main_bet = "Over 1.5"
+        confidence = "High"
+        reasoning.append(f"\n✅ **VERDICT:** {filters_passed}/3 filters passed → **OVER 1.5** (HIGH CONFIDENCE)")
         
-        return PredictionResult(
-            bet="Over 1.5",
-            confidence="High",
-            expected_goals=expected_goals,
-            stability=stability,
-            reasoning=reasoning
-        )
-    
-    # ========================================================================
-    # UNDER 2.5 CHECK
-    # ========================================================================
-    if expected_goals < 2.20 and league.avg_goals_per_game < 2.00:
-        reasoning.append(f"\n✅ Expected Goals {expected_goals} < 2.20 AND League Avg {league.avg_goals_per_game} < 2.00")
-        reasoning.append(f"   → BET UNDER 2.5")
-        reasoning.append(f"   • Validated on 2/2 matches (100%)")
+    elif filters_passed == 2:
+        decision_path.append("2 of 3 filters passed - checking tiebreaker")
         
-        return PredictionResult(
-            bet="Under 2.5",
-            confidence="High",
-            expected_goals=expected_goals,
-            stability=stability,
-            reasoning=reasoning
-        )
-    
-    # ========================================================================
-    # NO BET
-    # ========================================================================
-    reasoning.append(f"\n⚠️ No betting condition met:")
-    if expected_goals <= 2.20:
-        reasoning.append(f"   • Expected Goals {expected_goals} <= 2.20")
-    if league.avg_goals_per_game >= 2.00:
-        reasoning.append(f"   • League Avg {league.avg_goals_per_game} >= 2.00")
-    reasoning.append(f"   → NO BET")
+        # Apply xG tiebreaker
+        if filters.combined_xg:
+            if filters.combined_xg >= 2.4:
+                main_bet = "Over 1.5"
+                confidence = "High"
+                reasoning.append(f"\n✅ **TIEBREAKER:** Combined xG {filters.combined_xg} ≥ 2.4 → Upgrade to HIGH CONFIDENCE")
+                reasoning.append(f"   → **OVER 1.5** (HIGH CONFIDENCE)")
+            elif filters.combined_xg < 2.0:
+                main_bet = "AVOID / Under 1.5"
+                confidence = "Avoid"
+                reasoning.append(f"\n⚠️ **TIEBREAKER:** Combined xG {filters.combined_xg} < 2.0 → Downgrade to AVOID")
+                reasoning.append(f"   → **AVOID / UNDER 1.5**")
+            else:
+                main_bet = "Over 1.5"
+                confidence = "Moderate"
+                reasoning.append(f"\n🟡 **VERDICT:** {filters_passed}/3 filters passed → **OVER 1.5** (MODERATE CONFIDENCE)")
+                reasoning.append(f"   (xG {filters.combined_xg} in 2.0-2.4 range - no upgrade/downgrade)")
+        else:
+            # No xG data available
+            main_bet = "Over 1.5"
+            confidence = "Moderate"
+            reasoning.append(f"\n🟡 **VERDICT:** {filters_passed}/3 filters passed → **OVER 1.5** (MODERATE CONFIDENCE)")
+            reasoning.append(f"   (xG data not available for tiebreaker)")
+        
+    else:  # 0 or 1 filter passed
+        decision_path.append(f"{filters_passed} of 3 filters passed - insufficient")
+        main_bet = "AVOID / Under 1.5"
+        confidence = "Avoid"
+        reasoning.append(f"\n🔴 **VERDICT:** Only {filters_passed}/3 filters passed → **AVOID / UNDER 1.5**")
+        reasoning.append(f"   (Statistical risk of low-scoring match)")
     
     return PredictionResult(
-        bet="No bet",
-        confidence="Low",
-        expected_goals=expected_goals,
-        stability=stability,
-        reasoning=reasoning
+        main_bet=main_bet,
+        confidence=confidence,
+        filters_passed=filters_passed,
+        filter_results=filters,
+        reasoning=reasoning,
+        decision_path=decision_path
     )
 
 
 # ============================================================================
 # UI HELPER FUNCTIONS
 # ============================================================================
-def team_stats_input(team_name: str, key_prefix: str, is_home: bool = True) -> TeamStats:
-    """Create input fields for team statistics"""
-    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
+def home_team_stats_input(team_name: str) -> TeamStats:
+    """Create input fields for HOME team (using HOME stats only)"""
+    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name} (HOME Team)</span></div>", unsafe_allow_html=True)
+    st.markdown("<div class='input-note'>📌 Enter HOME team's HOME stats only (last 5-10 matches)</div>", unsafe_allow_html=True)
     
-    if is_home:
-        st.markdown("<div class='input-note'>📌 Enter HOME team's HOME stats only</div>", unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            avg_scored_home = st.number_input(
-                "🏠 Avg Goals Scored at HOME",
-                min_value=0.0, max_value=5.0, value=1.2, step=0.05,
-                key=f"{key_prefix}_scored_home"
-            )
-        with col2:
-            avg_conceded_home = st.number_input(
-                "🏠 Avg Goals Conceded at HOME",
-                min_value=0.0, max_value=5.0, value=1.0, step=0.05,
-                key=f"{key_prefix}_conceded_home"
-            )
-        
-        st.markdown("<div class='input-note'>📌 Goals scored in last 3 matches (for drought detection)</div>", unsafe_allow_html=True)
-        goals_last_3 = st.number_input(
-            "⚽ Goals Scored in Last 3 Matches",
-            min_value=0, max_value=20, value=3, step=1,
-            key=f"{key_prefix}_goals_last_3",
-            help="Total goals scored in the last 3 matches. Enter 0 if the team is in a scoring drought."
+    col1, col2 = st.columns(2)
+    with col1:
+        home_sot = st.number_input(
+            "🎯 Shots on Target per game (HOME)",
+            min_value=0.0, max_value=15.0, value=4.5, step=0.1,
+            key=f"{team_name}_home_sot"
         )
-        
-        return TeamStats(
-            name=team_name,
-            avg_scored_home=avg_scored_home,
-            avg_conceded_home=avg_conceded_home,
-            avg_scored_away=0.0,
-            avg_conceded_away=0.0,
-            goals_last_3=goals_last_3
+        home_scoring_freq = st.number_input(
+            "✅ Scoring Frequency % (HOME) - Scored in % of matches",
+            min_value=0, max_value=100, value=80, step=5,
+            key=f"{team_name}_home_scoring_freq"
         )
-    else:
-        st.markdown("<div class='input-note'>📌 Enter AWAY team's AWAY stats only</div>", unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            avg_scored_away = st.number_input(
-                "✈️ Avg Goals Scored AWAY",
-                min_value=0.0, max_value=5.0, value=0.8, step=0.05,
-                key=f"{key_prefix}_scored_away"
-            )
-        with col2:
-            avg_conceded_away = st.number_input(
-                "✈️ Avg Goals Conceded AWAY",
-                min_value=0.0, max_value=5.0, value=1.4, step=0.05,
-                key=f"{key_prefix}_conceded_away"
-            )
-        
-        st.markdown("<div class='input-note'>📌 Goals scored in last 3 matches (for drought detection)</div>", unsafe_allow_html=True)
-        goals_last_3 = st.number_input(
-            "⚽ Goals Scored in Last 3 Matches",
-            min_value=0, max_value=20, value=3, step=1,
-            key=f"{key_prefix}_goals_last_3",
-            help="Total goals scored in the last 3 matches. Enter 0 if the team is in a scoring drought."
+    with col2:
+        home_cs_rate = st.number_input(
+            "🧤 Clean Sheet Rate % (HOME) - Conceded 0 in % of matches",
+            min_value=0, max_value=100, value=15, step=5,
+            key=f"{team_name}_home_cs_rate"
         )
-        
-        return TeamStats(
-            name=team_name,
-            avg_scored_home=0.0,
-            avg_conceded_home=0.0,
-            avg_scored_away=avg_scored_away,
-            avg_conceded_away=avg_conceded_away,
-            goals_last_3=goals_last_3
+        home_xg = st.number_input(
+            "📊 xG per game (HOME) - Optional (0 if unknown)",
+            min_value=0.0, max_value=5.0, value=0.0, step=0.05,
+            key=f"{team_name}_home_xg"
         )
-
-
-def league_context_input() -> LeagueContext:
-    """Create dropdown for league selection"""
-    league_names = list(LEAGUE_CONTEXT.keys())
-    selected_league = st.selectbox(
-        "League / Competition",
-        options=league_names,
-        index=0,
-        key="league_select"
+    
+    return TeamStats(
+        name=team_name,
+        home_sot=home_sot,
+        home_scoring_freq=float(home_scoring_freq),
+        home_cs_rate=float(home_cs_rate),
+        home_xg=home_xg,
+        is_home=True
     )
-    return LEAGUE_CONTEXT[selected_league]
+
+
+def away_team_stats_input(team_name: str) -> TeamStats:
+    """Create input fields for AWAY team (using AWAY stats only)"""
+    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name} (AWAY Team)</span></div>", unsafe_allow_html=True)
+    st.markdown("<div class='input-note'>📌 Enter AWAY team's AWAY stats only (last 5-10 matches)</div>", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        away_sot = st.number_input(
+            "🎯 Shots on Target per game (AWAY)",
+            min_value=0.0, max_value=15.0, value=4.0, step=0.1,
+            key=f"{team_name}_away_sot"
+        )
+        away_scoring_freq = st.number_input(
+            "✅ Scoring Frequency % (AWAY) - Scored in % of matches",
+            min_value=0, max_value=100, value=75, step=5,
+            key=f"{team_name}_away_scoring_freq"
+        )
+    with col2:
+        away_cs_rate = st.number_input(
+            "🧤 Clean Sheet Rate % (AWAY) - Conceded 0 in % of matches",
+            min_value=0, max_value=100, value=20, step=5,
+            key=f"{team_name}_away_cs_rate"
+        )
+        away_xg = st.number_input(
+            "📊 xG per game (AWAY) - Optional (0 if unknown)",
+            min_value=0.0, max_value=5.0, value=0.0, step=0.05,
+            key=f"{team_name}_away_xg"
+        )
+    
+    return TeamStats(
+        name=team_name,
+        away_sot=away_sot,
+        away_scoring_freq=float(away_scoring_freq),
+        away_cs_rate=float(away_cs_rate),
+        away_xg=away_xg,
+        is_home=False
+    )
 
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("⚽ Expected Goals Predictor")
-    st.caption("Final Professional Version | Two-Step Stability Trigger | 100% Validated")
+    st.title("⚽ Over 1.5 Goals Predictor")
+    st.caption("3-Filter Strict System: SOT + Scoring Frequency + Clean Sheet Rate")
     
     st.markdown("""
-    <div class="league-note">
-        🛡️ <strong>STABILITY TRIGGER (HIGHEST PRIORITY - Bypasses all other logic):</strong><br>
-        <br>
-        <strong>1. DEFENSIVE OUTLIER CHECK:</strong><br>
-        &nbsp;&nbsp;&nbsp;• Away Conceded &lt; 0.90 OR Home Conceded &lt; 0.75 → <strong>NO BET</strong><br>
-        &nbsp;&nbsp;&nbsp;• Reason: Teams with elite defense are fragile. One goal breaks their structure.<br>
-        <br>
-        <strong>2. NEGATIVE VOLATILITY CHECK (SCORING DROUGHT):</strong><br>
-        &nbsp;&nbsp;&nbsp;• Home_Scored_Last_3 == 0 OR Away_Scored_Last_3 == 0 → <strong>NO BET</strong><br>
-        &nbsp;&nbsp;&nbsp;• Reason: A team that hasn't scored in 3+ matches has a "broken" seasonal average.<br>
-        <br>
-        <strong>If Stability Trigger passes, then:</strong><br>
-        &nbsp;&nbsp;&nbsp;• Expected Goals > 2.20 → <strong>Over 1.5</strong><br>
-        &nbsp;&nbsp;&nbsp;• Expected Goals &lt; 2.20 AND League Avg &lt; 2.00 → <strong>Under 2.5</strong><br>
-        &nbsp;&nbsp;&nbsp;• Otherwise → <strong>No bet</strong>
+    <div class="step-box">
+    <strong>🎯 3-Filter Logic:</strong><br>
+    • <strong>Filter 1:</strong> Combined SOT (Home + Away) ≥ 8.5<br>
+    • <strong>Filter 2:</strong> Both teams scoring frequency ≥ 80%<br>
+    • <strong>Filter 3:</strong> Both teams clean sheet rate ≤ 20%<br><br>
+    <strong>Confidence Levels:</strong><br>
+    • 3/3 PASS → 🔥 HIGH CONFIDENCE Over 1.5<br>
+    • 2/3 PASS → 🟡 MODERATE CONFIDENCE Over 1.5 (xG tiebreaker may upgrade/downgrade)<br>
+    • 0-1/3 PASS → 🔴 AVOID / Under 1.5
     </div>
     """, unsafe_allow_html=True)
     
@@ -481,192 +487,161 @@ def main():
     # ========================================================================
     col1, col2 = st.columns(2)
     with col1:
-        home_name = st.text_input("🏠 Home Team", "Home Team", key="home_name")
+        home_name = st.text_input("🏠 Home Team Name", "Home Team", key="home_name")
     with col2:
-        away_name = st.text_input("✈️ Away Team", "Away Team", key="away_name")
+        away_name = st.text_input("✈️ Away Team Name", "Away Team", key="away_name")
     
     st.divider()
     
     # Home Team Stats
-    st.subheader(f"🏠 {home_name} (HOME Team)")
-    home_stats = team_stats_input(home_name, "home", is_home=True)
+    st.subheader(f"🏠 {home_name} - HOME STATS ONLY")
+    home_stats = home_team_stats_input(home_name)
     
     st.divider()
     
     # Away Team Stats
-    st.subheader(f"✈️ {away_name} (AWAY Team)")
-    away_stats = team_stats_input(away_name, "away", is_home=False)
-    
-    st.divider()
-    
-    # League Context
-    st.subheader("🏆 League Context")
-    league_context = league_context_input()
+    st.subheader(f"✈️ {away_name} - AWAY STATS ONLY")
+    away_stats = away_team_stats_input(away_name)
     
     st.divider()
     
     # ========================================================================
     # PREDICT BUTTON
     # ========================================================================
-    if st.button("🔮 PREDICT", type="primary"):
-        # Step 1: Check Stability Trigger
-        stability = check_stability(home_stats, away_stats)
+    if st.button("🔮 PREDICT Over 1.5 Goals", type="primary"):
+        # Make prediction
+        result = make_prediction(home_stats, away_stats)
         
-        # Display stability warning if failed
-        if not stability.passed:
-            st.markdown(f"""
-            <div class="stability-warning">
-            <strong>🛡️ STABILITY TRIGGER FAILED: {stability.reason}</strong><br>
-            { '<br>'.join(stability.details) }
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Display prediction card with NO BET
-            st.markdown(f"""
-            <div class="prediction-card">
-                <div class="prediction-nobet">⏸️ NO BET</div>
-                <div class="confidence">Confidence: High (Stability Trigger)</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Display detailed reasoning
-            with st.expander("📋 Stability Trigger Details", expanded=True):
-                st.markdown(f"""
-                <div class="step-box">
-                <strong>Why this is a NO BET:</strong><br>
-                • {stability.reason}<br>
-                • {'<br>• '.join(stability.details)}<br>
-                <br>
-                <strong>The Stability Trigger overrides all other calculations.</strong> Even if Expected Goals suggest a bet, 
-                the match is too unpredictable due to defensive outliers or scoring droughts.
-                </div>
-                """, unsafe_allow_html=True)
-            
+        # Display prediction card
+        if "Over 1.5" in result.main_bet and "MODERATE" not in result.main_bet and "AVOID" not in result.main_bet:
+            pred_class = "prediction-over"
+            pred_icon = "🔥"
+        elif "MODERATE" in result.main_bet or (result.main_bet == "Over 1.5" and result.confidence == "Moderate"):
+            pred_class = "prediction-moderate"
+            pred_icon = "🟡"
         else:
-            # Step 2: Calculate Expected Goals
-            expected_goals = calculate_expected_goals(home_stats, away_stats)
+            pred_class = "prediction-avoid"
+            pred_icon = "🔴"
+        
+        confidence_class = f"confidence-{result.confidence.lower()}"
+        
+        st.markdown(f"""
+        <div class="prediction-card">
+            <div class="{pred_class}">{pred_icon} {result.main_bet}</div>
+            <div class="{confidence_class}">Confidence: {result.confidence}</div>
+            <div class="secondary">Filters Passed: {result.filters_passed}/3</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display filter details
+        with st.expander("📋 Filter Details", expanded=True):
+            f = result.filter_results
             
-            # Step 3: Make prediction
-            result = make_prediction(expected_goals, league_context, home_stats, away_stats, stability)
-            
-            # Display prediction card
-            if result.bet == "Over 1.5":
-                pred_class = "prediction-over15"
-                pred_icon = "📈"
-            elif result.bet == "Under 2.5":
-                pred_class = "prediction-under25"
-                pred_icon = "❄️"
+            if f.filter1_pass:
+                st.markdown(f'<div class="filter-pass">✅ FILTER 1 PASS: Combined SOT = {f.combined_sot} ≥ 8.5</div>', unsafe_allow_html=True)
             else:
-                pred_class = "prediction-nobet"
-                pred_icon = "⏸️"
+                st.markdown(f'<div class="filter-fail">❌ FILTER 1 FAIL: Combined SOT = {f.combined_sot} < 8.5</div>', unsafe_allow_html=True)
             
-            st.markdown(f"""
-            <div class="prediction-card">
-                <div class="expected-goals">⚽ Expected Goals: {result.expected_goals}</div>
-                <div class="{pred_class}">{pred_icon} {result.bet}</div>
-                <div class="confidence">Confidence: {result.confidence}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            if f.filter2_pass:
+                st.markdown(f'<div class="filter-pass">✅ FILTER 2 PASS: {home_stats.name} {f.home_scoring_freq}% / {away_stats.name} {f.away_scoring_freq}% (Both ≥80%)</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="filter-fail">❌ FILTER 2 FAIL: {home_stats.name} {f.home_scoring_freq}% / {away_stats.name} {f.away_scoring_freq}% (Need both ≥80%)</div>', unsafe_allow_html=True)
             
-            # Display the 4 numbers used
-            with st.expander("📐 Calculation Details", expanded=True):
-                st.markdown(f"""
-                <div class="step-box">
-                <strong>Formula:</strong> (Home_Scored_Home + Away_Conceded_Away + Away_Scored_Away + Home_Conceded_Home) / 2
-                </div>
-                <div class="step-box">
-                <strong>Numbers used:</strong><br>
-                • {home_name} Avg Scored at HOME: {home_stats.avg_scored_home}<br>
-                • {away_name} Avg Conceded AWAY: {away_stats.avg_conceded_away}<br>
-                • {away_name} Avg Scored AWAY: {away_stats.avg_scored_away}<br>
-                • {home_name} Avg Conceded at HOME: {home_stats.avg_conceded_home}<br>
-                <strong>= ({home_stats.avg_scored_home} + {away_stats.avg_conceded_away} + {away_stats.avg_scored_away} + {home_stats.avg_conceded_home}) / 2 = {result.expected_goals}</strong>
-                </div>
-                """, unsafe_allow_html=True)
+            if f.filter3_pass:
+                st.markdown(f'<div class="filter-pass">✅ FILTER 3 PASS: {home_stats.name} {f.home_cs_rate}% / {away_stats.name} {f.away_cs_rate}% (Both ≤20%)</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="filter-fail">❌ FILTER 3 FAIL: {home_stats.name} {f.home_cs_rate}% / {away_stats.name} {f.away_cs_rate}% (Need both ≤20%)</div>', unsafe_allow_html=True)
             
-            # Display detailed reasoning
-            with st.expander("📋 Detailed Reasoning", expanded=True):
-                for line in result.reasoning:
-                    if "✅" in line:
-                        st.success(line)
-                    elif "⚠️" in line:
-                        st.warning(line)
-                    else:
-                        st.write(line)
-            
-            # Display data table
-            with st.expander("📈 Data Summary", expanded=False):
-                data = {
-                    "Metric": [
-                        f"{home_name} Avg Scored (HOME)",
-                        f"{home_name} Avg Conceded (HOME)",
-                        f"{home_name} Goals Last 3",
-                        f"{away_name} Avg Scored (AWAY)",
-                        f"{away_name} Avg Conceded (AWAY)",
-                        f"{away_name} Goals Last 3",
-                        "Expected Goals",
-                        "League Avg Goals/Game",
-                        "Stability Trigger",
-                        "Bet"
-                    ],
-                    "Value": [
-                        f"{home_stats.avg_scored_home}",
-                        f"{home_stats.avg_conceded_home}",
-                        f"{home_stats.goals_last_3}",
-                        f"{away_stats.avg_scored_away}",
-                        f"{away_stats.avg_conceded_away}",
-                        f"{away_stats.goals_last_3}",
-                        f"{expected_goals}",
-                        f"{league_context.avg_goals_per_game}",
-                        "✅ Passed",
-                        f"{result.bet}"
-                    ]
-                }
-                df = pd.DataFrame(data)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+            if f.combined_xg:
+                st.markdown(f'<div class="step-box">📊 Combined xG (Tiebreaker): {f.combined_xg}</div>', unsafe_allow_html=True)
+        
+        # Display detailed reasoning
+        with st.expander("📊 Detailed Analysis", expanded=False):
+            for line in result.reasoning:
+                if "✅" in line:
+                    st.success(line)
+                elif "🟡" in line:
+                    st.warning(line)
+                elif "🔴" in line or "❌" in line:
+                    st.error(line)
+                elif "⚠️" in line:
+                    st.warning(line)
+                else:
+                    st.write(line)
+        
+        # Display data table
+        with st.expander("📈 Data Summary", expanded=False):
+            data = {
+                "Metric": [
+                    f"{home_stats.name} - SOT (HOME)",
+                    f"{away_stats.name} - SOT (AWAY)",
+                    "Combined SOT",
+                    f"{home_stats.name} - Scoring Frequency (HOME)",
+                    f"{away_stats.name} - Scoring Frequency (AWAY)",
+                    f"{home_stats.name} - Clean Sheet Rate (HOME)",
+                    f"{away_stats.name} - Clean Sheet Rate (AWAY)",
+                ],
+                "Value": [
+                    f"{home_stats.home_sot}",
+                    f"{away_stats.away_sot}",
+                    f"{result.filter_results.combined_sot}",
+                    f"{result.filter_results.home_scoring_freq}%",
+                    f"{result.filter_results.away_scoring_freq}%",
+                    f"{result.filter_results.home_cs_rate}%",
+                    f"{result.filter_results.away_cs_rate}%",
+                ],
+                "Threshold": [
+                    "-",
+                    "-",
+                    "≥ 8.5",
+                    "≥ 80%",
+                    "≥ 80%",
+                    "≤ 20%",
+                    "≤ 20%",
+                ],
+                "Pass?": [
+                    "-",
+                    "-",
+                    "✅" if result.filter_results.filter1_pass else "❌",
+                    "✅" if result.filter_results.filter2_pass else "❌",
+                    "✅" if result.filter_results.filter2_pass else "❌",
+                    "✅" if result.filter_results.filter3_pass else "❌",
+                    "✅" if result.filter_results.filter3_pass else "❌",
+                ]
+            }
+            df = pd.DataFrame(data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
     
     # Footer
     st.divider()
     st.markdown("""
-    ### 📋 Final Validated Rules (Priority Order)
+    ### 📋 3-Filter Decision Rules
     
-    | Priority | Condition | Bet | Validation |
-    |----------|-----------|-----|------------|
-    | **1** | Away Conceded < 0.90 OR Home Conceded < 0.75 | **NO BET** | Defensive outlier |
-    | **2** | Home_Scored_Last_3 == 0 OR Away_Scored_Last_3 == 0 | **NO BET** | Scoring drought |
-    | **3** | Expected Goals > 2.20 | **Over 1.5** | 10/10 (100%) |
-    | **4** | Expected Goals < 2.20 AND League Avg < 2.00 | **Under 2.5** | 2/2 (100%) |
-    | **5** | Otherwise | **NO BET** | - |
+    | Filters Passed | Verdict | Confidence |
+    |----------------|---------|------------|
+    | **3 of 3** | **Over 1.5** | HIGH 🔥 |
+    | **2 of 3** | **Over 1.5** | MODERATE 🟡 |
+    | **2 of 3 + xG ≥ 2.4** | **Over 1.5** | HIGH (Upgraded) 🔥 |
+    | **2 of 3 + xG < 2.0** | **AVOID / Under 1.5** | AVOID (Downgraded) 🔴 |
+    | **0-1 of 3** | **AVOID / Under 1.5** | AVOID 🔴 |
     
-    ### 🛡️ Stability Trigger Explained
+    ### 🎯 Critical Input Rules
     
-    **Defensive Outlier:**
-    - Home team conceding < 0.75 at home → Defensive fortress (fragile)
-    - Away team conceding < 0.90 away → Defensive outlier (fragile)
+    | Team | Use These Stats Only |
+    |------|---------------------|
+    | **Home Team** | HOME SOT + HOME Scoring Frequency + HOME Clean Sheet Rate |
+    | **Away Team** | AWAY SOT + AWAY Scoring Frequency + AWAY Clean Sheet Rate |
     
-    **Scoring Drought:**
-    - Any team scoring 0 goals in last 3 matches → Seasonal average is "broken"
+    ### 📊 Data Source
     
-    **Why this works:** These matches are unpredictable (0-0 draws or 4-3 blowouts). The Stability Trigger protects your bankroll.
+    All stats should be based on **last 5-10 matches** (minimum 5 matches for statistical significance).
     
-    ### 🎯 How to Use
+    ### 🛡️ When to AVOID
     
-    1. Enter **Home Team** and **Away Team** names
-    2. Enter Home Team's **HOME** stats (goals scored + conceded)
-    3. Enter Home Team's **Goals in Last 3 Matches** (total)
-    4. Enter Away Team's **AWAY** stats (goals scored + conceded)
-    5. Enter Away Team's **Goals in Last 3 Matches** (total)
-    6. Select the **League** from the dropdown
-    7. Click **PREDICT**
-    
-    ### ✅ Validation Summary
-    
-    - Total matches tested: 20+
-    - Stability Trigger captures: 6/6 problem matches (100%)
-    - Over 1.5 bets: 10/10 correct (100%)
-    - Under 2.5 bets: 2/2 correct (100%)
-    
-    **Overall accuracy on all decisions: 100%**
+    - Combined SOT < 8.5 (most important filter)
+    - Either team scores in < 80% of matches
+    - Either team keeps clean sheets in > 20% of matches
+    - 2 filters pass but xG < 2.0 (downgrade to AVOID)
     """)
 
 if __name__ == "__main__":
