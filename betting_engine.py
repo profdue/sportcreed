@@ -5,15 +5,17 @@ Story-Driven Predictions with Data-Aware Confidence
 LAYER 1: Sample Validator
 LAYER 2: Shape Classifier  
 LAYER 3: Story Matcher
-LAYER 4: Bet Generator (DATA-AWARE - checks metrics per bet)
-LAYER 5: Confidence Assigner (tier adjustments)
+LAYER 4: Bet Generator (DATA-AWARE)
+LAYER 5: Confidence Assigner
 
 OUTPUT: Story Narrative + Data-Justified Bets + Risk Notes + Scoreline Range
+
+UI: Light background with dark text. Dark cards with light text.
 """
 
 import streamlit as st
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 
 # ============================================================================
 # PAGE CONFIG
@@ -26,7 +28,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CSS STYLES - WHITE TEXT ON DARK BACKGROUND
+# CSS STYLES - Light background, dark text. Dark cards with light text.
 # ============================================================================
 st.markdown("""
 <style>
@@ -35,6 +37,8 @@ st.markdown("""
         padding-bottom: 2rem;
         max-width: 1100px;
     }
+    
+    /* Story card - dark background, white text */
     .story-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border-radius: 24px;
@@ -43,9 +47,11 @@ st.markdown("""
         border-left: 6px solid #f59e0b;
         color: #ffffff;
     }
-    .story-card div {
+    .story-card div, .story-card p, .story-card span, .story-card strong {
         color: #ffffff;
     }
+    
+    /* Bet card - dark background, white text */
     .bet-card {
         background: #1e293b;
         border-radius: 12px;
@@ -56,28 +62,33 @@ st.markdown("""
         align-items: center;
         color: #ffffff;
     }
-    .bet-card div {
+    .bet-card div, .bet-card p, .bet-card span {
         color: #ffffff;
     }
+    
     .tier-1 { border-left: 4px solid #10b981; }
     .tier-2 { border-left: 4px solid #fbbf24; }
     .tier-3 { border-left: 4px solid #f97316; }
     .tier-4 { border-left: 4px solid #ef4444; }
     .tier-5 { border-left: 4px solid #64748b; }
+    
+    /* Avoid card - dark background, muted text */
     .avoid-card {
         background: #1e1e1e;
         border-radius: 12px;
         padding: 1rem;
         margin: 0.5rem 0;
         border-left: 4px solid #64748b;
-        opacity: 0.7;
-        color: #ffffff;
+        color: #94a3b8;
     }
+    
+    /* Team header - dark background, white text */
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
         border-radius: 16px;
         padding: 1rem;
         margin: 0.5rem 0;
+        color: #ffffff;
     }
     .team-name { 
         font-size: 1.2rem; 
@@ -85,6 +96,8 @@ st.markdown("""
         margin-bottom: 0.5rem; 
         color: #ffffff; 
     }
+    
+    /* Section header - dark background, white text */
     .section-header {
         background: #0f172a;
         border-radius: 8px;
@@ -94,7 +107,12 @@ st.markdown("""
         text-align: center;
         color: #ffffff;
     }
+    .section-header div {
+        color: #ffffff;
+    }
+    
     hr { margin: 1rem 0; }
+    
     .stButton button {
         background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
         color: white;
@@ -104,6 +122,8 @@ st.markdown("""
         border: none;
         width: 100%;
     }
+    
+    /* Risk note - dark red background, white text */
     .risk-note {
         background: #7f1a1a;
         border-left: 4px solid #ef4444;
@@ -113,6 +133,8 @@ st.markdown("""
         font-size: 0.85rem;
         color: #ffffff;
     }
+    
+    /* Coexistence note - dark green background, white text */
     .coexistence-note {
         background: #1a3a1a;
         border-left: 4px solid #10b981;
@@ -122,28 +144,37 @@ st.markdown("""
         font-size: 0.85rem;
         color: #ffffff;
     }
+    
+    /* Confidence colors (text only, not background) */
     .confidence-very-high { color: #10b981; font-weight: 700; }
     .confidence-high { color: #fbbf24; font-weight: 700; }
     .confidence-medium { color: #f97316; font-weight: 600; }
     .confidence-low { color: #ef4444; font-weight: 500; }
     .confidence-pass { color: #94a3b8; }
     
-    /* Force white text everywhere */
-    .stMarkdown, p, span, label, div, h1, h2, h3, h4, h5, h6 {
-        color: #ffffff;
+    /* Input fields - dark text on light background */
+    .stNumberInput input, .stTextInput input {
+        color: #0f172a !important;
+        background-color: #ffffff !important;
     }
-    .stNumberInput label, .stTextInput label, .stSelectbox label {
-        color: #ffffff !important;
+    
+    /* Subheaders and labels - dark text for light background */
+    .stSubheader, .stMarkdown h3, h3 {
+        color: #0f172a !important;
     }
-    .stCaption {
-        color: #94a3b8 !important;
+    
+    /* Metric section labels - dark and bold */
+    .metric-label {
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 0.95rem;
+        margin-top: 0.5rem;
     }
-    /* Keep specific colored elements */
-    .confidence-very-high { color: #10b981 !important; font-weight: 700; }
-    .confidence-high { color: #fbbf24 !important; font-weight: 700; }
-    .confidence-medium { color: #f97316 !important; font-weight: 600; }
-    .confidence-low { color: #ef4444 !important; font-weight: 500; }
-    .confidence-pass { color: #94a3b8 !important; }
+    
+    /* General text on light background stays dark */
+    p, li, span, div:not(.story-card):not(.bet-card):not(.avoid-card):not(.team-header):not(.section-header):not(.risk-note):not(.coexistence-note) {
+        color: inherit;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -209,6 +240,7 @@ def validate_sample(home_games: int, away_games: int) -> Dict:
     if min_games < 5:
         return {
             "valid": False,
+            "story": "INSUFFICIENT_DATA",
             "confidence_multiplier": 0.0,
             "warning": f"Only {min_games} games. Data is unreliable. PASS on all markets."
         }
@@ -436,12 +468,12 @@ def generate_bets_no_goal(home: TeamMetrics, away: TeamMetrics, multiplier: floa
     bets.append(Bet(f"{dead_team.name} Team Total O0.5", "PASS", 5, "PASS",
                     f"{dead_team.name} FTS {dead_team.fts_pct:.0f}%. Cannot bet them to score."))
     
-    # Dead team CS No if they concede enough
+    # Dead team CS No if concede is high
     if dead_team.conceded_05 >= 75:
         cs_tier = apply_sample_adjustment(3, multiplier)
         bets.append(Bet(f"{dead_team.name} Clean Sheet", "No", cs_tier,
                         get_confidence_label(cs_tier),
-                        f"{dead_team.name} concedes in {dead_team.conceded_05:.0f}% of games."))
+                        f"{dead_team.name} concedes in {dead_team.conceded_05:.0f}% of games. Even dead attacks concede sometimes."))
     
     return bets, avoid
 
@@ -453,11 +485,11 @@ def generate_bets_extreme_collapse(home: TeamMetrics, away: TeamMetrics, multipl
     collapse_team = home if home.defense_type == "EXTREME_COLLAPSE" else away
     opponent = away if home.defense_type == "EXTREME_COLLAPSE" else home
     
-    # CS No for collapse team
+    # CS No - LOCK
     cs_tier = apply_sample_adjustment(1, multiplier)
     bets.append(Bet(f"{collapse_team.name} Clean Sheet", "No", cs_tier,
                     get_confidence_label(cs_tier),
-                    f"{collapse_team.name} concedes in {collapse_team.conceded_05:.0f}% of games. CS only {collapse_team.cs_pct:.0f}%."))
+                    f"{collapse_team.name} concedes in {collapse_team.conceded_05:.0f}% of games. CS only {collapse_team.cs_pct:.0f}%. Lock."))
     
     # BTTS Yes
     if opponent.fts_pct <= 25:
@@ -476,17 +508,17 @@ def generate_bets_extreme_collapse(home: TeamMetrics, away: TeamMetrics, multipl
         over_reasoning = f"Combined Over 2.5 at {combined_over25:.0f}%. Collapse defense drives totals."
     else:
         over_tier = apply_sample_adjustment(3, multiplier)
-        over_reasoning = f"Combined Over 2.5 at {combined_over25:.0f}%."
+        over_reasoning = f"Combined Over 2.5 at {combined_over25:.0f}%. Collapse defense helps but opponent may not contribute."
     
     bets.append(Bet("Over 2.5 Goals", "Over 2.5", over_tier, get_confidence_label(over_tier), over_reasoning))
     
-    # Opponent Team Total O0.5
+    # Opponent O0.5
     opp_tier = apply_sample_adjustment(2, multiplier)
     bets.append(Bet(f"{opponent.name} Team Total O0.5", "Over 0.5", opp_tier,
                     get_confidence_label(opp_tier),
                     f"{opponent.name} faces a defense that concedes {collapse_team.conceded_05:.0f}% of games."))
     
-    # Opponent Team Total O1.5 if capable
+    # Opponent O1.5
     if opponent.scored_15 >= 35:
         opp15_tier = apply_sample_adjustment(3, multiplier)
         bets.append(Bet(f"{opponent.name} Team Total O1.5", "Over 1.5", opp15_tier,
@@ -503,7 +535,7 @@ def generate_bets_mismatch(home: TeamMetrics, away: TeamMetrics, multiplier: flo
     elite_team = home if home.conceded_05 < away.conceded_05 else away
     weak_team = away if home.conceded_05 < away.conceded_05 else home
     
-    # Elite defense CS Yes if strong enough
+    # Elite CS Yes
     if elite_team.cs_pct >= 35:
         cs_tier = apply_sample_adjustment(2, multiplier)
         bets.append(Bet(f"{elite_team.name} Clean Sheet", "Yes", cs_tier,
@@ -543,7 +575,7 @@ def generate_bets_collapse_vs_scorer(home: TeamMetrics, away: TeamMetrics, multi
     collapse_team = home if home.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] else away
     scorer_team = away if home.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] else home
     
-    # CS No for collapse team
+    # CS No for collapse
     cs_tier = apply_sample_adjustment(1 if collapse_team.defense_type == "EXTREME_COLLAPSE" else 2, multiplier)
     bets.append(Bet(f"{collapse_team.name} Clean Sheet", "No", cs_tier,
                     get_confidence_label(cs_tier),
@@ -552,7 +584,7 @@ def generate_bets_collapse_vs_scorer(home: TeamMetrics, away: TeamMetrics, multi
     # BTTS Yes
     btts_tier = apply_sample_adjustment(2, multiplier)
     bets.append(Bet("BTTS", "Yes", btts_tier, get_confidence_label(btts_tier),
-                    f"Collapse defense concedes. Scorer team scores in {scorer_team.scored_05:.0f}%."))
+                    f"Collapse defense concedes. Scorer team scores in {scorer_team.scored_05:.0f}%. Both should score."))
     
     # Over 2.5
     combined_over25 = (home.over_25 + away.over_25) / 2
@@ -561,14 +593,14 @@ def generate_bets_collapse_vs_scorer(home: TeamMetrics, away: TeamMetrics, multi
                     get_confidence_label(over_tier),
                     f"Collapse defense + scoring attack. Combined Over 2.5 at {combined_over25:.0f}%."))
     
-    # Scorer Team Total O1.5 if capable
+    # Scorer O1.5
     if scorer_team.scored_15 >= 30:
         opp15_tier = apply_sample_adjustment(3, multiplier)
         bets.append(Bet(f"{scorer_team.name} Team Total O1.5", "Over 1.5", opp15_tier,
                         get_confidence_label(opp15_tier),
-                        f"{scorer_team.name} scores 2+ in {scorer_team.scored_15:.0f}%."))
+                        f"{scorer_team.name} scores 2+ in {scorer_team.scored_15:.0f}%. Collapse defense concedes multiple."))
     
-    # Under 3.5 if ceiling exists
+    # Under 3.5 ceiling check
     if collapse_team.conceded_35 == 0 and scorer_team.scored_35 == 0:
         under35_tier = apply_sample_adjustment(2, multiplier)
         bets.append(Bet("Under 3.5 Goals", "Under 3.5", under35_tier,
@@ -582,7 +614,7 @@ def generate_bets_two_one_goal(home: TeamMetrics, away: TeamMetrics, multiplier:
     bets = []
     avoid = ["Over 2.5 Goals"]
     
-    # Under 3.5
+    # Under 3.5 - LOCK
     both_zero_35 = home.scored_35 == 0 and away.scored_35 == 0
     if both_zero_35:
         under35_tier = apply_sample_adjustment(1, multiplier)
@@ -604,7 +636,7 @@ def generate_bets_two_one_goal(home: TeamMetrics, away: TeamMetrics, multiplier:
     # BTTS No
     if home.fts_pct >= 45 or away.fts_pct >= 45:
         btts_tier = apply_sample_adjustment(2, multiplier)
-        btts_reasoning = "One team blanks regularly. Both attacks limited."
+        btts_reasoning = f"One team blanks regularly. Both attacks limited."
     else:
         btts_tier = apply_sample_adjustment(3, multiplier)
         btts_reasoning = "Both attacks score 1 typically. BTTS is a coin flip."
@@ -621,11 +653,11 @@ def generate_bets_one_goal_vs_collapse(home: TeamMetrics, away: TeamMetrics, mul
     one_goal_team = home if home.attack_type == "ONE_GOAL" else away
     collapse_team = away if home.attack_type == "ONE_GOAL" else home
     
-    # Collapse team CS No
+    # Collapse CS No
     cs_tier = apply_sample_adjustment(2, multiplier)
     bets.append(Bet(f"{collapse_team.name} Clean Sheet", "No", cs_tier,
                     get_confidence_label(cs_tier),
-                    f"{collapse_team.name} concedes {collapse_team.conceded_05:.0f}%."))
+                    f"{collapse_team.name} concedes {collapse_team.conceded_05:.0f}%. Defense collapses when breached."))
     
     # Under 3.5
     if one_goal_team.scored_35 == 0 and collapse_team.conceded_35 == 0:
@@ -640,7 +672,7 @@ def generate_bets_one_goal_vs_collapse(home: TeamMetrics, away: TeamMetrics, mul
         btts_reasoning = f"{one_goal_team.name} scores consistently. {collapse_team.name} concedes consistently."
     else:
         btts_tier = apply_sample_adjustment(3, multiplier)
-        btts_reasoning = "One-goal attack may score. Collapse defense should concede."
+        btts_reasoning = f"One-goal attack may score. Collapse defense should concede."
     
     bets.append(Bet("BTTS", "Yes", btts_tier, get_confidence_label(btts_tier), btts_reasoning))
     
@@ -705,7 +737,6 @@ def generate_bets_generic(home: TeamMetrics, away: TeamMetrics, multiplier: floa
 
 def generate_bets(home: TeamMetrics, away: TeamMetrics, story_name: str, 
                   sample_multiplier: float, matched_stories: List[Dict]) -> Tuple[List[Bet], List[str]]:
-    
     story_generators = {
         "NO_GOAL_PRESENT": generate_bets_no_goal,
         "EXTREME_COLLAPSE_DEFENSE": generate_bets_extreme_collapse,
@@ -930,7 +961,6 @@ def generate_warnings(matched_stories: List[Dict], home: TeamMetrics, away: Team
 # MAIN PREDICTION PIPELINE
 # ============================================================================
 def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisOutput:
-    # LAYER 1
     sample_validation = validate_sample(home.games_played, away.games_played)
     
     if not sample_validation["valid"]:
@@ -946,22 +976,18 @@ def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisOutput:
             coexistence_notes=[]
         )
     
-    # LAYER 2
     home = classify_team(home)
     away = classify_team(away)
     
-    # LAYER 3
     matched_stories = match_stories(home, away)
     primary_story = matched_stories[0]
     
-    # LAYER 4
     bets, avoid_bets = generate_bets(
         home, away, primary_story["name"], 
         sample_validation["confidence_multiplier"],
         matched_stories
     )
     
-    # LAYER 5
     bets = apply_xg_adjustments(bets, home, away)
     coexistence_notes = check_coexistence(bets)
     bets.sort(key=lambda x: x.tier)
@@ -994,13 +1020,13 @@ def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisOutput:
 
 
 # ============================================================================
-# UI: METRIC INPUT (GROUPED BY DATA SOURCE)
+# UI - INPUT SECTION (Organized by data source for easy pasting)
 # ============================================================================
 def metric_input(team_name: str, prefix: str) -> TeamMetrics:
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
     # BLOCK 1: SCORED PER GAME
-    st.markdown("**⚽ Scored Per Game**")
+    st.markdown('<p class="metric-label">⚽ Scored Per Game</p>', unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         scored_05 = st.number_input("Over 0.5 %", 0, 100, 80, 5, key=f"{prefix}_s05")
@@ -1011,8 +1037,8 @@ def metric_input(team_name: str, prefix: str) -> TeamMetrics:
     with col4:
         scored_35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_s35")
     
-    # BLOCK 2: CONCEDED / GAME
-    st.markdown("**🛡️ Conceded / Game**")
+    # BLOCK 2: CONCEDED PER GAME
+    st.markdown('<p class="metric-label">🛡️ Conceded / Game</p>', unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         conceded_05 = st.number_input("Over 0.5 %", 0, 100, 77, 5, key=f"{prefix}_c05")
@@ -1024,7 +1050,7 @@ def metric_input(team_name: str, prefix: str) -> TeamMetrics:
         conceded_35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_c35")
     
     # BLOCK 3: MATCH GOALS + CORE
-    st.markdown("**📊 Match Goals & Core**")
+    st.markdown('<p class="metric-label">📊 Match Goals & Core</p>', unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         btts = st.number_input("BTTS %", 0, 100, 54, 5, key=f"{prefix}_btts")
@@ -1046,7 +1072,7 @@ def metric_input(team_name: str, prefix: str) -> TeamMetrics:
         cs_pct = st.number_input("Clean Sheet %", 0, 100, 23, 5, key=f"{prefix}_cs")
     
     # BLOCK 4: CONTEXT
-    st.markdown("**🏟️ Context (Venue Splits)**")
+    st.markdown('<p class="metric-label">🏟️ Context (Venue Splits)</p>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     with col1:
         games_played = st.number_input("Games Played", 0, 50, 15, 1, key=f"{prefix}_gp")
@@ -1077,21 +1103,23 @@ def main():
     st.caption("Story Engine | 5-Layer Architecture | Data-Aware Confidence")
     
     st.markdown("""
-    <div class="section-header">🏗️ 5-LAYER PROCESSING ENGINE</div>
-    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;color:#ffffff;">
+    <div class="section-header">
+    <div>🏗️ 5-LAYER PROCESSING ENGINE</div>
+    </div>
+    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; color: #ffffff;">
+        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
             <strong>Layer 1</strong><br>Sample Validator
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;color:#ffffff;">
+        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
             <strong>Layer 2</strong><br>Shape Classifier
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;color:#ffffff;">
+        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
             <strong>Layer 3</strong><br>Story Matcher
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;color:#ffffff;">
+        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
             <strong>Layer 4</strong><br>Bet Generator
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;color:#ffffff;">
+        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
             <strong>Layer 5</strong><br>Confidence Assigner
         </div>
     </div>
@@ -1101,9 +1129,9 @@ def main():
     
     col1, col2 = st.columns(2)
     with col1:
-        home_name = st.text_input("🏠 Home Team", "AC Pisa 1909", key="home_name")
+        home_name = st.text_input("🏠 Home Team", "Home Team", key="home_name")
     with col2:
-        away_name = st.text_input("✈️ Away Team", "Genoa CFC", key="away_name")
+        away_name = st.text_input("✈️ Away Team", "Away Team", key="away_name")
     
     st.divider()
     
@@ -1195,6 +1223,7 @@ def main():
             for risk in result.risks:
                 st.markdown(f'<div class="risk-note">⚠️ {risk}</div>', unsafe_allow_html=True)
     
+    # FOOTER
     st.divider()
     st.markdown("""
     ### 📋 Story Catalog
