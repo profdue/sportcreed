@@ -41,6 +41,7 @@ st.markdown("""
         padding: 1.5rem;
         margin: 1rem 0;
         border-left: 6px solid #f59e0b;
+        color: #ffffff;
     }
     .bet-card {
         background: #1e293b;
@@ -50,6 +51,7 @@ st.markdown("""
         display: flex;
         justify-content: space-between;
         align-items: center;
+        color: #ffffff;
     }
     .tier-1 { border-left: 4px solid #10b981; }
     .tier-2 { border-left: 4px solid #fbbf24; }
@@ -70,7 +72,7 @@ st.markdown("""
         padding: 1rem;
         margin: 0.5rem 0;
     }
-    .team-name { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .team-name { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.5rem; color: #ffffff; }
     .section-header {
         background: #0f172a;
         border-radius: 8px;
