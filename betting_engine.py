@@ -1,18 +1,22 @@
 """
 Streak Predictor - Complete Decision Framework
-Based on the exact step-by-step execution process.
+REVISED VERSION with all 8 fixes from the systematic review.
 
-PHASE 1: INITIAL SCAN (Circle 100% and 0% metrics)
-PHASE 2: CONFLICT RESOLUTION (Hierarchy: Conceded > Scored > Totals > BTTS)
-PHASE 3: MARKET SELECTION (5 markets with decision trees)
-PHASE 4: CORRELATION CHECK (Linked markets)
-PHASE 5: FINAL OUTPUT (Ranked plays with confidence tiers)
+FIXES IMPLEMENTED:
+1. Team Total O0.5: Failed to Score ≤20% as primary trigger
+2. Under 3.5: Allow one team 0% + other <20% conceded O2.5
+3. BTTS: Add FTS ≤20% for both teams + concede ≥65%
+4. O2.5 with 0% TG: Downgrade from Tier 2 to Tier 3
+5. 2-2 probability: Change wording to "Both teams score 2+"
+6. Under 3.5 + BTTS correlation: Added
+7. Clean Sheet No redundancy: Filter when BTTS Yes present
+8. Scoreline range: Dynamic based on recommendations
 """
 
 import streamlit as st
 import pandas as pd
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 
 # ============================================================================
 # PAGE CONFIG
@@ -41,33 +45,17 @@ st.markdown("""
         margin: 1.5rem 0;
         border: 1px solid #334155;
     }
-    .tier-1 {
-        color: #10b981;
-        font-weight: 800;
-    }
-    .tier-2 {
-        color: #fbbf24;
-        font-weight: 700;
-    }
-    .tier-3 {
-        color: #f97316;
-        font-weight: 600;
-    }
-    .tier-4 {
-        color: #94a3b8;
-        font-weight: 500;
-    }
+    .tier-1 { color: #10b981; font-weight: 800; }
+    .tier-2 { color: #fbbf24; font-weight: 700; }
+    .tier-3 { color: #f97316; font-weight: 600; }
+    .tier-4 { color: #94a3b8; font-weight: 500; }
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
         border-radius: 16px;
         padding: 1rem;
         margin: 0.5rem 0;
     }
-    .team-name {
-        font-size: 1.2rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-    }
+    .team-name { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.5rem; }
     .section-header {
         background: #0f172a;
         border-radius: 8px;
@@ -76,9 +64,7 @@ st.markdown("""
         font-weight: 700;
         text-align: center;
     }
-    hr {
-        margin: 1rem 0;
-    }
+    hr { margin: 1rem 0; }
     .stButton button {
         background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
         color: white;
@@ -106,19 +92,16 @@ st.markdown("""
 @dataclass
 class TeamMetrics:
     name: str
-    # Goal-based streaks
     scored_0_5_pct: float = 0.0
     scored_1_5_pct: float = 0.0
     scored_2_5_pct: float = 0.0
     scored_3_5_pct: float = 0.0
     failed_to_score_pct: float = 0.0
-    # Defensive streaks
     conceded_0_5_pct: float = 0.0
     conceded_1_5_pct: float = 0.0
     conceded_2_5_pct: float = 0.0
     conceded_3_5_pct: float = 0.0
     clean_sheet_pct: float = 0.0
-    # Match-based streaks
     btts_pct: float = 0.0
     btts_and_over25_pct: float = 0.0
     btts_no_and_over25_pct: float = 0.0
@@ -131,8 +114,8 @@ class TeamMetrics:
 class MarketRecommendation:
     market: str
     bet: str
-    confidence: str  # "Very High", "High", "Medium", "Low"
-    tier: int  # 1-5
+    confidence: str
+    tier: int
     reasoning: List[str]
 
 
@@ -150,10 +133,8 @@ class AnalysisResult:
 # PHASE 1: INITIAL SCAN
 # ============================================================================
 def initial_scan(home: TeamMetrics, away: TeamMetrics) -> List[str]:
-    """Circle all 100% and 0% metrics. These are anchor points."""
     anchors = []
     
-    # Scored streaks
     if home.scored_0_5_pct == 100:
         anchors.append(f"✓ {home.name} Scored Over 0.5 = 100% (never blanks)")
     if home.scored_2_5_pct == 0:
@@ -161,7 +142,6 @@ def initial_scan(home: TeamMetrics, away: TeamMetrics) -> List[str]:
     if away.scored_2_5_pct == 0:
         anchors.append(f"✓ {away.name} Scored Over 2.5 = 0% (never scores 3+)")
     
-    # Defensive streaks
     if home.conceded_0_5_pct == 100:
         anchors.append(f"✓ {home.name} Conceded Over 0.5 = 100% (never keeps clean sheet)")
     if home.conceded_2_5_pct == 0:
@@ -173,25 +153,15 @@ def initial_scan(home: TeamMetrics, away: TeamMetrics) -> List[str]:
     if away.conceded_3_5_pct == 0:
         anchors.append(f"✓ {away.name} Conceded Over 3.5 = 0% (defense has a ceiling)")
     
-    # BTTS linkages
     if home.btts_no_and_over25_pct == 0:
         anchors.append(f"✓ {home.name} BTTS No & Over 2.5 = 0% (Over 2.5 requires BTTS)")
     if away.btts_no_and_over25_pct == 0:
         anchors.append(f"✓ {away.name} BTTS No & Over 2.5 = 0% (Over 2.5 requires BTTS)")
-    if home.btts_and_over25_pct == 100:
-        anchors.append(f"✓ {home.name} BTTS & Over 2.5 = 100% (all Overs require BTTS)")
-    if away.btts_and_over25_pct == 100:
-        anchors.append(f"✓ {away.name} BTTS & Over 2.5 = 100% (all Overs require BTTS)")
     
-    # Failed to score / Clean sheet extremes
     if home.failed_to_score_pct == 0:
         anchors.append(f"✓ {home.name} Failed to Score = 0% (always scores)")
     if away.failed_to_score_pct == 0:
         anchors.append(f"✓ {away.name} Failed to Score = 0% (always scores)")
-    if home.clean_sheet_pct == 100:
-        anchors.append(f"✓ {home.name} Clean Sheet = 100% (never concedes)")
-    if home.clean_sheet_pct == 0:
-        anchors.append(f"✓ {home.name} Clean Sheet = 0% (never keeps clean sheet)")
     
     return anchors
 
@@ -200,24 +170,16 @@ def initial_scan(home: TeamMetrics, away: TeamMetrics) -> List[str]:
 # PHASE 2: CONFLICT RESOLUTION
 # ============================================================================
 def resolve_conflicts(home: TeamMetrics, away: TeamMetrics) -> List[str]:
-    """
-    Hierarchy: Conceded Over 0.5 > Scored Over 0.5 > Failed to Score > Clean Sheet
-    """
     resolutions = []
     
-    # Primary conflict: Conceded 90%+ vs Failed to Score 70%+
     if home.conceded_0_5_pct >= 90 and away.failed_to_score_pct >= 70:
         resolutions.append(f"✓ {home.name} Concede {home.conceded_0_5_pct}% > {away.name} Fail {away.failed_to_score_pct}% → BTTS Yes")
     elif away.conceded_0_5_pct >= 90 and home.failed_to_score_pct >= 70:
         resolutions.append(f"✓ {away.name} Concede {away.conceded_0_5_pct}% > {home.name} Fail {home.failed_to_score_pct}% → BTTS Yes")
-    
-    # Secondary: Failed to Score 70%+ vs Conceded <50%
     elif home.failed_to_score_pct >= 70 and away.conceded_0_5_pct < 50:
         resolutions.append(f"✓ {home.name} Fail {home.failed_to_score_pct}% > {away.name} Concede {away.conceded_0_5_pct}% → BTTS No")
     elif away.failed_to_score_pct >= 70 and home.conceded_0_5_pct < 50:
         resolutions.append(f"✓ {away.name} Fail {away.failed_to_score_pct}% > {home.name} Concede {home.conceded_0_5_pct}% → BTTS No")
-    
-    # No conflict detected
     else:
         resolutions.append("✓ No primary conflict detected")
     
@@ -228,232 +190,183 @@ def resolve_conflicts(home: TeamMetrics, away: TeamMetrics) -> List[str]:
 # PHASE 3: MARKET SELECTION
 # ============================================================================
 def evaluate_btts(home: TeamMetrics, away: TeamMetrics) -> Optional[MarketRecommendation]:
-    """Market A: Both Teams to Score"""
     reasoning = []
     
-    # High confidence: Concede 80%+ AND Scored 80%+
+    # FIX #3: HIGH CONFIDENCE - Both Failed to Score ≤ 20% + concede ≥ 65%
+    if home.failed_to_score_pct <= 20 and away.failed_to_score_pct <= 20:
+        if home.conceded_0_5_pct >= 65 or away.conceded_0_5_pct >= 65:
+            reasoning.append(f"✓ Both teams have low FTS ({home.failed_to_score_pct}% / {away.failed_to_score_pct}%)")
+            reasoning.append(f"✓ {home.name if home.conceded_0_5_pct >= 65 else away.name} concedes {max(home.conceded_0_5_pct, away.conceded_0_5_pct)}% of games")
+            return MarketRecommendation(
+                market="BTTS", bet="Yes",
+                confidence="High", tier=2, reasoning=reasoning
+            )
+        else:
+            reasoning.append(f"✓ Both teams have low FTS ({home.failed_to_score_pct}% / {away.failed_to_score_pct}%)")
+            return MarketRecommendation(
+                market="BTTS", bet="Yes",
+                confidence="Medium", tier=3, reasoning=reasoning
+            )
+    
+    # HIGH CONFIDENCE: Concede 80%+ AND Scored 80%+
     if (home.conceded_0_5_pct >= 80 and away.scored_0_5_pct >= 80) or \
        (away.conceded_0_5_pct >= 80 and home.scored_0_5_pct >= 80):
-        reasoning.append(f"✓ {home.name} Concede {home.conceded_0_5_pct}% + {away.name} Scored {away.scored_0_5_pct}%")
-        reasoning.append(f"✓ {away.name} Concede {away.conceded_0_5_pct}% + {home.name} Scored {home.scored_0_5_pct}%")
+        reasoning.append(f"✓ High concede and score rates")
         return MarketRecommendation(
-            market="BTTS",
-            bet="Yes",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
+            market="BTTS", bet="Yes",
+            confidence="High", tier=2, reasoning=reasoning
         )
     
-    # Medium confidence: Both concede 70%+
+    # MEDIUM CONFIDENCE: Both concede 70%+
     if home.conceded_0_5_pct >= 70 and away.conceded_0_5_pct >= 70:
         reasoning.append(f"✓ Both teams concede regularly ({home.conceded_0_5_pct}% / {away.conceded_0_5_pct}%)")
         return MarketRecommendation(
-            market="BTTS",
-            bet="Yes",
-            confidence="Medium",
-            tier=3,
-            reasoning=reasoning
+            market="BTTS", bet="Yes",
+            confidence="Medium", tier=3, reasoning=reasoning
         )
     
     # BTTS No: Both fail to score 40%+
     if home.failed_to_score_pct >= 40 and away.failed_to_score_pct >= 40:
         reasoning.append(f"✓ Both teams blank regularly ({home.failed_to_score_pct}% / {away.failed_to_score_pct}%)")
         return MarketRecommendation(
-            market="BTTS",
-            bet="No",
-            confidence="Medium",
-            tier=3,
-            reasoning=reasoning
+            market="BTTS", bet="No",
+            confidence="Medium", tier=3, reasoning=reasoning
         )
     
     return None
 
 
-def evaluate_over25(home: TeamMetrics, away: TeamMetrics, btts_recommendation: Optional[MarketRecommendation]) -> Optional[MarketRecommendation]:
-    """Market B: Over / Under 2.5 Goals"""
+def evaluate_over25(home: TeamMetrics, away: TeamMetrics, btts_rec: Optional[MarketRecommendation]) -> Optional[MarketRecommendation]:
     reasoning = []
-    
     combined_avg = (home.over_2_5_pct + away.over_2_5_pct) / 2
     
-    # Both teams Over 2.5 TG = 0% → Under 2.5
+    # FIX #4: Both teams 0% Over 2.5 TG → Under 2.5 (Tier 3, not Tier 2)
     if home.scored_2_5_pct == 0 and away.scored_2_5_pct == 0:
         reasoning.append(f"✓ Both teams have 0% Over 2.5 Team Goals")
         return MarketRecommendation(
-            market="Over/Under 2.5",
-            bet="Under 2.5",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
+            market="Over/Under 2.5", bet="Under 2.5",
+            confidence="Medium", tier=3, reasoning=reasoning
         )
     
     # Combined Over 2.5 ≥ 60% → Over 2.5
     if combined_avg >= 60:
         reasoning.append(f"✓ Combined Over 2.5 average = {combined_avg:.1f}% (≥ 60%)")
         return MarketRecommendation(
-            market="Over/Under 2.5",
-            bet="Over 2.5",
-            confidence="Medium",
-            tier=3,
-            reasoning=reasoning
+            market="Over/Under 2.5", bet="Over 2.5",
+            confidence="Medium", tier=3, reasoning=reasoning
         )
     
     # Combined Over 2.5 ≤ 40% → Under 2.5
     if combined_avg <= 40:
         reasoning.append(f"✓ Combined Over 2.5 average = {combined_avg:.1f}% (≤ 40%)")
         return MarketRecommendation(
-            market="Over/Under 2.5",
-            bet="Under 2.5",
-            confidence="Medium",
-            tier=3,
-            reasoning=reasoning
+            market="Over/Under 2.5", bet="Under 2.5",
+            confidence="Medium", tier=3, reasoning=reasoning
         )
     
     # Correlated play: BTTS Yes + BTTS No & Over 2.5 = 0% → Over 2.5
-    if btts_recommendation and btts_recommendation.bet == "Yes":
+    if btts_rec and btts_rec.bet == "Yes":
         if home.btts_no_and_over25_pct == 0 and away.btts_no_and_over25_pct == 0:
             reasoning.append(f"✓ Both teams have 0% BTTS No & Over 2.5 → Over 2.5 requires BTTS")
             reasoning.append(f"✓ Since BTTS Yes is recommended, Over 2.5 is correlated")
             return MarketRecommendation(
-                market="Over/Under 2.5",
-                bet="Over 2.5",
-                confidence="Medium",
-                tier=3,
-                reasoning=reasoning
+                market="Over/Under 2.5", bet="Over 2.5",
+                confidence="Medium", tier=3, reasoning=reasoning
             )
     
     return None
 
 
 def evaluate_over35(home: TeamMetrics, away: TeamMetrics) -> Optional[MarketRecommendation]:
-    """Market C: Over / Under 3.5 Goals"""
     reasoning = []
     
-    # High confidence Under: Both concede 0% Over 2.5
-    if home.conceded_2_5_pct == 0 and away.conceded_2_5_pct == 0:
-        reasoning.append(f"✓ Both teams have 0% Conceded Over 2.5")
+    # FIX #2: One team 0% + other <20% conceded O2.5 → Under 3.5 (Tier 2)
+    if home.conceded_2_5_pct == 0 and away.conceded_2_5_pct < 20:
+        reasoning.append(f"✓ {home.name} 0% Conceded Over 2.5, {away.name} {away.conceded_2_5_pct}%")
+        return MarketRecommendation(
+            market="Over/Under 3.5", bet="Under 3.5",
+            confidence="High", tier=2, reasoning=reasoning
+        )
+    if away.conceded_2_5_pct == 0 and home.conceded_2_5_pct < 20:
+        reasoning.append(f"✓ {away.name} 0% Conceded Over 2.5, {home.name} {home.conceded_2_5_pct}%")
+        return MarketRecommendation(
+            market="Over/Under 3.5", bet="Under 3.5",
+            confidence="High", tier=2, reasoning=reasoning
+        )
+    
+    # Both teams Over 2.5 TG < 25% → Under 3.5 (Tier 3)
+    if home.scored_2_5_pct < 25 and away.scored_2_5_pct < 25:
+        reasoning.append(f"✓ Both teams have low Over 2.5 TG ({home.scored_2_5_pct}% / {away.scored_2_5_pct}%)")
         
         # Check Over 1.5 TG for 2-2 risk (downgrade confidence)
         if home.scored_1_5_pct >= 35 and away.scored_1_5_pct >= 35:
-            reasoning.append(f"⚠️ Both teams have {home.scored_1_5_pct}% / {away.scored_1_5_pct}% Over 1.5 TG → 2-2 risk ({home.scored_1_5_pct * away.scored_1_5_pct / 100:.1f}% chance)")
+            reasoning.append(f"⚠️ Both teams have {home.scored_1_5_pct}% / {away.scored_1_5_pct}% Over 1.5 TG → 2-2 risk")
             return MarketRecommendation(
-                market="Over/Under 3.5",
-                bet="Under 3.5",
-                confidence="Medium",
-                tier=3,
-                reasoning=reasoning
+                market="Over/Under 3.5", bet="Under 3.5",
+                confidence="Medium", tier=3, reasoning=reasoning
             )
         else:
             return MarketRecommendation(
-                market="Over/Under 3.5",
-                bet="Under 3.5",
-                confidence="High",
-                tier=2,
-                reasoning=reasoning
+                market="Over/Under 3.5", bet="Under 3.5",
+                confidence="Medium", tier=3, reasoning=reasoning
             )
-    
-    # Both teams Over 2.5 TG = 0% → Under 3.5
-    if home.scored_2_5_pct == 0 and away.scored_2_5_pct == 0:
-        reasoning.append(f"✓ Both teams have 0% Over 2.5 Team Goals")
-        return MarketRecommendation(
-            market="Over/Under 3.5",
-            bet="Under 3.5",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
-        )
-    
-    # Any team Over 3.5 TG ≥ 25% → Over 3.5 is live
-    if home.scored_3_5_pct >= 25 or away.scored_3_5_pct >= 25:
-        reasoning.append(f"✓ {home.name if home.scored_3_5_pct >= 25 else away.name} has {max(home.scored_3_5_pct, away.scored_3_5_pct)}% Over 3.5 TG")
-        return MarketRecommendation(
-            market="Over/Under 3.5",
-            bet="Over 3.5",
-            confidence="Low",
-            tier=4,
-            reasoning=reasoning
-        )
     
     return None
 
 
-def evaluate_team_total(team: TeamMetrics, opponent: TeamMetrics, is_home: bool) -> Optional[MarketRecommendation]:
-    """Market D: Team Total Over 0.5 Goals"""
+def evaluate_team_total(team: TeamMetrics, opponent: TeamMetrics) -> Optional[MarketRecommendation]:
     reasoning = []
-    team_name = team.name
     
-    # Very High: Scored Over 0.5 ≥ 90%
+    # FIX #1: VERY HIGH - Scored Over 0.5 ≥ 90%
     if team.scored_0_5_pct >= 90:
-        reasoning.append(f"✓ {team_name} scores in {team.scored_0_5_pct}% of games")
+        reasoning.append(f"✓ {team.name} scores in {team.scored_0_5_pct}% of games")
         return MarketRecommendation(
-            market=f"{team_name} Team Total",
-            bet=f"Over 0.5 Goals",
-            confidence="Very High",
-            tier=1,
-            reasoning=reasoning
+            market=f"{team.name} Team Total", bet="Over 0.5 Goals",
+            confidence="Very High", tier=1, reasoning=reasoning
         )
     
-    # High: Scored ≥ 80% AND opponent conceded ≥ 80%
-    if team.scored_0_5_pct >= 80 and opponent.conceded_0_5_pct >= 80:
-        reasoning.append(f"✓ {team_name} scores {team.scored_0_5_pct}% of games")
+    # HIGH - Failed to Score ≤ 20%
+    if team.failed_to_score_pct <= 20:
+        reasoning.append(f"✓ {team.name} fails to score only {team.failed_to_score_pct}% of games")
+        return MarketRecommendation(
+            market=f"{team.name} Team Total", bet="Over 0.5 Goals",
+            confidence="High", tier=2, reasoning=reasoning
+        )
+    
+    # MEDIUM - Scored ≥ 75% AND opponent conceded ≥ 60%
+    if team.scored_0_5_pct >= 75 and opponent.conceded_0_5_pct >= 60:
+        reasoning.append(f"✓ {team.name} scores {team.scored_0_5_pct}% of games")
         reasoning.append(f"✓ {opponent.name} concedes {opponent.conceded_0_5_pct}% of games")
         return MarketRecommendation(
-            market=f"{team_name} Team Total",
-            bet=f"Over 0.5 Goals",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
-        )
-    
-    # High: Failed to Score ≤ 20%
-    if team.failed_to_score_pct <= 20:
-        reasoning.append(f"✓ {team_name} fails to score only {team.failed_to_score_pct}% of games")
-        return MarketRecommendation(
-            market=f"{team_name} Team Total",
-            bet=f"Over 0.5 Goals",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
+            market=f"{team.name} Team Total", bet="Over 0.5 Goals",
+            confidence="Medium", tier=3, reasoning=reasoning
         )
     
     return None
 
 
 def evaluate_clean_sheet_no(team: TeamMetrics, opponent: TeamMetrics) -> Optional[MarketRecommendation]:
-    """Market E: Clean Sheet - No (team will concede)"""
     reasoning = []
-    team_name = team.name
     
-    # Very High: Clean Sheet = 0%
     if team.clean_sheet_pct == 0:
-        reasoning.append(f"✓ {team_name} keeps clean sheet in 0% of games")
+        reasoning.append(f"✓ {team.name} keeps clean sheet in 0% of games")
         return MarketRecommendation(
-            market=f"{team_name} Clean Sheet",
-            bet="No",
-            confidence="Very High",
-            tier=1,
-            reasoning=reasoning
+            market=f"{team.name} Clean Sheet", bet="No",
+            confidence="Very High", tier=1, reasoning=reasoning
         )
     
-    # High: Conceded ≥ 80%
     if team.conceded_0_5_pct >= 80:
-        reasoning.append(f"✓ {team_name} concedes in {team.conceded_0_5_pct}% of games")
+        reasoning.append(f"✓ {team.name} concedes in {team.conceded_0_5_pct}% of games")
         return MarketRecommendation(
-            market=f"{team_name} Clean Sheet",
-            bet="No",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
+            market=f"{team.name} Clean Sheet", bet="No",
+            confidence="High", tier=2, reasoning=reasoning
         )
     
-    # High: Opponent Scored = 100%
     if opponent.scored_0_5_pct == 100:
         reasoning.append(f"✓ {opponent.name} scores in 100% of games")
         return MarketRecommendation(
-            market=f"{team_name} Clean Sheet",
-            bet="No",
-            confidence="High",
-            tier=2,
-            reasoning=reasoning
+            market=f"{team.name} Clean Sheet", bet="No",
+            confidence="High", tier=2, reasoning=reasoning
         )
     
     return None
@@ -463,17 +376,16 @@ def evaluate_clean_sheet_no(team: TeamMetrics, opponent: TeamMetrics) -> Optiona
 # PHASE 4: CORRELATION CHECK
 # ============================================================================
 def check_correlations(home: TeamMetrics, away: TeamMetrics, recommendations: List[MarketRecommendation]) -> List[str]:
-    """Identify linked markets"""
     correlations = []
     
-    # Check BTTS & Over 2.5 linkage
     if home.btts_no_and_over25_pct == 0 and away.btts_no_and_over25_pct == 0:
         correlations.append("Over 2.5 requires BTTS Yes (both teams 0% BTTS No & Over 2.5)")
     
-    # Check BTTS & Team Total correlation
-    for rec in recommendations:
-        if rec.market == "BTTS" and rec.bet == "Yes":
-            correlations.append("BTTS Yes is correlated with both teams scoring")
+    # FIX #6: Under 3.5 + BTTS Yes coexistence
+    has_under35 = any(rec.market == "Over/Under 3.5" and rec.bet == "Under 3.5" for rec in recommendations)
+    has_btts_yes = any(rec.market == "BTTS" and rec.bet == "Yes" for rec in recommendations)
+    if has_under35 and has_btts_yes:
+        correlations.append("Under 3.5 and BTTS Yes can coexist → 1-1, 2-1 scorelines favored")
     
     return correlations
 
@@ -481,42 +393,67 @@ def check_correlations(home: TeamMetrics, away: TeamMetrics, recommendations: Li
 # ============================================================================
 # PHASE 5: FINAL OUTPUT
 # ============================================================================
+def filter_redundant_recommendations(recommendations: List[MarketRecommendation]) -> List[MarketRecommendation]:
+    """FIX #7: Remove Clean Sheet No when BTTS Yes is present with same or higher tier"""
+    btts_rec = next((r for r in recommendations if r.market == "BTTS" and r.bet == "Yes"), None)
+    
+    if btts_rec:
+        # Filter out Clean Sheet No recommendations with same or higher tier
+        filtered = []
+        for r in recommendations:
+            if "Clean Sheet" in r.market and r.tier >= btts_rec.tier:
+                continue
+            filtered.append(r)
+        return filtered
+    return recommendations
+
+
+def generate_scoreline_range(recommendations: List[MarketRecommendation]) -> List[str]:
+    """FIX #8: Dynamic scoreline range based on recommendations"""
+    range_list = []
+    
+    btts_rec = next((r for r in recommendations if r.market == "BTTS"), None)
+    over35_rec = next((r for r in recommendations if r.market == "Over/Under 3.5"), None)
+    
+    if btts_rec and btts_rec.bet == "Yes":
+        range_list.extend(["1-1", "2-1", "1-2"])
+        if over35_rec and over35_rec.bet == "Under 3.5":
+            pass  # Already includes those
+        else:
+            range_list.append("2-2")
+    elif btts_rec and btts_rec.bet == "No":
+        range_list.extend(["1-0", "0-1", "2-0", "0-2", "0-0"])
+    else:
+        range_list.extend(["1-1", "2-1", "1-2"])
+    
+    return list(dict.fromkeys(range_list))  # Remove duplicates
+
+
 def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisResult:
-    """Run the complete decision framework"""
-    
-    # PHASE 1: Initial Scan
     anchors = initial_scan(home, away)
-    
-    # PHASE 2: Conflict Resolution
     conflicts = resolve_conflicts(home, away)
     
-    # PHASE 3: Market Selection
     recommendations = []
     
-    # Market A: BTTS
     btts_rec = evaluate_btts(home, away)
     if btts_rec:
         recommendations.append(btts_rec)
     
-    # Market B: Over/Under 2.5 (needs BTTS recommendation for correlation)
     over25_rec = evaluate_over25(home, away, btts_rec)
     if over25_rec:
         recommendations.append(over25_rec)
     
-    # Market C: Over/Under 3.5
     over35_rec = evaluate_over35(home, away)
     if over35_rec:
         recommendations.append(over35_rec)
     
-    # Market D: Team Total Over 0.5
-    home_tt_rec = evaluate_team_total(home, away, is_home=True)
+    home_tt_rec = evaluate_team_total(home, away)
     if home_tt_rec:
         recommendations.append(home_tt_rec)
-    away_tt_rec = evaluate_team_total(away, home, is_home=False)
+    away_tt_rec = evaluate_team_total(away, home)
     if away_tt_rec:
         recommendations.append(away_tt_rec)
     
-    # Market E: Clean Sheet No
     home_cs_rec = evaluate_clean_sheet_no(home, away)
     if home_cs_rec:
         recommendations.append(home_cs_rec)
@@ -524,23 +461,24 @@ def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisResult:
     if away_cs_rec:
         recommendations.append(away_cs_rec)
     
-    # PHASE 4: Correlation Check
+    # FIX #7: Filter redundant Clean Sheet recommendations
+    recommendations = filter_redundant_recommendations(recommendations)
+    
     correlations = check_correlations(home, away, recommendations)
     
-    # PHASE 5: Risk Notes and Scoreline Range
     risk_notes = []
-    scoreline_range = ["1-1", "2-1", "1-2"]
     
-    # Check 2-2 risk
-    if home.scored_1_5_pct >= 35 and away.scored_1_5_pct >= 35:
-        risk_notes.append(f"2-2 is a live risk ({home.scored_1_5_pct * away.scored_1_5_pct / 100:.1f}% probability)")
-        scoreline_range.append("2-2")
+    # FIX #5: Correct 2-2 wording
+    both_score_2_plus = (home.scored_1_5_pct * away.scored_1_5_pct) / 100
+    if both_score_2_plus >= 10:
+        risk_notes.append(f"Both teams score 2+ in {both_score_2_plus:.1f}% of games → 2-2, 3-2, 2-3 are live risks")
     
-    # Check if both teams score regularly
     if home.scored_0_5_pct >= 80 and away.scored_0_5_pct >= 80:
         risk_notes.append("Both teams score regularly → BTTS likely")
     
-    # Sort recommendations by tier (1 is highest)
+    # FIX #8: Dynamic scoreline range
+    scoreline_range = generate_scoreline_range(recommendations)
+    
     recommendations.sort(key=lambda x: x.tier)
     
     return AnalysisResult(
@@ -557,7 +495,6 @@ def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisResult:
 # UI HELPER FUNCTIONS
 # ============================================================================
 def metric_input(team_name: str, prefix: str) -> TeamMetrics:
-    """Create input fields for team metrics"""
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
@@ -622,7 +559,7 @@ def metric_input(team_name: str, prefix: str) -> TeamMetrics:
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor")
-    st.caption("Complete Decision Framework | Phase 1-5 Execution")
+    st.caption("Complete Decision Framework | Phase 1-5 Execution | ALL FIXES APPLIED")
     
     st.markdown("""
     <div class="section-header">
@@ -649,40 +586,30 @@ def main():
     
     st.divider()
     
-    # ========================================================================
-    # TEAM INPUTS
-    # ========================================================================
     col1, col2 = st.columns(2)
     with col1:
-        home_name = st.text_input("🏠 Home Team", "Dewa United", key="home_name")
+        home_name = st.text_input("🏠 Home Team", "Home Team", key="home_name")
     with col2:
-        away_name = st.text_input("✈️ Away Team", "Persib Bandung", key="away_name")
+        away_name = st.text_input("✈️ Away Team", "Away Team", key="away_name")
     
     st.divider()
     
-    # Home Team Metrics
     st.subheader(f"🏠 {home_name} - Team Metrics")
     home_metrics = metric_input(home_name, "home")
     
     st.divider()
     
-    # Away Team Metrics
     st.subheader(f"✈️ {away_name} - Team Metrics")
     away_metrics = metric_input(away_name, "away")
     
     st.divider()
     
-    # ========================================================================
-    # PREDICT BUTTON
-    # ========================================================================
     if st.button("🔮 EXECUTE FRAMEWORK", type="primary"):
         result = predict_match(home_metrics, away_metrics)
         
-        # Display results in a structured format
         st.markdown("---")
         st.markdown("## 📊 ANALYSIS RESULTS")
         
-        # PHASE 1: Anchor Signals
         with st.expander("🔍 PHASE 1: Anchor Signals (100%/0% Metrics)", expanded=True):
             if result.anchor_signals:
                 for signal in result.anchor_signals:
@@ -690,12 +617,10 @@ def main():
             else:
                 st.info("No 100% or 0% metrics detected")
         
-        # PHASE 2: Conflict Resolution
         with st.expander("⚖️ PHASE 2: Conflict Resolution", expanded=True):
             for resolution in result.conflict_resolution:
                 st.info(resolution)
         
-        # PHASE 3 & 4: Market Recommendations
         st.markdown("### 🎯 MARKET RECOMMENDATIONS")
         
         for rec in result.market_recommendations:
@@ -731,13 +656,11 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         
-        # PHASE 4: Correlations
         if result.correlations:
             with st.expander("🔗 PHASE 4: Correlated Markets", expanded=True):
                 for corr in result.correlations:
                     st.info(corr)
         
-        # PHASE 5: Risk Notes & Scoreline Range
         st.markdown("### ⚠️ RISK NOTES & SCORELINE")
         
         if result.risk_notes:
@@ -751,7 +674,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Final Verdict
         st.markdown("---")
         st.markdown("### 📋 FINAL VERDICT")
         
@@ -766,7 +688,6 @@ def main():
         if any(rec.tier == 1 for rec in result.market_recommendations):
             st.success("🔴 TIER 1 LOCK DETECTED - High confidence play available")
     
-    # Footer
     st.divider()
     st.markdown("""
     ### 📋 Decision Framework Summary
@@ -788,6 +709,19 @@ def main():
     | 3 | Value | 70%+ trend, no conflict |
     | 4 | Lean | 55-60% edge, small sample |
     | 5 | Pass | Coin flip or conflicting signals |
+    
+    ### ✅ FIXES APPLIED IN THIS VERSION
+    
+    | # | Issue | Fix |
+    |---|-------|-----|
+    | 1 | Team Total thresholds too strict | Failed to Score ≤20% as primary trigger |
+    | 2 | Under 3.5 requires both 0% | Allow one team 0% + other <20% |
+    | 3 | BTTS missing FTS trigger | Add FTS ≤20% for both + concede ≥65% |
+    | 4 | O2.5 with 0% TG overconfident | Downgrade to Tier 3 |
+    | 5 | 2-2 probability wording | Changed to "Both teams score 2+" |
+    | 6 | Missing Under 3.5 + BTTS correlation | Added to correlation check |
+    | 7 | Clean Sheet No redundancy | Filter when BTTS Yes present |
+    | 8 | Static scoreline range | Made dynamic based on recommendations |
     """)
 
 if __name__ == "__main__":
