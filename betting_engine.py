@@ -1,19 +1,22 @@
 """
-Streak Predictor - New Logic
-Based on 100%/0% metrics scanning and market-based betting.
+Streak Predictor - Core Logic Framework
+Based on hierarchical statistical analysis of team metrics.
 
-Core Principles:
-1. NEVER predict a winner (no "Team A will win")
-2. Only predict goal markets: Over 2.5, Under 2.5, Over 3.5, Under 3.5, BTTS Yes, BTTS No
-3. Find 100% or 0% metrics first (anchor bet)
-4. Then use tiered thresholds (75%+ / 25%-)
+TIER SYSTEM:
+- Tier 1: 100% or 0% rates (Heavy weight - structural truths)
+- Tier 2: 75%+ or 25%- rates (Strong - clear tendency)
+- Tier 3: 50-70% or 30-50% (Directional - slight lean)
+- Tier 4: Averages (Context only - masks extremes)
 
-Rules Priority:
-1. Scan for 100% or 0% metrics → Anchor bet
-2. Check Team Total Over 2.5 for BOTH teams
-3. Check Conceded Over 0.5 vs Failed to Score conflict
-4. Check BTTS & Over 2.5 correlation
-5. Output goal-market bets only
+CONFLICT RESOLUTION: Conceded > Scored > Match Totals > BTTS
+
+TEAM TOTAL FIRST PRINCIPLE: Check Team Total Over/Under before Match Total.
+
+CLEAN SHEET / FAILED TO SCORE MATRIX: Treat as inverse probabilities.
+
+MARKET EXPECTATION GAP: Compare averages with individual extremes.
+
+BTTS & OVER 2.5 LINKAGE: Check correlation for both teams.
 """
 
 import streamlit as st
@@ -25,7 +28,7 @@ from typing import List, Tuple, Optional
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(
-    page_title="Streak Predictor - Goal Markets",
+    page_title="Streak Predictor - Core Logic Framework",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -39,7 +42,7 @@ st.markdown("""
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
-        max-width: 900px;
+        max-width: 1000px;
     }
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
@@ -49,62 +52,60 @@ st.markdown("""
         text-align: center;
         border: 1px solid #334155;
     }
-    .prediction-market {
-        font-size: 1.8rem;
+    .prediction-over {
+        font-size: 2rem;
         font-weight: 800;
         color: #10b981;
-        margin: 0.5rem 0;
     }
-    .prediction-anchor {
-        font-size: 1.2rem;
-        font-weight: 600;
-        color: #fbbf24;
-        margin-bottom: 1rem;
+    .prediction-under {
+        font-size: 2rem;
+        font-weight: 800;
+        color: #ef4444;
     }
-    .confidence-high {
+    .prediction-btts-yes {
+        font-size: 1.5rem;
+        font-weight: 700;
         color: #10b981;
     }
-    .confidence-medium {
-        color: #fbbf24;
+    .prediction-btts-no {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #ef4444;
     }
-    .confidence-low {
-        color: #f97316;
+    .prediction-nobet {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #f59e0b;
+    }
+    .tier-badge {
+        display: inline-block;
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 0.2rem 0.6rem;
+        font-size: 0.7rem;
+        margin-left: 0.5rem;
     }
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
         border-radius: 16px;
         padding: 1rem;
         margin: 0.5rem 0;
-        text-align: center;
     }
     .team-name {
         font-size: 1.2rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
     }
-    .league-note {
+    .section-header {
         background: #0f172a;
         border-radius: 8px;
         padding: 0.5rem;
-        text-align: center;
-        font-size: 0.8rem;
-        color: #94a3b8;
-        margin-bottom: 1rem;
-    }
-    .input-note {
-        background: #1e293b;
-        border-radius: 8px;
-        padding: 0.5rem;
-        margin: 0.5rem 0;
-        font-size: 0.8rem;
-        color: #fbbf24;
+        margin: 1rem 0 0.5rem 0;
+        font-weight: 700;
         text-align: center;
     }
-    h1 {
-        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 800;
+    hr {
+        margin: 1rem 0;
     }
     .stButton button {
         background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
@@ -115,31 +116,10 @@ st.markdown("""
         border: none;
         width: 100%;
     }
-    hr {
-        margin: 1rem 0;
-    }
-    .step-box {
-        background: #1e293b;
-        border-radius: 8px;
-        padding: 0.5rem;
-        margin: 0.25rem 0;
-        font-family: monospace;
-        font-size: 0.8rem;
-        text-align: left;
-    }
     .metric-highlight {
-        background: #064e3b;
-        border-left: 3px solid #10b981;
-        padding: 0.25rem 0.5rem;
-        margin: 0.25rem 0;
-        border-radius: 4px;
-    }
-    .metric-warning {
-        background: #7f1a1a;
-        border-left: 3px solid #ef4444;
-        padding: 0.25rem 0.5rem;
-        margin: 0.25rem 0;
-        border-radius: 4px;
+        font-size: 1.2rem;
+        font-weight: 700;
+        color: #fbbf24;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -150,408 +130,416 @@ st.markdown("""
 # ============================================================================
 @dataclass
 class TeamMetrics:
-    """Team performance metrics (percentages)"""
+    """Complete team metrics for analysis"""
     name: str
-    over15_percent: float = 0.0      # % of matches with 2+ goals
-    over25_percent: float = 0.0      # % of matches with 3+ goals
-    over35_percent: float = 0.0      # % of matches with 4+ goals
-    btts_percent: float = 0.0        # % of matches where both teams scored
-    scored_over15_percent: float = 0.0   # % of matches where team scored 2+ goals
-    scored_over25_percent: float = 0.0   # % of matches where team scored 3+ goals
-    conceded_over05_percent: float = 0.0 # % of matches where team conceded
-    failed_to_score_percent: float = 0.0 # % of matches where team failed to score
-    clean_sheet_percent: float = 0.0     # % of matches where team kept clean sheet
+    # Goal-based streaks
+    scored_0_5_pct: float = 0.0      # Over 0.5 Team Goals %
+    scored_1_5_pct: float = 0.0      # Over 1.5 Team Goals %
+    scored_2_5_pct: float = 0.0      # Over 2.5 Team Goals %
+    failed_to_score_pct: float = 0.0  # Failed to Score %
+    # Defensive streaks
+    conceded_0_5_pct: float = 0.0     # Conceded Over 0.5 %
+    conceded_1_5_pct: float = 0.0     # Conceded Over 1.5 %
+    conceded_2_5_pct: float = 0.0     # Conceded Over 2.5 %
+    clean_sheet_pct: float = 0.0      # Clean Sheet %
+    # Match-based streaks
+    btts_pct: float = 0.0             # Both Teams to Score %
+    over_1_5_pct: float = 0.0         # Match Over 1.5 %
+    over_2_5_pct: float = 0.0         # Match Over 2.5 %
+    # Averages (Tier 4 - Context Only)
+    avg_goals_scored: float = 0.0
+    avg_goals_conceded: float = 0.0
+    avg_match_goals: float = 0.0
 
 
 @dataclass
-class MatchPrediction:
-    market: str          # "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5", "BTTS Yes", "BTTS No"
-    confidence: str      # "High", "Medium", "Low"
-    anchor_metric: str   # What triggered this bet
+class PredictionResult:
+    main_bet: str
+    confidence: str
     reasoning: List[str]
+    tier_signals: dict
 
 
 # ============================================================================
-# SCANNING FUNCTIONS
+# TIER CLASSIFICATION
 # ============================================================================
-def scan_100_percent(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
-    """Find 100% metrics → anchor bet"""
-    predictions = []
-    
-    # Home team 100% metrics
-    if home.over25_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Over 2.5",
-            confidence="High",
-            anchor_metric=f"{home.name} has 100% Over 2.5 rate",
-            reasoning=[f"{home.name} has Over 2.5 in 100% of matches → Anchor bet Over 2.5"]
-        ))
-    
-    if home.over35_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Over 3.5",
-            confidence="High",
-            anchor_metric=f"{home.name} has 100% Over 3.5 rate",
-            reasoning=[f"{home.name} has Over 3.5 in 100% of matches → Anchor bet Over 3.5"]
-        ))
-    
-    if home.scored_over25_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Over 2.5",
-            confidence="High",
-            anchor_metric=f"{home.name} scores 3+ goals in 100% of matches",
-            reasoning=[f"{home.name} always scores 3+ goals → Anchor bet Over 2.5"]
-        ))
-    
-    if home.clean_sheet_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="High",
-            anchor_metric=f"{home.name} has 100% clean sheets",
-            reasoning=[f"{home.name} never concedes → Anchor bet Under 2.5"]
-        ))
-    
-    if home.failed_to_score_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="High",
-            anchor_metric=f"{home.name} fails to score in 100% of matches",
-            reasoning=[f"{home.name} never scores → Anchor bet Under 2.5"]
-        ))
-    
-    # Away team 100% metrics
-    if away.over25_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Over 2.5",
-            confidence="High",
-            anchor_metric=f"{away.name} has 100% Over 2.5 rate",
-            reasoning=[f"{away.name} has Over 2.5 in 100% of matches → Anchor bet Over 2.5"]
-        ))
-    
-    if away.over35_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Over 3.5",
-            confidence="High",
-            anchor_metric=f"{away.name} has 100% Over 3.5 rate",
-            reasoning=[f"{away.name} has Over 3.5 in 100% of matches → Anchor bet Over 3.5"]
-        ))
-    
-    if away.scored_over25_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Over 2.5",
-            confidence="High",
-            anchor_metric=f"{away.name} scores 3+ goals in 100% of matches",
-            reasoning=[f"{away.name} always scores 3+ goals → Anchor bet Over 2.5"]
-        ))
-    
-    if away.clean_sheet_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="High",
-            anchor_metric=f"{away.name} has 100% clean sheets",
-            reasoning=[f"{away.name} never concedes → Anchor bet Under 2.5"]
-        ))
-    
-    if away.failed_to_score_percent == 100:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="High",
-            anchor_metric=f"{away.name} fails to score in 100% of matches",
-            reasoning=[f"{away.name} never scores → Anchor bet Under 2.5"]
-        ))
-    
-    return predictions
+def get_tier(percentage: float) -> Tuple[int, str]:
+    """Classify a metric into its tier based on percentage"""
+    if percentage >= 100 or percentage <= 0:
+        return 1, "TIER 1"
+    elif percentage >= 75 or percentage <= 25:
+        return 2, "TIER 2"
+    elif percentage >= 50 or percentage <= 50:
+        return 3, "TIER 3"
+    else:
+        return 4, "TIER 4"
 
 
-def scan_0_percent(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
-    """Find 0% metrics → anchor bet (reverse)"""
-    predictions = []
+# ============================================================================
+# CORE ANALYSIS FUNCTIONS
+# ============================================================================
+def analyze_team_totals(home: TeamMetrics, away: TeamMetrics) -> Tuple[Optional[str], List[str]]:
+    """
+    STEP 1: Check Team Total Over 2.5 for BOTH teams.
+    - Both 0% → Bet Under 3.5 / Under 2.5
+    - One or both high → Bet Over 2.5
+    """
+    reasoning = []
     
-    # Home team 0% metrics
-    if home.over25_percent == 0:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="High",
-            anchor_metric=f"{home.name} has 0% Over 2.5 rate",
-            reasoning=[f"{home.name} never goes Over 2.5 → Anchor bet Under 2.5"]
-        ))
+    home_high = home.scored_2_5_pct >= 50
+    away_high = away.scored_2_5_pct >= 50
+    both_zero = home.scored_2_5_pct == 0 and away.scored_2_5_pct == 0
     
-    if home.over35_percent == 0:
-        predictions.append(MatchPrediction(
-            market="Under 3.5",
-            confidence="High",
-            anchor_metric=f"{home.name} has 0% Over 3.5 rate",
-            reasoning=[f"{home.name} never goes Over 3.5 → Anchor bet Under 3.5"]
-        ))
+    if both_zero:
+        reasoning.append(f"✓ Both teams have 0% Over 2.5 Team Goals → Under 2.5")
+        return "Under 2.5", reasoning
+    elif home_high or away_high:
+        reasoning.append(f"✓ Team Total Over 2.5: Home {home.scored_2_5_pct}% | Away {away.scored_2_5_pct}% → Lean Over")
+        return "Over 2.5", reasoning
     
-    if home.btts_percent == 0:
-        predictions.append(MatchPrediction(
-            market="BTTS No",
-            confidence="High",
-            anchor_metric=f"{home.name} has 0% BTTS rate",
-            reasoning=[f"{home.name} never has both teams score → Anchor bet BTTS No"]
-        ))
-    
-    if home.clean_sheet_percent == 0:
-        predictions.append(MatchPrediction(
-            market="Over 0.5",  # They always concede
-            confidence="Medium",
-            anchor_metric=f"{home.name} has 0% clean sheets",
-            reasoning=[f"{home.name} always concedes → Supports goals"]
-        ))
-    
-    # Away team 0% metrics
-    if away.over25_percent == 0:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="High",
-            anchor_metric=f"{away.name} has 0% Over 2.5 rate",
-            reasoning=[f"{away.name} never goes Over 2.5 → Anchor bet Under 2.5"]
-        ))
-    
-    if away.over35_percent == 0:
-        predictions.append(MatchPrediction(
-            market="Under 3.5",
-            confidence="High",
-            anchor_metric=f"{away.name} has 0% Over 3.5 rate",
-            reasoning=[f"{away.name} never goes Over 3.5 → Anchor bet Under 3.5"]
-        ))
-    
-    if away.btts_percent == 0:
-        predictions.append(MatchPrediction(
-            market="BTTS No",
-            confidence="High",
-            anchor_metric=f"{away.name} has 0% BTTS rate",
-            reasoning=[f"{away.name} never has both teams score → Anchor bet BTTS No"]
-        ))
-    
-    if away.clean_sheet_percent == 0:
-        predictions.append(MatchPrediction(
-            market="Over 0.5",
-            confidence="Medium",
-            anchor_metric=f"{away.name} has 0% clean sheets",
-            reasoning=[f"{away.name} always concedes → Supports goals"]
-        ))
-    
-    return predictions
+    return None, reasoning
 
 
-def check_team_total_over25(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
-    """Check Team Total Over 2.5 for BOTH teams"""
-    predictions = []
+def analyze_clean_sheet_matrix(home: TeamMetrics, away: TeamMetrics) -> Tuple[Optional[str], List[str]]:
+    """
+    STEP 2: Clean Sheet / Failed to Score Matrix
+    Treat as inverse probabilities.
+    """
+    reasoning = []
     
-    home_over25_rate = home.scored_over25_percent
-    away_over25_rate = away.scored_over25_percent
+    # Home Failed to Score vs Away Clean Sheet
+    home_fail = home.failed_to_score_pct
+    away_cs = away.clean_sheet_pct
     
-    if home_over25_rate == 0 and away_over25_rate == 0:
-        predictions.append(MatchPrediction(
-            market="Under 3.5",
-            confidence="High",
-            anchor_metric="Both teams have 0% chance of scoring 3+ goals",
-            reasoning=[
-                f"{home.name} scores 3+ goals in {home_over25_rate}% of matches",
-                f"{away.name} scores 3+ goals in {away_over25_rate}% of matches",
-                "→ Bet Under 3.5 or Under 2.5"
-            ]
-        ))
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="Medium",
-            anchor_metric="Both teams have 0% chance of scoring 3+ goals",
-            reasoning=["Both teams unlikely to score multiple goals → Under 2.5"]
-        ))
+    if home_fail >= 75 and away_cs >= 25:
+        reasoning.append(f"✓ Home Fail to Score {home_fail}% + Away Clean Sheet {away_cs}% → BTTS No")
+        return "BTTS No", reasoning
+    elif home_fail >= 54 and away_cs >= 31:
+        reasoning.append(f"✓ Home Fail to Score {home_fail}% + Away Clean Sheet {away_cs}% → BTTS No lean")
+        return "BTTS No", reasoning
     
-    elif home_over25_rate >= 50 or away_over25_rate >= 50:
-        predictions.append(MatchPrediction(
-            market="Over 2.5",
-            confidence="Medium",
-            anchor_metric=f"One team scores 3+ in {max(home_over25_rate, away_over25_rate)}% of matches",
-            reasoning=[
-                f"{home.name} scores 3+ goals in {home_over25_rate}%",
-                f"{away.name} scores 3+ goals in {away_over25_rate}%",
-                "→ Bet Over 2.5"
-            ]
-        ))
+    # Away Failed to Score vs Home Clean Sheet
+    away_fail = away.failed_to_score_pct
+    home_cs = home.clean_sheet_pct
     
-    return predictions
+    if away_fail >= 75 and home_cs >= 25:
+        reasoning.append(f"✓ Away Fail to Score {away_fail}% + Home Clean Sheet {home_cs}% → BTTS No")
+        return "BTTS No", reasoning
+    elif away_fail >= 54 and home_cs >= 31:
+        reasoning.append(f"✓ Away Fail to Score {away_fail}% + Home Clean Sheet {home_cs}% → BTTS No lean")
+        return "BTTS No", reasoning
+    
+    return None, reasoning
 
 
-def check_btts_conflict(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
-    """Check Conceded Over 0.5 vs Failed to Score conflict"""
-    predictions = []
+def analyze_conflict_resolution(home: TeamMetrics, away: TeamMetrics) -> Tuple[Optional[str], List[str]]:
+    """
+    STEP 3: Conflict Resolution Rule
+    Order of precedence: Conceded > Scored > Match Totals > BTTS
+    """
+    reasoning = []
     
-    home_concede_rate = home.conceded_over05_percent
-    away_concede_rate = away.conceded_over05_percent
-    home_fail_rate = home.failed_to_score_percent
-    away_fail_rate = away.failed_to_score_percent
+    # Check Conceded vs Failed to Score conflict
+    home_concede = home.conceded_0_5_pct
+    away_fail = away.failed_to_score_pct
+    home_fail = home.failed_to_score_pct
+    away_concede = away.conceded_0_5_pct
     
-    avg_concede = (home_concede_rate + away_concede_rate) / 2
-    avg_fail = (home_fail_rate + away_fail_rate) / 2
+    # Home Concede 100% vs Away Fail 75%+ → BTTS Yes
+    if home_concede >= 90 and away_fail >= 75:
+        reasoning.append(f"✓ Home Concede {home_concede}% > Away Fail {away_fail}% → BTTS Yes")
+        return "BTTS Yes", reasoning
     
-    if avg_concede > 75 and avg_fail < 25:
-        predictions.append(MatchPrediction(
-            market="BTTS Yes",
-            confidence="High",
-            anchor_metric=f"Concede rate {avg_concede:.0f}% > Fail rate {avg_fail:.0f}%",
-            reasoning=[
-                "Both teams likely to concede and score",
-                "→ BTTS Yes"
-            ]
-        ))
+    # Away Concede 100% vs Home Fail 75%+ → BTTS Yes
+    if away_concede >= 90 and home_fail >= 75:
+        reasoning.append(f"✓ Away Concede {away_concede}% > Home Fail {home_fail}% → BTTS Yes")
+        return "BTTS Yes", reasoning
     
-    elif avg_fail > 75 and avg_concede < 50:
-        predictions.append(MatchPrediction(
-            market="BTTS No",
-            confidence="High",
-            anchor_metric=f"Fail rate {avg_fail:.0f}% > Concede rate {avg_concede:.0f}%",
-            reasoning=[
-                "One or both teams likely to fail to score",
-                "→ BTTS No"
-            ]
-        ))
+    # Home Fail 75%+ vs Away Concede <50% → BTTS No
+    if home_fail >= 75 and away_concede < 50:
+        reasoning.append(f"✓ Home Fail {home_fail}% > Away Concede {away_concede}% → BTTS No")
+        return "BTTS No", reasoning
     
-    return predictions
+    # Away Fail 75%+ vs Home Concede <50% → BTTS No
+    if away_fail >= 75 and home_concede < 50:
+        reasoning.append(f"✓ Away Fail {away_fail}% > Home Concede {home_concede}% → BTTS No")
+        return "BTTS No", reasoning
+    
+    return None, reasoning
 
 
-def check_btts_over25_correlation(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
-    """Check BTTS & Over 2.5 correlation"""
-    predictions = []
+def analyze_btts_over25_linkage(home: TeamMetrics, away: TeamMetrics) -> Tuple[Optional[str], List[str]]:
+    """
+    STEP 4: BTTS & Over 2.5 Linkage Check
+    If BTTS & Over 2.5 = 100% for a team, Over 2.5 requires BTTS.
+    If BTTS No & Over 2.5 = 0%, Over 2.5 in shutout never happens.
+    """
+    reasoning = []
     
-    avg_btts = (home.btts_percent + away.btts_percent) / 2
-    avg_over25 = (home.over25_percent + away.over25_percent) / 2
+    # Check if both teams have perfect correlation
+    home_correlation = home.btts_pct == 100 and home.over_2_5_pct == 100
+    away_correlation = away.btts_pct == 100 and away.over_2_5_pct == 100
     
-    # 100% linked: BTTS always means Over 2.5
-    if avg_btts > 75 and avg_over25 > 75:
-        predictions.append(MatchPrediction(
-            market="Over 2.5",
-            confidence="Medium",
-            anchor_metric="BTTS and Over 2.5 strongly correlated (75%+ each)",
-            reasoning=[
-                f"BTTS rate: {avg_btts:.0f}%",
-                f"Over 2.5 rate: {avg_over25:.0f}%",
-                "→ Over 2.5 requires BTTS. Adjust stake accordingly."
-            ]
-        ))
+    if home_correlation or away_correlation:
+        reasoning.append(f"✓ BTTS & Over 2.5 are 100% correlated for one or both teams")
+        reasoning.append(f"  → Over 2.5 requires BTTS Yes")
+        return "Over 2.5 requires BTTS", reasoning
     
-    # 0% linked: Over 2.5 never happens with BTTS
-    elif avg_btts > 50 and avg_over25 < 25:
-        predictions.append(MatchPrediction(
-            market="Under 2.5",
-            confidence="Medium",
-            anchor_metric="BTTS high but Over 2.5 low → Shutout likely",
-            reasoning=[
-                f"BTTS rate: {avg_btts:.0f}%",
-                f"Over 2.5 rate: {avg_over25:.0f}%",
-                "→ Over 2.5 in shutout never happens. Fade Over."
-            ]
-        ))
+    # Check if either team never covers Over 2.5 in a shutout
+    home_no_btts_over = away.btts_pct == 0 and away.over_2_5_pct == 0
+    away_no_btts_over = home.btts_pct == 0 and home.over_2_5_pct == 0
     
-    return predictions
+    if home_no_btts_over or away_no_btts_over:
+        reasoning.append(f"✓ One team has 0% BTTS and 0% Over 2.5 → Over 2.5 requires BTTS")
+        return "Over 2.5 requires BTTS", reasoning
+    
+    return None, reasoning
 
 
-def get_all_predictions(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
-    """Run all rules and return unique predictions"""
-    all_predictions = []
+def analyze_market_gap(home: TeamMetrics, away: TeamMetrics) -> Tuple[Optional[str], List[str]]:
+    """
+    STEP 5: Market Expectation Gap
+    Compare averages with individual extremes.
+    """
+    reasoning = []
     
-    # Tier 1: 100% / 0% metrics (anchor bets)
-    all_predictions.extend(scan_100_percent(home, away))
-    all_predictions.extend(scan_0_percent(home, away))
+    # Check Team Total Over 2.5 extremes vs Match Over 2.5 average
+    if home.scored_2_5_pct == 0 and away.scored_2_5_pct == 0:
+        match_avg = home.over_2_5_pct
+        reasoning.append(f"✓ Both teams 0% Over 2.5 Team Goals vs Match Avg {match_avg}% → Gap detected")
+        return "Under 2.5", reasoning
     
-    # Tier 2: 75%+ / 25%- thresholds
-    if not all_predictions:
-        all_predictions.extend(check_team_total_over25(home, away))
-        all_predictions.extend(check_btts_conflict(home, away))
-        all_predictions.extend(check_btts_over25_correlation(home, away))
+    # Check high individual extremes
+    if home.scored_2_5_pct >= 80 or away.scored_2_5_pct >= 80:
+        reasoning.append(f"✓ High Team Total Over 2.5: Home {home.scored_2_5_pct}% | Away {away.scored_2_5_pct}%")
+        return "Over 2.5", reasoning
     
-    # Remove duplicates (same market)
-    seen = set()
-    unique_predictions = []
-    for p in all_predictions:
-        if p.market not in seen:
-            seen.add(p.market)
-            unique_predictions.append(p)
+    return None, reasoning
+
+
+def analyze_tier1_signals(home: TeamMetrics, away: TeamMetrics) -> Tuple[Optional[str], List[str]]:
+    """
+    STEP 0: Scan for 100% or 0% metrics (Tier 1)
+    These are structural truths and anchor bets.
+    """
+    reasoning = []
     
-    return unique_predictions[:3]  # Max 3 recommendations
+    # Check for 0% Over 2.5 Team Goals on both teams
+    if home.scored_2_5_pct == 0 and away.scored_2_5_pct == 0:
+        reasoning.append(f"✓ TIER 1: Both teams have 0% Over 2.5 Team Goals")
+        return "Under 2.5 / Under 3.5", reasoning
+    
+    # Check for 100% BTTS on one team
+    if home.btts_pct == 100:
+        reasoning.append(f"✓ TIER 1: Home BTTS = 100% → They always concede")
+        return "BTTS Yes (Home side)", reasoning
+    if away.btts_pct == 100:
+        reasoning.append(f"✓ TIER 1: Away BTTS = 100% → They always concede")
+        return "BTTS Yes (Away side)", reasoning
+    
+    # Check for 0% BTTS on one team
+    if home.btts_pct == 0:
+        reasoning.append(f"✓ TIER 1: Home BTTS = 0% → They never concede")
+        return "BTTS No", reasoning
+    if away.btts_pct == 0:
+        reasoning.append(f"✓ TIER 1: Away BTTS = 0% → They never concede")
+        return "BTTS No", reasoning
+    
+    # Check for 100% Conceded Over 0.5
+    if home.conceded_0_5_pct == 100:
+        reasoning.append(f"✓ TIER 1: Home concedes in 100% of matches")
+    if away.conceded_0_5_pct == 100:
+        reasoning.append(f"✓ TIER 1: Away concedes in 100% of matches")
+    
+    return None, reasoning
+
+
+# ============================================================================
+# MAIN PREDICTION FUNCTION
+# ============================================================================
+def predict_match(home: TeamMetrics, away: TeamMetrics) -> PredictionResult:
+    """
+    Main prediction function implementing the Core Logic Framework.
+    """
+    reasoning = []
+    signals = {}
+    
+    reasoning.append("📊 **CORE LOGIC FRAMEWORK ANALYSIS**")
+    reasoning.append("")
+    reasoning.append("**TIER CLASSIFICATION:**")
+    reasoning.append(f"  Home Over 2.5 TG: {home.scored_2_5_pct}% → {get_tier(home.scored_2_5_pct)[1]}")
+    reasoning.append(f"  Away Over 2.5 TG: {away.scored_2_5_pct}% → {get_tier(away.scored_2_5_pct)[1]}")
+    reasoning.append(f"  Home BTTS: {home.btts_pct}% → {get_tier(home.btts_pct)[1]}")
+    reasoning.append(f"  Away BTTS: {away.btts_pct}% → {get_tier(away.btts_pct)[1]}")
+    reasoning.append(f"  Home Concede 0.5: {home.conceded_0_5_pct}% → {get_tier(home.conceded_0_5_pct)[1]}")
+    reasoning.append(f"  Away Concede 0.5: {away.conceded_0_5_pct}% → {get_tier(away.conceded_0_5_pct)[1]}")
+    
+    # ========================================================================
+    # STEP 0: Tier 1 Signals (100% or 0%)
+    # ========================================================================
+    tier1_result, tier1_reasoning = analyze_tier1_signals(home, away)
+    if tier1_result:
+        reasoning.extend(tier1_reasoning)
+        return PredictionResult(
+            main_bet=tier1_result,
+            confidence="High (Tier 1)",
+            reasoning=reasoning,
+            tier_signals=signals
+        )
+    
+    # ========================================================================
+    # STEP 1: Team Total First Principle
+    # ========================================================================
+    reasoning.append("\n**STEP 1: Team Total First Principle**")
+    team_total_result, team_total_reasoning = analyze_team_totals(home, away)
+    if team_total_result:
+        reasoning.extend(team_total_reasoning)
+        signals["team_total"] = team_total_result
+    
+    # ========================================================================
+    # STEP 2: Clean Sheet / Failed to Score Matrix
+    # ========================================================================
+    reasoning.append("\n**STEP 2: Clean Sheet / Failed to Score Matrix**")
+    cs_result, cs_reasoning = analyze_clean_sheet_matrix(home, away)
+    if cs_result:
+        reasoning.extend(cs_reasoning)
+        signals["clean_sheet"] = cs_result
+    
+    # ========================================================================
+    # STEP 3: Conflict Resolution
+    # ========================================================================
+    reasoning.append("\n**STEP 3: Conflict Resolution (Conceded > Scored > Totals > BTTS)**")
+    conflict_result, conflict_reasoning = analyze_conflict_resolution(home, away)
+    if conflict_result:
+        reasoning.extend(conflict_reasoning)
+        signals["conflict"] = conflict_result
+    
+    # ========================================================================
+    # STEP 4: BTTS & Over 2.5 Linkage
+    # ========================================================================
+    reasoning.append("\n**STEP 4: BTTS & Over 2.5 Linkage Check**")
+    linkage_result, linkage_reasoning = analyze_btts_over25_linkage(home, away)
+    if linkage_result:
+        reasoning.extend(linkage_reasoning)
+        signals["linkage"] = linkage_result
+    
+    # ========================================================================
+    # STEP 5: Market Expectation Gap
+    # ========================================================================
+    reasoning.append("\n**STEP 5: Market Expectation Gap**")
+    gap_result, gap_reasoning = analyze_market_gap(home, away)
+    if gap_result:
+        reasoning.extend(gap_reasoning)
+        signals["gap"] = gap_result
+    
+    # ========================================================================
+    # FINAL DECISION: Synthesize signals
+    # ========================================================================
+    reasoning.append("\n**FINAL SYNTHESIS:**")
+    
+    # Count signal directions
+    over_signals = 0
+    under_signals = 0
+    btts_yes = 0
+    btts_no = 0
+    
+    for key, value in signals.items():
+        if "Over" in str(value):
+            over_signals += 1
+        if "Under" in str(value):
+            under_signals += 1
+        if "BTTS Yes" in str(value):
+            btts_yes += 1
+        if "BTTS No" in str(value):
+            btts_no += 1
+    
+    # Determine primary bet
+    if over_signals > under_signals:
+        main_bet = "Over 2.5"
+        confidence = "Medium"
+        reasoning.append(f"✓ {over_signals} signal(s) point to Over, {under_signals} to Under")
+    elif under_signals > over_signals:
+        main_bet = "Under 2.5"
+        confidence = "Medium"
+        reasoning.append(f"✓ {under_signals} signal(s) point to Under, {over_signals} to Over")
+    else:
+        # Use BTTS as tiebreaker
+        if btts_yes > btts_no:
+            main_bet = "BTTS Yes"
+            confidence = "Medium"
+            reasoning.append(f"✓ Tie in Over/Under signals, BTTS Yes leads ({btts_yes} vs {btts_no})")
+        elif btts_no > btts_yes:
+            main_bet = "BTTS No"
+            confidence = "Medium"
+            reasoning.append(f"✓ Tie in Over/Under signals, BTTS No leads ({btts_no} vs {btts_yes})")
+        else:
+            main_bet = "No Bet"
+            confidence = "Low"
+            reasoning.append(f"✓ Conflicting signals → No Bet")
+    
+    reasoning.append(f"\n**FINAL RECOMMENDATION:** {main_bet}")
+    
+    return PredictionResult(
+        main_bet=main_bet,
+        confidence=confidence,
+        reasoning=reasoning,
+        tier_signals=signals
+    )
 
 
 # ============================================================================
 # UI HELPER FUNCTIONS
 # ============================================================================
-def team_metrics_input(team_name: str, key_prefix: str) -> TeamMetrics:
+def metric_input(team_name: str, prefix: str) -> TeamMetrics:
     """Create input fields for team metrics"""
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        over15_percent = st.number_input(
-            "Over 1.5 %",
-            min_value=0, max_value=100, value=50, step=5,
-            key=f"{key_prefix}_over15",
-            help="% of matches with 2+ goals"
-        )
-        over25_percent = st.number_input(
-            "Over 2.5 %",
-            min_value=0, max_value=100, value=35, step=5,
-            key=f"{key_prefix}_over25",
-            help="% of matches with 3+ goals"
-        )
-        over35_percent = st.number_input(
-            "Over 3.5 %",
-            min_value=0, max_value=100, value=20, step=5,
-            key=f"{key_prefix}_over35",
-            help="% of matches with 4+ goals"
-        )
-        btts_percent = st.number_input(
-            "BTTS %",
-            min_value=0, max_value=100, value=40, step=5,
-            key=f"{key_prefix}_btts",
-            help="% of matches where both teams scored"
-        )
+        st.markdown("**⚽ Goal-Based Streaks**")
+        scored_0_5_pct = st.number_input("Over 0.5 Team Goals %", min_value=0, max_value=100, value=80, step=5, key=f"{prefix}_scored_05")
+        scored_1_5_pct = st.number_input("Over 1.5 Team Goals %", min_value=0, max_value=100, value=40, step=5, key=f"{prefix}_scored_15")
+        scored_2_5_pct = st.number_input("Over 2.5 Team Goals %", min_value=0, max_value=100, value=10, step=5, key=f"{prefix}_scored_25")
+        failed_to_score_pct = st.number_input("Failed to Score %", min_value=0, max_value=100, value=30, step=5, key=f"{prefix}_failed_score")
     
     with col2:
-        scored_over15_percent = st.number_input(
-            "Scored 2+ %",
-            min_value=0, max_value=100, value=30, step=5,
-            key=f"{key_prefix}_scored15",
-            help="% of matches where team scored 2+ goals"
-        )
-        scored_over25_percent = st.number_input(
-            "Scored 3+ %",
-            min_value=0, max_value=100, value=15, step=5,
-            key=f"{key_prefix}_scored25",
-            help="% of matches where team scored 3+ goals"
-        )
-        conceded_over05_percent = st.number_input(
-            "Conceded %",
-            min_value=0, max_value=100, value=70, step=5,
-            key=f"{key_prefix}_conceded",
-            help="% of matches where team conceded"
-        )
-        failed_to_score_percent = st.number_input(
-            "Failed to Score %",
-            min_value=0, max_value=100, value=30, step=5,
-            key=f"{key_prefix}_failed",
-            help="% of matches where team failed to score"
-        )
-        clean_sheet_percent = st.number_input(
-            "Clean Sheet %",
-            min_value=0, max_value=100, value=30, step=5,
-            key=f"{key_prefix}_clean",
-            help="% of matches where team kept clean sheet"
-        )
+        st.markdown("**🛡️ Defensive Streaks**")
+        conceded_0_5_pct = st.number_input("Conceded Over 0.5 %", min_value=0, max_value=100, value=70, step=5, key=f"{prefix}_conceded_05")
+        conceded_1_5_pct = st.number_input("Conceded Over 1.5 %", min_value=0, max_value=100, value=40, step=5, key=f"{prefix}_conceded_15")
+        conceded_2_5_pct = st.number_input("Conceded Over 2.5 %", min_value=0, max_value=100, value=15, step=5, key=f"{prefix}_conceded_25")
+        clean_sheet_pct = st.number_input("Clean Sheet %", min_value=0, max_value=100, value=30, step=5, key=f"{prefix}_clean_sheet")
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        st.markdown("**📊 Match-Based Streaks**")
+        btts_pct = st.number_input("BTTS %", min_value=0, max_value=100, value=45, step=5, key=f"{prefix}_btts")
+        over_1_5_pct = st.number_input("Over 1.5 %", min_value=0, max_value=100, value=60, step=5, key=f"{prefix}_over15")
+        over_2_5_pct = st.number_input("Over 2.5 %", min_value=0, max_value=100, value=35, step=5, key=f"{prefix}_over25")
+    
+    with col4:
+        st.markdown("**📈 Averages (Context Only)**")
+        avg_scored = st.number_input("Avg Goals Scored", min_value=0.0, max_value=5.0, value=1.2, step=0.1, key=f"{prefix}_avg_scored")
+        avg_conceded = st.number_input("Avg Goals Conceded", min_value=0.0, max_value=5.0, value=1.2, step=0.1, key=f"{prefix}_avg_conceded")
+        avg_match = st.number_input("Avg Match Goals", min_value=0.0, max_value=6.0, value=2.4, step=0.1, key=f"{prefix}_avg_match")
     
     return TeamMetrics(
         name=team_name,
-        over15_percent=float(over15_percent),
-        over25_percent=float(over25_percent),
-        over35_percent=float(over35_percent),
-        btts_percent=float(btts_percent),
-        scored_over15_percent=float(scored_over15_percent),
-        scored_over25_percent=float(scored_over25_percent),
-        conceded_over05_percent=float(conceded_over05_percent),
-        failed_to_score_percent=float(failed_to_score_percent),
-        clean_sheet_percent=float(clean_sheet_percent)
+        scored_0_5_pct=float(scored_0_5_pct),
+        scored_1_5_pct=float(scored_1_5_pct),
+        scored_2_5_pct=float(scored_2_5_pct),
+        failed_to_score_pct=float(failed_to_score_pct),
+        conceded_0_5_pct=float(conceded_0_5_pct),
+        conceded_1_5_pct=float(conceded_1_5_pct),
+        conceded_2_5_pct=float(conceded_2_5_pct),
+        clean_sheet_pct=float(clean_sheet_pct),
+        btts_pct=float(btts_pct),
+        over_1_5_pct=float(over_1_5_pct),
+        over_2_5_pct=float(over_2_5_pct),
+        avg_goals_scored=avg_scored,
+        avg_goals_conceded=avg_conceded,
+        avg_match_goals=avg_match
     )
 
 
@@ -560,15 +548,40 @@ def team_metrics_input(team_name: str, key_prefix: str) -> TeamMetrics:
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor")
-    st.caption("Goal Markets Only | 100%/0% Anchor Bets | No Winner Picks")
+    st.caption("Core Logic Framework | Hierarchical Statistical Analysis")
     
     st.markdown("""
-    <div class="league-note">
-        📊 <strong>Core Principles:</strong><br>
-        • <strong>NEVER predict a winner</strong> (no "Team A will win")<br>
-        • Only predict goal markets: Over 2.5, Under 2.5, Over 3.5, Under 3.5, BTTS Yes, BTTS No<br>
-        • Find 100% or 0% metrics first → Anchor bet<br>
-        • Then use tiered thresholds (75%+ / 25%-)
+    <div class="section-header">
+    🎯 TIER SYSTEM
+    </div>
+    <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
+        <div style="flex: 1; background: #1e293b; padding: 0.5rem; border-radius: 8px;">
+            <strong>Tier 1 (Heavy)</strong><br>
+            100% or 0% rates<br>
+            Structural truths
+        </div>
+        <div style="flex: 1; background: #1e293b; padding: 0.5rem; border-radius: 8px;">
+            <strong>Tier 2 (Strong)</strong><br>
+            75%+ or 25%- rates<br>
+            Clear tendency
+        </div>
+        <div style="flex: 1; background: #1e293b; padding: 0.5rem; border-radius: 8px;">
+            <strong>Tier 3 (Directional)</strong><br>
+            50-70% or 30-50%<br>
+            Slight lean
+        </div>
+        <div style="flex: 1; background: #1e293b; padding: 0.5rem; border-radius: 8px;">
+            <strong>Tier 4 (Context)</strong><br>
+            Averages only<br>
+            Masks extremes
+        </div>
+    </div>
+    
+    <div class="section-header">
+    ⚖️ CONFLICT RESOLUTION ORDER
+    </div>
+    <div style="text-align: center; margin-bottom: 1rem;">
+        <code>Conceded > Scored > Match Totals > BTTS</code>
     </div>
     """, unsafe_allow_html=True)
     
@@ -587,13 +600,13 @@ def main():
     
     # Home Team Metrics
     st.subheader(f"🏠 {home_name} - Team Metrics")
-    home_metrics = team_metrics_input(home_name, "home")
+    home_metrics = metric_input(home_name, "home")
     
     st.divider()
     
     # Away Team Metrics
     st.subheader(f"✈️ {away_name} - Team Metrics")
-    away_metrics = team_metrics_input(away_name, "away")
+    away_metrics = metric_input(away_name, "away")
     
     st.divider()
     
@@ -601,68 +614,94 @@ def main():
     # PREDICT BUTTON
     # ========================================================================
     if st.button("🔮 PREDICT", type="primary"):
-        predictions = get_all_predictions(home_metrics, away_metrics)
+        result = predict_match(home_metrics, away_metrics)
         
-        if not predictions:
-            st.markdown("""
-            <div class="prediction-card">
-                <div class="prediction-market">⏸️ NO CLEAR BET</div>
-                <div style="margin-top: 1rem; font-size: 0.9rem; color: #94a3b8;">
-                    No 100%/0% metrics found. No strong thresholds triggered.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        # Display prediction card
+        if "Over" in result.main_bet:
+            pred_class = "prediction-over"
+            pred_icon = "🔥"
+        elif "Under" in result.main_bet:
+            pred_class = "prediction-under"
+            pred_icon = "❄️"
+        elif "BTTS Yes" in result.main_bet:
+            pred_class = "prediction-btts-yes"
+            pred_icon = "✅"
+        elif "BTTS No" in result.main_bet:
+            pred_class = "prediction-btts-no"
+            pred_icon = "🚫"
         else:
-            for pred in predictions:
-                confidence_class = "confidence-high" if pred.confidence == "High" else "confidence-medium" if pred.confidence == "Medium" else "confidence-low"
-                
-                st.markdown(f"""
-                <div class="prediction-card">
-                    <div class="prediction-anchor">🎯 {pred.anchor_metric}</div>
-                    <div class="prediction-market">📊 {pred.market}</div>
-                    <div class="{confidence_class}">Confidence: {pred.confidence}</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                with st.expander("📋 Reasoning", expanded=True):
-                    for line in pred.reasoning:
-                        st.write(f"• {line}")
+            pred_class = "prediction-nobet"
+            pred_icon = "⏸️"
         
-        # Display data summary
-        with st.expander("📈 Metrics Summary", expanded=False):
+        st.markdown(f"""
+        <div class="prediction-card">
+            <div class="{pred_class}">{pred_icon} {result.main_bet}</div>
+            <div style="margin-top: 0.5rem; font-size: 0.9rem; color: #94a3b8;">
+                Confidence: {result.confidence}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display detailed reasoning
+        with st.expander("📋 Detailed Analysis", expanded=True):
+            for line in result.reasoning:
+                if "✓" in line:
+                    st.success(line)
+                elif "**" in line:
+                    st.markdown(line)
+                else:
+                    st.write(line)
+        
+        # Display data table
+        with st.expander("📊 Data Summary", expanded=False):
             data = {
                 "Metric": [
-                    "Over 1.5 %",
-                    "Over 2.5 %",
-                    "Over 3.5 %",
-                    "BTTS %",
-                    "Scored 2+ %",
-                    "Scored 3+ %",
-                    "Conceded %",
-                    "Failed to Score %",
-                    "Clean Sheet %"
+                    "Over 0.5 TG",
+                    "Over 1.5 TG",
+                    "Over 2.5 TG",
+                    "Failed to Score",
+                    "Conceded 0.5",
+                    "Conceded 1.5",
+                    "Conceded 2.5",
+                    "Clean Sheet",
+                    "BTTS",
+                    "Over 1.5",
+                    "Over 2.5",
+                    "Avg Scored",
+                    "Avg Conceded",
+                    "Avg Match"
                 ],
                 home_name: [
-                    f"{home_metrics.over15_percent}%",
-                    f"{home_metrics.over25_percent}%",
-                    f"{home_metrics.over35_percent}%",
-                    f"{home_metrics.btts_percent}%",
-                    f"{home_metrics.scored_over15_percent}%",
-                    f"{home_metrics.scored_over25_percent}%",
-                    f"{home_metrics.conceded_over05_percent}%",
-                    f"{home_metrics.failed_to_score_percent}%",
-                    f"{home_metrics.clean_sheet_percent}%"
+                    f"{home_metrics.scored_0_5_pct}%",
+                    f"{home_metrics.scored_1_5_pct}%",
+                    f"{home_metrics.scored_2_5_pct}%",
+                    f"{home_metrics.failed_to_score_pct}%",
+                    f"{home_metrics.conceded_0_5_pct}%",
+                    f"{home_metrics.conceded_1_5_pct}%",
+                    f"{home_metrics.conceded_2_5_pct}%",
+                    f"{home_metrics.clean_sheet_pct}%",
+                    f"{home_metrics.btts_pct}%",
+                    f"{home_metrics.over_1_5_pct}%",
+                    f"{home_metrics.over_2_5_pct}%",
+                    f"{home_metrics.avg_goals_scored}",
+                    f"{home_metrics.avg_goals_conceded}",
+                    f"{home_metrics.avg_match_goals}"
                 ],
                 away_name: [
-                    f"{away_metrics.over15_percent}%",
-                    f"{away_metrics.over25_percent}%",
-                    f"{away_metrics.over35_percent}%",
-                    f"{away_metrics.btts_percent}%",
-                    f"{away_metrics.scored_over15_percent}%",
-                    f"{away_metrics.scored_over25_percent}%",
-                    f"{away_metrics.conceded_over05_percent}%",
-                    f"{away_metrics.failed_to_score_percent}%",
-                    f"{away_metrics.clean_sheet_percent}%"
+                    f"{away_metrics.scored_0_5_pct}%",
+                    f"{away_metrics.scored_1_5_pct}%",
+                    f"{away_metrics.scored_2_5_pct}%",
+                    f"{away_metrics.failed_to_score_pct}%",
+                    f"{away_metrics.conceded_0_5_pct}%",
+                    f"{away_metrics.conceded_1_5_pct}%",
+                    f"{away_metrics.conceded_2_5_pct}%",
+                    f"{away_metrics.clean_sheet_pct}%",
+                    f"{away_metrics.btts_pct}%",
+                    f"{away_metrics.over_1_5_pct}%",
+                    f"{away_metrics.over_2_5_pct}%",
+                    f"{away_metrics.avg_goals_scored}",
+                    f"{away_metrics.avg_goals_conceded}",
+                    f"{away_metrics.avg_match_goals}"
                 ]
             }
             df = pd.DataFrame(data)
@@ -671,35 +710,31 @@ def main():
     # Footer
     st.divider()
     st.markdown("""
-    ### 📋 Rules Summary
+    ### 📋 Core Logic Framework Summary
     
-    | Priority | Rule | Trigger | Bet |
-    |----------|------|---------|-----|
-    | **1** | Scan 100% metrics | Any metric = 100% | Anchor bet (Over/Under/BTTS) |
-    | **2** | Scan 0% metrics | Any metric = 0% | Anchor bet (reverse) |
-    | **3** | Team Total Over 2.5 | Both teams 0% → Under 3.5/2.5 | Goal market |
-    | **4** | BTTS Conflict | Concede 100% > Fail 75% → BTTS Yes | BTTS market |
-    | **5** | BTTS & Over 2.5 Correlation | 100% linked → Over 2.5 requires BTTS | Stake adjustment |
-    
-    ### 🎯 Key Principles
-    
-    - **NO WINNER PICKS** - Never predict which team will win
-    - **Goal markets only** - Over/Under/BTTS
-    - **Anchor bets first** - 100% or 0% metrics are most reliable
-    - **Maximum 3 recommendations** per match
+    | Step | Action | Output |
+    |------|--------|--------|
+    | 1 | Scan for 100% or 0% metrics | Anchor bet (Tier 1) |
+    | 2 | Check Team Total Over 2.5 for BOTH teams | Under/Over 2.5 |
+    | 3 | Clean Sheet / Failed to Score Matrix | BTTS Yes/No |
+    | 4 | Conflict Resolution (Conceded > Scored > Totals > BTTS) | Tie-breaker |
+    | 5 | BTTS & Over 2.5 Linkage Check | Correlation insight |
+    | 6 | Market Expectation Gap | Under/Over confirmation |
     
     ### 🎯 How to Use
     
     1. Enter **Home Team** and **Away Team** names
-    2. Enter each team's **percentage metrics** (from your data source)
+    2. Enter all percentage metrics for each team
     3. Click **PREDICT**
     
-    ### ✅ What This System Does
+    ### ✅ Key Principles
     
-    - Finds statistical certainties (100%/0%)
-    - Identifies conflicts and correlations
-    - Outputs only goal-market bets
-    - Never predicts a winner
+    - **Tier 1 (100%/0%)** → Heavy weight, structural truths
+    - **Tier 2 (75%+/25%-)** → Strong, clear tendency
+    - **Tier 3 (50-70%/30-50%)** → Directional, slight lean
+    - **Tier 4 (Averages)** → Context only, masks extremes
+    
+    **Conflict Resolution Order:** Conceded > Scored > Match Totals > BTTS
     """)
 
 if __name__ == "__main__":
