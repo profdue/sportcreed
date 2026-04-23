@@ -1113,7 +1113,7 @@ def main():
             <div style="font-size:1.2rem;font-weight:700;margin-bottom:0.5rem;">
                 📖 STORY: {result.story_name.replace('_', ' ').title()}
             </div>
-            <div style="color:#94a3b8;margin-bottom:1rem;">
+            <div style="color:#FFFFFF;margin-bottom:1rem;">
                 {result.story_description}
             </div>
             <div style="white-space:pre-line;font-size:0.9rem;">
