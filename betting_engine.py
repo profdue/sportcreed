@@ -1,37 +1,31 @@
 """
-Over 1.5 Goals Predictor - Kill Switch System
-Based on 3-Filter logic with mandatory Scoring Frequency kill switch.
+Streak Predictor - New Logic
+Based on 100%/0% metrics scanning and market-based betting.
 
-FINAL LOGIC:
+Core Principles:
+1. NEVER predict a winner (no "Team A will win")
+2. Only predict goal markets: Over 2.5, Under 2.5, Over 3.5, Under 3.5, BTTS Yes, BTTS No
+3. Find 100% or 0% metrics first (anchor bet)
+4. Then use tiered thresholds (75%+ / 25%-)
 
-STEP 1: THE KILL SWITCH (MANDATORY)
-- If either team has Scoring Frequency < 80% → IMMEDIATE AVOID / Under 1.5
-
-STEP 2: FILTER COUNT (Only if Kill Switch passes)
-- Filter 1: Combined SOT ≥ 8.5
-- Filter 3: Both teams clean sheet rate ≤ 20%
-
-STEP 3: BASE VERDICT
-- 2 of 2 filters pass → HIGH CONFIDENCE Over 1.5
-- 1 of 2 filters pass → MODERATE CONFIDENCE Over 1.5
-- 0 of 2 filters pass → AVOID / Under 1.5
-
-STEP 4: xG TIEBREAKER (For MODERATE only)
-- Combined xG ≥ 2.4 → Upgrade to HIGH
-- Combined xG < 2.0 → Downgrade to AVOID
-- Combined xG 2.0-2.4 → Leave as MODERATE
+Rules Priority:
+1. Scan for 100% or 0% metrics → Anchor bet
+2. Check Team Total Over 2.5 for BOTH teams
+3. Check Conceded Over 0.5 vs Failed to Score conflict
+4. Check BTTS & Over 2.5 correlation
+5. Output goal-market bets only
 """
 
 import streamlit as st
 import pandas as pd
-from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(
-    page_title="Over 1.5 Goals Predictor - Kill Switch System",
+    page_title="Streak Predictor - Goal Markets",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -45,7 +39,7 @@ st.markdown("""
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
-        max-width: 950px;
+        max-width: 900px;
     }
     .prediction-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
@@ -55,80 +49,26 @@ st.markdown("""
         text-align: center;
         border: 1px solid #334155;
     }
-    .prediction-high {
-        font-size: 2.5rem;
+    .prediction-market {
+        font-size: 1.8rem;
         font-weight: 800;
         color: #10b981;
+        margin: 0.5rem 0;
     }
-    .prediction-moderate {
-        font-size: 2.5rem;
-        font-weight: 800;
+    .prediction-anchor {
+        font-size: 1.2rem;
+        font-weight: 600;
         color: #fbbf24;
-    }
-    .prediction-avoid {
-        font-size: 2.5rem;
-        font-weight: 800;
-        color: #ef4444;
+        margin-bottom: 1rem;
     }
     .confidence-high {
-        font-size: 1rem;
-        font-weight: 600;
         color: #10b981;
-        margin-top: 0.5rem;
     }
-    .confidence-moderate {
-        font-size: 1rem;
-        font-weight: 600;
+    .confidence-medium {
         color: #fbbf24;
-        margin-top: 0.5rem;
     }
-    .confidence-avoid {
-        font-size: 1rem;
-        font-weight: 600;
-        color: #ef4444;
-        margin-top: 0.5rem;
-    }
-    .kill-switch-active {
-        background: #7f1a1a;
-        border-left: 4px solid #ef4444;
-        padding: 1rem;
-        margin: 1rem 0;
-        border-radius: 8px;
-        font-size: 1rem;
-        font-weight: 600;
-        color: #fca5a5;
-        text-align: center;
-    }
-    .kill-switch-inactive {
-        background: #064e3b;
-        border-left: 4px solid #10b981;
-        padding: 1rem;
-        margin: 1rem 0;
-        border-radius: 8px;
-        font-size: 1rem;
-        font-weight: 600;
-        color: #a7f3d0;
-        text-align: center;
-    }
-    .filter-pass {
-        background: #064e3b;
-        border-left: 4px solid #10b981;
-        padding: 0.75rem;
-        margin: 0.5rem 0;
-        border-radius: 8px;
-        font-size: 0.85rem;
-        color: #a7f3d0;
-        text-align: left;
-    }
-    .filter-fail {
-        background: #7f1a1a;
-        border-left: 4px solid #ef4444;
-        padding: 0.75rem;
-        margin: 0.5rem 0;
-        border-radius: 8px;
-        font-size: 0.85rem;
-        color: #fca5a5;
-        text-align: left;
+    .confidence-low {
+        color: #f97316;
     }
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
@@ -142,6 +82,15 @@ st.markdown("""
         font-weight: 700;
         margin-bottom: 0.5rem;
     }
+    .league-note {
+        background: #0f172a;
+        border-radius: 8px;
+        padding: 0.5rem;
+        text-align: center;
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-bottom: 1rem;
+    }
     .input-note {
         background: #1e293b;
         border-radius: 8px;
@@ -149,15 +98,6 @@ st.markdown("""
         margin: 0.5rem 0;
         font-size: 0.8rem;
         color: #fbbf24;
-        text-align: center;
-    }
-    .results-note {
-        background: #0f172a;
-        border-radius: 8px;
-        padding: 0.5rem;
-        margin: 0.5rem 0;
-        font-size: 0.75rem;
-        color: #94a3b8;
         text-align: center;
     }
     h1 {
@@ -187,6 +127,20 @@ st.markdown("""
         font-size: 0.8rem;
         text-align: left;
     }
+    .metric-highlight {
+        background: #064e3b;
+        border-left: 3px solid #10b981;
+        padding: 0.25rem 0.5rem;
+        margin: 0.25rem 0;
+        border-radius: 4px;
+    }
+    .metric-warning {
+        background: #7f1a1a;
+        border-left: 3px solid #ef4444;
+        padding: 0.25rem 0.5rem;
+        margin: 0.25rem 0;
+        border-radius: 4px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -195,359 +149,409 @@ st.markdown("""
 # DATA MODELS
 # ============================================================================
 @dataclass
-class TeamStats:
-    """Team statistical data - using home/away splits only"""
+class TeamMetrics:
+    """Team performance metrics (percentages)"""
     name: str
-    
-    # For Home Team (use HOME stats only)
-    home_total_shots: float = 0.0      # Total shots per game at home
-    home_on_target_percent: float = 0.0  # % of shots on target at home
-    home_scoring_freq: float = 0.0     # % of home matches they scored in
-    home_cs_rate: float = 0.0          # % of home matches they kept a clean sheet
-    home_xg: float = 0.0               # Expected goals per game at home (optional)
-    
-    # For Away Team (use AWAY stats only)
-    away_total_shots: float = 0.0      # Total shots per game away
-    away_on_target_percent: float = 0.0  # % of shots on target away
-    away_scoring_freq: float = 0.0     # % of away matches they scored in
-    away_cs_rate: float = 0.0          # % of away matches they kept a clean sheet
-    away_xg: float = 0.0               # Expected goals per game away (optional)
-    
-    # Flags
-    is_home: bool = True
+    over15_percent: float = 0.0      # % of matches with 2+ goals
+    over25_percent: float = 0.0      # % of matches with 3+ goals
+    over35_percent: float = 0.0      # % of matches with 4+ goals
+    btts_percent: float = 0.0        # % of matches where both teams scored
+    scored_over15_percent: float = 0.0   # % of matches where team scored 2+ goals
+    scored_over25_percent: float = 0.0   # % of matches where team scored 3+ goals
+    conceded_over05_percent: float = 0.0 # % of matches where team conceded
+    failed_to_score_percent: float = 0.0 # % of matches where team failed to score
+    clean_sheet_percent: float = 0.0     # % of matches where team kept clean sheet
 
 
 @dataclass
-class FilterResults:
-    """Results of all filters"""
-    kill_switch_passed: bool           # Both scoring frequencies ≥ 80%
-    kill_switch_reason: str            # Which team failed if any
-    
-    filter1_pass: bool                 # Combined SOT ≥ 8.5
-    filter3_pass: bool                 # Both clean sheet rates ≤ 20%
-    
-    combined_sot: float
-    home_sot: float
-    away_sot: float
-    
-    home_scoring_freq: float
-    away_scoring_freq: float
-    
-    home_cs_rate: float
-    away_cs_rate: float
-    
-    combined_xg: Optional[float] = None
-    
-    @property
-    def filters_passed_count(self) -> int:
-        """Count how many of Filter 1 and Filter 3 passed (only if kill switch passed)"""
-        return sum([self.filter1_pass, self.filter3_pass])
-
-
-@dataclass
-class PredictionResult:
-    main_bet: str      # "Over 1.5" or "AVOID / Under 1.5"
-    confidence: str    # "High", "Moderate", or "Avoid"
-    filter_results: FilterResults
+class MatchPrediction:
+    market: str          # "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5", "BTTS Yes", "BTTS No"
+    confidence: str      # "High", "Medium", "Low"
+    anchor_metric: str   # What triggered this bet
     reasoning: List[str]
-    decision_path: List[str]
 
 
 # ============================================================================
-# CALCULATION FUNCTIONS
+# SCANNING FUNCTIONS
 # ============================================================================
-def calculate_sot(total_shots: float, on_target_percent: float) -> float:
-    """Calculate Shots on Target per game from total shots and on-target %"""
-    return round(total_shots * (on_target_percent / 100), 2)
+def scan_100_percent(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
+    """Find 100% metrics → anchor bet"""
+    predictions = []
+    
+    # Home team 100% metrics
+    if home.over25_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Over 2.5",
+            confidence="High",
+            anchor_metric=f"{home.name} has 100% Over 2.5 rate",
+            reasoning=[f"{home.name} has Over 2.5 in 100% of matches → Anchor bet Over 2.5"]
+        ))
+    
+    if home.over35_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Over 3.5",
+            confidence="High",
+            anchor_metric=f"{home.name} has 100% Over 3.5 rate",
+            reasoning=[f"{home.name} has Over 3.5 in 100% of matches → Anchor bet Over 3.5"]
+        ))
+    
+    if home.scored_over25_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Over 2.5",
+            confidence="High",
+            anchor_metric=f"{home.name} scores 3+ goals in 100% of matches",
+            reasoning=[f"{home.name} always scores 3+ goals → Anchor bet Over 2.5"]
+        ))
+    
+    if home.clean_sheet_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="High",
+            anchor_metric=f"{home.name} has 100% clean sheets",
+            reasoning=[f"{home.name} never concedes → Anchor bet Under 2.5"]
+        ))
+    
+    if home.failed_to_score_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="High",
+            anchor_metric=f"{home.name} fails to score in 100% of matches",
+            reasoning=[f"{home.name} never scores → Anchor bet Under 2.5"]
+        ))
+    
+    # Away team 100% metrics
+    if away.over25_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Over 2.5",
+            confidence="High",
+            anchor_metric=f"{away.name} has 100% Over 2.5 rate",
+            reasoning=[f"{away.name} has Over 2.5 in 100% of matches → Anchor bet Over 2.5"]
+        ))
+    
+    if away.over35_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Over 3.5",
+            confidence="High",
+            anchor_metric=f"{away.name} has 100% Over 3.5 rate",
+            reasoning=[f"{away.name} has Over 3.5 in 100% of matches → Anchor bet Over 3.5"]
+        ))
+    
+    if away.scored_over25_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Over 2.5",
+            confidence="High",
+            anchor_metric=f"{away.name} scores 3+ goals in 100% of matches",
+            reasoning=[f"{away.name} always scores 3+ goals → Anchor bet Over 2.5"]
+        ))
+    
+    if away.clean_sheet_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="High",
+            anchor_metric=f"{away.name} has 100% clean sheets",
+            reasoning=[f"{away.name} never concedes → Anchor bet Under 2.5"]
+        ))
+    
+    if away.failed_to_score_percent == 100:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="High",
+            anchor_metric=f"{away.name} fails to score in 100% of matches",
+            reasoning=[f"{away.name} never scores → Anchor bet Under 2.5"]
+        ))
+    
+    return predictions
 
 
-def calculate_combined_sot(home: TeamStats, away: TeamStats) -> Tuple[float, float, float]:
-    """Calculate home SOT, away SOT, and combined SOT"""
-    home_sot = calculate_sot(home.home_total_shots, home.home_on_target_percent)
-    away_sot = calculate_sot(away.away_total_shots, away.away_on_target_percent)
-    combined = home_sot + away_sot
-    return home_sot, away_sot, combined
+def scan_0_percent(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
+    """Find 0% metrics → anchor bet (reverse)"""
+    predictions = []
+    
+    # Home team 0% metrics
+    if home.over25_percent == 0:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="High",
+            anchor_metric=f"{home.name} has 0% Over 2.5 rate",
+            reasoning=[f"{home.name} never goes Over 2.5 → Anchor bet Under 2.5"]
+        ))
+    
+    if home.over35_percent == 0:
+        predictions.append(MatchPrediction(
+            market="Under 3.5",
+            confidence="High",
+            anchor_metric=f"{home.name} has 0% Over 3.5 rate",
+            reasoning=[f"{home.name} never goes Over 3.5 → Anchor bet Under 3.5"]
+        ))
+    
+    if home.btts_percent == 0:
+        predictions.append(MatchPrediction(
+            market="BTTS No",
+            confidence="High",
+            anchor_metric=f"{home.name} has 0% BTTS rate",
+            reasoning=[f"{home.name} never has both teams score → Anchor bet BTTS No"]
+        ))
+    
+    if home.clean_sheet_percent == 0:
+        predictions.append(MatchPrediction(
+            market="Over 0.5",  # They always concede
+            confidence="Medium",
+            anchor_metric=f"{home.name} has 0% clean sheets",
+            reasoning=[f"{home.name} always concedes → Supports goals"]
+        ))
+    
+    # Away team 0% metrics
+    if away.over25_percent == 0:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="High",
+            anchor_metric=f"{away.name} has 0% Over 2.5 rate",
+            reasoning=[f"{away.name} never goes Over 2.5 → Anchor bet Under 2.5"]
+        ))
+    
+    if away.over35_percent == 0:
+        predictions.append(MatchPrediction(
+            market="Under 3.5",
+            confidence="High",
+            anchor_metric=f"{away.name} has 0% Over 3.5 rate",
+            reasoning=[f"{away.name} never goes Over 3.5 → Anchor bet Under 3.5"]
+        ))
+    
+    if away.btts_percent == 0:
+        predictions.append(MatchPrediction(
+            market="BTTS No",
+            confidence="High",
+            anchor_metric=f"{away.name} has 0% BTTS rate",
+            reasoning=[f"{away.name} never has both teams score → Anchor bet BTTS No"]
+        ))
+    
+    if away.clean_sheet_percent == 0:
+        predictions.append(MatchPrediction(
+            market="Over 0.5",
+            confidence="Medium",
+            anchor_metric=f"{away.name} has 0% clean sheets",
+            reasoning=[f"{away.name} always concedes → Supports goals"]
+        ))
+    
+    return predictions
 
 
-def calculate_combined_xg(home: TeamStats, away: TeamStats) -> Optional[float]:
-    """Calculate combined xG if available"""
-    if home.home_xg > 0 and away.away_xg > 0:
-        return round(home.home_xg + away.away_xg, 2)
-    return None
+def check_team_total_over25(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
+    """Check Team Total Over 2.5 for BOTH teams"""
+    predictions = []
+    
+    home_over25_rate = home.scored_over25_percent
+    away_over25_rate = away.scored_over25_percent
+    
+    if home_over25_rate == 0 and away_over25_rate == 0:
+        predictions.append(MatchPrediction(
+            market="Under 3.5",
+            confidence="High",
+            anchor_metric="Both teams have 0% chance of scoring 3+ goals",
+            reasoning=[
+                f"{home.name} scores 3+ goals in {home_over25_rate}% of matches",
+                f"{away.name} scores 3+ goals in {away_over25_rate}% of matches",
+                "→ Bet Under 3.5 or Under 2.5"
+            ]
+        ))
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="Medium",
+            anchor_metric="Both teams have 0% chance of scoring 3+ goals",
+            reasoning=["Both teams unlikely to score multiple goals → Under 2.5"]
+        ))
+    
+    elif home_over25_rate >= 50 or away_over25_rate >= 50:
+        predictions.append(MatchPrediction(
+            market="Over 2.5",
+            confidence="Medium",
+            anchor_metric=f"One team scores 3+ in {max(home_over25_rate, away_over25_rate)}% of matches",
+            reasoning=[
+                f"{home.name} scores 3+ goals in {home_over25_rate}%",
+                f"{away.name} scores 3+ goals in {away_over25_rate}%",
+                "→ Bet Over 2.5"
+            ]
+        ))
+    
+    return predictions
 
 
-def evaluate_filters(home: TeamStats, away: TeamStats) -> FilterResults:
-    """Evaluate all filters including the Kill Switch"""
+def check_btts_conflict(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
+    """Check Conceded Over 0.5 vs Failed to Score conflict"""
+    predictions = []
     
-    reasoning = []
+    home_concede_rate = home.conceded_over05_percent
+    away_concede_rate = away.conceded_over05_percent
+    home_fail_rate = home.failed_to_score_percent
+    away_fail_rate = away.failed_to_score_percent
     
-    # Calculate SOT
-    home_sot, away_sot, combined_sot = calculate_combined_sot(home, away)
+    avg_concede = (home_concede_rate + away_concede_rate) / 2
+    avg_fail = (home_fail_rate + away_fail_rate) / 2
     
-    # Calculate combined xG if available
-    combined_xg = calculate_combined_xg(home, away)
+    if avg_concede > 75 and avg_fail < 25:
+        predictions.append(MatchPrediction(
+            market="BTTS Yes",
+            confidence="High",
+            anchor_metric=f"Concede rate {avg_concede:.0f}% > Fail rate {avg_fail:.0f}%",
+            reasoning=[
+                "Both teams likely to concede and score",
+                "→ BTTS Yes"
+            ]
+        ))
     
-    # KILL SWITCH: Check scoring frequencies
-    home_scoring_freq = home.home_scoring_freq
-    away_scoring_freq = away.away_scoring_freq
+    elif avg_fail > 75 and avg_concede < 50:
+        predictions.append(MatchPrediction(
+            market="BTTS No",
+            confidence="High",
+            anchor_metric=f"Fail rate {avg_fail:.0f}% > Concede rate {avg_concede:.0f}%",
+            reasoning=[
+                "One or both teams likely to fail to score",
+                "→ BTTS No"
+            ]
+        ))
     
-    kill_switch_passed = home_scoring_freq >= 80.0 and away_scoring_freq >= 80.0
-    
-    kill_switch_reason = ""
-    if not kill_switch_passed:
-        if home_scoring_freq < 80.0 and away_scoring_freq < 80.0:
-            kill_switch_reason = f"Both teams failed: {home.name} {home_scoring_freq}% / {away.name} {away_scoring_freq}%"
-        elif home_scoring_freq < 80.0:
-            kill_switch_reason = f"{home.name} failed: {home_scoring_freq}% (<80%)"
-        else:
-            kill_switch_reason = f"{away.name} failed: {away_scoring_freq}% (<80%)"
-    
-    # Filter 1: Combined SOT ≥ 8.5
-    filter1_pass = combined_sot >= 8.5
-    
-    # Filter 3: Both clean sheet rates ≤ 20%
-    filter3_pass = home.home_cs_rate <= 20.0 and away.away_cs_rate <= 20.0
-    
-    return FilterResults(
-        kill_switch_passed=kill_switch_passed,
-        kill_switch_reason=kill_switch_reason,
-        filter1_pass=filter1_pass,
-        filter3_pass=filter3_pass,
-        combined_sot=combined_sot,
-        home_sot=home_sot,
-        away_sot=away_sot,
-        home_scoring_freq=home_scoring_freq,
-        away_scoring_freq=away_scoring_freq,
-        home_cs_rate=home.home_cs_rate,
-        away_cs_rate=away.away_cs_rate,
-        combined_xg=combined_xg
-    )
+    return predictions
 
 
-def make_prediction(home: TeamStats, away: TeamStats) -> PredictionResult:
-    """
-    Make Over 1.5 Goals prediction based on final refined logic.
-    """
-    reasoning = []
-    decision_path = []
+def check_btts_over25_correlation(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
+    """Check BTTS & Over 2.5 correlation"""
+    predictions = []
     
-    # Evaluate all filters
-    filters = evaluate_filters(home, away)
+    avg_btts = (home.btts_percent + away.btts_percent) / 2
+    avg_over25 = (home.over25_percent + away.over25_percent) / 2
     
-    # ========================================================================
-    # STEP 1: KILL SWITCH
-    # ========================================================================
-    decision_path.append("STEP 1: Kill Switch (Scoring Frequency ≥ 80% for both teams)")
+    # 100% linked: BTTS always means Over 2.5
+    if avg_btts > 75 and avg_over25 > 75:
+        predictions.append(MatchPrediction(
+            market="Over 2.5",
+            confidence="Medium",
+            anchor_metric="BTTS and Over 2.5 strongly correlated (75%+ each)",
+            reasoning=[
+                f"BTTS rate: {avg_btts:.0f}%",
+                f"Over 2.5 rate: {avg_over25:.0f}%",
+                "→ Over 2.5 requires BTTS. Adjust stake accordingly."
+            ]
+        ))
     
-    if not filters.kill_switch_passed:
-        reasoning.append(f"🔴 **KILL SWITCH ACTIVATED**")
-        reasoning.append(f"   {filters.kill_switch_reason}")
-        reasoning.append(f"   → Immediate AVOID / Under 1.5")
-        
-        return PredictionResult(
-            main_bet="AVOID / Under 1.5",
-            confidence="Avoid",
-            filter_results=filters,
-            reasoning=reasoning,
-            decision_path=decision_path
-        )
+    # 0% linked: Over 2.5 never happens with BTTS
+    elif avg_btts > 50 and avg_over25 < 25:
+        predictions.append(MatchPrediction(
+            market="Under 2.5",
+            confidence="Medium",
+            anchor_metric="BTTS high but Over 2.5 low → Shutout likely",
+            reasoning=[
+                f"BTTS rate: {avg_btts:.0f}%",
+                f"Over 2.5 rate: {avg_over25:.0f}%",
+                "→ Over 2.5 in shutout never happens. Fade Over."
+            ]
+        ))
     
-    # Kill switch passed
-    reasoning.append(f"🟢 **KILL SWITCH PASSED**")
-    reasoning.append(f"   {home.name} Scoring Frequency: {filters.home_scoring_freq}% (≥80%)")
-    reasoning.append(f"   {away.name} Scoring Frequency: {filters.away_scoring_freq}% (≥80%)")
+    return predictions
+
+
+def get_all_predictions(home: TeamMetrics, away: TeamMetrics) -> List[MatchPrediction]:
+    """Run all rules and return unique predictions"""
+    all_predictions = []
     
-    # ========================================================================
-    # STEP 2: FILTER COUNT (Filter 1 and Filter 3 only)
-    # ========================================================================
-    decision_path.append("STEP 2: Count remaining filters (SOT ≥ 8.5, Both CS ≤ 20%)")
+    # Tier 1: 100% / 0% metrics (anchor bets)
+    all_predictions.extend(scan_100_percent(home, away))
+    all_predictions.extend(scan_0_percent(home, away))
     
-    reasoning.append(f"\n📊 **REMAINING FILTERS:**")
+    # Tier 2: 75%+ / 25%- thresholds
+    if not all_predictions:
+        all_predictions.extend(check_team_total_over25(home, away))
+        all_predictions.extend(check_btts_conflict(home, away))
+        all_predictions.extend(check_btts_over25_correlation(home, away))
     
-    # Filter 1
-    if filters.filter1_pass:
-        reasoning.append(f"   ✅ Filter 1 PASS: Combined SOT = {filters.combined_sot} ≥ 8.5")
-    else:
-        reasoning.append(f"   ❌ Filter 1 FAIL: Combined SOT = {filters.combined_sot} < 8.5")
+    # Remove duplicates (same market)
+    seen = set()
+    unique_predictions = []
+    for p in all_predictions:
+        if p.market not in seen:
+            seen.add(p.market)
+            unique_predictions.append(p)
     
-    # Filter 3
-    if filters.filter3_pass:
-        reasoning.append(f"   ✅ Filter 3 PASS: Both CS rates ≤ 20% ({filters.home_cs_rate}% / {filters.away_cs_rate}%)")
-    else:
-        reasoning.append(f"   ❌ Filter 3 FAIL: {home.name} {filters.home_cs_rate}% / {away.name} {filters.away_cs_rate}% (Need both ≤20%)")
-    
-    filters_passed = filters.filters_passed_count
-    reasoning.append(f"\n📊 **Filters Passed: {filters_passed}/2**")
-    
-    # ========================================================================
-    # STEP 3: BASE VERDICT
-    # ========================================================================
-    if filters_passed == 2:
-        decision_path.append("STEP 3: 2/2 filters passed → HIGH CONFIDENCE")
-        main_bet = "Over 1.5"
-        confidence = "High"
-        reasoning.append(f"\n✅ **BASE VERDICT:** {filters_passed}/2 filters passed → **OVER 1.5** (HIGH CONFIDENCE)")
-        
-        return PredictionResult(
-            main_bet=main_bet,
-            confidence=confidence,
-            filter_results=filters,
-            reasoning=reasoning,
-            decision_path=decision_path
-        )
-    
-    elif filters_passed == 1:
-        decision_path.append("STEP 3: 1/2 filters passed → MODERATE (check xG tiebreaker)")
-        main_bet = "Over 1.5"
-        confidence = "Moderate"
-        reasoning.append(f"\n🟡 **BASE VERDICT:** {filters_passed}/2 filters passed → **OVER 1.5** (MODERATE CONFIDENCE)")
-        
-        # ====================================================================
-        # STEP 4: xG TIEBREAKER
-        # ====================================================================
-        if filters.combined_xg is not None:
-            decision_path.append(f"STEP 4: xG Tiebreaker - Combined xG = {filters.combined_xg}")
-            reasoning.append(f"\n📊 **xG TIEBREAKER:** Combined xG = {filters.combined_xg}")
-            
-            if filters.combined_xg >= 2.4:
-                main_bet = "Over 1.5"
-                confidence = "High"
-                reasoning.append(f"   → xG ≥ 2.4 → **UPGRADE to HIGH CONFIDENCE**")
-            elif filters.combined_xg < 2.0:
-                main_bet = "AVOID / Under 1.5"
-                confidence = "Avoid"
-                reasoning.append(f"   → xG < 2.0 → **DOWNGRADE to AVOID / Under 1.5**")
-            else:
-                reasoning.append(f"   → xG {filters.combined_xg} in 2.0-2.4 range → **No change (MODERATE)**")
-        else:
-            decision_path.append("STEP 4: xG data not available - no tiebreaker applied")
-            reasoning.append(f"\n📊 **xG TIEBREAKER:** No xG data available → Leave as MODERATE")
-        
-        return PredictionResult(
-            main_bet=main_bet,
-            confidence=confidence,
-            filter_results=filters,
-            reasoning=reasoning,
-            decision_path=decision_path
-        )
-    
-    else:  # 0 filters passed
-        decision_path.append("STEP 3: 0/2 filters passed → AVOID")
-        main_bet = "AVOID / Under 1.5"
-        confidence = "Avoid"
-        reasoning.append(f"\n🔴 **VERDICT:** {filters_passed}/2 filters passed → **AVOID / UNDER 1.5**")
-        
-        return PredictionResult(
-            main_bet=main_bet,
-            confidence=confidence,
-            filter_results=filters,
-            reasoning=reasoning,
-            decision_path=decision_path
-        )
+    return unique_predictions[:3]  # Max 3 recommendations
 
 
 # ============================================================================
 # UI HELPER FUNCTIONS
 # ============================================================================
-def home_team_stats_input(team_name: str) -> TeamStats:
-    """Create input fields for HOME team (using HOME stats only)"""
-    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name} (HOME Team)</span></div>", unsafe_allow_html=True)
-    st.markdown("<div class='input-note'>📌 Enter HOME team's HOME stats only (last 5-10 matches)</div>", unsafe_allow_html=True)
+def team_metrics_input(team_name: str, key_prefix: str) -> TeamMetrics:
+    """Create input fields for team metrics"""
+    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        home_total_shots = st.number_input(
-            "🎯 Total Shots per game (HOME)",
-            min_value=0.0, max_value=30.0, value=12.0, step=0.5,
-            key=f"{team_name}_home_total_shots"
+        over15_percent = st.number_input(
+            "Over 1.5 %",
+            min_value=0, max_value=100, value=50, step=5,
+            key=f"{key_prefix}_over15",
+            help="% of matches with 2+ goals"
         )
-        home_on_target_percent = st.number_input(
-            "📊 Shots ON TARGET % (HOME)",
-            min_value=0, max_value=100, value=30, step=1,
-            key=f"{team_name}_home_on_target_percent"
+        over25_percent = st.number_input(
+            "Over 2.5 %",
+            min_value=0, max_value=100, value=35, step=5,
+            key=f"{key_prefix}_over25",
+            help="% of matches with 3+ goals"
         )
-        home_scoring_freq = st.number_input(
-            "✅ Scoring Frequency % (HOME) - Scored in % of matches",
-            min_value=0, max_value=100, value=80, step=5,
-            key=f"{team_name}_home_scoring_freq"
-        )
-    
-    with col2:
-        home_cs_rate = st.number_input(
-            "🧤 Clean Sheet Rate % (HOME) - Conceded 0 in % of matches",
-            min_value=0, max_value=100, value=15, step=5,
-            key=f"{team_name}_home_cs_rate"
-        )
-        home_xg = st.number_input(
-            "📈 xG per game (HOME) - Optional (0 if unknown)",
-            min_value=0.0, max_value=5.0, value=0.0, step=0.05,
-            key=f"{team_name}_home_xg"
-        )
-    
-    # Display calculated SOT
-    calculated_sot = calculate_sot(home_total_shots, home_on_target_percent)
-    st.markdown(f"<div class='results-note'>🎯 Calculated Shots ON TARGET per game: {calculated_sot}</div>", unsafe_allow_html=True)
-    
-    return TeamStats(
-        name=team_name,
-        home_total_shots=home_total_shots,
-        home_on_target_percent=float(home_on_target_percent),
-        home_scoring_freq=float(home_scoring_freq),
-        home_cs_rate=float(home_cs_rate),
-        home_xg=home_xg,
-        is_home=True
-    )
-
-
-def away_team_stats_input(team_name: str) -> TeamStats:
-    """Create input fields for AWAY team (using AWAY stats only)"""
-    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name} (AWAY Team)</span></div>", unsafe_allow_html=True)
-    st.markdown("<div class='input-note'>📌 Enter AWAY team's AWAY stats only (last 5-10 matches)</div>", unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        away_total_shots = st.number_input(
-            "🎯 Total Shots per game (AWAY)",
-            min_value=0.0, max_value=30.0, value=10.0, step=0.5,
-            key=f"{team_name}_away_total_shots"
-        )
-        away_on_target_percent = st.number_input(
-            "📊 Shots ON TARGET % (AWAY)",
-            min_value=0, max_value=100, value=30, step=1,
-            key=f"{team_name}_away_on_target_percent"
-        )
-        away_scoring_freq = st.number_input(
-            "✅ Scoring Frequency % (AWAY) - Scored in % of matches",
-            min_value=0, max_value=100, value=75, step=5,
-            key=f"{team_name}_away_scoring_freq"
-        )
-    
-    with col2:
-        away_cs_rate = st.number_input(
-            "🧤 Clean Sheet Rate % (AWAY) - Conceded 0 in % of matches",
+        over35_percent = st.number_input(
+            "Over 3.5 %",
             min_value=0, max_value=100, value=20, step=5,
-            key=f"{team_name}_away_cs_rate"
+            key=f"{key_prefix}_over35",
+            help="% of matches with 4+ goals"
         )
-        away_xg = st.number_input(
-            "📈 xG per game (AWAY) - Optional (0 if unknown)",
-            min_value=0.0, max_value=5.0, value=0.0, step=0.05,
-            key=f"{team_name}_away_xg"
+        btts_percent = st.number_input(
+            "BTTS %",
+            min_value=0, max_value=100, value=40, step=5,
+            key=f"{key_prefix}_btts",
+            help="% of matches where both teams scored"
         )
     
-    # Display calculated SOT
-    calculated_sot = calculate_sot(away_total_shots, away_on_target_percent)
-    st.markdown(f"<div class='results-note'>🎯 Calculated Shots ON TARGET per game: {calculated_sot}</div>", unsafe_allow_html=True)
+    with col2:
+        scored_over15_percent = st.number_input(
+            "Scored 2+ %",
+            min_value=0, max_value=100, value=30, step=5,
+            key=f"{key_prefix}_scored15",
+            help="% of matches where team scored 2+ goals"
+        )
+        scored_over25_percent = st.number_input(
+            "Scored 3+ %",
+            min_value=0, max_value=100, value=15, step=5,
+            key=f"{key_prefix}_scored25",
+            help="% of matches where team scored 3+ goals"
+        )
+        conceded_over05_percent = st.number_input(
+            "Conceded %",
+            min_value=0, max_value=100, value=70, step=5,
+            key=f"{key_prefix}_conceded",
+            help="% of matches where team conceded"
+        )
+        failed_to_score_percent = st.number_input(
+            "Failed to Score %",
+            min_value=0, max_value=100, value=30, step=5,
+            key=f"{key_prefix}_failed",
+            help="% of matches where team failed to score"
+        )
+        clean_sheet_percent = st.number_input(
+            "Clean Sheet %",
+            min_value=0, max_value=100, value=30, step=5,
+            key=f"{key_prefix}_clean",
+            help="% of matches where team kept clean sheet"
+        )
     
-    return TeamStats(
+    return TeamMetrics(
         name=team_name,
-        away_total_shots=away_total_shots,
-        away_on_target_percent=float(away_on_target_percent),
-        away_scoring_freq=float(away_scoring_freq),
-        away_cs_rate=float(away_cs_rate),
-        away_xg=away_xg,
-        is_home=False
+        over15_percent=float(over15_percent),
+        over25_percent=float(over25_percent),
+        over35_percent=float(over35_percent),
+        btts_percent=float(btts_percent),
+        scored_over15_percent=float(scored_over15_percent),
+        scored_over25_percent=float(scored_over25_percent),
+        conceded_over05_percent=float(conceded_over05_percent),
+        failed_to_score_percent=float(failed_to_score_percent),
+        clean_sheet_percent=float(clean_sheet_percent)
     )
 
 
@@ -555,23 +559,16 @@ def away_team_stats_input(team_name: str) -> TeamStats:
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("⚽ Over 1.5 Goals Predictor")
-    st.caption("Kill Switch System: Scoring Frequency ≥ 80% is MANDATORY")
+    st.title("⚽ Streak Predictor")
+    st.caption("Goal Markets Only | 100%/0% Anchor Bets | No Winner Picks")
     
     st.markdown("""
-    <div class="step-box">
-    <strong>🎯 FINAL LOGIC:</strong><br><br>
-    <strong>STEP 1 - KILL SWITCH:</strong> If either team has Scoring Frequency &lt; 80% → 🔴 IMMEDIATE AVOID<br>
-    <strong>STEP 2 - FILTER COUNT:</strong> (Only if Kill Switch passes)<br>
-    &nbsp;&nbsp;&nbsp;• Filter 1: Combined SOT ≥ 8.5<br>
-    &nbsp;&nbsp;&nbsp;• Filter 3: Both teams Clean Sheet Rate ≤ 20%<br>
-    <strong>STEP 3 - BASE VERDICT:</strong><br>
-    &nbsp;&nbsp;&nbsp;• 2/2 pass → 🟢 HIGH CONFIDENCE Over 1.5<br>
-    &nbsp;&nbsp;&nbsp;• 1/2 pass → 🟡 MODERATE CONFIDENCE Over 1.5<br>
-    &nbsp;&nbsp;&nbsp;• 0/2 pass → 🔴 AVOID<br>
-    <strong>STEP 4 - xG TIEBREAKER:</strong> (For MODERATE only)<br>
-    &nbsp;&nbsp;&nbsp;• xG ≥ 2.4 → Upgrade to HIGH<br>
-    &nbsp;&nbsp;&nbsp;• xG &lt; 2.0 → Downgrade to AVOID
+    <div class="league-note">
+        📊 <strong>Core Principles:</strong><br>
+        • <strong>NEVER predict a winner</strong> (no "Team A will win")<br>
+        • Only predict goal markets: Over 2.5, Under 2.5, Over 3.5, Under 3.5, BTTS Yes, BTTS No<br>
+        • Find 100% or 0% metrics first → Anchor bet<br>
+        • Then use tiered thresholds (75%+ / 25%-)
     </div>
     """, unsafe_allow_html=True)
     
@@ -582,158 +579,90 @@ def main():
     # ========================================================================
     col1, col2 = st.columns(2)
     with col1:
-        home_name = st.text_input("🏠 Home Team Name", "Home Team", key="home_name")
+        home_name = st.text_input("🏠 Home Team", "Home Team", key="home_name")
     with col2:
-        away_name = st.text_input("✈️ Away Team Name", "Away Team", key="away_name")
+        away_name = st.text_input("✈️ Away Team", "Away Team", key="away_name")
     
     st.divider()
     
-    # Home Team Stats
-    st.subheader(f"🏠 {home_name} - HOME STATS ONLY")
-    home_stats = home_team_stats_input(home_name)
+    # Home Team Metrics
+    st.subheader(f"🏠 {home_name} - Team Metrics")
+    home_metrics = team_metrics_input(home_name, "home")
     
     st.divider()
     
-    # Away Team Stats
-    st.subheader(f"✈️ {away_name} - AWAY STATS ONLY")
-    away_stats = away_team_stats_input(away_name)
+    # Away Team Metrics
+    st.subheader(f"✈️ {away_name} - Team Metrics")
+    away_metrics = team_metrics_input(away_name, "away")
     
     st.divider()
     
     # ========================================================================
     # PREDICT BUTTON
     # ========================================================================
-    if st.button("🔮 PREDICT Over 1.5 Goals", type="primary"):
-        # Make prediction
-        result = make_prediction(home_stats, away_stats)
+    if st.button("🔮 PREDICT", type="primary"):
+        predictions = get_all_predictions(home_metrics, away_metrics)
         
-        # Determine display class
-        if "AVOID" in result.main_bet or result.confidence == "Avoid":
-            pred_class = "prediction-avoid"
-            pred_icon = "🔴"
-        elif result.confidence == "High":
-            pred_class = "prediction-high"
-            pred_icon = "🔥"
-        else:
-            pred_class = "prediction-moderate"
-            pred_icon = "🟡"
-        
-        confidence_class = f"confidence-{result.confidence.lower()}"
-        
-        # Display prediction card
-        st.markdown(f"""
-        <div class="prediction-card">
-            <div class="{pred_class}">{pred_icon} {result.main_bet}</div>
-            <div class="{confidence_class}">Confidence: {result.confidence}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Display Kill Switch status
-        f = result.filter_results
-        if not f.kill_switch_passed:
-            st.markdown(f"""
-            <div class="kill-switch-active">
-            🛑 KILL SWITCH ACTIVATED<br>
-            {f.kill_switch_reason}<br>
-            → Immediate AVOID / Under 1.5
+        if not predictions:
+            st.markdown("""
+            <div class="prediction-card">
+                <div class="prediction-market">⏸️ NO CLEAR BET</div>
+                <div style="margin-top: 1rem; font-size: 0.9rem; color: #94a3b8;">
+                    No 100%/0% metrics found. No strong thresholds triggered.
+                </div>
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.markdown(f"""
-            <div class="kill-switch-inactive">
-            ✅ KILL SWITCH PASSED<br>
-            {home_stats.name} {f.home_scoring_freq}% / {away_stats.name} {f.away_scoring_freq}% (Both ≥80%)
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Display filter details (only if kill switch passed)
-        if f.kill_switch_passed:
-            with st.expander("📋 Filter Details", expanded=True):
+            for pred in predictions:
+                confidence_class = "confidence-high" if pred.confidence == "High" else "confidence-medium" if pred.confidence == "Medium" else "confidence-low"
                 
-                if f.filter1_pass:
-                    st.markdown(f'<div class="filter-pass">✅ FILTER 1 PASS: Combined SOT = {f.combined_sot} ≥ 8.5<br>(Home SOT: {f.home_sot} | Away SOT: {f.away_sot})</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="filter-fail">❌ FILTER 1 FAIL: Combined SOT = {f.combined_sot} < 8.5<br>(Home SOT: {f.home_sot} | Away SOT: {f.away_sot})</div>', unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="prediction-card">
+                    <div class="prediction-anchor">🎯 {pred.anchor_metric}</div>
+                    <div class="prediction-market">📊 {pred.market}</div>
+                    <div class="{confidence_class}">Confidence: {pred.confidence}</div>
+                </div>
+                """, unsafe_allow_html=True)
                 
-                if f.filter3_pass:
-                    st.markdown(f'<div class="filter-pass">✅ FILTER 3 PASS: Both CS rates ≤ 20%<br>({home_stats.name} {f.home_cs_rate}% | {away_stats.name} {f.away_cs_rate}%)</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="filter-fail">❌ FILTER 3 FAIL: Need both ≤20%<br>({home_stats.name} {f.home_cs_rate}% | {away_stats.name} {f.away_cs_rate}%)</div>', unsafe_allow_html=True)
-                
-                if f.combined_xg:
-                    st.markdown(f'<div class="step-box">📊 Combined xG (Tiebreaker): {f.combined_xg}</div>', unsafe_allow_html=True)
+                with st.expander("📋 Reasoning", expanded=True):
+                    for line in pred.reasoning:
+                        st.write(f"• {line}")
         
-        # Display decision path
-        with st.expander("📋 Decision Path", expanded=False):
-            for i, step in enumerate(result.decision_path, 1):
-                st.markdown(f'<div class="step-box">{i}. {step}</div>', unsafe_allow_html=True)
-        
-        # Display detailed reasoning
-        with st.expander("📊 Detailed Analysis", expanded=False):
-            for line in result.reasoning:
-                if "🔴" in line or "❌" in line:
-                    st.error(line)
-                elif "🟢" in line or "✅" in line:
-                    st.success(line)
-                elif "🟡" in line:
-                    st.warning(line)
-                else:
-                    st.write(line)
-        
-        # Display data table
-        with st.expander("📈 Data Summary", expanded=False):
+        # Display data summary
+        with st.expander("📈 Metrics Summary", expanded=False):
             data = {
                 "Metric": [
-                    f"{home_stats.name} - Total Shots (HOME)",
-                    f"{home_stats.name} - ON Target % (HOME)",
-                    f"{home_stats.name} - SOT (HOME) - Calculated",
-                    f"{home_stats.name} - Scoring Frequency (HOME)",
-                    f"{home_stats.name} - Clean Sheet Rate (HOME)",
-                    f"{away_stats.name} - Total Shots (AWAY)",
-                    f"{away_stats.name} - ON Target % (AWAY)",
-                    f"{away_stats.name} - SOT (AWAY) - Calculated",
-                    f"{away_stats.name} - Scoring Frequency (AWAY)",
-                    f"{away_stats.name} - Clean Sheet Rate (AWAY)",
-                    "Combined SOT",
+                    "Over 1.5 %",
+                    "Over 2.5 %",
+                    "Over 3.5 %",
+                    "BTTS %",
+                    "Scored 2+ %",
+                    "Scored 3+ %",
+                    "Conceded %",
+                    "Failed to Score %",
+                    "Clean Sheet %"
                 ],
-                "Value": [
-                    f"{home_stats.home_total_shots}",
-                    f"{home_stats.home_on_target_percent}%",
-                    f"{f.home_sot}",
-                    f"{f.home_scoring_freq}%",
-                    f"{f.home_cs_rate}%",
-                    f"{away_stats.away_total_shots}",
-                    f"{away_stats.away_on_target_percent}%",
-                    f"{f.away_sot}",
-                    f"{f.away_scoring_freq}%",
-                    f"{f.away_cs_rate}%",
-                    f"{f.combined_sot}",
+                home_name: [
+                    f"{home_metrics.over15_percent}%",
+                    f"{home_metrics.over25_percent}%",
+                    f"{home_metrics.over35_percent}%",
+                    f"{home_metrics.btts_percent}%",
+                    f"{home_metrics.scored_over15_percent}%",
+                    f"{home_metrics.scored_over25_percent}%",
+                    f"{home_metrics.conceded_over05_percent}%",
+                    f"{home_metrics.failed_to_score_percent}%",
+                    f"{home_metrics.clean_sheet_percent}%"
                 ],
-                "Threshold": [
-                    "-",
-                    "-",
-                    "-",
-                    "≥ 80%",
-                    "≤ 20%",
-                    "-",
-                    "-",
-                    "-",
-                    "≥ 80%",
-                    "≤ 20%",
-                    "≥ 8.5",
-                ],
-                "Pass?": [
-                    "-",
-                    "-",
-                    "-",
-                    "✅" if f.home_scoring_freq >= 80 else "❌",
-                    "✅" if f.home_cs_rate <= 20 else "❌",
-                    "-",
-                    "-",
-                    "-",
-                    "✅" if f.away_scoring_freq >= 80 else "❌",
-                    "✅" if f.away_cs_rate <= 20 else "❌",
-                    "✅" if f.filter1_pass else "❌",
+                away_name: [
+                    f"{away_metrics.over15_percent}%",
+                    f"{away_metrics.over25_percent}%",
+                    f"{away_metrics.over35_percent}%",
+                    f"{away_metrics.btts_percent}%",
+                    f"{away_metrics.scored_over15_percent}%",
+                    f"{away_metrics.scored_over25_percent}%",
+                    f"{away_metrics.conceded_over05_percent}%",
+                    f"{away_metrics.failed_to_score_percent}%",
+                    f"{away_metrics.clean_sheet_percent}%"
                 ]
             }
             df = pd.DataFrame(data)
@@ -742,40 +671,35 @@ def main():
     # Footer
     st.divider()
     st.markdown("""
-    ### 📋 Complete Decision Rules
+    ### 📋 Rules Summary
     
-    | Step | Condition | Action |
-    |------|-----------|--------|
-    | **KILL SWITCH** | Either team Scoring Frequency < 80% | 🔴 **IMMEDIATE AVOID** |
-    | **Filter Count** | Both teams ≥80% scoring frequency | Proceed to check SOT + CS Rate |
-    | **2/2 Pass** | SOT ≥ 8.5 AND Both CS ≤ 20% | 🟢 **HIGH CONFIDENCE Over 1.5** |
-    | **1/2 Pass** | Only one of SOT or CS passes | 🟡 **MODERATE CONFIDENCE** |
-    | **0/2 Pass** | Neither SOT nor CS passes | 🔴 **AVOID / Under 1.5** |
+    | Priority | Rule | Trigger | Bet |
+    |----------|------|---------|-----|
+    | **1** | Scan 100% metrics | Any metric = 100% | Anchor bet (Over/Under/BTTS) |
+    | **2** | Scan 0% metrics | Any metric = 0% | Anchor bet (reverse) |
+    | **3** | Team Total Over 2.5 | Both teams 0% → Under 3.5/2.5 | Goal market |
+    | **4** | BTTS Conflict | Concede 100% > Fail 75% → BTTS Yes | BTTS market |
+    | **5** | BTTS & Over 2.5 Correlation | 100% linked → Over 2.5 requires BTTS | Stake adjustment |
     
-    ### xG Tiebreaker (For MODERATE only)
+    ### 🎯 Key Principles
     
-    | Combined xG | Action |
-    |-------------|--------|
-    | **≥ 2.4** | ⬆️ Upgrade to HIGH |
-    | **2.0 - 2.4** | 🟡 Leave as MODERATE |
-    | **< 2.0** | ⬇️ Downgrade to AVOID |
+    - **NO WINNER PICKS** - Never predict which team will win
+    - **Goal markets only** - Over/Under/BTTS
+    - **Anchor bets first** - 100% or 0% metrics are most reliable
+    - **Maximum 3 recommendations** per match
     
-    ### 🎯 Critical Input Rules
+    ### 🎯 How to Use
     
-    | Team | Use These Stats Only |
-    |------|---------------------|
-    | **Home Team** | HOME Total Shots + HOME ON Target % + HOME Scoring Frequency + HOME Clean Sheet Rate |
-    | **Away Team** | AWAY Total Shots + AWAY ON Target % + AWAY Scoring Frequency + AWAY Clean Sheet Rate |
+    1. Enter **Home Team** and **Away Team** names
+    2. Enter each team's **percentage metrics** (from your data source)
+    3. Click **PREDICT**
     
-    ### 📊 Data Source
+    ### ✅ What This System Does
     
-    All stats should be based on **last 5-10 matches** (minimum 5 matches for statistical significance).
-    
-    ### 🛡️ The Kill Switch
-        
-    **If either team fails to score in ≥20% of their matches → DO NOT BET Over 1.5.**
-    
-    This single rule would have saved every failed prediction in our test cases.
+    - Finds statistical certainties (100%/0%)
+    - Identifies conflicts and correlations
+    - Outputs only goal-market bets
+    - Never predicts a winner
     """)
 
 if __name__ == "__main__":
