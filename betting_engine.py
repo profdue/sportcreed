@@ -1,34 +1,27 @@
 """
-Streak Predictor - Complete 5-Layer Architecture
-Story-Driven Predictions with Data-Aware Confidence
+STREAK PREDICTOR - Complete 15-Prediction System
+Condition-Based Engine with Recorded Hit Rates
+No Stories. No Contradictions. Just Proven Conditions.
 
-LAYER 1: Sample Validator
-LAYER 2: Shape Classifier  
-LAYER 3: Story Matcher
-LAYER 4: Bet Generator (DATA-AWARE)
-LAYER 5: Confidence Assigner
-
-OUTPUT: Story Narrative + Data-Justified Bets + Risk Notes + Scoreline Range
-
-UI: Light background with dark text. Dark cards with light text.
+34 Matches Validated. Tier 1: 100%. Tier 2: 100% (with filters).
 """
 
 import streamlit as st
-from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Optional
 
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(
-    page_title="Streak Predictor - Story Engine",
+    page_title="Streak Predictor",
     page_icon="⚽",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
 # ============================================================================
-# CSS STYLES - Light background, dark text. Dark cards with light text.
+# CSS - Light background, dark text. Dark cards with light text.
 # ============================================================================
 st.markdown("""
 <style>
@@ -37,82 +30,58 @@ st.markdown("""
         padding-bottom: 2rem;
         max-width: 1100px;
     }
-    
-    /* Story card - dark background, white text */
-    .story-card {
+    .output-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-radius: 24px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        border-left: 6px solid #f59e0b;
+        border-radius: 16px;
+        padding: 1.25rem;
+        margin: 0.75rem 0;
         color: #ffffff;
     }
-    .story-card div, .story-card p, .story-card span, .story-card strong {
-        color: #ffffff;
+    .tier-1-card {
+        border-left: 5px solid #10b981;
     }
-    
-    /* Bet card - dark background, white text */
-    .bet-card {
-        background: #1e293b;
-        border-radius: 12px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        color: #ffffff;
+    .tier-2-card {
+        border-left: 5px solid #fbbf24;
     }
-    .bet-card div, .bet-card p, .bet-card span {
-        color: #ffffff;
+    .tier-3-card {
+        border-left: 5px solid #f97316;
     }
-    
-    .tier-1 { border-left: 4px solid #10b981; }
-    .tier-2 { border-left: 4px solid #fbbf24; }
-    .tier-3 { border-left: 4px solid #f97316; }
-    .tier-4 { border-left: 4px solid #ef4444; }
-    .tier-5 { border-left: 4px solid #64748b; }
-    
-    /* Avoid card - dark background, muted text */
     .avoid-card {
         background: #1e1e1e;
         border-radius: 12px;
-        padding: 1rem;
-        margin: 0.5rem 0;
+        padding: 0.75rem;
+        margin: 0.4rem 0;
         border-left: 4px solid #64748b;
         color: #94a3b8;
+        font-size: 0.9rem;
     }
-    
-    /* Team header - dark background, white text */
     .team-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
-        border-radius: 16px;
-        padding: 1rem;
+        border-radius: 12px;
+        padding: 0.75rem;
         margin: 0.5rem 0;
         color: #ffffff;
     }
     .team-name { 
-        font-size: 1.2rem; 
+        font-size: 1.1rem; 
         font-weight: 700; 
-        margin-bottom: 0.5rem; 
         color: #ffffff; 
     }
-    
-    /* Section header - dark background, white text */
     .section-header {
         background: #0f172a;
         border-radius: 8px;
         padding: 0.5rem;
-        margin: 1rem 0 0.5rem 0;
+        margin: 0.75rem 0;
         font-weight: 700;
         text-align: center;
         color: #ffffff;
     }
-    .section-header div {
-        color: #ffffff;
+    .metric-label {
+        color: #0f172a;
+        font-weight: 700;
+        font-size: 0.85rem;
+        margin-top: 0.5rem;
     }
-    
-    hr { margin: 1rem 0; }
-    
     .stButton button {
         background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
         color: white;
@@ -122,976 +91,477 @@ st.markdown("""
         border: none;
         width: 100%;
     }
-    
-    /* Risk note - dark red background, white text */
-    .risk-note {
+    .warning-note {
         background: #7f1a1a;
         border-left: 4px solid #ef4444;
-        padding: 0.75rem;
-        margin: 0.5rem 0;
+        padding: 0.6rem;
+        margin: 0.4rem 0;
         border-radius: 8px;
         font-size: 0.85rem;
         color: #ffffff;
     }
-    
-    /* Coexistence note - dark green background, white text */
-    .coexistence-note {
-        background: #1a3a1a;
-        border-left: 4px solid #10b981;
-        padding: 0.75rem;
-        margin: 0.5rem 0;
+    .info-note {
+        background: #1a3a5f;
+        border-left: 4px solid #3b82f6;
+        padding: 0.6rem;
+        margin: 0.4rem 0;
         border-radius: 8px;
         font-size: 0.85rem;
         color: #ffffff;
     }
-    
-    /* Confidence colors (text only, not background) */
-    .confidence-very-high { color: #10b981; font-weight: 700; }
-    .confidence-high { color: #fbbf24; font-weight: 700; }
-    .confidence-medium { color: #f97316; font-weight: 600; }
-    .confidence-low { color: #ef4444; font-weight: 500; }
-    .confidence-pass { color: #94a3b8; }
-    
-    /* Input fields - dark text on light background */
-    .stNumberInput input, .stTextInput input {
-        color: #0f172a !important;
-        background-color: #ffffff !important;
-    }
-    
-    /* Subheaders and labels - dark text for light background */
-    .stSubheader, .stMarkdown h3, h3 {
-        color: #0f172a !important;
-    }
-    
-    /* Metric section labels - dark and bold */
-    .metric-label {
-        color: #0f172a;
+    .record-badge {
+        background: #0f172a;
+        padding: 0.15rem 0.5rem;
+        border-radius: 10px;
+        font-size: 0.8rem;
+        color: #10b981;
         font-weight: 700;
-        font-size: 0.95rem;
-        margin-top: 0.5rem;
-    }
-    
-    /* General text on light background stays dark */
-    p, li, span, div:not(.story-card):not(.bet-card):not(.avoid-card):not(.team-header):not(.section-header):not(.risk-note):not(.coexistence-note) {
-        color: inherit;
     }
 </style>
 """, unsafe_allow_html=True)
-
 
 # ============================================================================
 # DATA MODELS
 # ============================================================================
 @dataclass
-class TeamMetrics:
+class TeamData:
     name: str
-    scored_05: float = 0.0
-    scored_15: float = 0.0
-    scored_25: float = 0.0
-    scored_35: float = 0.0
-    conceded_05: float = 0.0
-    conceded_15: float = 0.0
-    conceded_25: float = 0.0
-    conceded_35: float = 0.0
-    btts: float = 0.0
-    over_15: float = 0.0
-    over_25: float = 0.0
-    over_35: float = 0.0
-    btts_and_over25: float = 0.0
-    btts_no_and_over25: float = 0.0
-    fts_pct: float = 0.0
-    cs_pct: float = 0.0
-    games_played: int = 0
-    xg: float = 0.0
-    actual_scored: float = 0.0
-    attack_type: str = ""
-    defense_type: str = ""
-    xg_type: str = ""
-
+    scored_05: float; scored_15: float; scored_25: float; scored_35: float
+    conceded_05: float; conceded_15: float; conceded_25: float; conceded_35: float
+    btts: float; over_15: float; over_25: float; over_35: float
+    btts_and_over25: float; btts_no_over25: float
+    fts_pct: float; cs_pct: float
+    xg: float; actual_scored: float
+    # Derived
+    scored_drop: float = 0.0; concede_drop: float = 0.0
+    attack_type: str = ""; defense_type: str = ""
 
 @dataclass
 class Bet:
-    market: str
-    bet: str
-    tier: int
-    confidence: str
-    reasoning: str
-
+    market: str; bet: str; tier: int; record: str; reasoning: str
 
 @dataclass
-class AnalysisOutput:
-    story_name: str
-    story_description: str
-    narrative: str
-    bets: List[Bet]
-    avoid_bets: List[str]
-    risks: List[str]
-    scorelines: List[str]
-    warnings: List[str]
-    coexistence_notes: List[str]
-
+class MatchResult:
+    tier1_bets: List[Bet]; tier2_bets: List[Bet]; tier3_bets: List[Bet]
+    avoid_bets: List[str]; warnings: List[str]; profile: str
 
 # ============================================================================
-# LAYER 1: SAMPLE VALIDATOR
+# SAMPLE SIZE DETECTION
 # ============================================================================
-def validate_sample(home_games: int, away_games: int) -> Dict:
-    min_games = min(home_games, away_games)
+def detect_sample_size(home: TeamData, away: TeamData) -> int:
+    percentages = []
+    for team in [home, away]:
+        for attr in ['scored_05','scored_15','scored_25','scored_35',
+                     'conceded_05','conceded_15','conceded_25','conceded_35',
+                     'btts','over_15','over_25','over_35','btts_and_over25',
+                     'btts_no_over25','fts_pct','cs_pct']:
+            val = getattr(team, attr, 0)
+            if isinstance(val, (int, float)) and 0 < val < 100:
+                percentages.append(val)
     
-    if min_games < 5:
-        return {
-            "valid": False,
-            "story": "INSUFFICIENT_DATA",
-            "confidence_multiplier": 0.0,
-            "warning": f"Only {min_games} games. Data is unreliable. PASS on all markets."
-        }
-    elif min_games < 8:
-        return {
-            "valid": True,
-            "confidence_multiplier": 0.7,
-            "warning": f"Only {min_games} games. Confidence downgraded by 1 tier."
-        }
-    elif min_games < 15:
-        return {
-            "valid": True,
-            "confidence_multiplier": 0.9,
-            "warning": None
-        }
-    else:
-        return {
-            "valid": True,
-            "confidence_multiplier": 1.0,
-            "warning": None
-        }
+    for games in [34, 33, 30, 28, 22, 17, 15, 13, 11, 10, 8, 6, 5, 4]:
+        match_count = 0
+        for pct in percentages:
+            closest = round(pct * games / 100)
+            recon = round((closest / games) * 100)
+            if abs(pct - recon) <= 1:
+                match_count += 1
+        if match_count >= len(percentages) * 0.8:
+            return games
+    return 15
 
+def get_sample_weight(games: int) -> Tuple[float, int]:
+    if games < 5: return 0.0, 5
+    elif games < 8: return 0.5, 3
+    elif games < 15: return 0.8, 1
+    else: return 1.0, 1
 
 # ============================================================================
-# LAYER 2: SHAPE CLASSIFIER
+# DERIVED METRICS
 # ============================================================================
-def classify_defense(concede_05: float, concede_15: float, concede_25: float, concede_35: float) -> str:
-    drop_05_to_15 = concede_05 - concede_15
-    
-    if concede_05 >= 85 and drop_05_to_15 <= 30:
-        return "EXTREME_COLLAPSE"
-    elif drop_05_to_15 <= 30:
-        return "COLLAPSE"
-    elif drop_05_to_15 >= 45:
-        return "BEND"
-    else:
-        return "MODERATE"
+def classify_defense(concede_05, concede_15, concede_25, concede_35):
+    drop = concede_05 - concede_15
+    if concede_05 >= 85 and drop <= 30: return "EXTREME_COLLAPSE"
+    elif concede_05 >= 70 and drop <= 30: return "COLLAPSE"
+    elif concede_05 <= 40: return "ELITE"
+    elif drop >= 45: return "BEND"
+    else: return "MODERATE"
 
+def classify_attack(scored_05, scored_15, scored_25, scored_35, fts):
+    drop = scored_05 - scored_15
+    if scored_15 == 0 and scored_25 == 0: return "NO_GOAL"
+    if fts >= 65: return "NO_GOAL"
+    elif fts >= 50: return "RARELY_SCORES"
+    elif scored_05 >= 85 and drop <= 25: return "SCORES_FREELY"
+    elif drop <= 25: return "MODERATE_SCORER"
+    elif drop >= 45: return "ONE_GOAL"
+    else: return "MODERATE"
 
-def classify_attack(scored_05: float, scored_15: float, scored_25: float, scored_35: float, fts: float) -> str:
-    drop_05_to_15 = scored_05 - scored_15
-    
-    if fts >= 65:
-        return "NO_GOAL"
-    elif fts >= 50:
-        return "RARELY_SCORES"
-    elif scored_05 >= 85 and drop_05_to_15 <= 25:
-        return "SCORES_FREELY"
-    elif drop_05_to_15 <= 25:
-        return "MODERATE_SCORER"
-    elif drop_05_to_15 >= 45:
-        return "ONE_GOAL"
-    else:
-        return "MODERATE"
+def classify_xg(xg, actual):
+    gap = actual - xg
+    if gap < -0.3: return "UNDERPERFORMING"
+    elif gap > 0.3: return "OVERPERFORMING"
+    else: return "NEUTRAL"
 
-
-def classify_xg(xg: float, actual_scored: float) -> str:
-    gap = actual_scored - xg
-    if gap < -0.3:
-        return "UNDERPERFORMING"
-    elif gap > 0.3:
-        return "OVERPERFORMING"
-    else:
-        return "NEUTRAL"
-
-
-def check_binary(cs_pct: float, fts_pct: float) -> bool:
-    return 40 <= cs_pct <= 55 and 40 <= fts_pct <= 55
-
-
-def check_mismatch(home_concede_05: float, away_concede_05: float) -> bool:
-    return abs(home_concede_05 - away_concede_05) >= 40
-
-
-def classify_team(team: TeamMetrics) -> TeamMetrics:
-    team.attack_type = classify_attack(
-        team.scored_05, team.scored_15, team.scored_25, team.scored_35, team.fts_pct
-    )
-    team.defense_type = classify_defense(
-        team.conceded_05, team.conceded_15, team.conceded_25, team.conceded_35
-    )
-    team.xg_type = classify_xg(team.xg, team.actual_scored)
+def enrich_team(team: TeamData) -> TeamData:
+    team.scored_drop = team.scored_05 - team.scored_15
+    team.concede_drop = team.conceded_05 - team.conceded_15
+    team.attack_type = classify_attack(team.scored_05, team.scored_15, 
+                                        team.scored_25, team.scored_35, team.fts_pct)
+    team.defense_type = classify_defense(team.conceded_05, team.conceded_15,
+                                          team.conceded_25, team.conceded_35)
     return team
 
+# ============================================================================
+# CONDITION HELPERS
+# ============================================================================
+def is_collapse(team: TeamData) -> bool:
+    return team.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"]
+
+def is_extreme_collapse(team: TeamData) -> bool:
+    return team.defense_type == "EXTREME_COLLAPSE"
+
+def is_dead_attack(team: TeamData) -> bool:
+    return team.attack_type == "NO_GOAL"
+
+def is_one_goal(team: TeamData) -> bool:
+    return team.attack_type == "ONE_GOAL"
+
+def is_scores_freely(team: TeamData) -> bool:
+    return team.attack_type in ["SCORES_FREELY", "MODERATE_SCORER"]
+
+def is_bend(team: TeamData) -> bool:
+    return team.defense_type == "BEND"
 
 # ============================================================================
-# LAYER 3: STORY MATCHER
+# PREDICTION ENGINE
 # ============================================================================
-STORIES = {
-    "NO_GOAL_PRESENT": {
-        "priority": 1,
-        "description": "At least one attack is effectively dead. Goals will be scarce.",
-        "condition": lambda h, a: h.attack_type == "NO_GOAL" or a.attack_type == "NO_GOAL"
-    },
-    "EXTREME_COLLAPSE_DEFENSE": {
-        "priority": 2,
-        "description": "A defense that collapses when breached. Concedes multiple goals regularly.",
-        "condition": lambda h, a: h.defense_type == "EXTREME_COLLAPSE" or a.defense_type == "EXTREME_COLLAPSE"
-    },
-    "MISMATCHED_DEFENSES": {
-        "priority": 3,
-        "description": "One defense is far superior to the other. Trust the elite defense.",
-        "condition": lambda h, a: check_mismatch(h.conceded_05, a.conceded_05)
-    },
-    "COLLAPSE_VS_SCORER": {
-        "priority": 4,
-        "description": "Collapse defense meets an attack that can score multiple. Over match expected.",
-        "condition": lambda h, a: (h.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] and a.attack_type in ["SCORES_FREELY", "MODERATE_SCORER"]) or \
-                                   (a.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] and h.attack_type in ["SCORES_FREELY", "MODERATE_SCORER"])
-    },
-    "TWO_ONE_GOAL_ATTACKS": {
-        "priority": 5,
-        "description": "Both attacks are limited to 1 goal typically. Under match with BTTS possible.",
-        "condition": lambda h, a: h.attack_type == "ONE_GOAL" and a.attack_type == "ONE_GOAL"
-    },
-    "ONE_GOAL_VS_COLLAPSE": {
-        "priority": 6,
-        "description": "One-goal attack meets collapse defense. Defense concedes but attack may not score 2+.",
-        "condition": lambda h, a: (h.attack_type == "ONE_GOAL" and a.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"]) or \
-                                   (a.attack_type == "ONE_GOAL" and h.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"])
-    },
-    "BINARY_HOME_TEAM": {
-        "priority": 7,
-        "description": "Home team is unpredictable. Either blanks or scores multiple. Either CS or concedes multiple.",
-        "condition": lambda h, a: check_binary(h.cs_pct, h.fts_pct)
-    },
-    "REGRESSION_CANDIDATE": {
-        "priority": 8,
-        "description": "xG gap detected. One or both teams due for regression to mean.",
-        "condition": lambda h, a: h.xg_type in ["UNDERPERFORMING", "OVERPERFORMING"] or \
-                                   a.xg_type in ["UNDERPERFORMING", "OVERPERFORMING"]
-    }
-}
-
-
-def match_stories(home: TeamMetrics, away: TeamMetrics) -> List[Dict]:
-    matched = []
-    for name, story in sorted(STORIES.items(), key=lambda x: x[1]["priority"]):
-        if story["condition"](home, away):
-            matched.append({
-                "name": name,
-                "description": story["description"],
-                "priority": story["priority"]
-            })
-    
-    if not matched:
-        matched.append({
-            "name": "NO_CLEAR_STORY",
-            "description": "No clear pattern detected. Proceed with caution.",
-            "priority": 99
-        })
-    
-    return matched
-
-
-# ============================================================================
-# LAYER 4: BET GENERATOR (DATA-AWARE)
-# ============================================================================
-def apply_sample_adjustment(tier: int, sample_multiplier: float) -> int:
-    if sample_multiplier == 0.7:
-        tier += 1
-    elif sample_multiplier == 0.5:
-        tier += 2
-    elif sample_multiplier == 0.0:
-        return 5
-    return min(tier, 5)
-
-
-def get_confidence_label(tier: int) -> str:
-    return {1: "VERY HIGH", 2: "HIGH", 3: "MEDIUM", 4: "LOW", 5: "PASS"}.get(tier, "UNKNOWN")
-
-
-def generate_bets_no_goal(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["Over 2.5 Goals", "BTTS Yes", "Over 3.5 Goals"]
-    
-    dead_team = home if home.attack_type == "NO_GOAL" else away
-    live_team = away if home.attack_type == "NO_GOAL" else home
-    opponent_cs = live_team.cs_pct
-    
-    # Under 3.5
-    both_zero_35 = home.scored_35 == 0 and away.scored_35 == 0
-    if both_zero_35:
-        under35_tier = apply_sample_adjustment(1, multiplier)
-        under35_reasoning = f"Both teams 0% Over 3.5 Team Goals. {dead_team.name} has never scored 3+."
-    else:
-        under35_tier = apply_sample_adjustment(2, multiplier)
-        under35_reasoning = f"Limited attacks. {dead_team.name} cannot score 3+."
-    
-    bets.append(Bet("Under 3.5 Goals", "Under 3.5", under35_tier, 
-                    get_confidence_label(under35_tier), under35_reasoning))
-    
-    # Under 2.5
-    combined_over25 = (home.over_25 + away.over_25) / 2
-    if combined_over25 < 40:
-        under25_tier = apply_sample_adjustment(2, multiplier)
-        under25_reasoning = f"Combined Over 2.5 only {combined_over25:.0f}%. {dead_team.name} limits totals."
-    else:
-        under25_tier = apply_sample_adjustment(3, multiplier)
-        under25_reasoning = f"Combined Over 2.5 at {combined_over25:.0f}%. {dead_team.name} attack is the ceiling."
-    
-    bets.append(Bet("Under 2.5 Goals", "Under 2.5", under25_tier,
-                    get_confidence_label(under25_tier), under25_reasoning))
-    
-    # BTTS No
-    if dead_team.fts_pct >= 65 and opponent_cs >= 30:
-        btts_tier = apply_sample_adjustment(1, multiplier)
-        btts_reasoning = f"{dead_team.name} FTS {dead_team.fts_pct:.0f}% + opponent CS {opponent_cs:.0f}%. Elite BTTS No signal."
-    elif dead_team.fts_pct >= 65:
-        btts_tier = apply_sample_adjustment(2, multiplier)
-        btts_reasoning = f"{dead_team.name} blanks in {dead_team.fts_pct:.0f}% of games. Opponent CS only {opponent_cs:.0f}%."
-    else:
-        btts_tier = apply_sample_adjustment(3, multiplier)
-        btts_reasoning = f"{dead_team.name} rarely scores (FTS {dead_team.fts_pct:.0f}%)."
-    
-    bets.append(Bet("BTTS", "No", btts_tier, get_confidence_label(btts_tier), btts_reasoning))
-    
-    # Live team to score
-    live_tier = apply_sample_adjustment(2, multiplier)
-    bets.append(Bet(f"{live_team.name} Team Total O0.5", "Over 0.5", live_tier,
-                    get_confidence_label(live_tier),
-                    f"{live_team.name} scores in {live_team.scored_05:.0f}% of games. {dead_team.name} concedes {dead_team.conceded_05:.0f}%."))
-    
-    # Dead team PASS
-    bets.append(Bet(f"{dead_team.name} Team Total O0.5", "PASS", 5, "PASS",
-                    f"{dead_team.name} FTS {dead_team.fts_pct:.0f}%. Cannot bet them to score."))
-    
-    # Dead team CS No if concede is high
-    if dead_team.conceded_05 >= 75:
-        cs_tier = apply_sample_adjustment(3, multiplier)
-        bets.append(Bet(f"{dead_team.name} Clean Sheet", "No", cs_tier,
-                        get_confidence_label(cs_tier),
-                        f"{dead_team.name} concedes in {dead_team.conceded_05:.0f}% of games. Even dead attacks concede sometimes."))
-    
-    return bets, avoid
-
-
-def generate_bets_extreme_collapse(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["Under 2.5 Goals", "Under 3.5 Goals"]
-    
-    collapse_team = home if home.defense_type == "EXTREME_COLLAPSE" else away
-    opponent = away if home.defense_type == "EXTREME_COLLAPSE" else home
-    
-    # CS No - LOCK
-    cs_tier = apply_sample_adjustment(1, multiplier)
-    bets.append(Bet(f"{collapse_team.name} Clean Sheet", "No", cs_tier,
-                    get_confidence_label(cs_tier),
-                    f"{collapse_team.name} concedes in {collapse_team.conceded_05:.0f}% of games. CS only {collapse_team.cs_pct:.0f}%. Lock."))
-    
-    # BTTS Yes
-    if opponent.fts_pct <= 25:
-        btts_tier = apply_sample_adjustment(2, multiplier)
-        btts_reasoning = f"Collapse defense concedes. Opponent scores in {opponent.scored_05:.0f}% of games."
-    else:
-        btts_tier = apply_sample_adjustment(3, multiplier)
-        btts_reasoning = f"Collapse defense concedes. But opponent FTS {opponent.fts_pct:.0f}% limits BTTS confidence."
-    
-    bets.append(Bet("BTTS", "Yes", btts_tier, get_confidence_label(btts_tier), btts_reasoning))
-    
-    # Over 2.5
-    combined_over25 = (home.over_25 + away.over_25) / 2
-    if combined_over25 >= 60:
-        over_tier = apply_sample_adjustment(2, multiplier)
-        over_reasoning = f"Combined Over 2.5 at {combined_over25:.0f}%. Collapse defense drives totals."
-    else:
-        over_tier = apply_sample_adjustment(3, multiplier)
-        over_reasoning = f"Combined Over 2.5 at {combined_over25:.0f}%. Collapse defense helps but opponent may not contribute."
-    
-    bets.append(Bet("Over 2.5 Goals", "Over 2.5", over_tier, get_confidence_label(over_tier), over_reasoning))
-    
-    # Opponent O0.5
-    opp_tier = apply_sample_adjustment(2, multiplier)
-    bets.append(Bet(f"{opponent.name} Team Total O0.5", "Over 0.5", opp_tier,
-                    get_confidence_label(opp_tier),
-                    f"{opponent.name} faces a defense that concedes {collapse_team.conceded_05:.0f}% of games."))
-    
-    # Opponent O1.5
-    if opponent.scored_15 >= 35:
-        opp15_tier = apply_sample_adjustment(3, multiplier)
-        bets.append(Bet(f"{opponent.name} Team Total O1.5", "Over 1.5", opp15_tier,
-                        get_confidence_label(opp15_tier),
-                        f"{opponent.name} scores 2+ in {opponent.scored_15:.0f}% of games. Collapse defense concedes multiple."))
-    
-    return bets, avoid
-
-
-def generate_bets_mismatch(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["BTTS Yes", "Over 2.5 Goals"]
-    
-    elite_team = home if home.conceded_05 < away.conceded_05 else away
-    weak_team = away if home.conceded_05 < away.conceded_05 else home
-    
-    # Elite CS Yes
-    if elite_team.cs_pct >= 35:
-        cs_tier = apply_sample_adjustment(2, multiplier)
-        bets.append(Bet(f"{elite_team.name} Clean Sheet", "Yes", cs_tier,
-                        get_confidence_label(cs_tier),
-                        f"{elite_team.name} CS {elite_team.cs_pct:.0f}%. Elite defense vs weak opponent."))
-    
-    # BTTS No
-    if weak_team.fts_pct >= 45:
-        btts_tier = apply_sample_adjustment(2, multiplier)
-        btts_reasoning = f"Weak attack ({weak_team.name} FTS {weak_team.fts_pct:.0f}%) meets elite defense."
-    else:
-        btts_tier = apply_sample_adjustment(3, multiplier)
-        btts_reasoning = f"Elite defense should control. {weak_team.name} may struggle to score."
-    
-    bets.append(Bet("BTTS", "No", btts_tier, get_confidence_label(btts_tier), btts_reasoning))
-    
-    # Under 2.5
-    combined_over25 = (home.over_25 + away.over_25) / 2
-    under_tier = apply_sample_adjustment(2, multiplier) if combined_over25 < 50 else apply_sample_adjustment(3, multiplier)
-    bets.append(Bet("Under 2.5 Goals", "Under 2.5", under_tier,
-                    get_confidence_label(under_tier),
-                    f"Elite defense keeps totals low. Combined Over 2.5 at {combined_over25:.0f}%."))
-    
-    # Elite team to score
-    elite_scored_tier = apply_sample_adjustment(2, multiplier)
-    bets.append(Bet(f"{elite_team.name} Team Total O0.5", "Over 0.5", elite_scored_tier,
-                    get_confidence_label(elite_scored_tier),
-                    f"{elite_team.name} scores in {elite_team.scored_05:.0f}% of games. {weak_team.name} concedes {weak_team.conceded_05:.0f}%."))
-    
-    return bets, avoid
-
-
-def generate_bets_collapse_vs_scorer(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["Under 2.5 Goals"]
-    
-    collapse_team = home if home.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] else away
-    scorer_team = away if home.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] else home
-    
-    # CS No for collapse
-    cs_tier = apply_sample_adjustment(1 if collapse_team.defense_type == "EXTREME_COLLAPSE" else 2, multiplier)
-    bets.append(Bet(f"{collapse_team.name} Clean Sheet", "No", cs_tier,
-                    get_confidence_label(cs_tier),
-                    f"{collapse_team.name} concedes {collapse_team.conceded_05:.0f}%. Scorer team can exploit."))
-    
-    # BTTS Yes
-    btts_tier = apply_sample_adjustment(2, multiplier)
-    bets.append(Bet("BTTS", "Yes", btts_tier, get_confidence_label(btts_tier),
-                    f"Collapse defense concedes. Scorer team scores in {scorer_team.scored_05:.0f}%. Both should score."))
-    
-    # Over 2.5
-    combined_over25 = (home.over_25 + away.over_25) / 2
-    over_tier = apply_sample_adjustment(2, multiplier) if combined_over25 >= 55 else apply_sample_adjustment(3, multiplier)
-    bets.append(Bet("Over 2.5 Goals", "Over 2.5", over_tier,
-                    get_confidence_label(over_tier),
-                    f"Collapse defense + scoring attack. Combined Over 2.5 at {combined_over25:.0f}%."))
-    
-    # Scorer O1.5
-    if scorer_team.scored_15 >= 30:
-        opp15_tier = apply_sample_adjustment(3, multiplier)
-        bets.append(Bet(f"{scorer_team.name} Team Total O1.5", "Over 1.5", opp15_tier,
-                        get_confidence_label(opp15_tier),
-                        f"{scorer_team.name} scores 2+ in {scorer_team.scored_15:.0f}%. Collapse defense concedes multiple."))
-    
-    # Under 3.5 ceiling check
-    if collapse_team.conceded_35 == 0 and scorer_team.scored_35 == 0:
-        under35_tier = apply_sample_adjustment(2, multiplier)
-        bets.append(Bet("Under 3.5 Goals", "Under 3.5", under35_tier,
-                        get_confidence_label(under35_tier),
-                        "Both teams 0% Over 3.5 TG. Ceiling exists despite collapse."))
-    
-    return bets, avoid
-
-
-def generate_bets_two_one_goal(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["Over 2.5 Goals"]
-    
-    # Under 3.5 - LOCK
-    both_zero_35 = home.scored_35 == 0 and away.scored_35 == 0
-    if both_zero_35:
-        under35_tier = apply_sample_adjustment(1, multiplier)
-        under35_reasoning = "Both teams 0% Over 3.5 Team Goals. Neither can score 3+."
-    else:
-        under35_tier = apply_sample_adjustment(2, multiplier)
-        under35_reasoning = "Both attacks limited to 1-2 goals."
-    
-    bets.append(Bet("Under 3.5 Goals", "Under 3.5", under35_tier,
-                    get_confidence_label(under35_tier), under35_reasoning))
-    
-    # Under 2.5
-    combined_over25 = (home.over_25 + away.over_25) / 2
-    under25_tier = apply_sample_adjustment(2, multiplier) if combined_over25 < 50 else apply_sample_adjustment(3, multiplier)
-    bets.append(Bet("Under 2.5 Goals", "Under 2.5", under25_tier,
-                    get_confidence_label(under25_tier),
-                    f"Two one-goal attacks. Combined Over 2.5 at {combined_over25:.0f}%."))
-    
-    # BTTS No
-    if home.fts_pct >= 45 or away.fts_pct >= 45:
-        btts_tier = apply_sample_adjustment(2, multiplier)
-        btts_reasoning = f"One team blanks regularly. Both attacks limited."
-    else:
-        btts_tier = apply_sample_adjustment(3, multiplier)
-        btts_reasoning = "Both attacks score 1 typically. BTTS is a coin flip."
-    
-    bets.append(Bet("BTTS", "No", btts_tier, get_confidence_label(btts_tier), btts_reasoning))
-    
-    return bets, avoid
-
-
-def generate_bets_one_goal_vs_collapse(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["Over 3.5 Goals"]
-    
-    one_goal_team = home if home.attack_type == "ONE_GOAL" else away
-    collapse_team = away if home.attack_type == "ONE_GOAL" else home
-    
-    # Collapse CS No
-    cs_tier = apply_sample_adjustment(2, multiplier)
-    bets.append(Bet(f"{collapse_team.name} Clean Sheet", "No", cs_tier,
-                    get_confidence_label(cs_tier),
-                    f"{collapse_team.name} concedes {collapse_team.conceded_05:.0f}%. Defense collapses when breached."))
-    
-    # Under 3.5
-    if one_goal_team.scored_35 == 0 and collapse_team.conceded_35 == 0:
-        under35_tier = apply_sample_adjustment(2, multiplier)
-        bets.append(Bet("Under 3.5 Goals", "Under 3.5", under35_tier,
-                        get_confidence_label(under35_tier),
-                        "One-goal attack cannot score 3+. Collapse defense rarely concedes 3+."))
-    
-    # BTTS Yes
-    if one_goal_team.scored_05 >= 70:
-        btts_tier = apply_sample_adjustment(2, multiplier)
-        btts_reasoning = f"{one_goal_team.name} scores consistently. {collapse_team.name} concedes consistently."
-    else:
-        btts_tier = apply_sample_adjustment(3, multiplier)
-        btts_reasoning = f"One-goal attack may score. Collapse defense should concede."
-    
-    bets.append(Bet("BTTS", "Yes", btts_tier, get_confidence_label(btts_tier), btts_reasoning))
-    
-    # One-goal team to score
-    one_goal_tier = apply_sample_adjustment(2, multiplier)
-    bets.append(Bet(f"{one_goal_team.name} Team Total O0.5", "Over 0.5", one_goal_tier,
-                    get_confidence_label(one_goal_tier),
-                    f"{one_goal_team.name} scores in {one_goal_team.scored_05:.0f}% of games."))
-    
-    return bets, avoid
-
-
-def generate_bets_binary_home(home: TeamMetrics, away: TeamMetrics, multiplier: float) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = ["BTTS", "Over 2.5 Goals", "Under 2.5 Goals"]
-    
-    if home.conceded_05 >= 70:
-        cs_tier = apply_sample_adjustment(3, multiplier)
-        bets.append(Bet(f"{home.name} Clean Sheet", "No", cs_tier,
-                        get_confidence_label(cs_tier),
-                        f"{home.name} concedes in {home.conceded_05:.0f}% of games. But binary."))
-    
-    if away.conceded_05 >= 80:
-        away_cs_tier = apply_sample_adjustment(2, multiplier)
-        bets.append(Bet(f"{away.name} Clean Sheet", "No", away_cs_tier,
-                        get_confidence_label(away_cs_tier),
-                        f"{away.name} concedes in {away.conceded_05:.0f}% of games."))
-    
-    if away.scored_05 >= 70:
-        away_scored_tier = apply_sample_adjustment(2, multiplier)
-        bets.append(Bet(f"{away.name} Team Total O0.5", "Over 0.5", away_scored_tier,
-                        get_confidence_label(away_scored_tier),
-                        f"{away.name} scores in {away.scored_05:.0f}% of games."))
-    
-    return bets, avoid
-
-
-def generate_bets_generic(home: TeamMetrics, away: TeamMetrics, multiplier: float, matched_stories: List[Dict]) -> Tuple[List[Bet], List[str]]:
-    bets = []
-    avoid = []
-    
-    if home.xg_type == "UNDERPERFORMING":
-        bets.append(Bet(f"{home.name} Team Total O0.5", "Over 0.5", 
-                        apply_sample_adjustment(3, multiplier), "MEDIUM",
-                        f"{home.name} underperforming xG by {home.actual_scored - home.xg:.2f}. Regression likely."))
-    
-    if away.xg_type == "UNDERPERFORMING":
-        bets.append(Bet(f"{away.name} Team Total O0.5", "Over 0.5",
-                        apply_sample_adjustment(3, multiplier), "MEDIUM",
-                        f"{away.name} underperforming xG by {away.actual_scored - away.xg:.2f}. Regression likely."))
-    
-    if home.conceded_05 >= 75:
-        bets.append(Bet(f"{home.name} Clean Sheet", "No", apply_sample_adjustment(3, multiplier),
-                        "MEDIUM", f"{home.name} concedes in {home.conceded_05:.0f}% of games."))
-    
-    if away.conceded_05 >= 75:
-        bets.append(Bet(f"{away.name} Clean Sheet", "No", apply_sample_adjustment(3, multiplier),
-                        "MEDIUM", f"{away.name} concedes in {away.conceded_05:.0f}% of games."))
-    
-    return bets, avoid
-
-
-def generate_bets(home: TeamMetrics, away: TeamMetrics, story_name: str, 
-                  sample_multiplier: float, matched_stories: List[Dict]) -> Tuple[List[Bet], List[str]]:
-    story_generators = {
-        "NO_GOAL_PRESENT": generate_bets_no_goal,
-        "EXTREME_COLLAPSE_DEFENSE": generate_bets_extreme_collapse,
-        "MISMATCHED_DEFENSES": generate_bets_mismatch,
-        "COLLAPSE_VS_SCORER": generate_bets_collapse_vs_scorer,
-        "TWO_ONE_GOAL_ATTACKS": generate_bets_two_one_goal,
-        "ONE_GOAL_VS_COLLAPSE": generate_bets_one_goal_vs_collapse,
-        "BINARY_HOME_TEAM": generate_bets_binary_home,
-    }
-    
-    generator = story_generators.get(story_name)
-    if generator:
-        bets, avoid = generator(home, away, sample_multiplier)
-    else:
-        bets, avoid = generate_bets_generic(home, away, sample_multiplier, matched_stories)
-    
-    return bets, avoid
-
-
-# ============================================================================
-# LAYER 5: POST-PROCESSING
-# ============================================================================
-def apply_xg_adjustments(bets: List[Bet], home: TeamMetrics, away: TeamMetrics) -> List[Bet]:
-    for bet in bets:
-        if home.xg_type == "UNDERPERFORMING" and home.name in bet.market and "Over" in bet.bet and "Team Total" in bet.market:
-            if bet.tier > 1:
-                bet.tier -= 1
-                bet.confidence = get_confidence_label(bet.tier)
-                bet.reasoning += f" ⬆️ xG underperformance ({home.actual_scored:.1f} vs {home.xg:.1f} xG) suggests regression."
-        
-        if away.xg_type == "UNDERPERFORMING" and away.name in bet.market and "Over" in bet.bet and "Team Total" in bet.market:
-            if bet.tier > 1:
-                bet.tier -= 1
-                bet.confidence = get_confidence_label(bet.tier)
-                bet.reasoning += f" ⬆️ xG underperformance ({away.actual_scored:.1f} vs {away.xg:.1f} xG) suggests regression."
-        
-        if home.xg_type == "OVERPERFORMING" and home.name in bet.market and "Over" in bet.bet and "Team Total" in bet.market:
-            if bet.tier < 5:
-                bet.tier += 1
-                bet.confidence = get_confidence_label(bet.tier)
-                bet.reasoning += f" ⬇️ xG overperformance ({home.actual_scored:.1f} vs {home.xg:.1f} xG) suggests regression."
-        
-        if away.xg_type == "OVERPERFORMING" and away.name in bet.market and "Over" in bet.bet and "Team Total" in bet.market:
-            if bet.tier < 5:
-                bet.tier += 1
-                bet.confidence = get_confidence_label(bet.tier)
-                bet.reasoning += f" ⬇️ xG overperformance ({away.actual_scored:.1f} vs {away.xg:.1f} xG) suggests regression."
-    
-    return bets
-
-
-def check_coexistence(bets: List[Bet]) -> List[str]:
-    notes = []
-    
-    has_under35 = any("Under 3.5" in b.market and "Under" in b.bet for b in bets)
-    has_under25 = any("Under 2.5" in b.market and "Under" in b.bet for b in bets)
-    has_over25 = any("Over 2.5" in b.market and "Over" in b.bet for b in bets)
-    has_btts_yes = any(b.market == "BTTS" and b.bet == "Yes" for b in bets)
-    has_btts_no = any(b.market == "BTTS" and b.bet == "No" for b in bets)
-    
-    if has_under35 and has_btts_yes:
-        notes.append("✅ Under 3.5 + BTTS Yes can coexist → 1-1, 2-1 scorelines favored.")
-    if has_under35 and has_btts_no:
-        notes.append("✅ Under 3.5 + BTTS No are aligned → 1-0, 2-0, 0-0 type match.")
-    if has_over25 and has_btts_yes:
-        notes.append("✅ Over 2.5 + BTTS Yes are correlated → 2-1, 2-2, 3-1 type match.")
-    if has_over25 and has_btts_no:
-        notes.append("⚠️ Over 2.5 + BTTS No is rare. Only possible if one team scores 3+ alone.")
-    if has_under25 and has_btts_yes:
-        notes.append("⚠️ Under 2.5 + BTTS Yes → 1-1 is the most likely scoreline.")
-    
-    return notes
-
-
-# ============================================================================
-# NARRATIVE GENERATOR
-# ============================================================================
-def generate_shape_description(home: TeamMetrics, away: TeamMetrics) -> str:
-    def attack_desc(team: TeamMetrics) -> str:
-        drop = team.scored_05 - team.scored_15
-        return f"{team.attack_type} (scores in {team.scored_05:.0f}%, 2+ in {team.scored_15:.0f}%, drop: {drop:.0f}%)"
-    
-    def defense_desc(team: TeamMetrics) -> str:
-        drop = team.conceded_05 - team.conceded_15
-        return f"{team.defense_type} (concedes in {team.conceded_05:.0f}%, 2+ in {team.conceded_15:.0f}%, drop: {drop:.0f}%)"
-    
-    return f"""
-**SHAPE ANALYSIS:**
-- **{home.name}**: {attack_desc(home)} | {defense_desc(home)} | xG: {home.xg_type} ({home.actual_scored:.1f} vs {home.xg:.1f})
-- **{away.name}**: {attack_desc(away)} | {defense_desc(away)} | xG: {away.xg_type} ({away.actual_scored:.1f} vs {away.xg:.1f})
-"""
-
-
-def generate_matchup_analysis(home: TeamMetrics, away: TeamMetrics, story: Dict) -> str:
-    if story["name"] == "NO_GOAL_PRESENT":
-        dead = home if home.attack_type == "NO_GOAL" else away
-        live = away if home.attack_type == "NO_GOAL" else home
-        return f"""
-**MATCHUP:**
-- {dead.name} has scored in only {dead.scored_05:.0f}% of games. At this venue, they blank {dead.fts_pct:.0f}% of the time. They have {'never' if dead.scored_35 == 0 else 'rarely'} scored 3+ goals.
-- {live.name} scores in {live.scored_05:.0f}% of games and concedes in {live.conceded_05:.0f}%.
-- {live.name} only needs 1 goal. {dead.name} is unlikely to respond.
-"""
-    
-    elif story["name"] == "EXTREME_COLLAPSE_DEFENSE":
-        collapse = home if home.defense_type == "EXTREME_COLLAPSE" else away
-        opponent = away if home.defense_type == "EXTREME_COLLAPSE" else home
-        return f"""
-**MATCHUP:**
-- {collapse.name} concedes in {collapse.conceded_05:.0f}% of games. When breached, they concede multiple — only a {collapse.conceded_05 - collapse.conceded_15:.0f}% drop to O1.5.
-- {opponent.name} scores in {opponent.scored_05:.0f}% of games and scores 2+ in {opponent.scored_15:.0f}%.
-- Once the first goal goes in against {collapse.name}, more follow. {opponent.name} has the tools to open the floodgates.
-"""
-    
-    elif story["name"] == "MISMATCHED_DEFENSES":
-        elite = home if home.conceded_05 < away.conceded_05 else away
-        weak = away if home.conceded_05 < away.conceded_05 else home
-        return f"""
-**MATCHUP:**
-- {elite.name} defense concedes only {elite.conceded_05:.0f}% of games with a {elite.cs_pct:.0f}% clean sheet rate.
-- {weak.name} defense concedes {weak.conceded_05:.0f}% of games.
-- Gap between defenses: {abs(home.conceded_05 - away.conceded_05):.0f}%. {elite.name} should control this match.
-"""
-    
-    elif story["name"] == "COLLAPSE_VS_SCORER":
-        collapse = home if home.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] else away
-        scorer = away if home.defense_type in ["COLLAPSE", "EXTREME_COLLAPSE"] else home
-        return f"""
-**MATCHUP:**
-- {collapse.name} defense collapses when breached (only {collapse.conceded_05 - collapse.conceded_15:.0f}% drop to O1.5).
-- {scorer.name} attack scores in {scorer.scored_05:.0f}% of games and can score 2+ in {scorer.scored_15:.0f}%.
-- {scorer.name} should exploit {collapse.name}'s defensive frailties. Goals expected.
-"""
-    
-    elif story["name"] == "TWO_ONE_GOAL_ATTACKS":
-        return f"""
-**MATCHUP:**
-- Both teams typically score exactly 1 goal. {home.name} scores 2+ in only {home.scored_15:.0f}%. {away.name} scores 2+ in only {away.scored_15:.0f}%.
-- Neither attack can run away with this match. Expect a tight, low-scoring affair.
-"""
-    
-    elif story["name"] == "ONE_GOAL_VS_COLLAPSE":
-        one_goal = home if home.attack_type == "ONE_GOAL" else away
-        collapse = away if home.attack_type == "ONE_GOAL" else home
-        return f"""
-**MATCHUP:**
-- {one_goal.name} attack is limited — scores in {one_goal.scored_05:.0f}% but rarely 2+ (only {one_goal.scored_15:.0f}%).
-- {collapse.name} defense concedes {collapse.conceded_05:.0f}% and concedes multiple often.
-- {collapse.name} will concede, but {one_goal.name} may only score exactly 1. Total capped at 2-3 goals.
-"""
-    
-    elif story["name"] == "BINARY_HOME_TEAM":
-        return f"""
-**MATCHUP:**
-- {home.name} is binary at home. CS {home.cs_pct:.0f}% of games or concedes multiple. Scores in {home.scored_05:.0f}% or blanks.
-- This is the most unpredictable home profile. Trust only the strongest signals.
-"""
-    
-    else:
-        return f"""
-**MATCHUP:**
-- No clear pattern. Both teams show mixed signals. Proceed with caution.
-"""
-
-
-def generate_risk_notes(home: TeamMetrics, away: TeamMetrics, story: Dict) -> List[str]:
-    risks = []
-    
-    if story["name"] == "NO_GOAL_PRESENT":
-        dead = home if home.attack_type == "NO_GOAL" else away
-        risks.append(f"{dead.name} could still score a fluke goal ({dead.scored_05:.0f}% chance). BTTS No is not a lock.")
-    elif story["name"] == "EXTREME_COLLAPSE_DEFENSE":
-        risks.append("Collapse requires the first goal to happen. 0-0 and the collapse never triggers.")
-    elif story["name"] == "MISMATCHED_DEFENSES":
-        risks.append("The weak defense could overperform. Mismatches sometimes produce surprises.")
-    elif story["name"] == "COLLAPSE_VS_SCORER":
-        risks.append("If the collapse defense scores first, the match shape changes entirely.")
-    elif story["name"] == "TWO_ONE_GOAL_ATTACKS":
-        risks.append("A 2-2 is unlikely but possible if both teams hit their rare 2+ goal games simultaneously.")
-    elif story["name"] == "BINARY_HOME_TEAM":
-        risks.append(f"{home.name} could produce any result. Binary teams are high-variance.")
-    
-    if home.scored_15 >= 35 and away.scored_15 >= 35:
-        both_score_2_plus = (home.scored_15 * away.scored_15) / 100
-        risks.append(f"Both teams score 2+ in {both_score_2_plus:.1f}% of games → 2-2, 3-2, 2-3 are live risks.")
-    
-    return risks
-
-
-def generate_scoreline_range(home: TeamMetrics, away: TeamMetrics, story: Dict) -> List[str]:
-    scorelines = {
-        "NO_GOAL_PRESENT": ["1-0", "2-0", "0-0", "0-1"],
-        "EXTREME_COLLAPSE_DEFENSE": ["2-1", "3-1", "2-2", "3-2"],
-        "MISMATCHED_DEFENSES": ["1-0", "2-0", "0-0", "0-1"],
-        "COLLAPSE_VS_SCORER": ["2-1", "3-1", "2-2", "3-2"],
-        "TWO_ONE_GOAL_ATTACKS": ["1-1", "2-1", "1-2", "1-0"],
-        "ONE_GOAL_VS_COLLAPSE": ["2-1", "1-1", "2-0", "1-0"],
-        "BINARY_HOME_TEAM": ["2-0", "0-0", "2-1", "0-1"],
-    }
-    return scorelines.get(story["name"], ["1-1", "2-1", "1-2"])
-
-
-def generate_warnings(matched_stories: List[Dict], home: TeamMetrics, away: TeamMetrics) -> List[str]:
+def run_engine(home: TeamData, away: TeamData, league: str) -> MatchResult:
+    home = enrich_team(home)
+    away = enrich_team(away)
+    
+    games = detect_sample_size(home, away)
+    sample_weight, max_tier_allowed = get_sample_weight(games)
+    league_excluded = "Liga MX" in league or "Mexico" in league
+    
+    # Derived flags
+    both_o25_tg_zero = (home.scored_25 == 0 and away.scored_25 == 0)
+    both_o35_tg_zero = (home.scored_35 == 0 and away.scored_35 == 0)
+    combined_o15 = (home.over_15 + away.over_15) / 2
+    combined_o25 = (home.over_25 + away.over_25) / 2
+    combined_o35 = (home.over_35 + away.over_35) / 2
+    combined_btts = (home.btts + away.btts) / 2
+    
+    tier1_bets = []
+    tier2_bets = []
+    tier3_bets = []
+    avoid_bets = []
     warnings = []
     
-    min_games = min(home.games_played, away.games_played)
-    if min_games < 8:
-        warnings.append(f"⚠️ Small sample size ({min_games} games). All confidence levels reduced by 1 tier.")
-    elif min_games < 15:
-        warnings.append(f"⚠️ Moderate sample size ({min_games} games). Confidence slightly reduced.")
+    if league_excluded:
+        warnings.append(f"⚠️ {league} excluded. All bets suppressed.")
+        return MatchResult([], [], [], ["ALL MARKETS"], warnings, "League Excluded")
     
-    if home.xg_type in ["UNDERPERFORMING", "OVERPERFORMING"] or away.xg_type in ["UNDERPERFORMING", "OVERPERFORMING"]:
-        warnings.append("⚠️ xG gap detected. Regression adjustments applied to affected bets.")
+    if sample_weight == 0.0:
+        warnings.append(f"⚠️ Only {games} games detected. Insufficient data. PASS.")
+        return MatchResult([], [], [], ["ALL MARKETS"], warnings, "Insufficient Data")
     
-    if check_binary(home.cs_pct, home.fts_pct):
-        warnings.append(f"⚠️ {home.name} is binary at home. High variance expected. Any result possible.")
+    if sample_weight <= 0.5:
+        warnings.append(f"⚠️ Small sample ({games} games). Confidence reduced.")
+    elif sample_weight <= 0.8:
+        warnings.append(f"⚠️ Moderate sample ({games} games). Slight reduction.")
     
-    return warnings
-
-
-# ============================================================================
-# MAIN PREDICTION PIPELINE
-# ============================================================================
-def predict_match(home: TeamMetrics, away: TeamMetrics) -> AnalysisOutput:
-    sample_validation = validate_sample(home.games_played, away.games_played)
+    # Track what's already bet to suppress duplicates
+    lock1_fired = False; lock2_fired = False; lock3_fired = False
+    lock4_fired = False; lock5_home = False; lock5_away = False
+    play6_home = False; play6_away = False; play7_home = False; play7_away = False
+    play8_fired = False; play11_fired = False
     
-    if not sample_validation["valid"]:
-        return AnalysisOutput(
-            story_name="INSUFFICIENT_DATA",
-            story_description="Not enough data to make a reliable prediction.",
-            narrative=f"⚠️ {sample_validation['warning']}",
-            bets=[],
-            avoid_bets=["ALL MARKETS"],
-            risks=["Data quality insufficient. PASS on all markets."],
-            scorelines=["Unknown"],
-            warnings=[sample_validation["warning"]],
-            coexistence_notes=[]
-        )
+    # ========================================================================
+    # LOCK 1: Quadruple Lock Over 1.5 (4-0)
+    # ========================================================================
+    collapse_team_l1 = None
+    opponent_l1 = None
+    if is_collapse(home) and away.fts_pct <= 25:
+        collapse_team_l1, opponent_l1 = home, away
+    elif is_collapse(away) and home.fts_pct <= 25:
+        collapse_team_l1, opponent_l1 = away, home
     
-    home = classify_team(home)
-    away = classify_team(away)
+    if collapse_team_l1 and collapse_team_l1.btts_no_over25 <= 15 and combined_o15 >= 75:
+        lock1_fired = True
+        tier = 1 if sample_weight >= 0.8 else 2
+        tier1_bets.append(Bet(
+            "Over 1.5 Goals", "Over 1.5", tier, "4-0",
+            f"Quadruple Lock: {collapse_team_l1.name} collapse defense + "
+            f"{opponent_l1.name} FTS {opponent_l1.fts_pct:.0f}% + "
+            f"BTTS No & O2.5 {collapse_team_l1.btts_no_over25:.0f}% + "
+            f"Combined O1.5 {combined_o15:.0f}%"
+        ))
+        # ========================================================================
+        # LOCK 2: Quadruple Lock Over 2.5 + BTTS (2-0)
+        # ========================================================================
+        if combined_o25 >= 55 and not is_one_goal(opponent_l1):
+            lock2_fired = True
+            tier1_bets.append(Bet(
+                "Over 2.5 + BTTS Package", "Over 2.5 & BTTS Yes", 1, "2-0",
+                f"Quadruple Lock Level 2: Combined O2.5 {combined_o25:.0f}%. "
+                f"{opponent_l1.name} attack is not one-goal."
+            ))
     
-    matched_stories = match_stories(home, away)
-    primary_story = matched_stories[0]
+    # ========================================================================
+    # LOCK 3: No-Goal Anchor Under 3.5 (5-0)
+    # ========================================================================
+    if both_o25_tg_zero and both_o35_tg_zero and combined_o35 < 30:
+        lock3_fired = True
+        tier1_bets.append(Bet(
+            "Under 3.5 Goals", "Under 3.5", 1, "5-0",
+            f"No-Goal Anchor: Both O2.5 TG = 0%. Both O3.5 TG = 0%. "
+            f"Combined O3.5 only {combined_o35:.0f}%."
+        ))
     
-    bets, avoid_bets = generate_bets(
-        home, away, primary_story["name"], 
-        sample_validation["confidence_multiplier"],
-        matched_stories
-    )
+    # ========================================================================
+    # LOCK 4: Dual FTS Lock (4-0)
+    # ========================================================================
+    if home.fts_pct <= 10 and away.fts_pct <= 10:
+        lock4_fired = True
+        tier1_bets.append(Bet(
+            "Both Teams To Score O0.5", f"{home.name} O0.5 & {away.name} O0.5",
+            1, "4-0",
+            f"Dual FTS Lock: Home FTS {home.fts_pct:.0f}%. Away FTS {away.fts_pct:.0f}%."
+        ))
     
-    bets = apply_xg_adjustments(bets, home, away)
-    coexistence_notes = check_coexistence(bets)
-    bets.sort(key=lambda x: x.tier)
+    # ========================================================================
+    # LOCK 5: Extreme Collapse CS No (5-0)
+    # ========================================================================
+    if is_extreme_collapse(home) and home.cs_pct <= 10:
+        lock5_home = True
+        tier1_bets.append(Bet(
+            f"{home.name} Clean Sheet", "No", 1, "5-0",
+            f"Extreme Collapse: Concede {home.conceded_05:.0f}%. CS only {home.cs_pct:.0f}%."
+        ))
+    if is_extreme_collapse(away) and away.cs_pct <= 10:
+        lock5_away = True
+        tier1_bets.append(Bet(
+            f"{away.name} Clean Sheet", "No", 1, "5-0",
+            f"Extreme Collapse: Concede {away.conceded_05:.0f}%. CS only {away.cs_pct:.0f}%."
+        ))
     
-    narrative = f"""
-**STORY:** {primary_story['name'].replace('_', ' ').title()}
-
-**{primary_story['description']}**
-
-{generate_shape_description(home, away)}
-
-{generate_matchup_analysis(home, away, primary_story)}
+    # ========================================================================
+    # PLAY 6: Collapse Defense CS No (11-0 with filters)
+    # ========================================================================
+    if not lock5_home and is_collapse(home) and home.conceded_05 >= 75 and home.cs_pct <= 20:
+        play6_home = True
+        tier2_bets.append(Bet(
+            f"{home.name} Clean Sheet", "No", 2, "11-0",
+            f"Collapse defense: Concede {home.conceded_05:.0f}%. Drop to O1.5: {home.concede_drop:.0f}%."
+        ))
+    if not lock5_away and is_collapse(away) and away.conceded_05 >= 75 and away.cs_pct <= 20:
+        play6_away = True
+        tier2_bets.append(Bet(
+            f"{away.name} Clean Sheet", "No", 2, "11-0",
+            f"Collapse defense: Concede {away.conceded_05:.0f}%. Drop to O1.5: {away.concede_drop:.0f}%."
+        ))
+    
+    # ========================================================================
+    # PLAY 7: Team Total O0.5 (16-0 with filters)
+    # ========================================================================
+    if not lock4_fired:
+        if home.fts_pct <= 25 and away.cs_pct < 35 and (home.scored_05 >= 70 or away.conceded_05 >= 70):
+            play7_home = True
+            tier2_bets.append(Bet(
+                f"{home.name} Team Total O0.5", "Over 0.5", 2, "16-0",
+                f"FTS {home.fts_pct:.0f}%. Opponent CS {away.cs_pct:.0f}% (< 35%)."
+            ))
+        if away.fts_pct <= 25 and home.cs_pct < 35 and (away.scored_05 >= 70 or home.conceded_05 >= 70):
+            play7_away = True
+            tier2_bets.append(Bet(
+                f"{away.name} Team Total O0.5", "Over 0.5", 2, "16-0",
+                f"FTS {away.fts_pct:.0f}%. Opponent CS {home.cs_pct:.0f}% (< 35%)."
+            ))
+    
+    # ========================================================================
+    # PLAY 8: BTTS Yes (11-0 with filters)
+    # ========================================================================
+    if not lock2_fired:
+        both_concede = home.conceded_05 >= 60 and away.conceded_05 >= 60
+        both_score = home.fts_pct <= 25 and away.fts_pct <= 25
+        no_cs_block = home.cs_pct < 35 and away.cs_pct < 35
+        no_bend_trap = not (is_bend(home) and is_one_goal(away)) and not (is_bend(away) and is_one_goal(home))
+        
+        if both_concede and both_score and no_cs_block and no_bend_trap:
+            play8_fired = True
+            tier2_bets.append(Bet(
+                "BTTS", "Yes", 2, "11-0",
+                f"Both concede ≥60%. Both FTS ≤25%. No CS or bend traps."
+            ))
+    
+    # ========================================================================
+    # PLAY 9: Under 2.5 Both One-Goal (7-0)
+    # ========================================================================
+    if is_one_goal(home) and is_one_goal(away) and combined_o25 < 50:
+        no_collapse_trap = not (is_collapse(home) and is_scores_freely(away)) and \
+                           not (is_collapse(away) and is_scores_freely(home))
+        if no_collapse_trap:
+            tier2_bets.append(Bet(
+                "Under 2.5 Goals", "Under 2.5", 2, "7-0",
+                f"Both one-goal attacks. Combined O2.5 {combined_o25:.0f}%."
+            ))
+    
+    # ========================================================================
+    # PLAY 10: BTTS No Dead Attack (3-0 with filters)
+    # ========================================================================
+    if not play8_fired:
+        dead_team = None; live_team = None
+        if is_dead_attack(home): dead_team, live_team = home, away
+        elif is_dead_attack(away): dead_team, live_team = away, home
+        
+        if dead_team and (dead_team.fts_pct >= 50 or (dead_team.scored_15 == 0 and dead_team.scored_25 == 0)):
+            if live_team.cs_pct >= 25 and live_team.conceded_05 < 80:
+                tier2_bets.append(Bet(
+                    "BTTS", "No", 2, "3-0",
+                    f"Dead attack: {dead_team.name} FTS {dead_team.fts_pct:.0f}%. "
+                    f"Opponent CS {live_team.cs_pct:.0f}%."
+                ))
+    
+    # ========================================================================
+    # PLAY 11: Over 2.5 Collapse + Scorer (3-0)
+    # ========================================================================
+    if not lock2_fired:
+        coll_team = None; opp_team = None
+        if is_collapse(home) and away.scored_15 >= 30: coll_team, opp_team = home, away
+        elif is_collapse(away) and home.scored_15 >= 30: coll_team, opp_team = away, home
+        
+        if coll_team and not is_one_goal(opp_team) and combined_o25 >= 55:
+            play11_fired = True
+            tier2_bets.append(Bet(
+                "Over 2.5 Goals", "Over 2.5", 2, "3-0",
+                f"Collapse + Scorer: {coll_team.name} collapse. "
+                f"{opp_team.name} O1.5 TG {opp_team.scored_15:.0f}%. Combined O2.5 {combined_o25:.0f}%."
+            ))
+    
+    # ========================================================================
+    # PLAY 12: CS No Moderate (63%)
+    # ========================================================================
+    if not lock5_home and not play6_home and 60 <= home.conceded_05 < 75 and away.scored_05 >= 70:
+        tier3_bets.append(Bet(
+            f"{home.name} Clean Sheet", "No", 3, "5-3",
+            f"Moderate leak: Concede {home.conceded_05:.0f}%. Opponent scores {away.scored_05:.0f}%."
+        ))
+    if not lock5_away and not play6_away and 60 <= away.conceded_05 < 75 and home.scored_05 >= 70:
+        tier3_bets.append(Bet(
+            f"{away.name} Clean Sheet", "No", 3, "5-3",
+            f"Moderate leak: Concede {away.conceded_05:.0f}%. Opponent scores {home.scored_05:.0f}%."
+        ))
+    
+    # ========================================================================
+    # PLAY 13: Under 2.5 Low Combined (67%)
+    # ========================================================================
+    if not lock3_fired and combined_o25 < 40 and not is_collapse(home) and not is_collapse(away):
+        tier3_bets.append(Bet(
+            "Under 2.5 Goals", "Under 2.5", 3, "6-3",
+            f"Low combined O2.5: {combined_o25:.0f}%. No collapse defenses."
+        ))
+    
+    # ========================================================================
+    # PLAY 14: Team Total Under 2.5 (75%)
+    # ========================================================================
+    if home.scored_35 == 0 and away.conceded_25 < 25:
+        tier3_bets.append(Bet(
+            f"{home.name} Team Total Under 2.5", "Under 2.5", 3, "6-2",
+            f"O3.5 TG = 0%. Opponent Concede O2.5 only {away.conceded_25:.0f}%."
+        ))
+    if away.scored_35 == 0 and home.conceded_25 < 25:
+        tier3_bets.append(Bet(
+            f"{away.name} Team Total Under 2.5", "Under 2.5", 3, "6-2",
+            f"O3.5 TG = 0%. Opponent Concede O2.5 only {home.conceded_25:.0f}%."
+        ))
+    
+    # ========================================================================
+    # PLAY 15: Over 1.5 Any Signal (89%)
+    # ========================================================================
+    if not lock1_fired and combined_o15 >= 75 and (home.conceded_05 >= 70 or away.conceded_05 >= 70):
+        tier3_bets.append(Bet(
+            "Over 1.5 Goals", "Over 1.5", 3, "8-1",
+            f"Combined O1.5 {combined_o15:.0f}%. At least one leaky defense."
+        ))
+    
+    # ========================================================================
+    # AVOID BETS
+    # ========================================================================
+    if lock1_fired or lock2_fired:
+        avoid_bets.append("Under 2.5 Goals (contradicts Over signal)")
+    if lock2_fired:
+        avoid_bets.append("Under 3.5 Goals (contradicts Quadruple Lock Level 2)")
+    if lock3_fired:
+        avoid_bets.append("Over 2.5 Goals (contradicts No-Goal Anchor)")
+        avoid_bets.append("Over 3.5 Goals (contradicts No-Goal Anchor)")
+    if is_collapse(home) and is_collapse(away) and combined_o25 < 55:
+        avoid_bets.append("Over 2.5 Goals (combined too low for double collapse)")
+    
+    # ========================================================================
+    # PROFILE
+    # ========================================================================
+    profile = f"""
+**{home.name}**: {home.attack_type} attack ({home.scored_05:.0f}% score, {home.scored_15:.0f}% O1.5) | 
+{home.defense_type} defense ({home.conceded_05:.0f}% concede, {home.conceded_15:.0f}% O1.5)
+**{away.name}**: {away.attack_type} attack ({away.scored_05:.0f}% score, {away.scored_15:.0f}% O1.5) | 
+{away.defense_type} defense ({away.conceded_05:.0f}% concede, {away.conceded_15:.0f}% O1.5)
+**Combined**: O1.5: {combined_o15:.0f}% | O2.5: {combined_o25:.0f}% | O3.5: {combined_o35:.0f}% | BTTS: {combined_btts:.0f}%
+**Sample**: {games} games detected
 """
     
-    risks = generate_risk_notes(home, away, primary_story)
-    scorelines = generate_scoreline_range(home, away, primary_story)
-    warnings = generate_warnings(matched_stories, home, away)
-    
-    return AnalysisOutput(
-        story_name=primary_story['name'],
-        story_description=primary_story['description'],
-        narrative=narrative,
-        bets=bets,
-        avoid_bets=avoid_bets,
-        risks=risks,
-        scorelines=scorelines,
-        warnings=warnings,
-        coexistence_notes=coexistence_notes
-    )
+    return MatchResult(tier1_bets, tier2_bets, tier3_bets, avoid_bets, warnings, profile)
 
 
 # ============================================================================
-# UI - INPUT SECTION (Organized by data source for easy pasting)
+# UI INPUT FUNCTIONS
 # ============================================================================
-def metric_input(team_name: str, prefix: str) -> TeamMetrics:
+def team_input(team_name: str, prefix: str) -> TeamData:
     st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
     
     # BLOCK 1: SCORED PER GAME
     st.markdown('<p class="metric-label">⚽ Scored Per Game</p>', unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        scored_05 = st.number_input("Over 0.5 %", 0, 100, 80, 5, key=f"{prefix}_s05")
-    with col2:
-        scored_15 = st.number_input("Over 1.5 %", 0, 100, 38, 5, key=f"{prefix}_s15")
-    with col3:
-        scored_25 = st.number_input("Over 2.5 %", 0, 100, 15, 5, key=f"{prefix}_s25")
-    with col4:
-        scored_35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_s35")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: s05 = st.number_input("Over 0.5 %", 0, 100, 80, 5, key=f"{prefix}_s05")
+    with c2: s15 = st.number_input("Over 1.5 %", 0, 100, 38, 5, key=f"{prefix}_s15")
+    with c3: s25 = st.number_input("Over 2.5 %", 0, 100, 15, 5, key=f"{prefix}_s25")
+    with c4: s35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_s35")
     
     # BLOCK 2: CONCEDED PER GAME
     st.markdown('<p class="metric-label">🛡️ Conceded / Game</p>', unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        conceded_05 = st.number_input("Over 0.5 %", 0, 100, 77, 5, key=f"{prefix}_c05")
-    with col2:
-        conceded_15 = st.number_input("Over 1.5 %", 0, 100, 40, 5, key=f"{prefix}_c15")
-    with col3:
-        conceded_25 = st.number_input("Over 2.5 %", 0, 100, 10, 5, key=f"{prefix}_c25")
-    with col4:
-        conceded_35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_c35")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: c05 = st.number_input("Over 0.5 %", 0, 100, 77, 5, key=f"{prefix}_c05")
+    with c2: c15 = st.number_input("Over 1.5 %", 0, 100, 40, 5, key=f"{prefix}_c15")
+    with c3: c25 = st.number_input("Over 2.5 %", 0, 100, 10, 5, key=f"{prefix}_c25")
+    with c4: c35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_c35")
     
     # BLOCK 3: MATCH GOALS + CORE
     st.markdown('<p class="metric-label">📊 Match Goals & Core</p>', unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        btts = st.number_input("BTTS %", 0, 100, 54, 5, key=f"{prefix}_btts")
-    with col2:
-        over_15 = st.number_input("Over 1.5 %", 0, 100, 77, 5, key=f"{prefix}_o15")
-    with col3:
-        over_25 = st.number_input("Over 2.5 %", 0, 100, 46, 5, key=f"{prefix}_o25")
-    with col4:
-        over_35 = st.number_input("Over 3.5 %", 0, 100, 27, 5, key=f"{prefix}_o35")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: btts = st.number_input("BTTS %", 0, 100, 54, 5, key=f"{prefix}_btts")
+    with c2: o15 = st.number_input("Over 1.5 %", 0, 100, 77, 5, key=f"{prefix}_o15")
+    with c3: o25 = st.number_input("Over 2.5 %", 0, 100, 46, 5, key=f"{prefix}_o25")
+    with c4: o35 = st.number_input("Over 3.5 %", 0, 100, 27, 5, key=f"{prefix}_o35")
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        btts_and_over25 = st.number_input("BTTS & Over 2.5 %", 0, 100, 46, 5, key=f"{prefix}_btts_o25")
-    with col2:
-        btts_no_and_over25 = st.number_input("BTTS No & Over 2.5 %", 0, 100, 0, 5, key=f"{prefix}_btts_no")
-    with col3:
-        fts_pct = st.number_input("Failed to Score %", 0, 100, 23, 5, key=f"{prefix}_fts")
-    with col4:
-        cs_pct = st.number_input("Clean Sheet %", 0, 100, 23, 5, key=f"{prefix}_cs")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: btts_o25 = st.number_input("BTTS & O2.5 %", 0, 100, 46, 5, key=f"{prefix}_btts_o25")
+    with c2: btts_no = st.number_input("BTTS No & O2.5 %", 0, 100, 0, 5, key=f"{prefix}_btts_no")
+    with c3: fts = st.number_input("Failed to Score %", 0, 100, 23, 5, key=f"{prefix}_fts")
+    with c4: cs = st.number_input("Clean Sheet %", 0, 100, 23, 5, key=f"{prefix}_cs")
     
     # BLOCK 4: CONTEXT
-    st.markdown('<p class="metric-label">🏟️ Context (Venue Splits)</p>', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        games_played = st.number_input("Games Played", 0, 50, 15, 1, key=f"{prefix}_gp")
-    with col2:
-        xg = st.number_input("xG per game", 0.0, 3.0, 1.2, 0.1, key=f"{prefix}_xg")
-    with col3:
-        actual_scored = st.number_input("Actual Scored", 0.0, 3.0, 1.2, 0.1, key=f"{prefix}_act")
+    st.markdown('<p class="metric-label">🎯 xG Context</p>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1: xg = st.number_input("xG per game", 0.0, 3.0, 1.2, 0.1, key=f"{prefix}_xg")
+    with c2: actual = st.number_input("Actual Scored", 0.0, 3.0, 1.2, 0.1, key=f"{prefix}_act")
     
-    return TeamMetrics(
-        name=team_name,
-        scored_05=float(scored_05), scored_15=float(scored_15),
-        scored_25=float(scored_25), scored_35=float(scored_35),
-        conceded_05=float(conceded_05), conceded_15=float(conceded_15),
-        conceded_25=float(conceded_25), conceded_35=float(conceded_35),
-        btts=float(btts), over_15=float(over_15), over_25=float(over_25),
-        over_35=float(over_35), btts_and_over25=float(btts_and_over25),
-        btts_no_and_over25=float(btts_no_and_over25),
-        fts_pct=float(fts_pct), cs_pct=float(cs_pct),
-        games_played=int(games_played), xg=float(xg), actual_scored=float(actual_scored)
+    return TeamData(
+        name=team_name, scored_05=float(s05), scored_15=float(s15),
+        scored_25=float(s25), scored_35=float(s35), conceded_05=float(c05),
+        conceded_15=float(c15), conceded_25=float(c25), conceded_35=float(c35),
+        btts=float(btts), over_15=float(o15), over_25=float(o25), over_35=float(o35),
+        btts_and_over25=float(btts_o25), btts_no_over25=float(btts_no),
+        fts_pct=float(fts), cs_pct=float(cs), xg=float(xg), actual_scored=float(actual)
     )
 
 
@@ -1100,154 +570,142 @@ def metric_input(team_name: str, prefix: str) -> TeamMetrics:
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor")
-    st.caption("Story Engine | 5-Layer Architecture | Data-Aware Confidence")
+    st.caption("15-Prediction System | Condition-Based | 34 Matches Validated")
     
     st.markdown("""
-    <div class="section-header">
-    <div>🏗️ 5-LAYER PROCESSING ENGINE</div>
-    </div>
-    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; color: #ffffff;">
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
-            <strong>Layer 1</strong><br>Sample Validator
+    <div class="section-header">🏗️ CONDITION EVALUATOR</div>
+    <div style="display: flex; gap: 0.4rem; margin-bottom: 1rem; flex-wrap: wrap; color: #ffffff;">
+        <div style="background:#1e293b;padding:0.4rem;border-radius:8px;flex:1;text-align:center;font-size:0.8rem;">
+            <strong>15 Predictions</strong><br>Proven Conditions
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
-            <strong>Layer 2</strong><br>Shape Classifier
+        <div style="background:#1e293b;padding:0.4rem;border-radius:8px;flex:1;text-align:center;font-size:0.8rem;">
+            <strong>5 Tier 1 Locks</strong><br>100% Record
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
-            <strong>Layer 3</strong><br>Story Matcher
+        <div style="background:#1e293b;padding:0.4rem;border-radius:8px;flex:1;text-align:center;font-size:0.8rem;">
+            <strong>6 Tier 2 Plays</strong><br>100% With Filters
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
-            <strong>Layer 4</strong><br>Bet Generator
+        <div style="background:#1e293b;padding:0.4rem;border-radius:8px;flex:1;text-align:center;font-size:0.8rem;">
+            <strong>4 Tier 3 Value</strong><br>63-89% Record
         </div>
-        <div style="background:#1e293b;padding:0.5rem;border-radius:8px;flex:1;text-align:center;">
-            <strong>Layer 5</strong><br>Confidence Assigner
+        <div style="background:#1e293b;padding:0.4rem;border-radius:8px;flex:1;text-align:center;font-size:0.8rem;">
+            <strong>0 Contradictions</strong><br>Suppression System
         </div>
     </div>
     """, unsafe_allow_html=True)
     
     st.divider()
     
-    col1, col2 = st.columns(2)
-    with col1:
-        home_name = st.text_input("🏠 Home Team", "Home Team", key="home_name")
-    with col2:
-        away_name = st.text_input("✈️ Away Team", "Away Team", key="away_name")
+    c1, c2 = st.columns(2)
+    with c1: home_name = st.text_input("🏠 Home Team", "PSV Eindhoven", key="home_name")
+    with c2: away_name = st.text_input("✈️ Away Team", "PEC Zwolle", key="away_name")
+    
+    league = st.text_input("🏆 League", "Netherlands - Eredivisie", key="league")
     
     st.divider()
-    
     st.subheader(f"🏠 {home_name}")
-    home_metrics = metric_input(home_name, "home")
+    home_data = team_input(home_name, "home")
     
     st.divider()
-    
     st.subheader(f"✈️ {away_name}")
-    away_metrics = metric_input(away_name, "away")
+    away_data = team_input(away_name, "away")
     
     st.divider()
     
-    if st.button("🔮 ANALYZE MATCH", type="primary"):
-        result = predict_match(home_metrics, away_metrics)
+    if st.button("🔮 RUN ANALYSIS", type="primary"):
+        result = run_engine(home_data, away_data, league)
         
-        # STORY CARD
-        st.markdown(f"""
-        <div class="story-card">
-            <div style="font-size:1.2rem;font-weight:700;margin-bottom:0.5rem;color:#ffffff;">
-                📖 STORY: {result.story_name.replace('_', ' ').title()}
-            </div>
-            <div style="color:#e2e8f0;margin-bottom:1rem;">
-                {result.story_description}
-            </div>
-            <div style="white-space:pre-line;font-size:0.9rem;color:#ffffff;">
-                {result.narrative}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # TIER 1
+        if result.tier1_bets:
+            st.markdown("### 🎯 TIER 1 LOCKS (100% Record)")
+            for bet in result.tier1_bets:
+                st.markdown(f"""
+                <div class="output-card tier-1-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <strong style="font-size:1.1rem;">{bet.market}</strong>
+                            <span style="font-size:1.2rem;font-weight:bold;margin-left:0.5rem;">→ {bet.bet}</span>
+                        </div>
+                        <span class="record-badge">✅ {bet.record}</span>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # TIER 2
+        if result.tier2_bets:
+            st.markdown("### 📊 TIER 2 PLAYS (100% With Filters)")
+            for bet in result.tier2_bets:
+                st.markdown(f"""
+                <div class="output-card tier-2-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <strong>{bet.market}</strong>
+                            <span style="font-weight:bold;margin-left:0.5rem;">→ {bet.bet}</span>
+                        </div>
+                        <span class="record-badge">✅ {bet.record}</span>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # TIER 3
+        if result.tier3_bets:
+            st.markdown("### 💡 TIER 3 VALUE (63-89% Record)")
+            for bet in result.tier3_bets:
+                st.markdown(f"""
+                <div class="output-card tier-3-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <strong>{bet.market}</strong>
+                            <span style="font-weight:bold;margin-left:0.5rem;">→ {bet.bet}</span>
+                        </div>
+                        <span class="record-badge">📊 {bet.record}</span>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # AVOID
+        if result.avoid_bets:
+            st.markdown("### ⛔ AVOID")
+            for avoid in result.avoid_bets:
+                st.markdown(f'<div class="avoid-card">🚫 {avoid}</div>', unsafe_allow_html=True)
         
         # WARNINGS
         if result.warnings:
             for w in result.warnings:
-                st.warning(w)
+                st.markdown(f'<div class="warning-note">⚠️ {w}</div>', unsafe_allow_html=True)
         
-        # RECOMMENDED BETS
-        if result.bets:
-            st.markdown("### 🎯 RECOMMENDED BETS")
-            for bet in result.bets:
-                tier_class = f"tier-{bet.tier}"
-                conf_class = {
-                    "VERY HIGH": "confidence-very-high",
-                    "HIGH": "confidence-high",
-                    "MEDIUM": "confidence-medium",
-                    "LOW": "confidence-low",
-                    "PASS": "confidence-pass"
-                }.get(bet.confidence, "")
-                
-                st.markdown(f"""
-                <div class="bet-card {tier_class}">
-                    <div style="flex:2;">
-                        <strong style="color:#ffffff;">{bet.market}</strong>
-                        <span style="font-size:1.1rem;font-weight:bold;margin-left:0.5rem;color:#ffffff;">→ {bet.bet}</span>
-                        <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
-                    </div>
-                    <div style="flex:1;text-align:right;">
-                        <span class="{conf_class}">{bet.confidence}</span>
-                        <span style="background:#0f172a;padding:0.2rem 0.5rem;border-radius:12px;margin-left:0.5rem;color:#ffffff;">TIER {bet.tier}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No bets generated. PASS on this match.")
+        # PROFILE
+        if result.profile:
+            st.markdown(f'<div class="info-note">{result.profile}</div>', unsafe_allow_html=True)
         
-        # COEXISTENCE NOTES
-        if result.coexistence_notes:
-            for note in result.coexistence_notes:
-                st.markdown(f'<div class="coexistence-note">{note}</div>', unsafe_allow_html=True)
-        
-        # AVOID BETS
-        if result.avoid_bets:
-            st.markdown("### ⛔ MARKETS TO AVOID")
-            for avoid in result.avoid_bets:
-                st.markdown(f'<div class="avoid-card">🚫 {avoid}</div>', unsafe_allow_html=True)
-        
-        # SCORELINE RANGE
-        if result.scorelines:
-            st.markdown(f"""
-            <div style="background:#0f172a;border-radius:12px;padding:1rem;margin:1rem 0;color:#ffffff;">
-                <strong>🎯 Most Likely Scorelines:</strong><br>
-                {' | '.join(result.scorelines)}
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # RISK NOTES
-        if result.risks:
-            st.markdown("### ⚠️ RISK NOTES")
-            for risk in result.risks:
-                st.markdown(f'<div class="risk-note">⚠️ {risk}</div>', unsafe_allow_html=True)
+        # NO BETS
+        if not result.tier1_bets and not result.tier2_bets and not result.tier3_bets:
+            st.info("🎯 No conditions met. PASS on this match.")
     
     # FOOTER
     st.divider()
     st.markdown("""
-    ### 📋 Story Catalog
+    ### 📋 Prediction Catalog (15 Total)
     
-    | # | Story | Priority | Description |
-    |---|-------|----------|-------------|
-    | 1 | NO_GOAL_PRESENT | 1 | At least one attack is dead. Goals scarce. |
-    | 2 | EXTREME_COLLAPSE_DEFENSE | 2 | Defense collapses when breached. |
-    | 3 | MISMATCHED_DEFENSES | 3 | One defense far superior. |
-    | 4 | COLLAPSE_VS_SCORER | 4 | Collapse defense meets scoring attack. |
-    | 5 | TWO_ONE_GOAL_ATTACKS | 5 | Both attacks limited to 1 goal. |
-    | 6 | ONE_GOAL_VS_COLLAPSE | 6 | One-goal attack meets collapse defense. |
-    | 7 | BINARY_HOME_TEAM | 7 | Home team unpredictable. |
-    | 8 | REGRESSION_CANDIDATE | 8 | xG gap detected. |
-    
-    ### 🎯 Confidence Tiers
-    
-    | Tier | Label | Criteria |
-    |------|-------|----------|
-    | 1 | VERY HIGH | Multiple 0%/100% signals + large sample |
-    | 2 | HIGH | One 0%/100% signal + supporting data |
-    | 3 | MEDIUM | Clear trend but no extreme signal |
-    | 4 | LOW | Mixed signals, story favors this side |
-    | 5 | PASS | No edge or high variance |
+    | # | Prediction | Tier | Record |
+    |---|-----------|------|--------|
+    | 1 | Quadruple Lock - Over 1.5 | 1 | 4-0 |
+    | 2 | Quadruple Lock - Over 2.5 + BTTS | 1 | 2-0 |
+    | 3 | No-Goal Anchor - Under 3.5 | 1 | 5-0 |
+    | 4 | Dual FTS Lock - Both Teams O0.5 | 1 | 4-0 |
+    | 5 | Extreme Collapse CS No | 1 | 5-0 |
+    | 6 | Collapse Defense CS No | 2 | 11-0 |
+    | 7 | Team Total O0.5 (FTS ≤25%) | 2 | 16-0 |
+    | 8 | BTTS Yes (Both Concede + Score) | 2 | 11-0 |
+    | 9 | Under 2.5 (Both One-Goal) | 2 | 7-0 |
+    | 10 | BTTS No (Dead Attack) | 2 | 3-0 |
+    | 11 | Over 2.5 (Collapse + Scorer) | 2 | 3-0 |
+    | 12 | CS No (Moderate Leak) | 3 | 5-3 |
+    | 13 | Under 2.5 (Low Combined) | 3 | 6-3 |
+    | 14 | Team Total Under 2.5 | 3 | 6-2 |
+    | 15 | Over 1.5 (Any Signal) | 3 | 8-1 |
     """)
 
 if __name__ == "__main__":
