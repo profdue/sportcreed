@@ -1,11 +1,10 @@
 """
 STREAK PREDICTOR - Complete App with Supabase Integration
 15-Prediction System | Condition-Based | Auto-Learning
-Post-Match Result Entry | Live Records Tracking
+Post-Match Result Entry | Live Records Tracking | Duplicate Protection
 """
 
 import streamlit as st
-import pandas as pd
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 from datetime import date
@@ -276,7 +275,6 @@ def run_engine(home: TeamData, away: TeamData, league: str) -> MatchResult:
     elif sample_weight <= 0.8:
         warnings.append(f"⚠️ Moderate sample ({games} games).")
     
-    # Suppression flags
     lock1_fired = False; lock2_fired = False; lock3_fired = False
     lock4_fired = False; lock5_home = False; lock5_away = False
     play6_home = False; play6_away = False
@@ -303,7 +301,6 @@ def run_engine(home: TeamData, away: TeamData, league: str) -> MatchResult:
             f"Combined O1.5 {combined_o15:.0f}%"
         ))
         
-        # LOCK 2: Over 2.5 + BTTS (2-0)
         if combined_o25 >= 55 and not is_one_goal(opponent_l1):
             lock2_fired = True
             predictions_fired.append("lock2")
@@ -561,10 +558,10 @@ def save_match_to_db(home_data: TeamData, away_data: TeamData, league: str,
             "away_fts": away_data.fts_pct, "away_cs": away_data.cs_pct,
             "away_xg": away_data.xg, "away_actual_scored": away_data.actual_scored,
             "sample_size": sample_size,
-            "predictions_fired": json.dumps(result.predictions_fired),
-            "tier1_bets": json.dumps([{"market": b.market, "bet": b.bet, "record": b.record} for b in result.tier1_bets]),
-            "tier2_bets": json.dumps([{"market": b.market, "bet": b.bet, "record": b.record} for b in result.tier2_bets]),
-            "tier3_bets": json.dumps([{"market": b.market, "bet": b.bet, "record": b.record} for b in result.tier3_bets]),
+            "predictions_fired": result.predictions_fired,
+            "tier1_bets": [{"market": b.market, "bet": b.bet, "record": b.record} for b in result.tier1_bets],
+            "tier2_bets": [{"market": b.market, "bet": b.bet, "record": b.record} for b in result.tier2_bets],
+            "tier3_bets": [{"market": b.market, "bet": b.bet, "record": b.record} for b in result.tier3_bets],
         }
         
         response = supabase.table("matches").insert(match_record).execute()
@@ -583,7 +580,6 @@ def get_pending_matches():
 
 def submit_match_result(match_id: str, home_score: int, away_score: int):
     try:
-        # Get match data
         match = supabase.table("matches").select("*").eq("id", match_id).single().execute()
         match_data = match.data
         
@@ -604,6 +600,9 @@ def submit_match_result(match_id: str, home_score: int, away_score: int):
             won = evaluate_bet(bet["market"], bet["bet"], home_score, away_score, match_data)
             pred_id = map_market_to_prediction(bet["market"])
             
+            if pred_id == "unknown":
+                continue
+            
             supabase.table("prediction_results").insert({
                 "match_id": match_id,
                 "prediction_id": pred_id,
@@ -619,7 +618,6 @@ def submit_match_result(match_id: str, home_score: int, away_score: int):
             else:
                 supabase.rpc("increment_lost", {"pred_id": pred_id}).execute()
         
-        # Mark as entered
         supabase.table("matches").update({
             "actual_home_score": home_score,
             "actual_away_score": away_score,
@@ -633,71 +631,71 @@ def submit_match_result(match_id: str, home_score: int, away_score: int):
 
 def evaluate_bet(market: str, bet: str, home_score: int, away_score: int, match_data: dict) -> bool:
     total = home_score + away_score
+    home_team = match_data.get("home_team", "")
+    away_team = match_data.get("away_team", "")
     
-    if "Over 1.5" in market and "Over" in bet and "Over 2.5" not in market:
+    if "Over 1.5" in market and "Over 1.5" in bet and "Team Total" not in market and "Over 2.5" not in market:
         return total > 1
-    if "Over 2.5" in market and "Over" in bet:
+    if "Over 2.5" in market and "Over" in bet and "Team Total" not in market and "Package" not in market:
         return total > 2
-    if "Over 3.5" in market and "Over" in bet:
-        return total > 3
+    if "Over 2.5 & BTTS" in bet or ("Package" in market and "Over 2.5" in market):
+        return total > 2 and home_score > 0 and away_score > 0
     if "Under 1.5" in market:
         return total < 2
-    if "Under 2.5" in market and "Under" in bet:
+    if "Under 2.5" in market and "Under" in bet and "Team Total" not in market:
         return total < 3
     if "Under 3.5" in market and "Under" in bet:
         return total < 4
-    if "BTTS" in market and "Yes" in bet:
+    if market.strip() == "BTTS" and "Yes" in bet:
         return home_score > 0 and away_score > 0
-    if "BTTS" in market and "No" in bet:
+    if market.strip() == "BTTS" and "No" in bet:
         return not (home_score > 0 and away_score > 0)
     if "Clean Sheet" in market and "No" in bet:
         team_name = market.split(" Clean Sheet")[0].strip()
-        if team_name == match_data.get("home_team", ""):
+        if team_name == home_team:
             return away_score > 0
         else:
             return home_score > 0
-    if "Team Total O0.5" in market and "Over" in bet:
+    if "Team Total O0.5" in market:
         team_name = market.split(" Team Total")[0].strip()
-        if team_name == match_data.get("home_team", ""):
+        if team_name == home_team:
             return home_score > 0
         else:
             return away_score > 0
     if "Team Total Under 2.5" in market:
         team_name = market.split(" Team Total")[0].strip()
-        if team_name == match_data.get("home_team", ""):
+        if team_name == home_team:
             return home_score <= 2
         else:
             return away_score <= 2
-    if "Both Teams To Score O0.5" in market:
+    if "Both Teams" in market and "O0.5" in market:
         return home_score > 0 and away_score > 0
     
     return False
 
 def map_market_to_prediction(market: str) -> str:
-    if "Over 1.5" in market and "Over 2.5" not in market and "O0.5" not in market:
-        return "lock1" if "Quadruple" in market or "Package" not in market else "play15"
+    if "Over 1.5" in market and "Team Total" not in market and "Over 2.5" not in market:
+        return "lock1" if "Quadruple" in market else "play15"
     if "Over 2.5 + BTTS" in market or "Package" in market:
         return "lock2"
     if "Under 3.5" in market:
         return "lock3"
-    if "Both Teams To Score O0.5" in market:
+    if "Both Teams" in market and "O0.5" in market:
         return "lock4"
     if "Clean Sheet" in market:
-        return "play6" if "Collapse" in market else "play12"
+        return "play6"
     if "Team Total O0.5" in market:
         return "play7"
-    if market == "BTTS" and "Yes" in market:
+    if market.strip() == "BTTS":
         return "play8"
-    if "Under 2.5" in market:
-        return "play9" if "One-Goal" in market else "play13"
-    if market == "BTTS" and "No" in market:
+    if "Under 2.5" in market and "Team Total" not in market:
+        return "play9"
+    if "BTTS No" in market:
         return "play10"
-    if "Over 2.5" in market:
+    if "Over 2.5" in market and "Team Total" not in market and "Package" not in market:
         return "play11"
     if "Team Total Under" in market:
         return "play14"
-    if "Over 1.5" in market:
-        return "play15"
     return "unknown"
 
 def get_prediction_records():
@@ -788,12 +786,20 @@ def main():
         if st.button("🔮 RUN ANALYSIS", type="primary"):
             result = run_engine(home_data, away_data, league)
             
-            # Save to Supabase
-            sample_size = detect_sample_size(home_data, away_data)
-            match_id = save_match_to_db(home_data, away_data, league, sample_size, match_date, result)
+            # Check for duplicate
+            existing = supabase.table("matches").select("id").eq(
+                "home_team", home_name
+            ).eq("away_team", away_name).eq(
+                "match_date", str(match_date)
+            ).eq("result_entered", False).execute()
             
-            if match_id:
-                st.success(f"✅ Analysis saved (ID: {match_id[:8]}...)")
+            if existing.data and len(existing.data) > 0:
+                st.warning(f"⚠️ This match already exists (ID: {existing.data[0]['id'][:8]}...). Submit result in Post-Match tab.")
+            else:
+                sample_size = detect_sample_size(home_data, away_data)
+                match_id = save_match_to_db(home_data, away_data, league, sample_size, match_date, result)
+                if match_id:
+                    st.success(f"✅ Analysis saved (ID: {match_id[:8]}...)")
             
             # DISPLAY TIER 1
             if result.tier1_bets:
@@ -879,10 +885,12 @@ def main():
             
             selected_label = st.selectbox("Select Match", list(match_options.keys()))
             
-            # Show what was predicted
             selected_match = next((m for m in pending if m['id'] == match_options[selected_label]), None)
             if selected_match:
-                st.caption(f"Predictions fired: {selected_match.get('predictions_fired', 'None')}")
+                preds = selected_match.get('predictions_fired', [])
+                if isinstance(preds, str):
+                    preds = json.loads(preds)
+                st.caption(f"Predictions fired: {preds}")
             
             c1, c2 = st.columns(2)
             with c1: home_score = st.number_input("Home Score", 0, 20, 0, key="post_home")
@@ -912,14 +920,10 @@ def main():
                 lost = pred['total_lost']
                 win_rate = (won / fired * 100) if fired > 0 else 0
                 
-                if win_rate >= 90:
-                    color = "#10b981"
-                elif win_rate >= 70:
-                    color = "#fbbf24"
-                elif win_rate >= 50:
-                    color = "#f97316"
-                else:
-                    color = "#ef4444"
+                if win_rate >= 90: color = "#10b981"
+                elif win_rate >= 70: color = "#fbbf24"
+                elif win_rate >= 50: color = "#f97316"
+                else: color = "#ef4444"
                 
                 st.markdown(f"""
                 <div style="display:flex;justify-content:space-between;align-items:center;
