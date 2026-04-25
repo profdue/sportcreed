@@ -207,17 +207,17 @@ def submit_result(match_id, home_score, away_score):
                 pred_id = bet.get("rule_id", "")
                 
                 if pred_id:
-                    supabase.table("prediction_results_v3").insert({
-                        "match_id": match_id, "prediction_id": pred_id,
+                    supabase.table("results").insert({
+                        "match_id": match_id, "rule_id": pred_id,
                         "bet_market": bet["market"], "bet_selection": bet["bet"],
-                        "layer": 1, "tier": bet["tier"],
+                        "tier": bet["tier"],
                         "won": won, "actual_result": f"{home_score}-{away_score}"
                     }).execute()
                     
                     if won:
-                        supabase.rpc("increment_won_v3", {"pred_id": pred_id}).execute()
+                        supabase.rpc("increment_won", {"pred_id": pred_id}).execute()
                     else:
-                        supabase.rpc("increment_lost_v3", {"pred_id": pred_id}).execute()
+                        supabase.rpc("increment_lost", {"pred_id": pred_id}).execute()
         
         supabase.table("matches").update({
             "actual_home_score": home_score, "actual_away_score": away_score,
@@ -395,7 +395,7 @@ def main():
     with tab3:
         st.subheader("📊 Live Records")
         try:
-            records = supabase.table("predictions_v3").select("*").order("tier,id").execute()
+            records = supabase.table("rules").select("*").order("tier,id").execute()
             if records.data:
                 for r in records.data:
                     fired = r['total_fired']
@@ -408,8 +408,8 @@ def main():
                         <div style="color:{color};">{won}/{fired} ({wr:.0f}%)</div>
                     </div>
                     """, unsafe_allow_html=True)
-        except:
-            st.info("Run Supabase SQL setup first.")
+        except Exception as e:
+            st.error(f"Database error: {e}")
     
     st.divider()
     st.markdown("""
