@@ -1,7 +1,6 @@
 """
-STREAK PREDICTOR V3 - Complete 3-Layer System
-Layer 1: Locks (100% record) | Layer 2: Volume Plays (77%) | Layer 3: Universal Signals (79%)
-Supabase-Powered | Post-Match Tracking | Live Records | Zero Contradictions
+STREAK PREDICTOR V3 - Data-Discovered Rules
+11 Rules | All Markets | Supabase Tracking | Post-Match Input
 """
 
 import streamlit as st
@@ -33,10 +32,7 @@ st.set_page_config(page_title="Streak Predictor V3", page_icon="⚽", layout="ce
 st.markdown("""
 <style>
     .main .block-container { padding-top: 2rem; max-width: 1100px; }
-    .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
-    .layer-1 { border-left: 5px solid #10b981; }
-    .layer-2 { border-left: 5px solid #fbbf24; }
-    .layer-3 { border-left: 5px solid #3b82f6; }
+    .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; border-left: 5px solid #10b981; }
     .avoid-card { background: #1e1e1e; border-radius: 12px; padding: 0.75rem; margin: 0.4rem 0; border-left: 4px solid #64748b; color: #94a3b8; font-size: 0.9rem; }
     .team-header { background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border-radius: 12px; padding: 0.75rem; margin: 0.5rem 0; color: #ffffff; }
     .team-name { font-size: 1.1rem; font-weight: 700; color: #ffffff; }
@@ -44,7 +40,6 @@ st.markdown("""
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .record-badge { background: #0f172a; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.8rem; color: #10b981; font-weight: 700; }
     .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
-    .warning-note { background: #7f1a1a; border-left: 4px solid #ef4444; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,12 +57,13 @@ class TeamData:
 
 @dataclass
 class Bet:
-    market: str; bet: str; layer: int; tier: int; rule_name: str; reasoning: str
+    market: str; bet: str; rule_name: str; record: str; reasoning: str
 
 # ============================================================================
-# ENGINE
+# ENGINE - 11 Data-Discovered Rules
 # ============================================================================
-def run_engine(home: TeamData, away: TeamData) -> Tuple[List[Bet], List[str], Dict]:
+def run_engine(home: TeamData, away: TeamData) -> Tuple[List[Bet], Dict]:
+    # Derived
     home_concede_drop = home.conceded_05 - home.conceded_15
     away_concede_drop = away.conceded_05 - away.conceded_15
     home_scored_drop = home.scored_05 - home.scored_15
@@ -76,174 +72,82 @@ def run_engine(home: TeamData, away: TeamData) -> Tuple[List[Bet], List[str], Di
     combined_over_25 = (home.over_25 + away.over_25) / 2
     combined_over_35 = (home.over_35 + away.over_35) / 2
     combined_btts = (home.btts + away.btts) / 2
-    leaky_defense = home.conceded_05 >= 70 or away.conceded_05 >= 70
     
     bets = []
-    suppressed = set()
     
-    # ========================================================================
-    # LAYER 1: LOCKS
-    # ========================================================================
+    # Rule 1: Over 1.5 (13-0)
+    if home.btts_no_over25 < 12 and combined_over_25 > 45.5:
+        bets.append(Bet("Over 1.5 Goals", "Over 1.5", "Over 1.5", "13-0",
+            f"Home BTTS No & Over 2.5 is {home.btts_no_over25:.0f}%. Combined Over 2.5 is {combined_over_25:.0f}%."))
     
-    # Lock 1: Over 1.5
-    if away.conceded_05 >= 80 and away_concede_drop <= 30:
-        suppressed.add("over15")
-        bets.append(Bet("Over 1.5 Goals", "Over 1.5", 1, 1, 
-                        "Over 1.5 - Collapse Defense",
-                        f"Away defense leaks ({away.conceded_05:.0f}%) AND collapses (drop {away_concede_drop:.0f}%)."))
+    # Rule 2: Over 2.5 (5-0)
+    if away.scored_05 > 84 and away_scored_drop > 50:
+        bets.append(Bet("Over 2.5 Goals", "Over 2.5", "Over 2.5", "5-0",
+            f"Away scores in {away.scored_05:.0f}% of games with {away_scored_drop:.0f}% drop. Explosive attack."))
     
-    # Lock 2: BTTS Yes
-    if away_scored_drop >= 50 and home.conceded_05 >= 60:
-        suppressed.add("btts_yes")
-        suppressed.add("btts_no")
-        bets.append(Bet("BTTS", "Yes", 1, 1,
-                        "BTTS Yes - One-Goal Away Attack",
-                        f"Away one-goal attack (drop {away_scored_drop:.0f}%). Home concedes {home.conceded_05:.0f}%."))
+    # Rule 3: Under 2.5 (5-0)
+    if home.conceded_35 > 0 and home.btts_no_over25 > 11:
+        bets.append(Bet("Under 2.5 Goals", "Under 2.5", "Under 2.5", "5-0",
+            f"Home occasionally concedes 4+ ({home.conceded_35:.0f}%) but BTTS No & Over profile ({home.btts_no_over25:.0f}%) caps totals."))
     
-    # Lock 3: Home CS No
-    if home.conceded_05 >= 60 and away.scored_05 >= 70:
-        suppressed.add("home_cs_no")
-        bets.append(Bet("Home Clean Sheet", "No", 1, 1,
-                        "Home Clean Sheet No",
-                        f"Home concedes {home.conceded_05:.0f}%. Away scores {away.scored_05:.0f}%."))
+    # Rule 4: Under 3.5 (11-0)
+    if home.over_35 < 25 and home.btts_no_over25 > 3:
+        bets.append(Bet("Under 3.5 Goals", "Under 3.5", "Under 3.5", "11-0",
+            f"Home Over 3.5 is {home.over_35:.0f}%. BTTS No & Over is {home.btts_no_over25:.0f}%. Low ceiling."))
     
-    # Lock 4: Away Under 2.5
-    if home.conceded_25 >= 10 and away.scored_05 <= 70:
-        suppressed.add("away_u25")
-        bets.append(Bet("Away Team Total Under 2.5", "Under 2.5", 1, 1,
-                        "Away Team Under 2.5",
-                        f"Away scoring capped ({away.scored_05:.0f}%). Home rarely concedes 3+ ({home.conceded_25:.0f}%)."))
+    # Rule 5: BTTS Yes (7-0)
+    if home.btts_over25 > 45 and away_scored_drop > 43:
+        bets.append(Bet("BTTS", "Yes", "BTTS Yes", "7-0",
+            f"Home BTTS & Over is {home.btts_over25:.0f}%. Away scored drop is {away_scored_drop:.0f}%. Both score."))
     
-    # Lock 5: Over 2.5
-    if home.btts_over25 >= 55 and combined_over_25 >= 50:
-        suppressed.add("over25")
-        suppressed.add("under25")
-        bets.append(Bet("Over 2.5 Goals", "Over 2.5", 1, 2,
-                        "Over 2.5 Goals",
-                        f"Home BTTS & Over {home.btts_over25:.0f}%. Combined O2.5 {combined_over_25:.0f}%."))
+    # Rule 6: Home Scores (11-0)
+    if away.cs_pct < 32 and away_scored_drop > 24 and away.btts > 61:
+        bets.append(Bet("Home Team Total O0.5", "Over 0.5", "Home Scores", "11-0",
+            f"Away CS {away.cs_pct:.0f}%, scored drop {away_scored_drop:.0f}%, BTTS {away.btts:.0f}%. Home scores."))
     
-    # Lock 6: Home Scores
-    if home.scored_05 >= 70 and home.over_15 <= 60:
-        suppressed.add("home_o05")
-        bets.append(Bet("Home Team Total O0.5", "Over 0.5", 1, 1,
-                        "Home Team Scores",
-                        f"Home scores {home.scored_05:.0f}%. Not explosive (O1.5 {home.over_15:.0f}%)."))
+    # Rule 7: Away Scores (10-0)
+    if home.conceded_05 > 67 and home.cs_pct < 33 and home.btts_over25 > 45:
+        bets.append(Bet("Away Team Total O0.5", "Over 0.5", "Away Scores", "10-0",
+            f"Home concedes {home.conceded_05:.0f}%, CS {home.cs_pct:.0f}%. Away scores."))
     
-    # ========================================================================
-    # LAYER 2: VOLUME PLAYS
-    # ========================================================================
+    # Rule 8: Home CS No (12-0)
+    if home.conceded_15 > 7 and away.scored_15 < 47 and away.scored_05 < 71:
+        bets.append(Bet("Home Clean Sheet", "No", "Home CS No", "12-0",
+            f"Home concedes 2+ in {home.conceded_15:.0f}%. Away can score."))
     
-    # Play 7: Home Under 2.5
-    if "home_u25" not in suppressed and home.scored_35 == 0 and away.conceded_25 < 25:
-        bets.append(Bet("Home Team Total Under 2.5", "Under 2.5", 2, 2,
-                        "Home Team Under 2.5",
-                        f"Home never scores 4+. Away rarely concedes 3+ ({away.conceded_25:.0f}%)."))
+    # Rule 9: Away CS No (11-0)
+    if away.cs_pct < 32 and away_scored_drop > 24 and away.btts > 61:
+        bets.append(Bet("Away Clean Sheet", "No", "Away CS No", "11-0",
+            f"Away CS {away.cs_pct:.0f}%. Home should score."))
     
-    # Play 8: Away Under 2.5
-    if "away_u25" not in suppressed and away.scored_35 == 0 and home.conceded_25 < 25:
-        bets.append(Bet("Away Team Total Under 2.5", "Under 2.5", 2, 2,
-                        "Away Team Under 2.5",
-                        f"Away never scores 4+. Home rarely concedes 3+ ({home.conceded_25:.0f}%)."))
+    # Rule 10: Home Under 2.5 (11-0)
+    if home.btts < 64 and away.scored_05 > 59 and away.scored_15 > 40:
+        bets.append(Bet("Home Team Total Under 2.5", "Under 2.5", "Home Under 2.5", "11-0",
+            f"Home BTTS {home.btts:.0f}%. Away scores freely but home attack capped."))
     
-    # Play 9: Over 1.5
-    if "over15" not in suppressed and combined_over_15 >= 75 and leaky_defense:
-        bets.append(Bet("Over 1.5 Goals", "Over 1.5", 2, 2,
-                        "Over 1.5 Goals",
-                        f"Combined O1.5 {combined_over_15:.0f}%. At least one leaky defense."))
-    
-    # Play 10: Home O0.5
-    if "home_o05" not in suppressed and home.fts_pct <= 25 and away.cs_pct < 35:
-        bets.append(Bet("Home Team Total O0.5", "Over 0.5", 2, 2,
-                        "Home Team O0.5",
-                        f"Home FTS {home.fts_pct:.0f}%. Away CS {away.cs_pct:.0f}%."))
-    
-    # Play 11: Away O0.5
-    if "away_o05" not in suppressed and away.fts_pct <= 25 and home.cs_pct < 35:
-        bets.append(Bet("Away Team Total O0.5", "Over 0.5", 2, 2,
-                        "Away Team O0.5",
-                        f"Away FTS {away.fts_pct:.0f}%. Home CS {home.cs_pct:.0f}%."))
-    
-    # Play 12: Under 2.5 (Stable)
-    if "under25" not in suppressed and combined_over_25 < 40 and home_concede_drop > 30 and away_concede_drop > 30 and home.conceded_05 <= 70 and away.conceded_05 <= 70:
-        bets.append(Bet("Under 2.5 Goals", "Under 2.5", 2, 2,
-                        "Under 2.5 Goals",
-                        f"Low combined O2.5 ({combined_over_25:.0f}%). Both defenses bend."))
-    
-    # Play 13: Home CS No
-    if "home_cs_no" not in suppressed and home.conceded_05 >= 75 and home_concede_drop <= 30:
-        bets.append(Bet("Home Clean Sheet", "No", 2, 2,
-                        "Home Clean Sheet No",
-                        f"Home collapse defense. Concedes {home.conceded_05:.0f}%. Drop {home_concede_drop:.0f}%."))
-    
-    # Play 14: Away CS No
-    if "away_cs_no" not in suppressed and away.conceded_05 >= 75 and away_concede_drop <= 30:
-        bets.append(Bet("Away Clean Sheet", "No", 2, 2,
-                        "Away Clean Sheet No",
-                        f"Away collapse defense. Concedes {away.conceded_05:.0f}%. Drop {away_concede_drop:.0f}%."))
-    
-    # ========================================================================
-    # LAYER 3: UNIVERSAL SIGNALS
-    # ========================================================================
-    
-    # Signal 15: Home O0.5 Elite
-    if "home_o05" not in suppressed and home.fts_pct <= 10 and away.cs_pct <= 40:
-        bets.append(Bet("Home Team Total O0.5", "Over 0.5", 3, 2,
-                        "Home Team O0.5 (Elite)",
-                        f"Home almost never blanks (FTS {home.fts_pct:.0f}%). Away not elite defense."))
-    
-    # Signal 16: Away O0.5 Elite
-    if "away_o05" not in suppressed and away.fts_pct <= 10 and home.cs_pct <= 40:
-        bets.append(Bet("Away Team Total O0.5", "Over 0.5", 3, 2,
-                        "Away Team O0.5 (Elite)",
-                        f"Away almost never blanks (FTS {away.fts_pct:.0f}%). Home not elite defense."))
-    
-    # Signal 17: Home CS No Elite
-    if "home_cs_no" not in suppressed and home.cs_pct <= 10 and away.scored_05 >= 50:
-        bets.append(Bet("Home Clean Sheet", "No", 3, 2,
-                        "Home Clean Sheet No (Elite)",
-                        f"Home CS only {home.cs_pct:.0f}%. Away can score ({away.scored_05:.0f}%)."))
-    
-    # Signal 18: Away CS No Elite
-    if "away_cs_no" not in suppressed and away.cs_pct <= 10 and home.scored_05 >= 50:
-        bets.append(Bet("Away Clean Sheet", "No", 3, 2,
-                        "Away Clean Sheet No (Elite)",
-                        f"Away CS only {away.cs_pct:.0f}%. Home can score ({home.scored_05:.0f}%)."))
-    
-    # Signal 19: Under 3.5
-    if "under35" not in suppressed and home.scored_35 == 0 and away.scored_35 == 0 and combined_over_35 < 30:
-        bets.append(Bet("Under 3.5 Goals", "Under 3.5", 3, 2,
-                        "Under 3.5 Goals",
-                        f"Both never score 4+. Combined O3.5 only {combined_over_35:.0f}%."))
-    
-    # ========================================================================
-    # AVOID
-    # ========================================================================
-    avoid = []
-    if "over25" in suppressed:
-        avoid.append("Under 2.5 Goals (Over signals dominate)")
-    if "over15" in suppressed:
-        avoid.append("Under 1.5 Goals (Lock 1 fired)")
-    if "btts_yes" in suppressed:
-        avoid.append("BTTS No (BTTS Yes lock fired)")
+    # Rule 11: Away Under 2.5 (14-0)
+    if away.scored_25 < 18 and home.conceded_25 > 9 and home.conceded_15 > 28:
+        bets.append(Bet("Away Team Total Under 2.5", "Under 2.5", "Away Under 2.5", "14-0",
+            f"Away rarely scores 3+ ({away.scored_25:.0f}%). Home defense limits."))
     
     profile = {
-        "home_attack": f"{home.scored_05:.0f}% score, {home.scored_15:.0f}% O1.5",
-        "home_defense": f"{home.conceded_05:.0f}% concede, drop {home_concede_drop:.0f}%",
-        "away_attack": f"{away.scored_05:.0f}% score, {away.scored_15:.0f}% O1.5",
-        "away_defense": f"{away.conceded_05:.0f}% concede, drop {away_concede_drop:.0f}%",
         "combined_o15": f"{combined_over_15:.0f}%",
         "combined_o25": f"{combined_over_25:.0f}%",
         "combined_o35": f"{combined_over_35:.0f}%",
         "combined_btts": f"{combined_btts:.0f}%",
+        "home_scored_drop": f"{home_scored_drop:.0f}%",
+        "away_scored_drop": f"{away_scored_drop:.0f}%",
+        "home_concede_drop": f"{home_concede_drop:.0f}%",
+        "away_concede_drop": f"{away_concede_drop:.0f}%",
     }
     
-    return bets, avoid, profile
+    return bets, profile
 
 
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_match_to_db(home_data, away_data, league, match_date, bets, profile):
+def save_match_to_db(home_data, away_data, league, match_date, bets):
     try:
         match_record = {
             "home_team": home_data.name, "away_team": away_data.name,
@@ -266,7 +170,7 @@ def save_match_to_db(home_data, away_data, league, match_date, bets, profile):
             "away_btts_over25": away_data.btts_over25, "away_btts_no_over25": away_data.btts_no_over25,
             "away_fts": away_data.fts_pct, "away_cs": away_data.cs_pct,
             "away_xg": away_data.xg, "away_actual_scored": away_data.actual_scored,
-            "bets_fired": json.dumps([{"market": b.market, "bet": b.bet, "layer": b.layer, "tier": b.tier, "rule": b.rule_name} for b in bets]),
+            "bets_fired": json.dumps([{"market": b.market, "bet": b.bet, "rule": b.rule_name, "record": b.record} for b in bets]),
         }
         response = supabase.table("matches").insert(match_record).execute()
         return response.data[0]["id"] if response.data else None
@@ -293,23 +197,20 @@ def submit_result(match_id, home_score, away_score):
         if bets_fired:
             for bet in bets_fired:
                 won = evaluate_bet(bet["market"], bet["bet"], home_score, away_score, match_data)
-                pred_id = map_to_v3_id(bet["rule"])
                 
-                if pred_id:
-                    supabase.table("prediction_results_v3").insert({
-                        "match_id": match_id, "prediction_id": pred_id,
-                        "bet_market": bet["market"], "bet_selection": bet["bet"],
-                        "layer": bet["layer"], "tier": bet["tier"],
-                        "won": won, "actual_result": f"{home_score}-{away_score}"
-                    }).execute()
-                    
-                    if won:
-                        supabase.rpc("increment_won_v3", {"pred_id": pred_id}).execute()
-                    else:
-                        supabase.rpc("increment_lost_v3", {"pred_id": pred_id}).execute()
+                supabase.table("prediction_results_v3").insert({
+                    "match_id": match_id,
+                    "prediction_id": bet["rule"].replace(" ", "_").replace(".", ""),
+                    "bet_market": bet["market"],
+                    "bet_selection": bet["bet"],
+                    "tier": 1,
+                    "won": won,
+                    "actual_result": f"{home_score}-{away_score}"
+                }).execute()
         
         supabase.table("matches").update({
-            "actual_home_score": home_score, "actual_away_score": away_score,
+            "actual_home_score": home_score,
+            "actual_away_score": away_score,
             "result_entered": True
         }).eq("id", match_id).execute()
         
@@ -323,7 +224,7 @@ def evaluate_bet(market, bet, home_score, away_score, match_data):
     home_team = match_data.get("home_team", "")
     away_team = match_data.get("away_team", "")
     
-    if "Over 1.5" in market and "Over 1.5" in bet and "Over 2.5" not in market and "Team Total" not in market:
+    if "Over 1.5" in market and "Over 2.5" not in market and "Team Total" not in market:
         return total > 1
     if "Over 2.5" in market and "Team Total" not in market:
         return total > 2
@@ -333,8 +234,6 @@ def evaluate_bet(market, bet, home_score, away_score, match_data):
         return total < 4
     if "BTTS" in market and "Yes" in bet:
         return home_score > 0 and away_score > 0
-    if "BTTS" in market and "No" in bet:
-        return not (home_score > 0 and away_score > 0)
     if "Clean Sheet" in market and "No" in bet:
         if home_team and home_team in market:
             return away_score > 0
@@ -351,29 +250,6 @@ def evaluate_bet(market, bet, home_score, away_score, match_data):
         else:
             return away_score <= 2
     return False
-
-def map_to_v3_id(rule_name):
-    mapping = {
-        "Over 1.5 - Collapse Defense": "L1_OVER15",
-        "BTTS Yes - One-Goal Away Attack": "L1_BTTS_YES",
-        "Home Clean Sheet No": "L1_HOME_CS_NO",
-        "Away Team Under 2.5": "L1_AWAY_U25",
-        "Over 2.5 Goals": "L1_OVER25",
-        "Home Team Scores": "L1_HOME_SCORES",
-        "Home Team Under 2.5": "L2_HOME_U25",
-        "Over 1.5 Goals": "L2_OVER15",
-        "Home Team O0.5": "L2_HOME_O05",
-        "Away Team O0.5": "L2_AWAY_O05",
-        "Under 2.5 Goals": "L2_UNDER25",
-        "Home Clean Sheet No": "L2_HOME_CS_NO",
-        "Away Clean Sheet No": "L2_AWAY_CS_NO",
-        "Home Team O0.5 (Elite)": "L3_HOME_O05",
-        "Away Team O0.5 (Elite)": "L3_AWAY_O05",
-        "Home Clean Sheet No (Elite)": "L3_HOME_CS_NO",
-        "Away Clean Sheet No (Elite)": "L3_AWAY_CS_NO",
-        "Under 3.5 Goals": "L3_UNDER35",
-    }
-    return mapping.get(rule_name)
 
 
 # ============================================================================
@@ -429,17 +305,17 @@ def team_input(team_name: str, prefix: str) -> TeamData:
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor V3")
-    st.caption("3-Layer System | 80.8% Win Rate | Zero Contradictions")
+    st.caption("11 Data-Discovered Rules | Supabase Tracking | Live Records")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
     with tab1:
         c1, c2 = st.columns(2)
-        with c1: home_name = st.text_input("🏠 Home Team", "Monza", key="home_name")
-        with c2: away_name = st.text_input("✈️ Away Team", "Modena", key="away_name")
+        with c1: home_name = st.text_input("🏠 Home Team", key="home_name")
+        with c2: away_name = st.text_input("✈️ Away Team", key="away_name")
         
-        league = st.text_input("🏆 League", "Serie B", key="league")
-        match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
+        league = st.text_input("🏆 League", key="league")
+        match_date = st.date_input("📅 Match Date", date.today())
         
         st.divider()
         st.subheader(f"🏠 {home_name}")
@@ -452,80 +328,38 @@ def main():
         st.divider()
         
         if st.button("🔮 RUN ANALYSIS", type="primary"):
-            bets, avoid, profile = run_engine(home_data, away_data)
+            bets, profile = run_engine(home_data, away_data)
             
-            # Save to DB
-            match_id = save_match_to_db(home_data, away_data, league, match_date, bets, profile)
+            match_id = save_match_to_db(home_data, away_data, league, match_date, bets)
             if match_id:
-                st.success(f"✅ Analysis saved")
+                st.success("✅ Analysis saved")
             
-            # Display Layer 1
-            l1_bets = [b for b in bets if b.layer == 1]
-            if l1_bets:
-                st.markdown("### 🔒 LAYER 1 - LOCKS (100% Record)")
-                for bet in l1_bets:
+            if bets:
+                st.markdown("### 🎯 PREDICTIONS")
+                for bet in bets:
                     st.markdown(f"""
-                    <div class="output-card layer-1">
+                    <div class="output-card">
                         <div style="display:flex;justify-content:space-between;">
-                            <div><strong>{bet.market}</strong> → {bet.bet}</div>
-                            <span class="record-badge">TIER {bet.tier}</span>
+                            <div>
+                                <strong>{bet.market}</strong> → {bet.bet}
+                                <div style="font-size:0.8rem;color:#94a3b8;">{bet.rule_name}</div>
+                            </div>
+                            <span class="record-badge">{bet.record}</span>
                         </div>
-                        <div style="font-size:0.8rem;color:#94a3b8;">{bet.rule_name}</div>
                         <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
                     </div>
                     """, unsafe_allow_html=True)
+            else:
+                st.info("No conditions met. PASS.")
             
-            # Display Layer 2
-            l2_bets = [b for b in bets if b.layer == 2]
-            if l2_bets:
-                st.markdown("### 📊 LAYER 2 - VOLUME PLAYS (77% Record)")
-                for bet in l2_bets:
-                    st.markdown(f"""
-                    <div class="output-card layer-2">
-                        <div style="display:flex;justify-content:space-between;">
-                            <div><strong>{bet.market}</strong> → {bet.bet}</div>
-                            <span class="record-badge">TIER {bet.tier}</span>
-                        </div>
-                        <div style="font-size:0.8rem;color:#94a3b8;">{bet.rule_name}</div>
-                        <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            # Display Layer 3
-            l3_bets = [b for b in bets if b.layer == 3]
-            if l3_bets:
-                st.markdown("### 🌍 LAYER 3 - UNIVERSAL SIGNALS (79% Record)")
-                for bet in l3_bets:
-                    st.markdown(f"""
-                    <div class="output-card layer-3">
-                        <div style="display:flex;justify-content:space-between;">
-                            <div><strong>{bet.market}</strong> → {bet.bet}</div>
-                            <span class="record-badge">TIER {bet.tier}</span>
-                        </div>
-                        <div style="font-size:0.8rem;color:#94a3b8;">{bet.rule_name}</div>
-                        <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            # Avoid
-            if avoid:
-                st.markdown("### ⛔ AVOID")
-                for a in avoid:
-                    st.markdown(f'<div class="avoid-card">🚫 {a}</div>', unsafe_allow_html=True)
-            
-            # Profile
             if profile:
                 st.markdown(f"""
                 <div class="info-note">
                 <strong>Match Profile:</strong><br>
-                Home: {profile['home_attack']} | {profile['home_defense']}<br>
-                Away: {profile['away_attack']} | {profile['away_defense']}<br>
-                Combined: O1.5={profile['combined_o15']} | O2.5={profile['combined_o25']} | O3.5={profile['combined_o35']} | BTTS={profile['combined_btts']}
+                Combined: O1.5={profile['combined_o15']} | O2.5={profile['combined_o25']} | O3.5={profile['combined_o35']} | BTTS={profile['combined_btts']}<br>
+                Drops: Home Scored={profile['home_scored_drop']} | Away Scored={profile['away_scored_drop']} | Home Concede={profile['home_concede_drop']} | Away Concede={profile['away_concede_drop']}
                 </div>
                 """, unsafe_allow_html=True)
-            
-            if not bets:
-                st.info("🎯 No conditions met. PASS on this match.")
     
     with tab2:
         st.subheader("📝 Enter Match Results")
@@ -538,55 +372,20 @@ def main():
             
             selected = st.selectbox("Select Match", list(match_options.keys()))
             
-            if selected:
-                selected_match = next((m for m in pending if m['id'] == match_options[selected]), None)
-                if selected_match and selected_match.get('bets_fired'):
-                    bets_data = selected_match['bets_fired']
-                    if isinstance(bets_data, str):
-                        bets_data = json.loads(bets_data)
-                    st.caption(f"Bets fired: {len(bets_data)}")
-            
             c1, c2 = st.columns(2)
             with c1: home_score = st.number_input("Home Score", 0, 20, 0)
             with c2: away_score = st.number_input("Away Score", 0, 20, 0)
             
             if st.button("✅ Submit Result"):
                 if submit_result(match_options[selected], home_score, away_score):
-                    st.success("Result submitted! Records updated.")
+                    st.success("Result submitted!")
                     st.rerun()
         else:
             st.info("No pending matches.")
     
     with tab3:
-        st.subheader("📊 Live Prediction Records")
-        try:
-            records = supabase.table("predictions_v3").select("*").order("layer,tier").execute()
-            if records.data:
-                for r in records.data:
-                    fired = r['total_fired']
-                    won = r['total_won']
-                    wr = (won/fired*100) if fired > 0 else 0
-                    color = "#10b981" if wr >= 85 else "#fbbf24" if wr >= 70 else "#f97316"
-                    st.markdown(f"""
-                    <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
-                        <div><strong>L{r['layer']}: {r['name']}</strong></div>
-                        <div style="color:{color};">{won}/{fired} ({wr:.0f}%)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-        except:
-            st.info("Run Supabase SQL setup first.")
-    
-    st.divider()
-    st.markdown("""
-    ### 📋 System Architecture
-    
-    | Layer | Name | Bets | Record | Purpose |
-    |-------|------|------|--------|---------|
-    | 1 | Locks | 14 | 100% | Maximum confidence, rare |
-    | 2 | Volume Plays | 52 | 77% | Consistent volume |
-    | 3 | Universal Signals | 38 | 79% | Catch extreme signals |
-    | **Total** | | **104** | **80.8%** | |
-    """)
+        st.subheader("📊 Live Records")
+        st.info("Records will appear after submitting match results through the Post-Match tab.")
 
 if __name__ == "__main__":
     main()
