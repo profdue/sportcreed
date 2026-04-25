@@ -41,6 +41,7 @@ st.markdown("""
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .record-badge { background: #0f172a; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.8rem; color: #10b981; font-weight: 700; }
     .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
+    .warning-note { background: #7f1a1a; border-left: 4px solid #ef4444; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -342,9 +343,23 @@ def main():
         if st.button("🔮 RUN ANALYSIS", type="primary"):
             bets, profile = run_engine(home_data, away_data)
             
-            match_id = save_match_to_db(home_data, away_data, league, match_date, bets)
-            if match_id:
-                st.success(f"✅ Analysis saved")
+            # Check for duplicate match with same data
+            existing = supabase.table("matches").select("id").eq(
+                "home_team", home_name
+            ).eq("away_team", away_name).eq(
+                "match_date", str(match_date)
+            ).eq("home_scored_05", home_data.scored_05).eq(
+                "home_scored_15", home_data.scored_15
+            ).eq("away_scored_05", away_data.scored_05).eq(
+                "away_scored_15", away_data.scored_15
+            ).eq("result_entered", False).execute()
+            
+            if existing.data and len(existing.data) > 0:
+                st.warning(f"⚠️ This exact analysis already exists. Submit result in Post-Match tab.")
+            else:
+                match_id = save_match_to_db(home_data, away_data, league, match_date, bets)
+                if match_id:
+                    st.success(f"✅ Analysis saved")
             
             if bets:
                 st.markdown("### 🎯 BETS")
