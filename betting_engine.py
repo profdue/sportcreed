@@ -401,7 +401,7 @@ def main():
                     fired = r['total_fired']
                     won = r['total_won']
                     wr = (won/fired*100) if fired > 0 else 0
-                    color = "#10b981" if wr >= 85 else "#fbbf24" if wr >= 70 else "#f97316"
+                    color = "#10b981" if wr >= 95 else "#fbbf24" if wr >= 80 else "#f97316" if wr >= 60 else "#ef4444"
                     st.markdown(f"""
                     <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
                         <div><strong>{r['name']}</strong></div>
