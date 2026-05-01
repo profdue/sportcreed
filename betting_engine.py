@@ -1,11 +1,11 @@
 """
-STREAK PREDICTOR V3 - 11 Discovered Rules
-Data-Discovered | Football-Logic Filtered | Supabase Tracked
+STREAK PREDICTOR V3 - Six Checks System
+Complete Engine | Audited Logic | Supabase Tracked
 """
 
 import streamlit as st
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 from datetime import date
 from supabase import create_client, Client
 import json
@@ -42,6 +42,12 @@ st.markdown("""
     .record-badge { background: #0f172a; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.8rem; color: #10b981; font-weight: 700; }
     .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
     .warning-note { background: #7f1a1a; border-left: 4px solid #ef4444; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
+    .check-card { background: #1e293b; border-radius: 10px; padding: 1rem; margin: 0.5rem 0; color: #ffffff; }
+    .check-triggered { border: 2px solid #10b981; }
+    .check-not-triggered { border: 2px solid #334155; opacity: 0.6; }
+    .conf-high { color: #10b981; font-weight: 700; }
+    .conf-medium { color: #fbbf24; font-weight: 700; }
+    .conf-low { color: #f97316; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,136 +55,271 @@ st.markdown("""
 # DATA MODELS
 # ============================================================================
 @dataclass
-class TeamData:
-    name: str
-    scored_05: float; scored_15: float; scored_25: float; scored_35: float
-    conceded_05: float; conceded_15: float; conceded_25: float; conceded_35: float
-    btts: float; over_15: float; over_25: float; over_35: float
-    btts_over25: float; btts_no_over25: float
-    fts_pct: float; cs_pct: float; xg: float; actual_scored: float
+class MatchData:
+    home_team: str
+    away_team: str
+    
+    # Home team data
+    home_last_6_wins: int
+    home_last_6_draws: int
+    home_last_6_losses: int
+    home_last_6_goals_scored: float
+    home_last_6_goals_conceded: float
+    home_consecutive_wins: Optional[int]
+    home_consecutive_winless: Optional[int]
+    home_overall_winless: Optional[int]
+    home_overall_unbeaten: Optional[int]
+    home_clean_sheet_pct: Optional[float]
+    
+    # Away team data
+    away_last_6_wins: int
+    away_last_6_draws: int
+    away_last_6_losses: int
+    away_last_6_goals_scored: float
+    away_last_6_goals_conceded: float
+    away_consecutive_winless: Optional[int]
+    away_consecutive_losses: Optional[int]
+    away_overall_winless: Optional[int]
+    away_overall_unbeaten: Optional[int]
+    away_clean_sheet_pct: Optional[float]
+    
+    # H2H
+    h2h_home_wins_last_5: Optional[int]
+    h2h_away_wins_last_5: Optional[int]
+    
+    # Reverse fixture
+    reverse_margin: Optional[int]
+    reverse_winner: Optional[str]
+    reverse_possession_winner: Optional[str]
+    reverse_shots_winner: Optional[str]
+    reverse_dangerous_attacks_winner: Optional[str]
+    reverse_all_dominated: Optional[bool]
+    
+    # Model
+    model_home_pct: Optional[float]
+    model_away_pct: Optional[float]
+    model_draw_pct: Optional[float]
 
 @dataclass
-class Bet:
-    market: str; bet: str; tier: int; rule_id: str; rule_name: str; reasoning: str
+class CheckResult:
+    check_id: str
+    check_name: str
+    triggered: bool
+    direction: Optional[str]
+    reasoning: str
+
+@dataclass
+class BetDecision:
+    bet_type: str
+    team: Optional[str]
+    confidence: str
+    home_triggers: int
+    away_triggers: int
+    net_checks: int
+    model_agreement: str
+    checks: List[CheckResult]
 
 # ============================================================================
-# ENGINE - 11 Discovered Rules
+# SIX CHECKS ENGINE
 # ============================================================================
-def run_engine(home: TeamData, away: TeamData) -> Tuple[List[Bet], Dict]:
-    home_scored_drop = home.scored_05 - home.scored_15
-    away_scored_drop = away.scored_05 - away.scored_15
-    home_concede_drop = home.conceded_05 - home.conceded_15
-    away_concede_drop = away.conceded_05 - away.conceded_15
-    combined_over_15 = (home.over_15 + away.over_15) / 2
-    combined_over_25 = (home.over_25 + away.over_25) / 2
-    combined_over_35 = (home.over_35 + away.over_35) / 2
-    combined_btts = (home.btts + away.btts) / 2
+def run_check_1(data: MatchData) -> CheckResult:
+    """WINLESS vs STREAKING"""
+    # Condition A: Home winless, Away streaking
+    if (data.home_overall_winless is not None and data.home_overall_winless >= 5) or \
+       (data.home_consecutive_winless is not None and data.home_consecutive_winless >= 5):
+        if data.away_overall_unbeaten is not None and data.away_overall_unbeaten >= 5:
+            return CheckResult("C1", "Winless vs Streaking", True, "AWAY",
+                             f"Home winless {data.home_overall_winless or data.home_consecutive_winless}+, Away unbeaten {data.away_overall_unbeaten}+")
     
-    bets = []
+    # Condition B: Away winless, Home streaking
+    if (data.away_overall_winless is not None and data.away_overall_winless >= 5) or \
+       (data.away_consecutive_winless is not None and data.away_consecutive_winless >= 5):
+        if data.home_overall_unbeaten is not None and data.home_overall_unbeaten >= 5:
+            return CheckResult("C1", "Winless vs Streaking", True, "HOME",
+                             f"Away winless {data.away_overall_winless or data.away_consecutive_winless}+, Home unbeaten {data.home_overall_unbeaten}+")
     
-    # Rule 1: Over 1.5
-    if home.btts_no_over25 < 12 and combined_over_25 > 45.5:
-        bets.append(Bet("Over 1.5 Goals", "Over 1.5", 1, "D_OVER15",
-                        "Over 1.5 Goals",
-                        f"Home BTTS No & Over2.5: {home.btts_no_over25:.0f}%. Combined O2.5: {combined_over_25:.0f}%."))
-    
-    # Rule 2: Over 2.5
-    if away.scored_05 > 84 and away_scored_drop > 50:
-        bets.append(Bet("Over 2.5 Goals", "Over 2.5", 2, "D_OVER25",
-                        "Over 2.5 Goals",
-                        f"Away scores {away.scored_05:.0f}%. Away scored drop {away_scored_drop:.0f}%."))
-    
-    # Rule 3: Under 2.5
-    if home.conceded_35 > 0 and home.btts_no_over25 > 11:
-        bets.append(Bet("Under 2.5 Goals", "Under 2.5", 2, "D_UNDER25",
-                        "Under 2.5 Goals",
-                        f"Home conceded 4+ in {home.conceded_35:.0f}% of games. BTTS No & Over: {home.btts_no_over25:.0f}%."))
-    
-    # Rule 4: Under 3.5
-    if home.over_35 < 25 and home.btts_no_over25 > 3:
-        bets.append(Bet("Under 3.5 Goals", "Under 3.5", 1, "D_UNDER35",
-                        "Under 3.5 Goals",
-                        f"Home Over 3.5: {home.over_35:.0f}%. BTTS No & Over: {home.btts_no_over25:.0f}%."))
-    
-    # Rule 5: BTTS Yes
-    if home.btts_over25 > 45 and away_scored_drop > 43:
-        bets.append(Bet("BTTS", "Yes", 1, "D_BTTS_YES",
-                        "BTTS Yes",
-                        f"Home BTTS & Over: {home.btts_over25:.0f}%. Away scored drop: {away_scored_drop:.0f}%."))
-    
-    # Rule 6: Home Scores
-    if away.cs_pct < 32 and away_scored_drop > 24 and away.btts > 61:
-        bets.append(Bet("Home Team Total O0.5", "Over 0.5", 1, "D_HOME_SCORES",
-                        "Home Team Scores",
-                        f"Away CS: {away.cs_pct:.0f}%. Away scored drop: {away_scored_drop:.0f}%. Away BTTS: {away.btts:.0f}%."))
-    
-    # Rule 7: Away Scores
-    if home.conceded_05 > 67 and home.cs_pct < 33 and home.btts_over25 > 45:
-        bets.append(Bet("Away Team Total O0.5", "Over 0.5", 1, "D_AWAY_SCORES",
-                        "Away Team Scores",
-                        f"Home concede: {home.conceded_05:.0f}%. Home CS: {home.cs_pct:.0f}%. Home BTTS & Over: {home.btts_over25:.0f}%."))
-    
-    # Rule 8: Home CS No
-    if home.conceded_15 > 7 and away.scored_15 < 47 and away.scored_05 < 71:
-        bets.append(Bet("Home Clean Sheet", "No", 2, "D_HOME_CS_NO",
-                        "Home Clean Sheet No",
-                        f"Home concede 2+: {home.conceded_15:.0f}%. Away scored 2+: {away.scored_15:.0f}%. Away scored: {away.scored_05:.0f}%."))
-    
-    # Rule 9: Away CS No
-    if away.cs_pct < 32 and away_scored_drop > 24 and away.btts > 61:
-        bets.append(Bet("Away Clean Sheet", "No", 2, "D_AWAY_CS_NO",
-                        "Away Clean Sheet No",
-                        f"Away CS: {away.cs_pct:.0f}%. Away scored drop: {away_scored_drop:.0f}%. Away BTTS: {away.btts:.0f}%."))
-    
-    # Rule 10: Home Under 2.5
-    if home.btts < 64 and away.scored_05 > 59 and away.scored_15 > 40:
-        bets.append(Bet("Home Team Total Under 2.5", "Under 2.5", 2, "D_HOME_U25",
-                        "Home Team Under 2.5",
-                        f"Home BTTS: {home.btts:.0f}%. Away scored: {away.scored_05:.0f}%. Away scored 2+: {away.scored_15:.0f}%."))
-    
-    # Rule 11: Away Under 2.5
-    if away.scored_25 < 18 and home.conceded_25 > 9 and home.conceded_15 > 28:
-        bets.append(Bet("Away Team Total Under 2.5", "Under 2.5", 1, "D_AWAY_U25",
-                        "Away Team Under 2.5",
-                        f"Away scored 3+: {away.scored_25:.0f}%. Home concede 3+: {home.conceded_25:.0f}%. Home concede 2+: {home.conceded_15:.0f}%."))
-    
-    profile = {
-        "combined_o15": f"{combined_over_15:.0f}%",
-        "combined_o25": f"{combined_over_25:.0f}%",
-        "combined_o35": f"{combined_over_35:.0f}%",
-        "combined_btts": f"{combined_btts:.0f}%",
-    }
-    
-    return bets, profile
+    return CheckResult("C1", "Winless vs Streaking", False, None, "No extreme streak mismatch")
 
+def run_check_2(data: MatchData) -> CheckResult:
+    """FORTRESS vs TRAVELERS"""
+    if data.home_consecutive_wins is not None and data.home_consecutive_wins >= 3:
+        if data.away_consecutive_winless is not None and data.away_consecutive_winless >= 5:
+            return CheckResult("C2", "Fortress vs Travelers", True, "HOME",
+                             f"Home won {data.home_consecutive_wins} straight at home, Away winless {data.away_consecutive_winless} straight away")
+    
+    return CheckResult("C2", "Fortress vs Travelers", False, None, "No fortress/travelers mismatch")
+
+def run_check_3(data: MatchData) -> CheckResult:
+    """REVERSE FIXTURE DOMINATION"""
+    if data.reverse_margin is None or data.reverse_winner is None:
+        return CheckResult("C3", "Reverse Domination", False, None, "No reverse fixture data")
+    
+    if data.reverse_margin >= 2:
+        if data.reverse_possession_winner == data.reverse_winner and \
+           data.reverse_shots_winner == data.reverse_winner and \
+           data.reverse_dangerous_attacks_winner == data.reverse_winner:
+            return CheckResult("C3", "Reverse Domination", True, data.reverse_winner,
+                             f"Won by {data.reverse_margin} goals, dominated all three metrics")
+    
+    return CheckResult("C3", "Reverse Domination", False, None, 
+                      f"Margin {data.reverse_margin} or incomplete domination")
+
+def run_check_4(data: MatchData) -> CheckResult:
+    """DEFENSIVE COLLAPSE vs HOT ATTACK"""
+    # Condition A: Home leaking, Away scoring
+    if data.home_last_6_goals_conceded >= 2.0 and data.away_last_6_goals_scored >= 2.0:
+        return CheckResult("C4", "Defensive Collapse vs Hot Attack", True, "AWAY",
+                         f"Home conceding {data.home_last_6_goals_conceded}/game, Away scoring {data.away_last_6_goals_scored}/game")
+    
+    # Condition B: Away leaking, Home scoring
+    if data.away_last_6_goals_conceded >= 2.0 and data.home_last_6_goals_scored >= 2.0:
+        return CheckResult("C4", "Defensive Collapse vs Hot Attack", True, "HOME",
+                         f"Away conceding {data.away_last_6_goals_conceded}/game, Home scoring {data.home_last_6_goals_scored}/game")
+    
+    return CheckResult("C4", "Defensive Collapse vs Hot Attack", False, None, 
+                      "No 2+ conceded vs 2+ scored mismatch")
+
+def run_check_5(data: MatchData) -> CheckResult:
+    """H2H ONE-WAY TRAFFIC"""
+    if data.h2h_home_wins_last_5 is not None and data.h2h_home_wins_last_5 >= 4:
+        return CheckResult("C5", "H2H One-Way Traffic", True, "HOME",
+                         f"Home won {data.h2h_home_wins_last_5} of last 5 at this venue")
+    
+    if data.h2h_away_wins_last_5 is not None and data.h2h_away_wins_last_5 >= 4:
+        return CheckResult("C5", "H2H One-Way Traffic", True, "AWAY",
+                         f"Away won {data.h2h_away_wins_last_5} of last 5 at this venue")
+    
+    return CheckResult("C5", "H2H One-Way Traffic", False, None, "No 4+ H2H dominance at venue")
+
+def run_check_6(data: MatchData) -> CheckResult:
+    """GOAL DROUGHT vs CLEAN SHEETS - DORMANT"""
+    # Condition A: Home can't score, Away keeps clean sheets
+    if data.home_last_6_goals_scored <= 0.5 and data.away_clean_sheet_pct is not None and data.away_clean_sheet_pct >= 40:
+        return CheckResult("C6", "Goal Drought vs Clean Sheets", True, "AWAY",
+                         f"Home scoring {data.home_last_6_goals_scored}/game, Away CS {data.away_clean_sheet_pct}%")
+    
+    # Condition B: Away can't score, Home keeps clean sheets
+    if data.away_last_6_goals_scored <= 0.5 and data.home_clean_sheet_pct is not None and data.home_clean_sheet_pct >= 40:
+        return CheckResult("C6", "Goal Drought vs Clean Sheets", True, "HOME",
+                         f"Away scoring {data.away_last_6_goals_scored}/game, Home CS {data.home_clean_sheet_pct}%")
+    
+    return CheckResult("C6", "Goal Drought vs Clean Sheets", False, None, "Dormant - thresholds rarely met")
+
+def decide_bet(home_triggers: int, away_triggers: int, checks: List[CheckResult]) -> BetDecision:
+    """Decision function based on net checks"""
+    net_checks = abs(home_triggers - away_triggers)
+    
+    if home_triggers > away_triggers:
+        direction = "HOME"
+    elif away_triggers > home_triggers:
+        direction = "AWAY"
+    else:
+        return BetDecision("SKIP", None, "NONE", home_triggers, away_triggers, 0, "N/A", checks)
+    
+    if net_checks >= 3:
+        bet_type = "WIN"
+        confidence = "HIGH"
+    elif net_checks == 2:
+        bet_type = "DNB"
+        confidence = "MEDIUM"
+    else:
+        bet_type = "DOUBLE_CHANCE"
+        confidence = "LOW"
+    
+    return BetDecision(bet_type, direction, confidence, home_triggers, away_triggers, net_checks, "PENDING", checks)
+
+def compare_to_model(decision: BetDecision, data: MatchData) -> str:
+    """Firewalled model comparison"""
+    if decision.bet_type == "SKIP":
+        return "N/A"
+    
+    if decision.team == "HOME" and data.model_home_pct and data.model_home_pct >= 60:
+        return "STRONG_ALIGN"
+    elif decision.team == "AWAY" and data.model_away_pct and data.model_away_pct >= 60:
+        return "STRONG_ALIGN"
+    elif decision.team == "HOME" and data.model_draw_pct and data.model_draw_pct >= 35:
+        return "DISAGREE"
+    elif decision.team == "AWAY" and data.model_home_pct and data.model_home_pct >= 40:
+        return "STRONG_DISAGREE"
+    else:
+        return "ALIGN"
+
+def run_engine(data: MatchData) -> BetDecision:
+    """Complete pipeline"""
+    # Run all six checks
+    checks = [
+        run_check_1(data),
+        run_check_2(data),
+        run_check_3(data),
+        run_check_4(data),
+        run_check_5(data),
+        run_check_6(data),
+    ]
+    
+    # Tally triggers
+    home_triggers = sum(1 for c in checks if c.triggered and c.direction == "HOME")
+    away_triggers = sum(1 for c in checks if c.triggered and c.direction == "AWAY")
+    
+    # Decide bet
+    decision = decide_bet(home_triggers, away_triggers, checks)
+    
+    # Model comparison (firewalled)
+    decision.model_agreement = compare_to_model(decision, data)
+    
+    return decision
 
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_match_to_db(home_data, away_data, league, match_date, bets):
+def save_match_to_db(data: MatchData, league: str, match_date: date, decision: BetDecision):
     try:
         match_record = {
-            "home_team": home_data.name, "away_team": away_data.name,
-            "league": league, "match_date": str(match_date),
-            "home_scored_05": home_data.scored_05, "home_scored_15": home_data.scored_15,
-            "home_scored_25": home_data.scored_25, "home_scored_35": home_data.scored_35,
-            "home_conceded_05": home_data.conceded_05, "home_conceded_15": home_data.conceded_15,
-            "home_conceded_25": home_data.conceded_25, "home_conceded_35": home_data.conceded_35,
-            "home_btts": home_data.btts, "home_over_15": home_data.over_15,
-            "home_over_25": home_data.over_25, "home_over_35": home_data.over_35,
-            "home_btts_over25": home_data.btts_over25, "home_btts_no_over25": home_data.btts_no_over25,
-            "home_fts": home_data.fts_pct, "home_cs": home_data.cs_pct,
-            "home_xg": home_data.xg, "home_actual_scored": home_data.actual_scored,
-            "away_scored_05": away_data.scored_05, "away_scored_15": away_data.scored_15,
-            "away_scored_25": away_data.scored_25, "away_scored_35": away_data.scored_35,
-            "away_conceded_05": away_data.conceded_05, "away_conceded_15": away_data.conceded_15,
-            "away_conceded_25": away_data.conceded_25, "away_conceded_35": away_data.conceded_35,
-            "away_btts": away_data.btts, "away_over_15": away_data.over_15,
-            "away_over_25": away_data.over_25, "away_over_35": away_data.over_35,
-            "away_btts_over25": away_data.btts_over25, "away_btts_no_over25": away_data.btts_no_over25,
-            "away_fts": away_data.fts_pct, "away_cs": away_data.cs_pct,
-            "away_xg": away_data.xg, "away_actual_scored": away_data.actual_scored,
-            "bets_fired": json.dumps([{"market": b.market, "bet": b.bet, "tier": b.tier, "rule_id": b.rule_id, "rule": b.rule_name} for b in bets]),
+            "home_team": data.home_team,
+            "away_team": data.away_team,
+            "league": league,
+            "match_date": str(match_date),
+            # Save all input data as JSON for reproducibility
+            "input_data": json.dumps({
+                "home": {
+                    "last_6": {"wins": data.home_last_6_wins, "draws": data.home_last_6_draws, 
+                              "losses": data.home_last_6_losses, "goals_scored": data.home_last_6_goals_scored,
+                              "goals_conceded": data.home_last_6_goals_conceded},
+                    "streaks": {"consecutive_wins": data.home_consecutive_wins, 
+                               "consecutive_winless": data.home_consecutive_winless,
+                               "overall_winless": data.home_overall_winless,
+                               "overall_unbeaten": data.home_overall_unbeaten},
+                    "clean_sheet_pct": data.home_clean_sheet_pct
+                },
+                "away": {
+                    "last_6": {"wins": data.away_last_6_wins, "draws": data.away_last_6_draws,
+                              "losses": data.away_last_6_losses, "goals_scored": data.away_last_6_goals_scored,
+                              "goals_conceded": data.away_last_6_goals_conceded},
+                    "streaks": {"consecutive_winless": data.away_consecutive_winless,
+                               "consecutive_losses": data.away_consecutive_losses,
+                               "overall_winless": data.away_overall_winless,
+                               "overall_unbeaten": data.away_overall_unbeaten},
+                    "clean_sheet_pct": data.away_clean_sheet_pct
+                },
+                "h2h": {"home_wins_last_5": data.h2h_home_wins_last_5, 
+                       "away_wins_last_5": data.h2h_away_wins_last_5},
+                "reverse": {"margin": data.reverse_margin, "winner": data.reverse_winner,
+                           "possession_winner": data.reverse_possession_winner,
+                           "shots_winner": data.reverse_shots_winner,
+                           "dangerous_attacks_winner": data.reverse_dangerous_attacks_winner},
+                "model": {"home_pct": data.model_home_pct, "away_pct": data.model_away_pct, 
+                         "draw_pct": data.model_draw_pct}
+            }),
+            "decision": json.dumps({
+                "bet_type": decision.bet_type,
+                "team": decision.team,
+                "confidence": decision.confidence,
+                "home_triggers": decision.home_triggers,
+                "away_triggers": decision.away_triggers,
+                "net_checks": decision.net_checks,
+                "model_agreement": decision.model_agreement,
+                "checks": [{"id": c.check_id, "name": c.check_name, "triggered": c.triggered, 
+                           "direction": c.direction, "reasoning": c.reasoning} for c in decision.checks]
+            }),
         }
         response = supabase.table("matches").insert(match_record).execute()
         return response.data[0]["id"] if response.data else None
@@ -198,30 +339,48 @@ def submit_result(match_id, home_score, away_score):
         match = supabase.table("matches").select("*").eq("id", match_id).single().execute()
         match_data = match.data
         
-        bets_fired = match_data.get("bets_fired")
-        if isinstance(bets_fired, str):
-            bets_fired = json.loads(bets_fired)
+        decision_data = match_data.get("decision")
+        if isinstance(decision_data, str):
+            decision_data = json.loads(decision_data)
         
-        if bets_fired:
-            for bet in bets_fired:
-                won = evaluate_bet(bet["market"], bet["bet"], home_score, away_score, match_data)
-                pred_id = bet.get("rule_id", "")
+        if decision_data:
+            bet_type = decision_data.get("bet_type", "SKIP")
+            team = decision_data.get("team")
+            confidence = decision_data.get("confidence")
+            
+            if bet_type != "SKIP" and team:
+                # Evaluate bet outcome
+                won = evaluate_bet(bet_type, team, home_score, away_score)
                 
-                if pred_id:
-                    supabase.table("results").insert({
-                        "match_id": match_id, "rule_id": pred_id,
-                        "bet_market": bet["market"], "bet_selection": bet["bet"],
-                        "tier": bet["tier"],
-                        "won": won, "actual_result": f"{home_score}-{away_score}"
-                    }).execute()
-                    
-                    if won:
-                        supabase.rpc("increment_won", {"pred_id": pred_id}).execute()
-                    else:
-                        supabase.rpc("increment_lost", {"pred_id": pred_id}).execute()
+                # Record result per check
+                checks = decision_data.get("checks", [])
+                for check in checks:
+                    if check.get("triggered"):
+                        check_id = check.get("id")
+                        check_direction = check.get("direction")
+                        # A check is "correct" if the match result aligns with its direction
+                        check_correct = None
+                        if check_direction == "HOME" and home_score > away_score:
+                            check_correct = True
+                        elif check_direction == "AWAY" and away_score > home_score:
+                            check_correct = True
+                        elif home_score == away_score:
+                            check_correct = None  # Draw = push for directional bets
+                        else:
+                            check_correct = False
+                        
+                        if check_correct is not None:
+                            supabase.table("check_results").insert({
+                                "match_id": match_id,
+                                "check_id": check_id,
+                                "direction": check_direction,
+                                "correct": check_correct,
+                                "actual_result": f"{home_score}-{away_score}"
+                            }).execute()
         
         supabase.table("matches").update({
-            "actual_home_score": home_score, "actual_away_score": away_score,
+            "actual_home_score": home_score,
+            "actual_away_score": away_score,
             "result_entered": True
         }).eq("id", match_id).execute()
         
@@ -230,159 +389,265 @@ def submit_result(match_id, home_score, away_score):
         st.error(f"Failed: {e}")
         return False
 
-def evaluate_bet(market, bet, home_score, away_score, match_data):
-    total = home_score + away_score
-    home_team = match_data.get("home_team", "")
-    away_team = match_data.get("away_team", "")
-    
-    if "Over 1.5" in market and "Over 2.5" not in market and "Team Total" not in market:
-        return total > 1
-    if "Over 2.5" in market and "Team Total" not in market:
-        return total > 2
-    if "Under 2.5" in market and "Team Total" not in market:
-        return total < 3
-    if "Under 3.5" in market:
-        return total < 4
-    if "BTTS" in market and "Yes" in bet:
-        return home_score > 0 and away_score > 0
-    if "BTTS" in market and "No" in bet:
-        return not (home_score > 0 and away_score > 0)
-    if "Clean Sheet" in market and "No" in bet:
-        if home_team and home_team in market:
-            return away_score > 0
+def evaluate_bet(bet_type, team, home_score, away_score):
+    """Evaluate if the bet won"""
+    if bet_type == "WIN":
+        if team == "HOME":
+            return home_score > away_score
         else:
-            return home_score > 0
-    if "Team Total O0.5" in market:
-        if home_team and home_team in market:
-            return home_score > 0
+            return away_score > home_score
+    elif bet_type == "DNB":
+        if team == "HOME":
+            return home_score >= away_score  # Push on draw
         else:
-            return away_score > 0
-    if "Team Total Under 2.5" in market:
-        if home_team and home_team in market:
-            return home_score <= 2
+            return away_score >= home_score
+    elif bet_type == "DOUBLE_CHANCE":
+        if team == "HOME":
+            return home_score >= away_score  # Home win or draw
         else:
-            return away_score <= 2
+            return away_score >= home_score  # Away win or draw
     return False
-
 
 # ============================================================================
 # UI INPUT
 # ============================================================================
-def team_input(team_name: str, prefix: str) -> TeamData:
-    st.markdown(f"<div class='team-header'><span class='team-name'>{team_name}</span></div>", unsafe_allow_html=True)
-    
-    st.markdown('<p class="metric-label">⚽ Scored Per Game</p>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: s05 = st.number_input("Over 0.5 %", 0, 100, 80, 5, key=f"{prefix}_s05")
-    with c2: s15 = st.number_input("Over 1.5 %", 0, 100, 38, 5, key=f"{prefix}_s15")
-    with c3: s25 = st.number_input("Over 2.5 %", 0, 100, 15, 5, key=f"{prefix}_s25")
-    with c4: s35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_s35")
-    
-    st.markdown('<p class="metric-label">🛡️ Conceded / Game</p>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: c05 = st.number_input("Over 0.5 %", 0, 100, 77, 5, key=f"{prefix}_c05")
-    with c2: c15 = st.number_input("Over 1.5 %", 0, 100, 40, 5, key=f"{prefix}_c15")
-    with c3: c25 = st.number_input("Over 2.5 %", 0, 100, 10, 5, key=f"{prefix}_c25")
-    with c4: c35 = st.number_input("Over 3.5 %", 0, 100, 0, 5, key=f"{prefix}_c35")
-    
-    st.markdown('<p class="metric-label">📊 Match Goals & Core</p>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: btts = st.number_input("BTTS %", 0, 100, 54, 5, key=f"{prefix}_btts")
-    with c2: o15 = st.number_input("Over 1.5 %", 0, 100, 77, 5, key=f"{prefix}_o15")
-    with c3: o25 = st.number_input("Over 2.5 %", 0, 100, 46, 5, key=f"{prefix}_o25")
-    with c4: o35 = st.number_input("Over 3.5 %", 0, 100, 27, 5, key=f"{prefix}_o35")
-    
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: btts_o25 = st.number_input("BTTS & O2.5 %", 0, 100, 46, 5, key=f"{prefix}_btts_o25")
-    with c2: btts_no = st.number_input("BTTS No & O2.5 %", 0, 100, 0, 5, key=f"{prefix}_btts_no")
-    with c3: fts = st.number_input("Failed to Score %", 0, 100, 23, 5, key=f"{prefix}_fts")
-    with c4: cs = st.number_input("Clean Sheet %", 0, 100, 23, 5, key=f"{prefix}_cs")
-    
-    st.markdown('<p class="metric-label">🎯 xG Context</p>', unsafe_allow_html=True)
+def match_input() -> MatchData:
+    st.markdown("### 📋 Team Names & Context")
     c1, c2 = st.columns(2)
-    with c1: xg = st.number_input("xG per game", 0.0, 3.0, 1.2, 0.1, key=f"{prefix}_xg")
-    with c2: actual = st.number_input("Actual Scored", 0.0, 3.0, 1.2, 0.1, key=f"{prefix}_act")
+    with c1:
+        home_name = st.text_input("🏠 Home Team", "Home", key="home_name")
+    with c2:
+        away_name = st.text_input("✈️ Away Team", "Away", key="away_name")
     
-    return TeamData(
-        name=team_name, scored_05=float(s05), scored_15=float(s15),
-        scored_25=float(s25), scored_35=float(s35), conceded_05=float(c05),
-        conceded_15=float(c15), conceded_25=float(c25), conceded_35=float(c35),
-        btts=float(btts), over_15=float(o15), over_25=float(o25), over_35=float(o35),
-        btts_over25=float(btts_o25), btts_no_over25=float(btts_no),
-        fts_pct=float(fts), cs_pct=float(cs), xg=float(xg), actual_scored=float(actual)
+    league = st.text_input("🏆 League", "League", key="league")
+    match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
+    
+    st.divider()
+    
+    # HOME TEAM DATA
+    st.markdown(f"<div class='team-header'><span class='team-name'>🏠 {home_name}</span></div>", unsafe_allow_html=True)
+    
+    st.markdown('<p class="metric-label">📊 Last 6 Matches</p>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        h_l6_w = st.number_input("Wins", 0, 6, 0, key="h_l6_w")
+    with c2:
+        h_l6_d = st.number_input("Draws", 0, 6, 0, key="h_l6_d")
+    with c3:
+        h_l6_l = st.number_input("Losses", 0, 6, 0, key="h_l6_l")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        h_l6_gs = st.number_input("Goals Scored/Game", 0.0, 6.0, 1.0, 0.1, key="h_l6_gs")
+    with c2:
+        h_l6_gc = st.number_input("Goals Conceded/Game", 0.0, 6.0, 1.0, 0.1, key="h_l6_gc")
+    
+    st.markdown('<p class="metric-label">🔄 Streaks</p>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        h_cons_w = st.number_input("Home Consecutive Wins", 0, 20, 0, key="h_cons_w")
+        if h_cons_w == 0: h_cons_w = None
+    with c2:
+        h_cons_wl = st.number_input("Home Consecutive Winless", 0, 20, 0, key="h_cons_wl")
+        if h_cons_wl == 0: h_cons_wl = None
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        h_ov_wl = st.number_input("Overall Winless Streak", 0, 20, 0, key="h_ov_wl")
+        if h_ov_wl == 0: h_ov_wl = None
+    with c2:
+        h_ov_ub = st.number_input("Overall Unbeaten Streak", 0, 20, 0, key="h_ov_ub")
+        if h_ov_ub == 0: h_ov_ub = None
+    
+    h_cs_pct = st.number_input("Home Clean Sheet %", 0.0, 100.0, 0.0, 5.0, key="h_cs_pct")
+    if h_cs_pct == 0.0: h_cs_pct = None
+    
+    st.divider()
+    
+    # AWAY TEAM DATA
+    st.markdown(f"<div class='team-header'><span class='team-name'>✈️ {away_name}</span></div>", unsafe_allow_html=True)
+    
+    st.markdown('<p class="metric-label">📊 Last 6 Matches</p>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        a_l6_w = st.number_input("Wins", 0, 6, 0, key="a_l6_w")
+    with c2:
+        a_l6_d = st.number_input("Draws", 0, 6, 0, key="a_l6_d")
+    with c3:
+        a_l6_l = st.number_input("Losses", 0, 6, 0, key="a_l6_l")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        a_l6_gs = st.number_input("Goals Scored/Game", 0.0, 6.0, 1.0, 0.1, key="a_l6_gs")
+    with c2:
+        a_l6_gc = st.number_input("Goals Conceded/Game", 0.0, 6.0, 1.0, 0.1, key="a_l6_gc")
+    
+    st.markdown('<p class="metric-label">🔄 Streaks</p>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        a_cons_wl = st.number_input("Away Consecutive Winless", 0, 20, 0, key="a_cons_wl")
+        if a_cons_wl == 0: a_cons_wl = None
+    with c2:
+        a_cons_l = st.number_input("Away Consecutive Losses", 0, 20, 0, key="a_cons_l")
+        if a_cons_l == 0: a_cons_l = None
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        a_ov_wl = st.number_input("Overall Winless Streak", 0, 20, 0, key="a_ov_wl")
+        if a_ov_wl == 0: a_ov_wl = None
+    with c2:
+        a_ov_ub = st.number_input("Overall Unbeaten Streak", 0, 20, 0, key="a_ov_ub")
+        if a_ov_ub == 0: a_ov_ub = None
+    
+    a_cs_pct = st.number_input("Away Clean Sheet %", 0.0, 100.0, 0.0, 5.0, key="a_cs_pct")
+    if a_cs_pct == 0.0: a_cs_pct = None
+    
+    st.divider()
+    
+    # H2H DATA
+    st.markdown(f"<div class='team-header'><span class='team-name'>🤝 H2H at Venue (Last 5)</span></div>", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        h2h_home = st.number_input(f"{home_name} Wins", 0, 5, 0, key="h2h_home")
+        if h2h_home == 0: h2h_home = None
+    with c2:
+        h2h_away = st.number_input(f"{away_name} Wins", 0, 5, 0, key="h2h_away")
+        if h2h_away == 0: h2h_away = None
+    
+    st.divider()
+    
+    # REVERSE FIXTURE
+    st.markdown(f"<div class='team-header'><span class='team-name'>🔄 Reverse Fixture</span></div>", unsafe_allow_html=True)
+    rev_margin = st.number_input("Score Margin", 0, 10, 0, key="rev_margin")
+    rev_winner = st.selectbox("Winner", ["None", home_name, away_name, "Draw"], key="rev_winner")
+    if rev_winner == "None": 
+        rev_winner = None
+        rev_margin = None
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        rev_poss = st.selectbox("Possession Winner", ["None", home_name, away_name], key="rev_poss")
+        if rev_poss == "None": rev_poss = None
+    with c2:
+        rev_shots = st.selectbox("Shots Winner", ["None", home_name, away_name], key="rev_shots")
+        if rev_shots == "None": rev_shots = None
+    with c3:
+        rev_attacks = st.selectbox("Dangerous Attacks Winner", ["None", home_name, away_name], key="rev_attacks")
+        if rev_attacks == "None": rev_attacks = None
+    
+    st.divider()
+    
+    # MODEL DATA
+    st.markdown(f"<div class='team-header'><span class='team-name'>🤖 Model Probabilities</span></div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        model_home = st.number_input("Home Win %", 0.0, 100.0, 0.0, 5.0, key="model_home")
+        if model_home == 0.0: model_home = None
+    with c2:
+        model_away = st.number_input("Away Win %", 0.0, 100.0, 0.0, 5.0, key="model_away")
+        if model_away == 0.0: model_away = None
+    with c3:
+        model_draw = st.number_input("Draw %", 0.0, 100.0, 0.0, 5.0, key="model_draw")
+        if model_draw == 0.0: model_draw = None
+    
+    return MatchData(
+        home_team=home_name, away_team=away_name,
+        home_last_6_wins=h_l6_w, home_last_6_draws=h_l6_d, home_last_6_losses=h_l6_l,
+        home_last_6_goals_scored=h_l6_gs, home_last_6_goals_conceded=h_l6_gc,
+        home_consecutive_wins=h_cons_w, home_consecutive_winless=h_cons_wl,
+        home_overall_winless=h_ov_wl, home_overall_unbeaten=h_ov_ub,
+        home_clean_sheet_pct=h_cs_pct,
+        away_last_6_wins=a_l6_w, away_last_6_draws=a_l6_d, away_last_6_losses=a_l6_l,
+        away_last_6_goals_scored=a_l6_gs, away_last_6_goals_conceded=a_l6_gc,
+        away_consecutive_winless=a_cons_wl, away_consecutive_losses=a_cons_l,
+        away_overall_winless=a_ov_wl, away_overall_unbeaten=a_ov_ub,
+        away_clean_sheet_pct=a_cs_pct,
+        h2h_home_wins_last_5=h2h_home, h2h_away_wins_last_5=h2h_away,
+        reverse_margin=rev_margin, reverse_winner=rev_winner,
+        reverse_possession_winner=rev_poss, reverse_shots_winner=rev_shots,
+        reverse_dangerous_attacks_winner=rev_attacks, reverse_all_dominated=None,
+        model_home_pct=model_home, model_away_pct=model_away, model_draw_pct=model_draw
     )
-
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor V3")
-    st.caption("11 Discovered Rules | Data-Discovered | Football-Logic Filtered")
+    st.caption("Six Checks System | Audited Logic | Directional Betting")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
     with tab1:
-        c1, c2 = st.columns(2)
-        with c1: home_name = st.text_input("🏠 Home Team", "Home", key="home_name")
-        with c2: away_name = st.text_input("✈️ Away Team", "Away", key="away_name")
-        
-        league = st.text_input("🏆 League", "League", key="league")
-        match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
-        
-        st.divider()
-        st.subheader(f"🏠 {home_name}")
-        home_data = team_input(home_name, "home")
-        
-        st.divider()
-        st.subheader(f"✈️ {away_name}")
-        away_data = team_input(away_name, "away")
+        match_data = match_input()
         
         st.divider()
         
         if st.button("🔮 RUN ANALYSIS", type="primary"):
-            bets, profile = run_engine(home_data, away_data)
+            decision = run_engine(match_data)
             
-            # Check for duplicate match with same data
+            # Check for duplicate
             existing = supabase.table("matches").select("id").eq(
-                "home_team", home_name
-            ).eq("away_team", away_name).eq(
-                "match_date", str(match_date)
-            ).eq("home_scored_05", home_data.scored_05).eq(
-                "home_scored_15", home_data.scored_15
-            ).eq("away_scored_05", away_data.scored_05).eq(
-                "away_scored_15", away_data.scored_15
+                "home_team", match_data.home_team
+            ).eq("away_team", match_data.away_team).eq(
+                "match_date", str(st.session_state.get("match_date", date.today()))
             ).eq("result_entered", False).execute()
             
             if existing.data and len(existing.data) > 0:
-                st.warning(f"⚠️ This exact analysis already exists. Submit result in Post-Match tab.")
+                st.warning(f"⚠️ This analysis already exists. Submit result in Post-Match tab.")
             else:
-                match_id = save_match_to_db(home_data, away_data, league, match_date, bets)
+                match_id = save_match_to_db(match_data, st.session_state.get("league", "Unknown"), 
+                                           st.session_state.get("match_date", date.today()), decision)
                 if match_id:
                     st.success(f"✅ Analysis saved")
             
-            if bets:
-                st.markdown("### 🎯 BETS")
-                for bet in bets:
-                    tier_class = "tier-1" if bet.tier == 1 else "tier-2"
-                    st.markdown(f"""
-                    <div class="output-card {tier_class}">
-                        <div style="display:flex;justify-content:space-between;">
-                            <div><strong>{bet.market}</strong> → {bet.bet}</div>
-                            <span class="record-badge">TIER {bet.tier}</span>
-                        </div>
-                        <div style="font-size:0.8rem;color:#94a3b8;">{bet.rule_name}</div>
-                        <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{bet.reasoning}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("🎯 No conditions met. PASS on this match.")
+            # Display checks
+            st.markdown("### 🔍 Six Checks Results")
+            triggered_checks = [c for c in decision.checks if c.triggered]
             
-            if profile:
+            for check in decision.checks:
+                if check.triggered:
+                    card_class = "check-triggered"
+                    status = f"✅ TRIGGERED → {check.direction}"
+                else:
+                    card_class = "check-not-triggered"
+                    status = "⏭️ Not triggered"
+                
+                st.markdown(f"""
+                <div class="check-card {card_class}">
+                    <div style="display:flex;justify-content:space-between;">
+                        <div><strong>{check.check_id}: {check.check_name}</strong></div>
+                        <div>{status}</div>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{check.reasoning}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Display decision
+            st.markdown("### 🎯 Bet Decision")
+            
+            conf_class = f"conf-{decision.confidence.lower()}"
+            
+            if decision.bet_type == "SKIP":
+                st.info("🎯 SKIP — No directional edge found. Checks conflict or don't trigger.")
+            else:
+                st.markdown(f"""
+                <div class="output-card tier-1">
+                    <div style="display:flex;justify-content:space-between;">
+                        <div><strong>{decision.bet_type}</strong> → {decision.team}</div>
+                        <span class="{conf_class}">{decision.confidence} CONFIDENCE</span>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">
+                        Triggers: {decision.home_triggers} HOME, {decision.away_triggers} AWAY | Net: {decision.net_checks}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Model comparison
+            if decision.bet_type != "SKIP":
                 st.markdown(f"""
                 <div class="info-note">
-                <strong>Match Profile:</strong><br>
-                Combined: O1.5={profile['combined_o15']} | O2.5={profile['combined_o25']} | O3.5={profile['combined_o35']} | BTTS={profile['combined_btts']}
+                <strong>Model Agreement:</strong> {decision.model_agreement}
                 </div>
                 """, unsafe_allow_html=True)
     
@@ -408,41 +673,71 @@ def main():
             st.info("No pending matches.")
     
     with tab3:
-        st.subheader("📊 Live Records")
+        st.subheader("📊 Live Records by Check")
         try:
-            records = supabase.table("rules").select("*").order("tier,id").execute()
-            if records.data:
-                for r in records.data:
-                    fired = r['total_fired']
-                    won = r['total_won']
-                    wr = (won/fired*100) if fired > 0 else 0
-                    color = "#10b981" if wr >= 95 else "#fbbf24" if wr >= 80 else "#f97316" if wr >= 60 else "#ef4444"
+            # Aggregate results by check
+            response = supabase.table("check_results").select("*").execute()
+            if response.data:
+                from collections import defaultdict
+                check_stats = defaultdict(lambda: {"total": 0, "correct": 0, "incorrect": 0, "pushes": 0})
+                
+                for r in response.data:
+                    check_id = r.get("check_id")
+                    correct = r.get("correct")
+                    if correct is True:
+                        check_stats[check_id]["correct"] += 1
+                        check_stats[check_id]["total"] += 1
+                    elif correct is False:
+                        check_stats[check_id]["incorrect"] += 1
+                        check_stats[check_id]["total"] += 1
+                    else:
+                        check_stats[check_id]["pushes"] += 1
+                
+                check_names = {
+                    "C1": "Winless vs Streaking",
+                    "C2": "Fortress vs Travelers",
+                    "C3": "Reverse Domination",
+                    "C4": "Defensive Collapse vs Hot Attack",
+                    "C5": "H2H One-Way Traffic",
+                    "C6": "Goal Drought vs Clean Sheets"
+                }
+                
+                for check_id in ["C1", "C2", "C3", "C4", "C5", "C6"]:
+                    stats = check_stats.get(check_id, {"total": 0, "correct": 0, "incorrect": 0, "pushes": 0})
+                    total = stats["total"]
+                    correct = stats["correct"]
+                    wr = (correct/total*100) if total > 0 else 0
+                    color = "#10b981" if wr >= 80 else "#fbbf24" if wr >= 60 else "#f97316" if wr >= 40 else "#ef4444"
+                    
                     st.markdown(f"""
                     <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
-                        <div><strong>{r['name']}</strong></div>
-                        <div style="color:{color};">{won}/{fired} ({wr:.0f}%)</div>
+                        <div><strong>{check_id}: {check_names.get(check_id, check_id)}</strong></div>
+                        <div style="color:{color};">{correct}/{total} ({wr:.0f}%) | {stats['pushes']} pushes</div>
                     </div>
                     """, unsafe_allow_html=True)
+            else:
+                st.info("No results recorded yet.")
         except Exception as e:
             st.error(f"Database error: {e}")
     
     st.divider()
     st.markdown("""
-    ### 📋 11 Discovered Rules
+    ### 📋 Six Checks System
     
-    | # | Market | Conditions | Discovered Record |
-    |---|--------|------------|-------------------|
-    | 1 | Over 1.5 | home_btts_no_over25 < 12 AND combined_over_25 > 45.5 | 13-0 |
-    | 2 | Over 2.5 | away_scored_05 > 84 AND away_scored_drop > 50 | 5-0 |
-    | 3 | Under 2.5 | home_conceded_35 > 0 AND home_btts_no_over25 > 11 | 5-0 |
-    | 4 | Under 3.5 | home_over_35 < 25 AND home_btts_no_over25 > 3 | 11-0 |
-    | 5 | BTTS Yes | home_btts_over25 > 45 AND away_scored_drop > 43 | 7-0 |
-    | 6 | Home Scores | away_cs < 32 AND away_scored_drop > 24 AND away_btts > 61 | 11-0 |
-    | 7 | Away Scores | home_conceded_05 > 67 AND home_cs < 33 AND home_btts_over25 > 45 | 10-0 |
-    | 8 | Home CS No | home_conceded_15 > 7 AND away_scored_15 < 47 AND away_scored_05 < 71 | 12-0 |
-    | 9 | Away CS No | away_cs < 32 AND away_scored_drop > 24 AND away_btts > 61 | 11-0 |
-    | 10 | Home U2.5 | home_btts < 64 AND away_scored_05 > 59 AND away_scored_15 > 40 | 11-0 |
-    | 11 | Away U2.5 | away_scored_25 < 18 AND home_conceded_25 > 9 AND home_conceded_15 > 28 | 14-0 |
+    | Check | Logic | Record |
+    |-------|-------|--------|
+    | C1: Winless vs Streaking | Team in terminal decline vs team that can't lose | ~80% |
+    | C2: Fortress vs Travelers | Home team with 3+ straight wins vs away team winless 5+ | ~100% |
+    | C3: Reverse Domination | Won reverse by 2+ and dominated all stats | ~50% |
+    | C4: Defensive Collapse | Team conceding 2+ vs team scoring 2+ | ~100% |
+    | C5: H2H One-Way Traffic | 4+ wins in last 5 at this venue | ~100% |
+    | C6: Goal Drought vs Clean Sheets | DORMANT — thresholds too tight | N/A |
+    
+    **Decision Logic:**
+    - Net 3+ checks → WIN bet (HIGH confidence)
+    - Net 2 checks → DNB (MEDIUM confidence)
+    - Net 1 check → DOUBLE CHANCE (LOW confidence)
+    - Net 0 / conflict → SKIP
     """)
 
 if __name__ == "__main__":
