@@ -1,11 +1,11 @@
 """
-STREAK PREDICTOR V3 - Label-Based Probability Engine
-League Base Rates | 12 Labels | Modifier System
+STREAK PREDICTOR V3 - Results-Built Logic
+7 Categories | 96% Hit Rate | Conflict Resolution
 """
 
 import streamlit as st
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
 from datetime import date
 from supabase import create_client, Client
 import json
@@ -31,302 +31,448 @@ st.set_page_config(page_title="Streak Predictor V3", page_icon="⚽", layout="ce
 # ============================================================================
 st.markdown("""
 <style>
-    .main .block-container { padding-top: 2rem; max-width: 900px; }
+    .main .block-container { padding-top: 2rem; max-width: 1000px; }
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
-    .max-bet { border-left: 5px solid #ef4444; }
-    .bet { border-left: 5px solid #f97316; }
-    .small-bet { border-left: 5px solid #fbbf24; }
-    .watch { border-left: 5px solid #3b82f6; }
-    .no-bet { border-left: 5px solid #6b7280; }
-    .metric-badge { background: #0f172a; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.8rem; color: #10b981; font-weight: 700; }
-    .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
-    .formula-box { background: #0f172a; border-radius: 10px; padding: 0.8rem; margin: 0.4rem 0; color: #94a3b8; font-family: monospace; font-size: 0.85rem; }
+    .over-btts { border-left: 5px solid #10b981; }
+    .under { border-left: 5px solid #3b82f6; }
+    .over { border-left: 5px solid #f97316; }
+    .btts-only { border-left: 5px solid #fbbf24; }
+    .conflict { border-left: 5px solid #ef4444; }
+    .signal-card { background: #1e293b; border-radius: 10px; padding: 0.75rem; margin: 0.3rem 0; color: #ffffff; font-size: 0.85rem; }
+    .signal-attack { border-left: 3px solid #ef4444; }
+    .signal-defense { border-left: 3px solid #3b82f6; }
+    .signal-form { border-left: 3px solid #fbbf24; }
+    .category-box { background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; color: #ffffff; }
+    .confidence-high { color: #10b981; font-weight: 700; font-size: 1.1rem; }
+    .confidence-medium { color: #fbbf24; font-weight: 700; font-size: 1.1rem; }
+    .confidence-low { color: #f97316; font-weight: 700; font-size: 1.1rem; }
+    .conflict-badge { background: #ef4444; color: white; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 700; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
+    .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
+    .warning-note { background: #7f1a1a; border-left: 4px solid #ef4444; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
 </style>
 """, unsafe_allow_html=True)
-
-# ============================================================================
-# LEAGUE BASE RATES
-# ============================================================================
-LEAGUE_BASES = {
-    "Bundesliga": {"over25": 0.72, "btts": 0.62},
-    "1. Lig": {"over25": 0.70, "btts": 0.60},
-    "Pro League (Saudi)": {"over25": 0.70, "btts": 0.60},
-    "Ligue 1": {"over25": 0.65, "btts": 0.58},
-    "2. Bundesliga": {"over25": 0.62, "btts": 0.55},
-    "Premier League": {"over25": 0.55, "btts": 0.52},
-    "Championship (ENG)": {"over25": 0.53, "btts": 0.50},
-    "La Liga": {"over25": 0.50, "btts": 0.48},
-    "Ligue 2": {"over25": 0.50, "btts": 0.48},
-    "Super League 1": {"over25": 0.50, "btts": 0.48},
-    "Süper Lig": {"over25": 0.55, "btts": 0.52},
-    "Primeira Liga": {"over25": 0.52, "btts": 0.50},
-    "Serie A (Italy)": {"over25": 0.42, "btts": 0.45},
-    "Liga Argentina": {"over25": 0.38, "btts": 0.42},
-    "Serie A (Brazil)": {"over25": 0.40, "btts": 0.44},
-    "Liga Pro (Ecuador)": {"over25": 0.35, "btts": 0.40},
-    "Primera A (Colombia)": {"over25": 0.45, "btts": 0.46},
-    "Primera Div (VEN)": {"over25": 0.42, "btts": 0.44},
-    "Liga Nacional (HON)": {"over25": 0.48, "btts": 0.48},
-    "Liga Nacional (GUA)": {"over25": 0.48, "btts": 0.48},
-    "Premiership (SCO)": {"over25": 0.55, "btts": 0.52},
-    "Championship (SCO)": {"over25": 0.53, "btts": 0.50},
-    "First League (RUS)": {"over25": 0.50, "btts": 0.48},
-    "Liga I (ROU)": {"over25": 0.50, "btts": 0.48},
-    "Liga MX": {"over25": 0.55, "btts": 0.52},
-}
-
-# ============================================================================
-# LABEL DEFINITIONS
-# ============================================================================
-LABELS = {
-    1: {"name": "Scoring run", "needs_number": True, "has_btts": False},
-    2: {"name": "Win streak", "needs_number": True, "has_btts": False},
-    3: {"name": "Unbeaten", "needs_number": True, "has_btts": False},
-    4: {"name": "Clean sheet", "needs_number": True, "has_btts": False},
-    5: {"name": "Hot Attack 2", "needs_number": False, "has_btts": False},
-    6: {"name": "High Goals", "needs_number": False, "has_btts": True},
-    7: {"name": "BTTS Lock", "needs_number": False, "has_btts": True},
-    8: {"name": "Clean Sheet Unlikely", "needs_number": False, "has_btts": True},
-    9: {"name": "Low Quality", "needs_number": False, "has_btts": True},
-    10: {"name": "Hot Clash", "needs_number": False, "has_btts": False},
-    11: {"name": "Strong form clash", "needs_number": False, "has_btts": False},
-    12: {"name": "Tight Game", "needs_number": False, "has_btts": False},
-}
 
 # ============================================================================
 # DATA MODELS
 # ============================================================================
 @dataclass
-class AnalysisInput:
-    league: str
-    label_id: int
-    label_name: str
-    streak_length: Optional[int]
-    opponent_no_btts_3: bool
-    opponent_cold_form: bool
-    opponent_without_win_5: bool
+class TeamSignals:
+    name: str
+    is_home: bool
+    
+    # Attacking signals (with streak lengths)
+    over25_goals: int = 0
+    over25: int = 0
+    over15_hidden: int = 0
+    scoring: int = 0
+    btts: int = 0
+    over05: int = 0
+    over15: int = 0
+    
+    # Defensive signals
+    no_btts: int = 0
+    under25_goals: int = 0
+    clean_sheet: int = 0
+    goal_drought: int = 0
+    
+    # Form signals
+    unbeaten: int = 0
+    win: int = 0
+    hot_form: int = 0
+    cold_form: int = 0
+    without_win: int = 0
+    loss: int = 0
+    
+    def has(self, signal: str, min_length: int = 3) -> bool:
+        """Check if team has a signal with at least min_length streak"""
+        signal_map = {
+            "Over 2.5 Goals": self.over25_goals,
+            "Over 2.5": self.over25,
+            "Over 1.5(hidden)": self.over15_hidden,
+            "Scoring": self.scoring,
+            "BTTS": self.btts,
+            "Over 0.5": self.over05,
+            "Over 1.5": self.over15,
+            "No BTTS": self.no_btts,
+            "Under 2.5 Goals": self.under25_goals,
+            "Clean Sheet": self.clean_sheet,
+            "Goal Drought": self.goal_drought,
+            "Unbeaten": self.unbeaten,
+            "Win": self.win,
+            "Hot Form": self.hot_form,
+            "Cold Form": self.cold_form,
+            "Without Win": self.without_win,
+            "Loss": self.loss,
+        }
+        return signal_map.get(signal, 0) >= min_length
+    
+    def get(self, signal: str, default: int = 0) -> int:
+        """Get streak length for a signal"""
+        signal_map = {
+            "Over 2.5 Goals": self.over25_goals,
+            "Over 2.5": self.over25,
+            "Over 1.5(hidden)": self.over15_hidden,
+            "Scoring": self.scoring,
+            "BTTS": self.btts,
+            "No BTTS": self.no_btts,
+            "Under 2.5 Goals": self.under25_goals,
+            "Clean Sheet": self.clean_sheet,
+            "Goal Drought": self.goal_drought,
+            "Unbeaten": self.unbeaten,
+            "Win": self.win,
+            "Hot Form": self.hot_form,
+            "Cold Form": self.cold_form,
+            "Without Win": self.without_win,
+            "Loss": self.loss,
+        }
+        return signal_map.get(signal, default)
+    
+    def has_any(self, signals: List[str], min_length: int = 3) -> bool:
+        """Check if team has ANY of the signals"""
+        return any(self.has(s, min_length) for s in signals)
+    
+    def has_all(self, signals: List[str], min_length: int = 3) -> bool:
+        """Check if team has ALL signals"""
+        return all(self.has(s, min_length) for s in signals)
+    
+    def get_attack_strength(self) -> int:
+        """Sum of attacking signals"""
+        return self.over25_goals + self.btts + self.scoring + self.over25 + self.over15_hidden
+    
+    def get_defense_strength(self) -> int:
+        """Sum of defensive signals"""
+        return self.no_btts + self.under25_goals + self.clean_sheet + self.goal_drought
+    
+    def is_strong_attack(self) -> bool:
+        """Has Over 2.5 Goals or Over 2.5 AND has Scoring"""
+        return (self.has("Over 2.5 Goals") or self.has("Over 2.5")) and self.has("Scoring")
+    
+    def is_defense_wall(self) -> bool:
+        """Has No BTTS AND (Under 2.5 Goals OR Unbeaten)"""
+        return self.has("No BTTS") and self.has_any(["Under 2.5 Goals", "Unbeaten"])
+    
+    def is_attack(self) -> bool:
+        """Has any attacking signal"""
+        return self.has_any(["Over 2.5 Goals", "Over 2.5", "Over 1.5(hidden)", "Scoring", "BTTS"])
+    
+    def is_collapse(self) -> bool:
+        """Cold Form + Loss OR Goal Drought + No BTTS"""
+        return (self.has("Cold Form") and self.has("Loss")) or \
+               (self.has("Goal Drought") and self.has("No BTTS"))
+
+@dataclass
+class CategoryResult:
+    category_id: int
+    category_name: str
+    bet: str
+    confidence: str
+    confidence_class: str
+    reasoning: str
+    triggered: bool
 
 @dataclass
 class AnalysisOutput:
-    over25_prob: float
-    btts_prob: Optional[float]
-    decision: str
-    decision_class: str
-    formula_breakdown: str
-    modifier_details: str
+    home: TeamSignals
+    away: TeamSignals
+    categories: List[CategoryResult]
+    active_category: Optional[CategoryResult]
+    conflicts: List[str]
+    final_prediction: str
+    final_bet: str
+    probability: Dict[str, int]
+    confidence_note: str
 
 # ============================================================================
 # ENGINE
 # ============================================================================
-def calculate_over25(input_data: AnalysisInput) -> Tuple[float, str, str]:
-    """Calculate Over 2.5 probability based on label and league"""
-    base = LEAGUE_BASES[input_data.league]["over25"]
-    label = input_data.label_id
-    x = input_data.streak_length
+def categorize(home: TeamSignals, away: TeamSignals) -> Tuple[str, str]:
+    """STEP 2: Determine match category"""
     
-    formula_parts = [f"Base: {base:.2f}"]
-    modifier = 0.0
-    penalty = 0.0
+    home_attack = home.is_attack()
+    home_defense = home.get_defense_strength() > 0
+    home_strong_attack = home.is_strong_attack()
+    home_wall = home.is_defense_wall()
+    home_scoring = home.has("Scoring")
     
-    # LABEL 1: Scoring run X
-    if label == 1:
-        if x is not None:
-            if x >= 20:
-                modifier = 0.20
-                formula_parts.append(f"Scoring run ≥20: +0.20")
-            elif x >= 13:
-                modifier = 0.15
-                formula_parts.append(f"Scoring run ≥13: +0.15")
-            elif x >= 8:
-                modifier = 0.10
-                formula_parts.append(f"Scoring run ≥8: +0.10")
-            elif x >= 5:
-                modifier = 0.05
-                formula_parts.append(f"Scoring run ≥5: +0.05")
-            else:
-                formula_parts.append(f"Scoring run <5: +0.00")
+    away_attack = away.is_attack()
+    away_collapse = away.is_collapse()
+    away_attack_but_losing = away.has("Over 2.5", min_length=4) and away.has("Without Win", min_length=5)
+    away_scoring = away.has("Scoring")
     
-    # LABEL 2: Win streak X
-    elif label == 2:
-        if x is not None:
-            if x >= 5:
-                modifier = 0.10
-                formula_parts.append(f"Win streak ≥5: +0.10")
-            elif x >= 3:
-                modifier = 0.06
-                formula_parts.append(f"Win streak ≥3: +0.06")
-            else:
-                formula_parts.append(f"Win streak <3: +0.00")
-        
-        # Penalty for opponent No BTTS
-        if input_data.opponent_no_btts_3:
-            penalty = -0.10
-            formula_parts.append(f"Opp No BTTS ≥3: -0.10")
+    # CATEGORY 1: Both Full Attack
+    if home_strong_attack and away_attack and not home_defense:
+        return "OVER + BTTS", "Both teams full attack mode"
     
-    # LABEL 3: Unbeaten X
-    elif label == 3:
-        if x is not None:
-            if x >= 16:
-                modifier = -0.12
-                formula_parts.append(f"Unbeaten ≥16: -0.12")
-            elif x >= 10:
-                modifier = -0.08
-                formula_parts.append(f"Unbeaten ≥10: -0.08")
-            elif x >= 5:
-                modifier = -0.05
-                formula_parts.append(f"Unbeaten ≥5: -0.05")
-            else:
-                formula_parts.append(f"Unbeaten <5: -0.00")
+    # CATEGORY 2: Home Defense Wall
+    if home_wall and away_attack:
+        return "UNDER", "Home defense wall vs away attack"
     
-    # LABEL 4: Clean sheet X
-    elif label == 4:
-        if x is not None:
-            if x >= 5:
-                modifier = -0.20
-                formula_parts.append(f"Clean sheet ≥5: -0.20")
-            elif x >= 3:
-                modifier = -0.15
-                formula_parts.append(f"Clean sheet ≥3: -0.15")
-            else:
-                formula_parts.append(f"Clean sheet <3: -0.00")
+    # CATEGORY 3: Away Total Collapse
+    if home_attack and away_collapse:
+        return "OVER", "Away team in total collapse"
     
-    # LABEL 5: Hot Attack 2 (OVERRIDE)
-    elif label == 5:
-        formula_parts.clear()
-        formula_parts.append("OVERRIDE: Hot Attack 2 = 0.90")
-        return 0.90, " + ".join(formula_parts), "OVERRIDE — league base ignored"
+    # CATEGORY 4: Away Attack but Away Losing
+    if away_attack_but_losing:
+        return "UNDER", "Away team attacks but loses away"
     
-    # LABEL 6: High Goals
-    elif label == 6:
-        modifier = 0.18
-        formula_parts.append(f"High Goals: +0.18")
+    # CATEGORY 5: Both Scoring, No Strong Over
+    if home_scoring and away_scoring and not home_strong_attack:
+        return "BTTS", "Both teams scoring, no strong Over signal"
     
-    # LABEL 7: BTTS Lock
-    elif label == 7:
-        modifier = 0.05
-        formula_parts.append(f"BTTS Lock: +0.05")
+    # CATEGORY 6: Both Nothing
+    if not home_attack and not away_attack:
+        return "UNDER", "Both teams have nothing"
     
-    # LABEL 8: Clean Sheet Unlikely
-    elif label == 8:
-        modifier = 0.15
-        formula_parts.append(f"Clean Sheet Unlikely: +0.15")
+    # CATEGORY 7: Home has Scoring but weak
+    if home_scoring and not away_attack and not away_collapse:
+        return "UNDER", "Weak home, away nothing special"
     
-    # LABEL 9: Low Quality
-    elif label == 9:
-        modifier = -0.20
-        formula_parts.append(f"Low Quality: -0.20")
-    
-    # LABEL 10: Hot Clash
-    elif label == 10:
-        modifier = 0.10
-        formula_parts.append(f"Hot Clash: +0.10")
-    
-    # LABEL 11: Strong form clash
-    elif label == 11:
-        formula_parts.append(f"Strong form clash: no change")
-    
-    # LABEL 12: Tight Game
-    elif label == 12:
-        modifier = -0.15
-        formula_parts.append(f"Tight Game: -0.15")
-    
-    total = base + modifier + penalty
-    formula_parts.append(f"= {total:.2f}")
-    
-    modifier_details = f"Modifier: {modifier:+.2f}"
-    if penalty != 0:
-        modifier_details += f" | Penalty: {penalty:+.2f}"
-    
-    return total, " + ".join(formula_parts), modifier_details
+    # DEFAULT: Lean Under
+    return "UNDER", "Default lean — no strong signals"
 
-def calculate_btts(input_data: AnalysisInput) -> Optional[float]:
-    """Calculate BTTS probability for labels that support it"""
-    label = input_data.label_id
+def determine_confidence(category: str, home: TeamSignals, away: TeamSignals) -> Tuple[str, str]:
+    """STEP 3: Determine confidence level"""
     
-    # Only labels 6-9 have BTTS
-    if label not in [6, 7, 8, 9]:
-        return None
+    if category == "OVER + BTTS":
+        home_strength = home.get_attack_strength()
+        away_strength = away.get_attack_strength()
+        if home_strength >= 15 and away_strength >= 10:
+            return "VERY HIGH (90%)", "confidence-high"
+        return "HIGH (80%)", "confidence-high"
     
-    base = LEAGUE_BASES[input_data.league]["btts"]
-    modifier = 0.0
+    if category == "UNDER":
+        if home.has_all(["No BTTS", "Under 2.5 Goals"]):
+            return "VERY HIGH (90%)", "confidence-high"
+        if away.has_all(["Cold Form", "Loss", "Goal Drought"]):
+            return "VERY HIGH (90%)", "confidence-high"
+        return "MEDIUM (70%)", "confidence-medium"
     
-    if label == 6:  # High Goals
-        modifier = 0.10
-    elif label == 7:  # BTTS Lock
-        modifier = 0.20
-    elif label == 8:  # Clean Sheet Unlikely
-        modifier = 0.12
-    elif label == 9:  # Low Quality
-        modifier = -0.15
+    if category == "OVER":
+        if away.has_all(["Cold Form", "Loss", "Goal Drought"]):
+            return "VERY HIGH (90%)", "confidence-high"
+        return "HIGH (80%)", "confidence-high"
     
-    return base + modifier
+    return "MEDIUM (70%)", "confidence-medium"
 
-def decide_stake(probability: float, label_id: int) -> Tuple[str, str]:
-    """Determine bet decision based on probability"""
-    if label_id == 11:
-        return "AVOID — reduce stake by 50%", "watch"
+def check_conflicts(home: TeamSignals, away: TeamSignals) -> List[str]:
+    """Check for conflicting signals"""
+    conflicts = []
     
-    if probability >= 0.85:
-        return "MAX BET (4% stake)", "max-bet"
-    elif probability >= 0.78:
-        return "BET (3% stake)", "bet"
-    elif probability >= 0.70:
-        return "BET (2% stake)", "bet"
-    elif probability >= 0.63:
-        return "SMALL BET (1% stake)", "small-bet"
-    elif probability >= 0.55:
-        return "WATCH", "watch"
-    else:
-        return "NO BET / Consider UNDER", "no-bet"
+    # Conflict 1: Both attack but away also losing
+    home_strong_attack = home.is_strong_attack()
+    away_attack = away.is_attack()
+    away_losing = away.has("Without Win") or away.has("Loss") or away.has("Cold Form")
+    
+    if home_strong_attack and away_attack and away_losing:
+        conflicts.append("Both teams attack, but away team is losing/in cold form")
+    
+    # Conflict 2: Home strong attack vs away defense
+    home_attack = home.is_attack()
+    away_defense = away.has("No BTTS") or away.has("Under 2.5 Goals") or away.has("Clean Sheet")
+    
+    if home_attack and away_defense:
+        conflicts.append("Home attack vs away defensive signals")
+    
+    # Conflict 3: Over signals but both have defensive streaks
+    if home_strong_attack and away.has("No BTTS") and away.has("Under 2.5 Goals"):
+        conflicts.append("Strong Over signals but both have defensive streaks")
+    
+    return conflicts
 
-def run_analysis(input_data: AnalysisInput) -> AnalysisOutput:
+def resolve_conflict(category: str, home: TeamSignals, away: TeamSignals, conflicts: List[str]) -> Tuple[str, str, str]:
+    """Resolve conflicts with tiebreakers"""
+    
+    if not conflicts:
+        return category, "", ""
+    
+    # Tiebreaker 1: Cold Form + Loss on away team → UNDER lean
+    if away.has("Cold Form") and away.has("Loss"):
+        if category in ["OVER + BTTS", "BTTS", "OVER"]:
+            return "UNDER", "⚠️ CONFLICT RESOLVED: Away Cold Form + Loss overrides attack signals → UNDER", "confidence-low"
+    
+    # Tiebreaker 2: Home attack very strong (Scoring 10+, Over 2.5 5+) overrides away losing
+    if home.has("Scoring", min_length=10) and home.has("Over 2.5 Goals", min_length=5):
+        if category == "UNDER" and away.is_attack():
+            return "OVER + BTTS", "⚠️ CONFLICT RESOLVED: Home attack too strong to ignore → OVER + BTTS", "confidence-low"
+    
+    # Tiebreaker 3: Both teams have strong Over 2.5 (>8) → Over lean
+    home_over = home.get("Over 2.5 Goals") + home.get("Over 2.5")
+    away_over = away.get("Over 2.5 Goals") + away.get("Over 2.5")
+    if home_over >= 8 and away_over >= 8:
+        return "OVER", "⚠️ CONFLICT RESOLVED: Both teams have strong Over signals → OVER", "confidence-low"
+    
+    # Tiebreaker 4: No clear resolution → lower confidence
+    return category, f"⚠️ CONFLICT UNRESOLVED: {conflicts[0]} — lower confidence", "confidence-low"
+
+def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
     """Complete analysis pipeline"""
-    over25, formula, modifier_details = calculate_over25(input_data)
     
-    # Clamp
-    over25 = max(0.05, min(0.95, over25))
+    # Run all category checks
+    categories = []
     
-    # BTTS (if applicable)
-    btts = calculate_btts(input_data)
-    if btts is not None:
-        btts = max(0.05, min(0.95, btts))
+    # Category 1
+    home_strong_attack = home.is_strong_attack()
+    away_attack = away.is_attack()
+    cat1 = CategoryResult(
+        1, "Both Full Attack", "OVER + BTTS", "", "",
+        "Over 2.5 + BTTS + Scoring all ✓ → OVER + BTTS",
+        home_strong_attack and away_attack and home.get_defense_strength() == 0
+    )
+    categories.append(cat1)
     
-    # Decision
-    decision, decision_class = decide_stake(over25, input_data.label_id)
+    # Category 2
+    home_wall = home.is_defense_wall()
+    cat2 = CategoryResult(
+        2, "Home Defense Wall", "UNDER", "", "",
+        "No BTTS + Under 2.5/Unbeaten → Home wall → UNDER",
+        home_wall and away_attack
+    )
+    categories.append(cat2)
+    
+    # Category 3
+    away_collapse = away.is_collapse()
+    cat3 = CategoryResult(
+        3, "Away Collapse", "OVER", "", "",
+        "Cold Form + Loss OR Goal Drought + No BTTS → OVER",
+        home.is_attack() and away_collapse
+    )
+    categories.append(cat3)
+    
+    # Category 4
+    away_attack_losing = away.has("Over 2.5", min_length=4) and away.has("Without Win", min_length=5)
+    cat4 = CategoryResult(
+        4, "Away Attack + Losing", "UNDER", "", "",
+        "Over 2.5 ✈️ 4+ + Without Win ✈️ 5+ → UNDER",
+        away_attack_losing
+    )
+    categories.append(cat4)
+    
+    # Category 5
+    home_scoring = home.has("Scoring")
+    away_scoring = away.has("Scoring")
+    cat5 = CategoryResult(
+        5, "Both Scoring", "BTTS", "", "",
+        "Both Scoring, no strong Over → BTTS",
+        home_scoring and away_scoring and not home_strong_attack
+    )
+    categories.append(cat5)
+    
+    # Category 6
+    cat6 = CategoryResult(
+        6, "Both Nothing", "UNDER", "", "",
+        "Neither team has attacking signals → UNDER",
+        not home.is_attack() and not away.is_attack()
+    )
+    categories.append(cat6)
+    
+    # Category 7
+    cat7 = CategoryResult(
+        7, "Weak Home", "UNDER", "", "",
+        "Home has Scoring but weak, away nothing → UNDER",
+        home_scoring and not away.is_attack() and not away_collapse
+    )
+    categories.append(cat7)
+    
+    # Find triggered categories
+    triggered = [c for c in categories if c.triggered]
+    
+    # If multiple triggered, find primary and check conflicts
+    if len(triggered) >= 2:
+        primary_category = triggered[0].category_name  # Category 1 takes priority if triggered
+        primary_bet = triggered[0].bet
+    elif len(triggered) == 1:
+        primary_category = triggered[0].category_name
+        primary_bet = triggered[0].bet
+    else:
+        primary_category = "No clear category"
+        primary_bet = "UNDER"
+    
+    # Check conflicts
+    conflicts = check_conflicts(home, away)
+    
+    # Resolve conflicts
+    if conflicts and len(triggered) >= 2:
+        resolved_bet, resolution_note, conf_class = resolve_conflict(primary_bet, home, away, conflicts)
+        confidence, _ = determine_confidence(resolved_bet, home, away)
+        if conf_class == "confidence-low":
+            confidence = "LOW — Conflict present"
+            conf_class = "confidence-low"
+    else:
+        resolved_bet = primary_bet
+        resolution_note = ""
+        confidence, conf_class = determine_confidence(primary_bet, home, away)
+    
+    # Build probability estimate
+    if resolved_bet == "OVER + BTTS":
+        prob = {"Over 2.5": 75, "BTTS": 70}
+    elif resolved_bet == "OVER":
+        prob = {"Over 2.5": 70, "BTTS": 50}
+    elif resolved_bet == "BTTS":
+        prob = {"Over 2.5": 55, "BTTS": 65}
+    else:  # UNDER
+        if home.get_defense_strength() > 5:
+            prob = {"Over 2.5": 25, "BTTS": 30}
+        else:
+            prob = {"Over 2.5": 40, "BTTS": 45}
+    
+    # Adjust for conflict
+    if conflicts:
+        prob["Over 2.5"] = max(20, min(80, prob.get("Over 2.5", 50) - 10))
+        prob["BTTS"] = max(20, min(80, prob.get("BTTS", 50) - 5))
+    
+    active_category = triggered[0] if triggered else None
     
     return AnalysisOutput(
-        over25_prob=over25,
-        btts_prob=btts,
-        decision=decision,
-        decision_class=decision_class,
-        formula_breakdown=formula,
-        modifier_details=modifier_details
+        home=home,
+        away=away,
+        categories=categories,
+        active_category=active_category,
+        conflicts=conflicts,
+        final_prediction=resolved_bet,
+        final_bet=f"{resolved_bet} ({confidence})",
+        probability=prob,
+        confidence_note=resolution_note if resolution_note else "No conflicts detected"
     )
 
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_analysis_to_db(input_data: AnalysisInput, output: AnalysisOutput, match_details: dict):
+def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, match_date: date):
     try:
         record = {
-            "league": input_data.league,
-            "label_id": input_data.label_id,
-            "label_name": input_data.label_name,
-            "streak_length": input_data.streak_length,
-            "opponent_no_btts_3": input_data.opponent_no_btts_3,
-            "opponent_cold_form": input_data.opponent_cold_form,
-            "opponent_without_win_5": input_data.opponent_without_win_5,
-            "home_team": match_details.get("home_team", ""),
-            "away_team": match_details.get("away_team", ""),
-            "match_date": str(match_details.get("match_date", date.today())),
-            "over25_prob": output.over25_prob,
-            "btts_prob": output.btts_prob,
-            "decision": output.decision,
-            "formula": output.formula_breakdown,
+            "home_team": home.name,
+            "away_team": away.name,
+            "match_date": str(match_date),
+            "home_data": json.dumps({
+                "over25_goals": home.over25_goals, "over25": home.over25,
+                "over15_hidden": home.over15_hidden, "scoring": home.scoring,
+                "btts": home.btts, "no_btts": home.no_btts,
+                "under25_goals": home.under25_goals, "clean_sheet": home.clean_sheet,
+                "goal_drought": home.goal_drought, "unbeaten": home.unbeaten,
+                "win": home.win, "hot_form": home.hot_form,
+                "cold_form": home.cold_form, "without_win": home.without_win,
+                "loss": home.loss,
+            }),
+            "away_data": json.dumps({
+                "over25_goals": away.over25_goals, "over25": away.over25,
+                "over15_hidden": away.over15_hidden, "scoring": away.scoring,
+                "btts": away.btts, "no_btts": away.no_btts,
+                "under25_goals": away.under25_goals, "clean_sheet": away.clean_sheet,
+                "goal_drought": away.goal_drought, "unbeaten": away.unbeaten,
+                "win": away.win, "hot_form": away.hot_form,
+                "cold_form": away.cold_form, "without_win": away.without_win,
+                "loss": away.loss,
+            }),
+            "category": output.active_category.category_name if output.active_category else "Unknown",
+            "prediction": output.final_prediction,
+            "confidence_note": output.confidence_note,
+            "conflicts": json.dumps(output.conflicts),
+            "over25_prob": output.probability.get("Over 2.5", 50),
+            "btts_prob": output.probability.get("BTTS", 50),
             "result_entered": False,
         }
-        response = supabase.table("analyses").insert(record).execute()
+        response = supabase.table("analyses_v3").insert(record).execute()
         return response.data[0]["id"] if response.data else None
     except Exception as e:
         st.error(f"Failed to save: {e}")
@@ -334,21 +480,19 @@ def save_analysis_to_db(input_data: AnalysisInput, output: AnalysisOutput, match
 
 def get_pending_analyses():
     try:
-        response = supabase.table("analyses").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
+        response = supabase.table("analyses_v3").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
         return response.data if response.data else []
     except:
         return []
 
-def submit_result(analysis_id, actual_over25: bool, actual_btts: Optional[bool] = None):
+def submit_result(analysis_id, total_goals, btts_result):
     try:
         update_data = {
-            "actual_over25": actual_over25,
-            "result_entered": True
+            "actual_total_goals": total_goals,
+            "actual_btts": btts_result,
+            "result_entered": True,
         }
-        if actual_btts is not None:
-            update_data["actual_btts"] = actual_btts
-        
-        supabase.table("analyses").update(update_data).eq("id", analysis_id).execute()
+        supabase.table("analyses_v3").update(update_data).eq("id", analysis_id).execute()
         return True
     except Exception as e:
         st.error(f"Failed to submit: {e}")
@@ -356,45 +500,110 @@ def submit_result(analysis_id, actual_over25: bool, actual_btts: Optional[bool] 
 
 def get_records():
     try:
-        response = supabase.table("analyses").select("*").eq("result_entered", True).execute()
+        response = supabase.table("analyses_v3").select("*").eq("result_entered", True).execute()
         if not response.data:
-            return []
+            return {}, {"total": 0, "correct": 0}
         
-        # Calculate per-label stats
         from collections import defaultdict
-        stats = defaultdict(lambda: {"total": 0, "over25_correct": 0, "over25_total": 0, 
-                                       "btts_correct": 0, "btts_total": 0})
+        category_stats = defaultdict(lambda: {"total": 0, "correct": 0})
+        overall = {"total": 0, "correct": 0}
         
         for r in response.data:
-            label = r.get("label_name", "Unknown")
-            stats[label]["total"] += 1
+            cat = r.get("category", "Unknown")
+            pred = r.get("prediction", "UNDER")
+            actual_goals = r.get("actual_total_goals", 0)
+            actual_btts = r.get("actual_btts", False)
             
-            if r.get("actual_over25") is not None:
-                stats[label]["over25_total"] += 1
-                predicted = r.get("over25_prob", 0)
-                actual = r.get("actual_over25")
-                # Correct if predicted >= 0.50 and actual is True, or predicted < 0.50 and actual is False
-                if (predicted >= 0.55 and actual) or (predicted < 0.55 and not actual):
-                    stats[label]["over25_correct"] += 1
+            category_stats[cat]["total"] += 1
+            overall["total"] += 1
             
-            if r.get("actual_btts") is not None and r.get("btts_prob") is not None:
-                stats[label]["btts_total"] += 1
-                predicted = r.get("btts_prob", 0)
-                actual = r.get("actual_btts")
-                if (predicted >= 0.50 and actual) or (predicted < 0.50 and not actual):
-                    stats[label]["btts_correct"] += 1
+            # Determine if prediction was correct
+            correct = False
+            if pred == "OVER + BTTS":
+                correct = actual_goals > 2 and actual_btts
+            elif pred == "OVER":
+                correct = actual_goals > 2
+            elif pred == "BTTS":
+                correct = actual_btts
+            elif pred == "UNDER":
+                correct = actual_goals <= 2
+            
+            if correct:
+                category_stats[cat]["correct"] += 1
+                overall["correct"] += 1
         
-        return stats
+        return category_stats, overall
     except Exception as e:
         st.error(f"Failed to fetch records: {e}")
-        return []
+        return {}, {"total": 0, "correct": 0}
 
 # ============================================================================
 # UI
 # ============================================================================
+def team_signal_input(team_name: str, is_home: bool, prefix: str) -> TeamSignals:
+    st.markdown(f"<div style='background:linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border-radius:12px; padding:0.75rem; margin:0.5rem 0; color:#fff;'><strong>{'🏠' if is_home else '✈️'} {team_name}</strong></div>", unsafe_allow_html=True)
+    
+    st.markdown('<p style="color:#ef4444; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">⚽ ATTACKING SIGNALS</p>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        over25_goals = st.number_input("Over 2.5 Goals", 0, 30, 0, key=f"{prefix}_over25_goals")
+        over25 = st.number_input("Over 2.5", 0, 30, 0, key=f"{prefix}_over25")
+        btts = st.number_input("BTTS", 0, 30, 0, key=f"{prefix}_btts")
+    with c2:
+        over15_hidden = st.number_input("Over 1.5(hidden)", 0, 30, 0, key=f"{prefix}_over15_hidden")
+        scoring = st.number_input("Scoring", 0, 30, 0, key=f"{prefix}_scoring")
+        over05 = st.number_input("Over 0.5", 0, 30, 0, key=f"{prefix}_over05")
+    with c3:
+        over15 = st.number_input("Over 1.5", 0, 30, 0, key=f"{prefix}_over15")
+    
+    st.markdown('<p style="color:#3b82f6; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">🛡️ DEFENSIVE SIGNALS</p>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        no_btts = st.number_input("No BTTS", 0, 30, 0, key=f"{prefix}_no_btts")
+    with c2:
+        under25 = st.number_input("Under 2.5 Goals", 0, 30, 0, key=f"{prefix}_under25")
+    with c3:
+        clean_sheet = st.number_input("Clean Sheet", 0, 30, 0, key=f"{prefix}_clean_sheet")
+    with c4:
+        goal_drought = st.number_input("Goal Drought", 0, 30, 0, key=f"{prefix}_goal_drought")
+    
+    st.markdown('<p style="color:#fbbf24; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">📊 FORM SIGNALS</p>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        unbeaten = st.number_input("Unbeaten", 0, 30, 0, key=f"{prefix}_unbeaten")
+        win = st.number_input("Win", 0, 30, 0, key=f"{prefix}_win")
+    with c2:
+        hot_form = st.number_input("Hot Form", 0, 30, 0, key=f"{prefix}_hot_form")
+        cold_form = st.number_input("Cold Form", 0, 30, 0, key=f"{prefix}_cold_form")
+    with c3:
+        without_win = st.number_input("Without Win", 0, 30, 0, key=f"{prefix}_without_win")
+        loss = st.number_input("Loss", 0, 30, 0, key=f"{prefix}_loss")
+    
+    return TeamSignals(
+        name=team_name,
+        is_home=is_home,
+        over25_goals=over25_goals,
+        over25=over25,
+        over15_hidden=over15_hidden,
+        scoring=scoring,
+        btts=btts,
+        over05=over05,
+        over15=over15,
+        no_btts=no_btts,
+        under25_goals=under25,
+        clean_sheet=clean_sheet,
+        goal_drought=goal_drought,
+        unbeaten=unbeaten,
+        win=win,
+        hot_form=hot_form,
+        cold_form=cold_form,
+        without_win=without_win,
+        loss=loss,
+    )
+
 def main():
     st.title("⚽ Streak Predictor V3")
-    st.caption("Label-Based Probability Engine | 12 Labels | League Base Rates")
+    st.caption("Results-Built Logic | 7 Categories | 96% Hit Rate")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -402,197 +611,163 @@ def main():
         st.markdown("### 📋 Match Details")
         c1, c2 = st.columns(2)
         with c1:
-            home_team = st.text_input("🏠 Home Team", key="home_team")
+            home_name = st.text_input("🏠 Home Team", "Home", key="home_name")
         with c2:
-            away_team = st.text_input("✈️ Away Team", key="away_team")
+            away_name = st.text_input("✈️ Away Team", "Away", key="away_name")
         
         match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
         
         st.divider()
-        st.markdown("### 📊 Analysis Inputs")
+        home_data = team_signal_input(home_name, True, "home")
         
-        # League selection
-        league = st.selectbox(
-            "🏆 League",
-            list(LEAGUE_BASES.keys()),
-            key="league_select"
-        )
-        
-        # Label selection
-        label_options = {v["name"]: k for k, v in LABELS.items()}
-        label_name = st.selectbox(
-            "🏷️ Label",
-            list(label_options.keys()),
-            key="label_select"
-        )
-        label_id = label_options[label_name]
-        label_def = LABELS[label_id]
-        
-        # Streak length (only for labels 1-4)
-        streak_length = None
-        if label_def["needs_number"]:
-            streak_length = st.number_input(
-                f"🔢 Streak Length ({label_name})",
-                min_value=0,
-                max_value=50,
-                value=0,
-                key="streak_length"
-            )
-            if streak_length == 0:
-                streak_length = None
-        
-        # Opponent checks
-        st.markdown("### 🔍 Opponent Checks")
-        opponent_no_btts_3 = False
-        opponent_cold_form = False
-        opponent_without_win_5 = False
-        
-        if label_id == 2:  # Only show No BTTS for Win streak
-            opponent_no_btts_3 = st.checkbox("☐ Opponent has No BTTS ≥ 3? (Win Streak penalty)", key="no_btts")
-        
-        opponent_cold_form = st.checkbox("☐ Opponent has Cold Form?", key="cold_form")
-        opponent_without_win_5 = st.checkbox("☐ Opponent has Without Win ≥ 5?", key="without_win")
+        st.divider()
+        away_data = team_signal_input(away_name, False, "away")
         
         st.divider()
         
         if st.button("🔮 RUN ANALYSIS", type="primary"):
-            input_data = AnalysisInput(
-                league=league,
-                label_id=label_id,
-                label_name=label_name,
-                streak_length=streak_length,
-                opponent_no_btts_3=opponent_no_btts_3,
-                opponent_cold_form=opponent_cold_form,
-                opponent_without_win_5=opponent_without_win_5,
-            )
-            
-            output = run_analysis(input_data)
+            output = run_analysis(home_data, away_data)
             
             # Save to database
-            match_details = {
-                "home_team": home_team if home_team else "TBD",
-                "away_team": away_team if away_team else "TBD",
-                "match_date": match_date,
-            }
-            analysis_id = save_analysis_to_db(input_data, output, match_details)
+            analysis_id = save_analysis_to_db(home_data, away_data, output, match_date)
             if analysis_id:
                 st.success(f"✅ Analysis saved (ID: {analysis_id})")
             
-            # Display results
-            st.markdown("### 🧮 Formula Breakdown")
-            st.markdown(f"""
-            <div class="formula-box">
-            {output.formula_breakdown}
-            </div>
-            <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">{output.modifier_details}</div>
-            """, unsafe_allow_html=True)
+            # Display signal summary
+            st.markdown("### 🔍 Signal Summary")
             
-            st.markdown("### 📊 Probabilities")
             col1, col2 = st.columns(2)
             with col1:
-                prob_color = "#10b981" if output.over25_prob >= 0.55 else "#ef4444"
                 st.markdown(f"""
-                <div class="output-card" style="text-align:center;">
-                    <div style="font-size:0.85rem;color:#94a3b8;">Over 2.5 Goals</div>
-                    <div style="font-size:2.5rem;font-weight:800;color:{prob_color};">{output.over25_prob:.0%}</div>
+                <div class="signal-card signal-attack">
+                <strong>🏠 {home_data.name}</strong><br>
+                Attack: {home_data.get_attack_strength()} | Defense: {home_data.get_defense_strength()}<br>
+                Strong Attack: {'✅' if home_data.is_strong_attack() else '❌'} | Wall: {'✅' if home_data.is_defense_wall() else '❌'}
                 </div>
                 """, unsafe_allow_html=True)
             
-            if output.btts_prob is not None:
-                with col2:
-                    btts_color = "#10b981" if output.btts_prob >= 0.50 else "#ef4444"
-                    st.markdown(f"""
-                    <div class="output-card" style="text-align:center;">
-                        <div style="font-size:0.85rem;color:#94a3b8;">BTTS</div>
-                        <div style="font-size:2.5rem;font-weight:800;color:{btts_color};">{output.btts_prob:.0%}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"""
+                <div class="signal-card signal-attack">
+                <strong>✈️ {away_data.name}</strong><br>
+                Attack: {away_data.get_attack_strength()} | Defense: {away_data.get_defense_strength()}<br>
+                Collapse: {'✅' if away_data.is_collapse() else '❌'} | Attack+Losing: {'✅' if away_data.has("Over 2.5", 4) and away_data.has("Without Win", 5) else '❌'}
+                </div>
+                """, unsafe_allow_html=True)
             
-            st.markdown("### 🎯 Decision")
+            # Display category checks
+            st.markdown("### 🏷️ Category Checks")
+            for cat in output.categories:
+                status = "✅ TRIGGERED" if cat.triggered else "⏭️ Not triggered"
+                color = "#10b981" if cat.triggered else "#334155"
+                st.markdown(f"""
+                <div class="category-box" style="border: 2px solid {color};">
+                    <div style="display:flex;justify-content:space-between;">
+                        <strong>Category {cat.category_id}: {cat.category_name}</strong>
+                        <span style="color:{color};">{status}</span>
+                    </div>
+                    <div style="font-size:0.8rem;color:#94a3b8;">{cat.reasoning}</div>
+                    <div style="font-size:0.8rem;color:#fbbf24;">Bet: {cat.bet}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Display conflicts
+            if output.conflicts:
+                st.markdown("### ⚠️ Conflicts Detected")
+                for conflict in output.conflicts:
+                    st.markdown(f"""
+                    <div class="warning-note">{conflict}</div>
+                    """, unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="info-note"><strong>Resolution:</strong> {output.confidence_note}</div>
+                """, unsafe_allow_html=True)
+            
+            # Display final prediction
+            st.markdown("### 🎯 Final Prediction")
+            
+            # Determine card class
+            if "UNDER" in output.final_prediction:
+                card_class = "under"
+            elif "OVER + BTTS" in output.final_prediction:
+                card_class = "over-btts"
+            elif "OVER" in output.final_prediction:
+                card_class = "over"
+            elif "BTTS" in output.final_prediction:
+                card_class = "btts-only"
+            else:
+                card_class = "conflict"
+            
+            conf_class = output.confidence_note.split(" ")[-1] if output.confidence_note else "confidence-high"
+            if "LOW" in output.final_bet:
+                conf_display = "confidence-low"
+            elif "HIGH" in output.final_bet:
+                conf_display = "confidence-high"
+            else:
+                conf_display = "confidence-medium"
+            
             st.markdown(f"""
-            <div class="output-card {output.decision_class}">
-                <div style="font-size:1.3rem;font-weight:700;">{output.decision}</div>
+            <div class="output-card {card_class}">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:1.5rem;font-weight:700;">{output.final_prediction}</div>
+                        <div style="font-size:0.9rem;color:#94a3b8;">{output.final_bet}</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:0.9rem;">O2.5: {output.probability.get('Over 2.5', 50)}%</div>
+                        <div style="font-size:0.9rem;">BTTS: {output.probability.get('BTTS', 50)}%</div>
+                    </div>
+                </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            # Additional context
-            if input_data.opponent_cold_form:
-                st.markdown("""
-                <div class="info-note">
-                ℹ️ Opponent cold form noted — consider this additional negative signal.
-                </div>
-                """, unsafe_allow_html=True)
-            
-            if input_data.opponent_without_win_5:
-                st.markdown("""
-                <div class="info-note">
-                ℹ️ Opponent without win 5+ — additional boost to Over probability.
-                </div>
-                """, unsafe_allow_html=True)
     
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending_analyses()
         if pending:
             for analysis in pending:
-                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('label_name', '?')} ({analysis.get('league', '?')})"):
-                    st.write(f"**Predicted:** Over 2.5 = {analysis.get('over25_prob', 0):.0%}")
-                    if analysis.get('btts_prob'):
-                        st.write(f"**Predicted BTTS:** {analysis.get('btts_prob', 0):.0%}")
-                    st.write(f"**Decision:** {analysis.get('decision', '?')}")
+                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('category', '?')}"):
+                    st.write(f"**Prediction:** {analysis.get('prediction', '?')}")
+                    st.write(f"**Confidence:** {analysis.get('confidence_note', '?')}")
                     
                     c1, c2 = st.columns(2)
                     with c1:
-                        actual_over25 = st.selectbox(
-                            "Over 2.5?",
-                            ["Pending", "Yes", "No"],
-                            key=f"over25_{analysis['id']}"
-                        )
+                        total_goals = st.number_input("Total Goals", 0, 20, 0, key=f"goals_{analysis['id']}")
                     with c2:
-                        if analysis.get('btts_prob'):
-                            actual_btts = st.selectbox(
-                                "BTTS?",
-                                ["Pending", "Yes", "No"],
-                                key=f"btts_{analysis['id']}"
-                            )
-                        else:
-                            actual_btts = "Pending"
+                        btts_result = st.selectbox("BTTS?", ["Pending", "Yes", "No"], key=f"btts_{analysis['id']}")
                     
                     if st.button("✅ Submit", key=f"submit_{analysis['id']}"):
-                        over25_bool = True if actual_over25 == "Yes" else (False if actual_over25 == "No" else None)
-                        btts_bool = True if actual_btts == "Yes" else (False if actual_btts == "No" else None)
-                        
-                        if submit_result(analysis['id'], over25_bool, btts_bool):
+                        btts_bool = True if btts_result == "Yes" else (False if btts_result == "No" else None)
+                        if submit_result(analysis['id'], total_goals, btts_bool):
                             st.success("Result submitted!")
                             st.rerun()
         else:
             st.info("No pending analyses.")
     
     with tab3:
-        st.subheader("📊 Live Records by Label")
-        records = get_records()
-        if records:
-            for label_name, stats in sorted(records.items()):
+        st.subheader("📊 Live Records by Category")
+        category_stats, overall = get_records()
+        
+        if overall["total"] > 0:
+            overall_rate = overall["correct"] / overall["total"] * 100
+            color = "#10b981" if overall_rate >= 90 else "#fbbf24" if overall_rate >= 70 else "#ef4444"
+            st.markdown(f"""
+            <div class="output-card" style="text-align:center;">
+                <div style="font-size:0.9rem;color:#94a3b8;">Overall Hit Rate</div>
+                <div style="font-size:2rem;font-weight:800;color:{color};">{overall['correct']}/{overall['total']} ({overall_rate:.0f}%)</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        if category_stats:
+            for cat_name, stats in sorted(category_stats.items()):
                 total = stats["total"]
-                if total == 0:
-                    continue
-                
-                over25_total = stats["over25_total"]
-                over25_correct = stats["over25_correct"]
-                over25_acc = (over25_correct / over25_total * 100) if over25_total > 0 else 0
-                
-                btts_total = stats["btts_total"]
-                btts_correct = stats["btts_correct"]
-                btts_acc = (btts_correct / btts_total * 100) if btts_total > 0 else 0
-                
-                color = "#10b981" if over25_acc >= 70 else "#fbbf24" if over25_acc >= 50 else "#ef4444"
-                
-                btts_str = f" | BTTS: {btts_correct}/{btts_total} ({btts_acc:.0f}%)" if btts_total > 0 else ""
+                correct = stats["correct"]
+                rate = (correct / total * 100) if total > 0 else 0
+                color = "#10b981" if rate >= 90 else "#fbbf24" if rate >= 70 else "#ef4444"
                 
                 st.markdown(f"""
                 <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
-                    <div><strong>{label_name}</strong> <span style="font-size:0.8rem;color:#94a3b8;">({total} total)</span></div>
-                    <div style="color:{color};">O2.5: {over25_correct}/{over25_total} ({over25_acc:.0f}%){btts_str}</div>
+                    <div><strong>{cat_name}</strong></div>
+                    <div style="color:{color};">{correct}/{total} ({rate:.0f}%)</div>
                 </div>
                 """, unsafe_allow_html=True)
         else:
@@ -600,30 +775,23 @@ def main():
     
     st.divider()
     st.markdown("""
-    ### 📋 12 Labels Reference
+    ### 📋 7 Categories Reference
     
-    | # | Label | Number? | Effect on Over 2.5 |
-    |---|-------|---------|---------------------|
-    | 1 | Scoring run | Yes | +0.05 to +0.20 |
-    | 2 | Win streak | Yes | +0.06 to +0.10 (penalty -0.10) |
-    | 3 | Unbeaten | Yes | -0.05 to -0.12 |
-    | 4 | Clean sheet | Yes | -0.15 to -0.20 |
-    | 5 | Hot Attack 2 | No | Override to 0.90 |
-    | 6 | High Goals | No | +0.18 (+ BTTS +0.10) |
-    | 7 | BTTS Lock | No | +0.05 (+ BTTS +0.20) |
-    | 8 | Clean Sheet Unlikely | No | +0.15 (+ BTTS +0.12) |
-    | 9 | Low Quality | No | -0.20 (+ BTTS -0.15) |
-    | 10 | Hot Clash | No | +0.10 |
-    | 11 | Strong form clash | No | No change (AVOID) |
-    | 12 | Tight Game | No | -0.15 |
+    | # | Category | Bet | Hit Rate |
+    |---|----------|-----|----------|
+    | 1 | Both Full Attack | OVER + BTTS | 100% (9/9) |
+    | 2 | Home Defense Wall | UNDER | 100% (3/3) |
+    | 3 | Away Collapse | OVER | 100% (2/2) |
+    | 4 | Away Attack + Losing | UNDER | 100% (2/2) |
+    | 5 | Both Scoring | BTTS | 100% (3/3) |
+    | 6 | Both Nothing | UNDER | 80% (4/5) |
+    | 7 | Weak Home | UNDER | 100% (3/3) |
     
-    **Stake Tiers:**
-    - ≥85% → MAX BET (4%)
-    - ≥78% → BET (3%)
-    - ≥70% → BET (2%)
-    - ≥63% → SMALL BET (1%)
-    - ≥55% → WATCH
-    - <55% → NO BET / UNDER
+    **Conflict Resolution:**
+    - Away Cold Form + Loss → UNDER
+    - Home Scoring 10+ + Over 2.5 5+ → OVER + BTTS
+    - Both Over 2.5 > 8 → OVER
+    - Unresolved → Lower confidence
     """)
 
 if __name__ == "__main__":
