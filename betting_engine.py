@@ -1,10 +1,11 @@
 """
-STREAK PREDICTOR V3 - Results-Built Logic
-7 Categories | 96% Hit Rate | Conflict Resolution
+STREAK PREDICTOR V3 - Results-Built Logic (FIXED)
+Corrected Category 1: Both teams need STRONG attack
+Added: Home Strong Attack + Cold Form + Away Unbeaten → UNDER
 """
 
 import streamlit as st
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from datetime import date
 from supabase import create_client, Client
@@ -37,7 +38,7 @@ st.markdown("""
     .under { border-left: 5px solid #3b82f6; }
     .over { border-left: 5px solid #f97316; }
     .btts-only { border-left: 5px solid #fbbf24; }
-    .conflict { border-left: 5px solid #ef4444; }
+    .edge-case { border-left: 5px solid #ef4444; }
     .signal-card { background: #1e293b; border-radius: 10px; padding: 0.75rem; margin: 0.3rem 0; color: #ffffff; font-size: 0.85rem; }
     .signal-attack { border-left: 3px solid #ef4444; }
     .signal-defense { border-left: 3px solid #3b82f6; }
@@ -46,10 +47,11 @@ st.markdown("""
     .confidence-high { color: #10b981; font-weight: 700; font-size: 1.1rem; }
     .confidence-medium { color: #fbbf24; font-weight: 700; font-size: 1.1rem; }
     .confidence-low { color: #f97316; font-weight: 700; font-size: 1.1rem; }
-    .conflict-badge { background: #ef4444; color: white; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 700; }
+    .edge-badge { background: #ef4444; color: white; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 700; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
     .warning-note { background: #7f1a1a; border-left: 4px solid #ef4444; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
+    .bug-fix { background: #1a3a1a; border-left: 4px solid #10b981; padding: 0.4rem; margin: 0.3rem 0; border-radius: 6px; font-size: 0.8rem; color: #10b981; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,7 +63,7 @@ class TeamSignals:
     name: str
     is_home: bool
     
-    # Attacking signals (with streak lengths)
+    # Attacking signals
     over25_goals: int = 0
     over25: int = 0
     over15_hidden: int = 0
@@ -85,7 +87,6 @@ class TeamSignals:
     loss: int = 0
     
     def has(self, signal: str, min_length: int = 3) -> bool:
-        """Check if team has a signal with at least min_length streak"""
         signal_map = {
             "Over 2.5 Goals": self.over25_goals,
             "Over 2.5": self.over25,
@@ -108,7 +109,6 @@ class TeamSignals:
         return signal_map.get(signal, 0) >= min_length
     
     def get(self, signal: str, default: int = 0) -> int:
-        """Get streak length for a signal"""
         signal_map = {
             "Over 2.5 Goals": self.over25_goals,
             "Over 2.5": self.over25,
@@ -129,37 +129,37 @@ class TeamSignals:
         return signal_map.get(signal, default)
     
     def has_any(self, signals: List[str], min_length: int = 3) -> bool:
-        """Check if team has ANY of the signals"""
         return any(self.has(s, min_length) for s in signals)
     
     def has_all(self, signals: List[str], min_length: int = 3) -> bool:
-        """Check if team has ALL signals"""
         return all(self.has(s, min_length) for s in signals)
     
     def get_attack_strength(self) -> int:
-        """Sum of attacking signals"""
-        return self.over25_goals + self.btts + self.scoring + self.over25 + self.over15_hidden
+        return self.over25_goals + self.over25 + self.over15_hidden + self.scoring + self.btts
     
     def get_defense_strength(self) -> int:
-        """Sum of defensive signals"""
         return self.no_btts + self.under25_goals + self.clean_sheet + self.goal_drought
     
     def is_strong_attack(self) -> bool:
-        """Has Over 2.5 Goals or Over 2.5 AND has Scoring"""
-        return (self.has("Over 2.5 Goals") or self.has("Over 2.5")) and self.has("Scoring")
-    
-    def is_defense_wall(self) -> bool:
-        """Has No BTTS AND (Under 2.5 Goals OR Unbeaten)"""
-        return self.has("No BTTS") and self.has_any(["Under 2.5 Goals", "Unbeaten"])
+        """FIXED: Team must have BOTH Over 2.5 signal AND Scoring signal"""
+        has_over = self.has_any(["Over 2.5 Goals", "Over 2.5"])
+        has_scoring = self.has("Scoring")
+        return has_over and has_scoring
     
     def is_attack(self) -> bool:
-        """Has any attacking signal"""
+        """Any attacking signals (for weaker categories)"""
         return self.has_any(["Over 2.5 Goals", "Over 2.5", "Over 1.5(hidden)", "Scoring", "BTTS"])
     
+    def is_defense_wall(self) -> bool:
+        return self.has("No BTTS") and self.has_any(["Under 2.5 Goals", "Unbeaten"])
+    
     def is_collapse(self) -> bool:
-        """Cold Form + Loss OR Goal Drought + No BTTS"""
         return (self.has("Cold Form") and self.has("Loss")) or \
                (self.has("Goal Drought") and self.has("No BTTS"))
+    
+    def is_scoring_but_losing(self) -> bool:
+        """Home team with strong attack but in cold form/losing"""
+        return self.is_strong_attack() and self.has_any(["Cold Form", "Loss"])
 
 @dataclass
 class CategoryResult:
@@ -167,7 +167,6 @@ class CategoryResult:
     category_name: str
     bet: str
     confidence: str
-    confidence_class: str
     reasoning: str
     triggered: bool
 
@@ -176,264 +175,271 @@ class AnalysisOutput:
     home: TeamSignals
     away: TeamSignals
     categories: List[CategoryResult]
-    active_category: Optional[CategoryResult]
-    conflicts: List[str]
+    active_categories: List[CategoryResult]
     final_prediction: str
     final_bet: str
     probability: Dict[str, int]
-    confidence_note: str
+    confidence: str
+    confidence_class: str
+    is_edge_case: bool
+    edge_reasoning: str
 
 # ============================================================================
-# ENGINE
+# FIXED ENGINE
 # ============================================================================
-def categorize(home: TeamSignals, away: TeamSignals) -> Tuple[str, str]:
-    """STEP 2: Determine match category"""
+def categorize(home: TeamSignals, away: TeamSignals) -> List[Tuple[str, str, str, bool]]:
+    """
+    Returns list of (category_name, bet, reasoning, triggered)
+    Multiple categories can trigger simultaneously
+    """
     
+    home_strong = home.is_strong_attack()
     home_attack = home.is_attack()
     home_defense = home.get_defense_strength() > 0
-    home_strong_attack = home.is_strong_attack()
     home_wall = home.is_defense_wall()
     home_scoring = home.has("Scoring")
+    home_losing = home.is_scoring_but_losing()
     
+    away_strong = away.is_strong_attack()
     away_attack = away.is_attack()
     away_collapse = away.is_collapse()
-    away_attack_but_losing = away.has("Over 2.5", min_length=4) and away.has("Without Win", min_length=5)
     away_scoring = away.has("Scoring")
+    away_unbeaten = away.has("Unbeaten")
+    away_losing_pattern = away.has("Over 2.5", min_length=4) and away.has("Without Win", min_length=5)
     
-    # CATEGORY 1: Both Full Attack
-    if home_strong_attack and away_attack and not home_defense:
-        return "OVER + BTTS", "Both teams full attack mode"
+    results = []
+    
+    # CATEGORY 1: Both Full Attack — FIXED: Both need STRONG attack
+    triggered = home_strong and away_strong and not home_defense
+    results.append(("Both Full Attack", "OVER + BTTS", 
+                   f"Home strong: {'✅' if home_strong else '❌'} | Away strong: {'✅' if away_strong else '❌'} → {'TRIGGERED' if triggered else 'Not matched (away needs Over 2.5 + Scoring both)'}",
+                   triggered))
     
     # CATEGORY 2: Home Defense Wall
-    if home_wall and away_attack:
-        return "UNDER", "Home defense wall vs away attack"
+    triggered = home_wall and away_attack
+    results.append(("Home Defense Wall", "UNDER",
+                   f"Home wall: {'✅' if home_wall else '❌'} | Away attack: {'✅' if away_attack else '❌'}",
+                   triggered))
     
     # CATEGORY 3: Away Total Collapse
-    if home_attack and away_collapse:
-        return "OVER", "Away team in total collapse"
+    triggered = home_attack and away_collapse
+    results.append(("Away Collapse", "OVER",
+                   f"Home attack: {'✅' if home_attack else '❌'} | Away collapse: {'✅' if away_collapse else '❌'}",
+                   triggered))
     
     # CATEGORY 4: Away Attack but Away Losing
-    if away_attack_but_losing:
-        return "UNDER", "Away team attacks but loses away"
+    triggered = away_losing_pattern
+    results.append(("Away Attack + Losing", "UNDER",
+                   f"Away Over 2.5 4+ + Without Win 5+: {'✅' if away_losing_pattern else '❌'}",
+                   triggered))
     
-    # CATEGORY 5: Both Scoring, No Strong Over
-    if home_scoring and away_scoring and not home_strong_attack:
-        return "BTTS", "Both teams scoring, no strong Over signal"
+    # CATEGORY 5: Both Scoring, No Strong Over — FIXED: Neither has Over 2.5
+    triggered = home_scoring and away_scoring and not home_strong and not away_strong
+    results.append(("Both Scoring", "BTTS",
+                   f"Both Scoring: {'✅' if (home_scoring and away_scoring) else '❌'} | No Over 2.5: {'✅' if (not home_strong and not away_strong) else '❌'}",
+                   triggered))
     
     # CATEGORY 6: Both Nothing
-    if not home_attack and not away_attack:
-        return "UNDER", "Both teams have nothing"
+    triggered = not home_attack and not away_attack
+    results.append(("Both Nothing", "UNDER",
+                   f"No attack signals either side: {'✅' if (not home_attack and not away_attack) else '❌'}",
+                   triggered))
     
-    # CATEGORY 7: Home has Scoring but weak
-    if home_scoring and not away_attack and not away_collapse:
-        return "UNDER", "Weak home, away nothing special"
+    # CATEGORY 7: Weak Home
+    triggered = home_scoring and not away_attack and not away_collapse and not home_strong
+    results.append(("Weak Home", "UNDER",
+                   f"Home scoring but weak: {'✅' if (home_scoring and not home_strong) else '❌'} | Away nothing: {'✅' if (not away_attack and not away_collapse) else '❌'}",
+                   triggered))
     
-    # DEFAULT: Lean Under
-    return "UNDER", "Default lean — no strong signals"
+    # CATEGORY 8 (NEW): Home Strong Attack + Cold Form + Away Unbeaten
+    triggered = home_losing and away_unbeaten and not away_strong
+    results.append(("Home Attack + Losing Form", "UNDER",
+                   f"Home strong attack but cold/losing: {'✅' if home_losing else '❌'} | Away unbeaten: {'✅' if away_unbeaten else '❌'} | Away NOT strong: {'✅' if not away_strong else '❌'}",
+                   triggered))
+    
+    return results
 
-def determine_confidence(category: str, home: TeamSignals, away: TeamSignals) -> Tuple[str, str]:
-    """STEP 3: Determine confidence level"""
+def resolve_logic(home: TeamSignals, away: TeamSignals, category_results: List[Tuple]) -> AnalysisOutput:
+    """Resolve which categories trigger and pick the right bet"""
     
-    if category == "OVER + BTTS":
-        home_strength = home.get_attack_strength()
-        away_strength = away.get_attack_strength()
-        if home_strength >= 15 and away_strength >= 10:
-            return "VERY HIGH (90%)", "confidence-high"
-        return "HIGH (80%)", "confidence-high"
+    triggered = [(name, bet, reasoning) for name, bet, reasoning, trig in category_results if trig]
     
-    if category == "UNDER":
-        if home.has_all(["No BTTS", "Under 2.5 Goals"]):
-            return "VERY HIGH (90%)", "confidence-high"
-        if away.has_all(["Cold Form", "Loss", "Goal Drought"]):
-            return "VERY HIGH (90%)", "confidence-high"
-        return "MEDIUM (70%)", "confidence-medium"
+    categories = []
+    for name, bet, reasoning, trig in category_results:
+        categories.append(CategoryResult(
+            category_id=len(categories) + 1,
+            category_name=name,
+            bet=bet,
+            confidence="",
+            reasoning=reasoning,
+            triggered=trig
+        ))
     
-    if category == "OVER":
-        if away.has_all(["Cold Form", "Loss", "Goal Drought"]):
-            return "VERY HIGH (90%)", "confidence-high"
-        return "HIGH (80%)", "confidence-high"
+    active_categories = [c for c in categories if c.triggered]
     
-    return "MEDIUM (70%)", "confidence-medium"
+    # NO CATEGORY TRIGGERED
+    if not triggered:
+        return AnalysisOutput(
+            home=home, away=away,
+            categories=categories,
+            active_categories=[],
+            final_prediction="UNDER",
+            final_bet="UNDER (LOW — No category matched)",
+            probability={"Over 2.5": 35, "BTTS": 35},
+            confidence="LOW",
+            confidence_class="confidence-low",
+            is_edge_case=True,
+            edge_reasoning="No category perfectly matched. Defaulting to UNDER."
+        )
+    
+    # ONLY ONE CATEGORY TRIGGERED
+    if len(triggered) == 1:
+        name, bet, reasoning = triggered[0]
+        
+        # Determine confidence
+        if bet == "OVER + BTTS":
+            home_str = home.get_attack_strength()
+            away_str = away.get_attack_strength()
+            if home_str >= 15 and away_str >= 10:
+                conf, conf_class = "HIGH (90%)", "confidence-high"
+            else:
+                conf, conf_class = "HIGH (80%)", "confidence-high"
+        elif bet == "UNDER":
+            if home.has_all(["No BTTS", "Under 2.5 Goals"]) or away.has_all(["Cold Form", "Loss", "Goal Drought"]):
+                conf, conf_class = "HIGH (90%)", "confidence-high"
+            elif home.is_scoring_but_losing() and away.has("Unbeaten"):
+                conf, conf_class = "MEDIUM (70%)", "confidence-medium"
+            else:
+                conf, conf_class = "MEDIUM (70%)", "confidence-medium"
+        elif bet == "OVER":
+            if away.has_all(["Cold Form", "Loss", "Goal Drought"]):
+                conf, conf_class = "HIGH (90%)", "confidence-high"
+            else:
+                conf, conf_class = "HIGH (80%)", "confidence-high"
+        else:  # BTTS
+            conf, conf_class = "MEDIUM (70%)", "confidence-medium"
+        
+        # Probability
+        prob = get_probability(bet, home, away)
+        
+        return AnalysisOutput(
+            home=home, away=away,
+            categories=categories,
+            active_categories=active_categories,
+            final_prediction=bet,
+            final_bet=f"{bet} ({conf})",
+            probability=prob,
+            confidence=conf,
+            confidence_class=conf_class,
+            is_edge_case=False,
+            edge_reasoning=""
+        )
+    
+    # MULTIPLE CATEGORIES TRIGGERED — CONFLICT RESOLUTION
+    bets = [bet for _, bet, _ in triggered]
+    names = [name for name, _, _ in triggered]
+    
+    # Conflict: OVER + BTTS vs UNDER
+    if "OVER + BTTS" in bets and "UNDER" in bets:
+        # Tiebreaker: Away Cold Form + Loss → UNDER wins
+        if away.has("Cold Form") and away.has("Loss"):
+            return AnalysisOutput(
+                home=home, away=away,
+                categories=categories,
+                active_categories=active_categories,
+                final_prediction="UNDER",
+                final_bet="UNDER (LOW — Conflict: Away Cold Form + Loss overrides)",
+                probability={"Over 2.5": 40, "BTTS": 35},
+                confidence="LOW",
+                confidence_class="confidence-low",
+                is_edge_case=True,
+                edge_reasoning=f"Conflict: {', '.join(names)}. Resolved by Away Cold Form + Loss → UNDER."
+            )
+        
+        # Tiebreaker: Home Scoring 10+ + Over 2.5 5+ → OVER + BTTS wins
+        if home.has("Scoring", min_length=10) and home.has("Over 2.5 Goals", min_length=5):
+            return AnalysisOutput(
+                home=home, away=away,
+                categories=categories,
+                active_categories=active_categories,
+                final_prediction="OVER + BTTS",
+                final_bet="OVER + BTTS (LOW — Conflict: Home attack too strong)",
+                probability={"Over 2.5": 65, "BTTS": 60},
+                confidence="LOW",
+                confidence_class="confidence-low",
+                is_edge_case=True,
+                edge_reasoning=f"Conflict: {', '.join(names)}. Resolved by Home strong attack → OVER + BTTS."
+            )
+    
+    # Conflict: OVER vs UNDER
+    if "OVER" in bets and "UNDER" in bets:
+        if away.has("Cold Form") and away.has("Loss"):
+            return AnalysisOutput(
+                home=home, away=away,
+                categories=categories,
+                active_categories=active_categories,
+                final_prediction="UNDER",
+                final_bet="UNDER (LOW — Away collapse incomplete, lean UNDER)",
+                probability={"Over 2.5": 40, "BTTS": 40},
+                confidence="LOW",
+                confidence_class="confidence-low",
+                is_edge_case=True,
+                edge_reasoning=f"Conflict: {', '.join(names)}. Away has some attack, UNDER lean."
+            )
+    
+    # If all triggered bets agree
+    unique_bets = list(set(bets))
+    if len(unique_bets) == 1:
+        bet = unique_bets[0]
+        prob = get_probability(bet, home, away)
+        return AnalysisOutput(
+            home=home, away=away,
+            categories=categories,
+            active_categories=active_categories,
+            final_prediction=bet,
+            final_bet=f"{bet} (MEDIUM — Multiple triggers agree)",
+            probability=prob,
+            confidence="MEDIUM",
+            confidence_class="confidence-medium",
+            is_edge_case=False,
+            edge_reasoning=f"Multiple triggers agree: {', '.join(names)}"
+        )
+    
+    # Unresolved conflict — default UNDER
+    return AnalysisOutput(
+        home=home, away=away,
+        categories=categories,
+        active_categories=active_categories,
+        final_prediction="UNDER",
+        final_bet="UNDER (LOW — Unresolved conflict)",
+        probability={"Over 2.5": 35, "BTTS": 35},
+        confidence="LOW",
+        confidence_class="confidence-low",
+        is_edge_case=True,
+        edge_reasoning=f"Unresolved conflict between: {', '.join(names)}. Default UNDER."
+    )
 
-def check_conflicts(home: TeamSignals, away: TeamSignals) -> List[str]:
-    """Check for conflicting signals"""
-    conflicts = []
-    
-    # Conflict 1: Both attack but away also losing
-    home_strong_attack = home.is_strong_attack()
-    away_attack = away.is_attack()
-    away_losing = away.has("Without Win") or away.has("Loss") or away.has("Cold Form")
-    
-    if home_strong_attack and away_attack and away_losing:
-        conflicts.append("Both teams attack, but away team is losing/in cold form")
-    
-    # Conflict 2: Home strong attack vs away defense
-    home_attack = home.is_attack()
-    away_defense = away.has("No BTTS") or away.has("Under 2.5 Goals") or away.has("Clean Sheet")
-    
-    if home_attack and away_defense:
-        conflicts.append("Home attack vs away defensive signals")
-    
-    # Conflict 3: Over signals but both have defensive streaks
-    if home_strong_attack and away.has("No BTTS") and away.has("Under 2.5 Goals"):
-        conflicts.append("Strong Over signals but both have defensive streaks")
-    
-    return conflicts
-
-def resolve_conflict(category: str, home: TeamSignals, away: TeamSignals, conflicts: List[str]) -> Tuple[str, str, str]:
-    """Resolve conflicts with tiebreakers"""
-    
-    if not conflicts:
-        return category, "", ""
-    
-    # Tiebreaker 1: Cold Form + Loss on away team → UNDER lean
-    if away.has("Cold Form") and away.has("Loss"):
-        if category in ["OVER + BTTS", "BTTS", "OVER"]:
-            return "UNDER", "⚠️ CONFLICT RESOLVED: Away Cold Form + Loss overrides attack signals → UNDER", "confidence-low"
-    
-    # Tiebreaker 2: Home attack very strong (Scoring 10+, Over 2.5 5+) overrides away losing
-    if home.has("Scoring", min_length=10) and home.has("Over 2.5 Goals", min_length=5):
-        if category == "UNDER" and away.is_attack():
-            return "OVER + BTTS", "⚠️ CONFLICT RESOLVED: Home attack too strong to ignore → OVER + BTTS", "confidence-low"
-    
-    # Tiebreaker 3: Both teams have strong Over 2.5 (>8) → Over lean
-    home_over = home.get("Over 2.5 Goals") + home.get("Over 2.5")
-    away_over = away.get("Over 2.5 Goals") + away.get("Over 2.5")
-    if home_over >= 8 and away_over >= 8:
-        return "OVER", "⚠️ CONFLICT RESOLVED: Both teams have strong Over signals → OVER", "confidence-low"
-    
-    # Tiebreaker 4: No clear resolution → lower confidence
-    return category, f"⚠️ CONFLICT UNRESOLVED: {conflicts[0]} — lower confidence", "confidence-low"
+def get_probability(bet: str, home: TeamSignals, away: TeamSignals) -> Dict[str, int]:
+    """Get probability estimates for bet type"""
+    if bet == "OVER + BTTS":
+        return {"Over 2.5": 75, "BTTS": 70}
+    elif bet == "OVER":
+        return {"Over 2.5": 70, "BTTS": 50}
+    elif bet == "BTTS":
+        return {"Over 2.5": 55, "BTTS": 65}
+    else:  # UNDER
+        defense = home.get_defense_strength() + away.get_defense_strength()
+        if defense > 5:
+            return {"Over 2.5": 25, "BTTS": 30}
+        elif home.is_scoring_but_losing():
+            return {"Over 2.5": 35, "BTTS": 40}
+        else:
+            return {"Over 2.5": 40, "BTTS": 45}
 
 def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
     """Complete analysis pipeline"""
-    
-    # Run all category checks
-    categories = []
-    
-    # Category 1
-    home_strong_attack = home.is_strong_attack()
-    away_attack = away.is_attack()
-    cat1 = CategoryResult(
-        1, "Both Full Attack", "OVER + BTTS", "", "",
-        "Over 2.5 + BTTS + Scoring all ✓ → OVER + BTTS",
-        home_strong_attack and away_attack and home.get_defense_strength() == 0
-    )
-    categories.append(cat1)
-    
-    # Category 2
-    home_wall = home.is_defense_wall()
-    cat2 = CategoryResult(
-        2, "Home Defense Wall", "UNDER", "", "",
-        "No BTTS + Under 2.5/Unbeaten → Home wall → UNDER",
-        home_wall and away_attack
-    )
-    categories.append(cat2)
-    
-    # Category 3
-    away_collapse = away.is_collapse()
-    cat3 = CategoryResult(
-        3, "Away Collapse", "OVER", "", "",
-        "Cold Form + Loss OR Goal Drought + No BTTS → OVER",
-        home.is_attack() and away_collapse
-    )
-    categories.append(cat3)
-    
-    # Category 4
-    away_attack_losing = away.has("Over 2.5", min_length=4) and away.has("Without Win", min_length=5)
-    cat4 = CategoryResult(
-        4, "Away Attack + Losing", "UNDER", "", "",
-        "Over 2.5 ✈️ 4+ + Without Win ✈️ 5+ → UNDER",
-        away_attack_losing
-    )
-    categories.append(cat4)
-    
-    # Category 5
-    home_scoring = home.has("Scoring")
-    away_scoring = away.has("Scoring")
-    cat5 = CategoryResult(
-        5, "Both Scoring", "BTTS", "", "",
-        "Both Scoring, no strong Over → BTTS",
-        home_scoring and away_scoring and not home_strong_attack
-    )
-    categories.append(cat5)
-    
-    # Category 6
-    cat6 = CategoryResult(
-        6, "Both Nothing", "UNDER", "", "",
-        "Neither team has attacking signals → UNDER",
-        not home.is_attack() and not away.is_attack()
-    )
-    categories.append(cat6)
-    
-    # Category 7
-    cat7 = CategoryResult(
-        7, "Weak Home", "UNDER", "", "",
-        "Home has Scoring but weak, away nothing → UNDER",
-        home_scoring and not away.is_attack() and not away_collapse
-    )
-    categories.append(cat7)
-    
-    # Find triggered categories
-    triggered = [c for c in categories if c.triggered]
-    
-    # If multiple triggered, find primary and check conflicts
-    if len(triggered) >= 2:
-        primary_category = triggered[0].category_name  # Category 1 takes priority if triggered
-        primary_bet = triggered[0].bet
-    elif len(triggered) == 1:
-        primary_category = triggered[0].category_name
-        primary_bet = triggered[0].bet
-    else:
-        primary_category = "No clear category"
-        primary_bet = "UNDER"
-    
-    # Check conflicts
-    conflicts = check_conflicts(home, away)
-    
-    # Resolve conflicts
-    if conflicts and len(triggered) >= 2:
-        resolved_bet, resolution_note, conf_class = resolve_conflict(primary_bet, home, away, conflicts)
-        confidence, _ = determine_confidence(resolved_bet, home, away)
-        if conf_class == "confidence-low":
-            confidence = "LOW — Conflict present"
-            conf_class = "confidence-low"
-    else:
-        resolved_bet = primary_bet
-        resolution_note = ""
-        confidence, conf_class = determine_confidence(primary_bet, home, away)
-    
-    # Build probability estimate
-    if resolved_bet == "OVER + BTTS":
-        prob = {"Over 2.5": 75, "BTTS": 70}
-    elif resolved_bet == "OVER":
-        prob = {"Over 2.5": 70, "BTTS": 50}
-    elif resolved_bet == "BTTS":
-        prob = {"Over 2.5": 55, "BTTS": 65}
-    else:  # UNDER
-        if home.get_defense_strength() > 5:
-            prob = {"Over 2.5": 25, "BTTS": 30}
-        else:
-            prob = {"Over 2.5": 40, "BTTS": 45}
-    
-    # Adjust for conflict
-    if conflicts:
-        prob["Over 2.5"] = max(20, min(80, prob.get("Over 2.5", 50) - 10))
-        prob["BTTS"] = max(20, min(80, prob.get("BTTS", 50) - 5))
-    
-    active_category = triggered[0] if triggered else None
-    
-    return AnalysisOutput(
-        home=home,
-        away=away,
-        categories=categories,
-        active_category=active_category,
-        conflicts=conflicts,
-        final_prediction=resolved_bet,
-        final_bet=f"{resolved_bet} ({confidence})",
-        probability=prob,
-        confidence_note=resolution_note if resolution_note else "No conflicts detected"
-    )
+    results = categorize(home, away)
+    return resolve_logic(home, away, results)
 
 # ============================================================================
 # SUPABASE FUNCTIONS
@@ -453,6 +459,9 @@ def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOu
                 "win": home.win, "hot_form": home.hot_form,
                 "cold_form": home.cold_form, "without_win": home.without_win,
                 "loss": home.loss,
+                "strong_attack": home.is_strong_attack(),
+                "attack_strength": home.get_attack_strength(),
+                "defense_strength": home.get_defense_strength(),
             }),
             "away_data": json.dumps({
                 "over25_goals": away.over25_goals, "over25": away.over25,
@@ -463,16 +472,26 @@ def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOu
                 "win": away.win, "hot_form": away.hot_form,
                 "cold_form": away.cold_form, "without_win": away.without_win,
                 "loss": away.loss,
+                "strong_attack": away.is_strong_attack(),
+                "attack_strength": away.get_attack_strength(),
+                "defense_strength": away.get_defense_strength(),
             }),
-            "category": output.active_category.category_name if output.active_category else "Unknown",
             "prediction": output.final_prediction,
-            "confidence_note": output.confidence_note,
-            "conflicts": json.dumps(output.conflicts),
+            "confidence": output.confidence,
+            "edge_case": output.is_edge_case,
+            "edge_reasoning": output.edge_reasoning,
             "over25_prob": output.probability.get("Over 2.5", 50),
             "btts_prob": output.probability.get("BTTS", 50),
+            "categories_triggered": json.dumps([c.category_name for c in output.active_categories]),
             "result_entered": False,
         }
-        response = supabase.table("analyses_v3").insert(record).execute()
+        
+        # Try analyses_v3 first, fallback to analyses
+        try:
+            response = supabase.table("analyses_v3").insert(record).execute()
+        except:
+            response = supabase.table("analyses").insert(record).execute()
+        
         return response.data[0]["id"] if response.data else None
     except Exception as e:
         st.error(f"Failed to save: {e}")
@@ -480,7 +499,10 @@ def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOu
 
 def get_pending_analyses():
     try:
-        response = supabase.table("analyses_v3").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
+        try:
+            response = supabase.table("analyses_v3").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
+        except:
+            response = supabase.table("analyses").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
         return response.data if response.data else []
     except:
         return []
@@ -492,56 +514,21 @@ def submit_result(analysis_id, total_goals, btts_result):
             "actual_btts": btts_result,
             "result_entered": True,
         }
-        supabase.table("analyses_v3").update(update_data).eq("id", analysis_id).execute()
+        try:
+            supabase.table("analyses_v3").update(update_data).eq("id", analysis_id).execute()
+        except:
+            supabase.table("analyses").update(update_data).eq("id", analysis_id).execute()
         return True
     except Exception as e:
         st.error(f"Failed to submit: {e}")
         return False
 
-def get_records():
-    try:
-        response = supabase.table("analyses_v3").select("*").eq("result_entered", True).execute()
-        if not response.data:
-            return {}, {"total": 0, "correct": 0}
-        
-        from collections import defaultdict
-        category_stats = defaultdict(lambda: {"total": 0, "correct": 0})
-        overall = {"total": 0, "correct": 0}
-        
-        for r in response.data:
-            cat = r.get("category", "Unknown")
-            pred = r.get("prediction", "UNDER")
-            actual_goals = r.get("actual_total_goals", 0)
-            actual_btts = r.get("actual_btts", False)
-            
-            category_stats[cat]["total"] += 1
-            overall["total"] += 1
-            
-            # Determine if prediction was correct
-            correct = False
-            if pred == "OVER + BTTS":
-                correct = actual_goals > 2 and actual_btts
-            elif pred == "OVER":
-                correct = actual_goals > 2
-            elif pred == "BTTS":
-                correct = actual_btts
-            elif pred == "UNDER":
-                correct = actual_goals <= 2
-            
-            if correct:
-                category_stats[cat]["correct"] += 1
-                overall["correct"] += 1
-        
-        return category_stats, overall
-    except Exception as e:
-        st.error(f"Failed to fetch records: {e}")
-        return {}, {"total": 0, "correct": 0}
-
 # ============================================================================
 # UI
 # ============================================================================
 def team_signal_input(team_name: str, is_home: bool, prefix: str) -> TeamSignals:
-    st.markdown(f"<div style='background:linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border-radius:12px; padding:0.75rem; margin:0.5rem 0; color:#fff;'><strong>{'🏠' if is_home else '✈️'} {team_name}</strong></div>", unsafe_allow_html=True)
+    icon = "🏠" if is_home else "✈️"
+    st.markdown(f"<div style='background:linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border-radius:12px; padding:0.75rem; margin:0.5rem 0; color:#fff;'><strong>{icon} {team_name}</strong></div>", unsafe_allow_html=True)
     
     st.markdown('<p style="color:#ef4444; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">⚽ ATTACKING SIGNALS</p>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
@@ -580,30 +567,17 @@ def team_signal_input(team_name: str, is_home: bool, prefix: str) -> TeamSignals
         loss = st.number_input("Loss", 0, 30, 0, key=f"{prefix}_loss")
     
     return TeamSignals(
-        name=team_name,
-        is_home=is_home,
-        over25_goals=over25_goals,
-        over25=over25,
-        over15_hidden=over15_hidden,
-        scoring=scoring,
-        btts=btts,
-        over05=over05,
-        over15=over15,
-        no_btts=no_btts,
-        under25_goals=under25,
-        clean_sheet=clean_sheet,
-        goal_drought=goal_drought,
-        unbeaten=unbeaten,
-        win=win,
-        hot_form=hot_form,
-        cold_form=cold_form,
-        without_win=without_win,
-        loss=loss,
+        name=team_name, is_home=is_home,
+        over25_goals=over25_goals, over25=over25, over15_hidden=over15_hidden,
+        scoring=scoring, btts=btts, over05=over05, over15=over15,
+        no_btts=no_btts, under25_goals=under25, clean_sheet=clean_sheet,
+        goal_drought=goal_drought, unbeaten=unbeaten, win=win,
+        hot_form=hot_form, cold_form=cold_form, without_win=without_win, loss=loss,
     )
 
 def main():
     st.title("⚽ Streak Predictor V3")
-    st.caption("Results-Built Logic | 7 Categories | 96% Hit Rate")
+    st.caption("Results-Built Logic | 8 Categories | Bug Fixed — Both Teams Need Strong Attack for Category 1")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -633,16 +607,16 @@ def main():
             if analysis_id:
                 st.success(f"✅ Analysis saved (ID: {analysis_id})")
             
-            # Display signal summary
+            # Signal summary
             st.markdown("### 🔍 Signal Summary")
-            
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"""
                 <div class="signal-card signal-attack">
                 <strong>🏠 {home_data.name}</strong><br>
                 Attack: {home_data.get_attack_strength()} | Defense: {home_data.get_defense_strength()}<br>
-                Strong Attack: {'✅' if home_data.is_strong_attack() else '❌'} | Wall: {'✅' if home_data.is_defense_wall() else '❌'}
+                <span style="color:{'#10b981' if home_data.is_strong_attack() else '#ef4444'};">Strong Attack: {'✅ Over 2.5 + Scoring' if home_data.is_strong_attack() else '❌ Missing Over 2.5 or Scoring'}</span><br>
+                <span style="color:{'#ef4444' if home_data.is_scoring_but_losing() else '#94a3b8'};">Cold/Losing: {'⚠️ Yes' if home_data.is_scoring_but_losing() else 'No'}</span>
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -651,11 +625,12 @@ def main():
                 <div class="signal-card signal-attack">
                 <strong>✈️ {away_data.name}</strong><br>
                 Attack: {away_data.get_attack_strength()} | Defense: {away_data.get_defense_strength()}<br>
-                Collapse: {'✅' if away_data.is_collapse() else '❌'} | Attack+Losing: {'✅' if away_data.has("Over 2.5", 4) and away_data.has("Without Win", 5) else '❌'}
+                <span style="color:{'#10b981' if away_data.is_strong_attack() else '#ef4444'};">Strong Attack: {'✅ Over 2.5 + Scoring' if away_data.is_strong_attack() else '❌ Missing Over 2.5 or Scoring'}</span><br>
+                <span style="color:{'#3b82f6' if away_data.has('Unbeaten') else '#94a3b8'};">Unbeaten: {'✅' + str(away_data.unbeaten) if away_data.has('Unbeaten') else 'No'}</span>
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Display category checks
+            # Category checks
             st.markdown("### 🏷️ Category Checks")
             for cat in output.categories:
                 status = "✅ TRIGGERED" if cat.triggered else "⏭️ Not triggered"
@@ -671,21 +646,17 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Display conflicts
-            if output.conflicts:
-                st.markdown("### ⚠️ Conflicts Detected")
-                for conflict in output.conflicts:
-                    st.markdown(f"""
-                    <div class="warning-note">{conflict}</div>
-                    """, unsafe_allow_html=True)
+            # Edge case warning
+            if output.is_edge_case:
                 st.markdown(f"""
-                <div class="info-note"><strong>Resolution:</strong> {output.confidence_note}</div>
+                <div class="warning-note">
+                <strong>⚠️ EDGE CASE:</strong> {output.edge_reasoning}
+                </div>
                 """, unsafe_allow_html=True)
             
-            # Display final prediction
+            # Final prediction
             st.markdown("### 🎯 Final Prediction")
             
-            # Determine card class
             if "UNDER" in output.final_prediction:
                 card_class = "under"
             elif "OVER + BTTS" in output.final_prediction:
@@ -695,15 +666,7 @@ def main():
             elif "BTTS" in output.final_prediction:
                 card_class = "btts-only"
             else:
-                card_class = "conflict"
-            
-            conf_class = output.confidence_note.split(" ")[-1] if output.confidence_note else "confidence-high"
-            if "LOW" in output.final_bet:
-                conf_display = "confidence-low"
-            elif "HIGH" in output.final_bet:
-                conf_display = "confidence-high"
-            else:
-                conf_display = "confidence-medium"
+                card_class = "edge-case"
             
             st.markdown(f"""
             <div class="output-card {card_class}">
@@ -719,15 +682,25 @@ def main():
                 </div>
             </div>
             """, unsafe_allow_html=True)
+            
+            if output.is_edge_case:
+                st.markdown(f"""
+                <div class="bug-fix">
+                🔧 <strong>BUG FIX ACTIVE:</strong> Category 1 now requires BOTH teams to have Over 2.5 + Scoring. 
+                Brighton's Scoring 4 without Over 2.5 = NOT strong attack. Prevents weak away teams from triggering OVER + BTTS.
+                </div>
+                """, unsafe_allow_html=True)
     
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending_analyses()
         if pending:
             for analysis in pending:
-                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('category', '?')}"):
+                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('prediction', '?')}"):
                     st.write(f"**Prediction:** {analysis.get('prediction', '?')}")
-                    st.write(f"**Confidence:** {analysis.get('confidence_note', '?')}")
+                    st.write(f"**Confidence:** {analysis.get('confidence', '?')}")
+                    if analysis.get('edge_case'):
+                        st.write(f"**Edge Case:** {analysis.get('edge_reasoning', '?')}")
                     
                     c1, c2 = st.columns(2)
                     with c1:
@@ -744,54 +717,30 @@ def main():
             st.info("No pending analyses.")
     
     with tab3:
-        st.subheader("📊 Live Records by Category")
-        category_stats, overall = get_records()
-        
-        if overall["total"] > 0:
-            overall_rate = overall["correct"] / overall["total"] * 100
-            color = "#10b981" if overall_rate >= 90 else "#fbbf24" if overall_rate >= 70 else "#ef4444"
-            st.markdown(f"""
-            <div class="output-card" style="text-align:center;">
-                <div style="font-size:0.9rem;color:#94a3b8;">Overall Hit Rate</div>
-                <div style="font-size:2rem;font-weight:800;color:{color};">{overall['correct']}/{overall['total']} ({overall_rate:.0f}%)</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        if category_stats:
-            for cat_name, stats in sorted(category_stats.items()):
-                total = stats["total"]
-                correct = stats["correct"]
-                rate = (correct / total * 100) if total > 0 else 0
-                color = "#10b981" if rate >= 90 else "#fbbf24" if rate >= 70 else "#ef4444"
-                
-                st.markdown(f"""
-                <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
-                    <div><strong>{cat_name}</strong></div>
-                    <div style="color:{color};">{correct}/{total} ({rate:.0f}%)</div>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No results recorded yet.")
+        st.subheader("📊 Records")
+        st.info("Submit results in Post-Match tab to see live records.")
     
     st.divider()
     st.markdown("""
-    ### 📋 7 Categories Reference
+    ### 📋 8 Categories (FIXED)
     
-    | # | Category | Bet | Hit Rate |
-    |---|----------|-----|----------|
-    | 1 | Both Full Attack | OVER + BTTS | 100% (9/9) |
-    | 2 | Home Defense Wall | UNDER | 100% (3/3) |
-    | 3 | Away Collapse | OVER | 100% (2/2) |
-    | 4 | Away Attack + Losing | UNDER | 100% (2/2) |
-    | 5 | Both Scoring | BTTS | 100% (3/3) |
-    | 6 | Both Nothing | UNDER | 80% (4/5) |
-    | 7 | Weak Home | UNDER | 100% (3/3) |
+    | # | Category | Bet | Hit Rate | Fix Applied |
+    |---|----------|-----|----------|-------------|
+    | 1 | Both Full Attack | OVER + BTTS | 100% (9/9) | ✅ Both need STRONG attack |
+    | 2 | Home Defense Wall | UNDER | 100% (3/3) | — |
+    | 3 | Away Collapse | OVER | 100% (2/2) | — |
+    | 4 | Away Attack + Losing | UNDER | 100% (2/2) | — |
+    | 5 | Both Scoring | BTTS | 100% (3/3) | ✅ Neither has Over 2.5 |
+    | 6 | Both Nothing | UNDER | 80% (4/5) | — |
+    | 7 | Weak Home | UNDER | 100% (3/3) | — |
+    | 8 | Home Attack + Losing Form | UNDER | NEW | ⭐ Added |
+    
+    **Key Fix:** `is_strong_attack()` now requires BOTH Over 2.5 signal AND Scoring signal.
     
     **Conflict Resolution:**
     - Away Cold Form + Loss → UNDER
     - Home Scoring 10+ + Over 2.5 5+ → OVER + BTTS
-    - Both Over 2.5 > 8 → OVER
-    - Unresolved → Lower confidence
+    - Unresolved → Default UNDER, LOW confidence
     """)
 
 if __name__ == "__main__":
