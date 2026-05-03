@@ -6,10 +6,8 @@ Both Unbeaten | Home Scoring | Away Dominant | Under Default | Skip
 
 import streamlit as st
 from dataclasses import dataclass
-from typing import Optional, Tuple
 from datetime import date
 from supabase import create_client, Client
-import json
 
 # ============================================================================
 # SUPABASE SETUP
@@ -42,7 +40,6 @@ st.markdown("""
     .step-fail { border: 2px solid #ef4444; opacity: 0.7; }
     .step-current { border: 2px solid #fbbf24; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
-    .info-note { background: #1a3a5f; border-left: 4px solid #3b82f6; padding: 0.6rem; margin: 0.4rem 0; border-radius: 8px; font-size: 0.85rem; color: #ffffff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,17 +49,11 @@ st.markdown("""
 @dataclass
 class TeamSignals:
     name: str
-    
-    # SCORING (venue ignored)
     scoring: int = 0
     over05: int = 0
-    
-    # OVER DATA (venue ignored)
     over25_goals: int = 0
     over25: int = 0
     over15_hidden: int = 0
-    
-    # FORM (venue ignored)
     unbeaten: int = 0
     win: int = 0
     hot_form: int = 0
@@ -109,9 +100,7 @@ class AnalysisOutput:
 def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
     steps = []
     
-    # ========================================================================
     # STEP 1: BOTH UNBEATEN ≥ 5 → UNDER
-    # ========================================================================
     home_unbeaten = home.unbeaten
     away_unbeaten = away.unbeaten
     
@@ -130,9 +119,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
             reasoning="Both teams unbeaten ≥ 5. No match with both teams unbeaten 5+ went Over 2.5."
         )
     
-    # ========================================================================
     # STEP 2: HOME SCORING + BOTH OVER DATA → OVER
-    # ========================================================================
     home_scores = home.has_scoring()
     home_over = home.has_over_data(min_length=3)
     away_over = away.has_over_data(min_length=3)
@@ -154,9 +141,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
             reasoning="Home is scoring AND both teams have Over data ≥ 3. When home scores and both have Over data, Over hits."
         )
     
-    # ========================================================================
     # STEP 3: AWAY DOMINANT → OVER
-    # ========================================================================
     away_strong = away.is_away_strong()
     away_over_data = away.has_over_data(min_length=3)
     
@@ -178,9 +163,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
             reasoning="Away team is dominant (Win + Hot Form + Goals 2+) with Over data. Dominant away covers Over even without home scoring."
         )
     
-    # ========================================================================
-    # STEP 4: UNDER BY DEFAULT (No home scoring + No away strong)
-    # ========================================================================
+    # STEP 4: UNDER BY DEFAULT
     step4_passed = not home_scores and not away_strong
     steps.append(StepResult(
         4, "Under by Default",
@@ -197,9 +180,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
             reasoning="Home is not scoring AND away is not dominant. Goals unlikely."
         )
     
-    # ========================================================================
     # STEP 5: SKIP
-    # ========================================================================
     steps.append(StepResult(
         5, "Skip",
         "None of the above matched",
@@ -216,13 +197,13 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, match_date: date):
+def save_analysis(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, match_date: date):
     try:
         record = {
             "home_team": home.name,
             "away_team": away.name,
             "match_date": str(match_date),
-            "home_data": json.dumps({
+            "home_data": {
                 "scoring": home.scoring, "over05": home.over05,
                 "over25_goals": home.over25_goals, "over25": home.over25,
                 "over15_hidden": home.over15_hidden,
@@ -230,8 +211,8 @@ def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOu
                 "hot_form": home.hot_form, "goals2": home.goals2,
                 "without_win": home.without_win, "loss": home.loss,
                 "cold_form": home.cold_form,
-            }),
-            "away_data": json.dumps({
+            },
+            "away_data": {
                 "scoring": away.scoring, "over05": away.over05,
                 "over25_goals": away.over25_goals, "over25": away.over25,
                 "over15_hidden": away.over15_hidden,
@@ -239,7 +220,7 @@ def save_analysis_to_db(home: TeamSignals, away: TeamSignals, output: AnalysisOu
                 "hot_form": away.hot_form, "goals2": away.goals2,
                 "without_win": away.without_win, "loss": away.loss,
                 "cold_form": away.cold_form,
-            }),
+            },
             "final_step": output.final_step,
             "prediction": output.prediction,
             "reasoning": output.reasoning,
@@ -262,7 +243,6 @@ def submit_result(analysis_id, total_goals):
     try:
         over25 = total_goals > 2
         
-        # Get the prediction first
         record = supabase.table("analyses").select("prediction").eq("id", analysis_id).single().execute()
         
         if not record.data:
@@ -271,7 +251,6 @@ def submit_result(analysis_id, total_goals):
         
         prediction = record.data.get("prediction", "SKIP")
         
-        # Check if correct
         if prediction == "SKIP":
             correct = None
         else:
@@ -297,11 +276,13 @@ def get_records():
             return {"total": 0, "correct": 0, "skipped": 0}, {}
         
         overall = {"total": 0, "correct": 0, "skipped": 0}
-        step_stats = {1: {"name": "Both Unbeaten", "total": 0, "correct": 0},
-                      2: {"name": "Home Scoring + Over", "total": 0, "correct": 0},
-                      3: {"name": "Away Dominant", "total": 0, "correct": 0},
-                      4: {"name": "Under Default", "total": 0, "correct": 0},
-                      5: {"name": "Skip", "total": 0, "correct": 0}}
+        step_stats = {
+            1: {"name": "Both Unbeaten", "total": 0, "correct": 0},
+            2: {"name": "Home Scoring + Over", "total": 0, "correct": 0},
+            3: {"name": "Away Dominant", "total": 0, "correct": 0},
+            4: {"name": "Under Default", "total": 0, "correct": 0},
+            5: {"name": "Skip", "total": 0, "correct": 0}
+        }
         
         for r in response.data:
             step = r.get("final_step", 5)
@@ -326,17 +307,22 @@ def get_records():
         return {"total": 0, "correct": 0, "skipped": 0}, {}
 
 # ============================================================================
-# UI
+# UI COMPONENTS
 # ============================================================================
 def team_signal_input(team_name: str, prefix: str) -> TeamSignals:
-    st.markdown(f"<div style='background:linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border-radius:12px; padding:0.75rem; margin:0.5rem 0; color:#fff;'><strong>{team_name}</strong></div>", unsafe_allow_html=True)
+    st.markdown(f"""
+        <div style='background:linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); 
+                    border-radius:12px; padding:0.75rem; margin:0.5rem 0; color:#fff;'>
+            <strong>{team_name}</strong>
+        </div>
+    """, unsafe_allow_html=True)
     
     st.markdown('<p style="color:#ef4444; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">⚽ SCORING</p>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
-        scoring = st.number_input("Scoring", 0, 50, 0, key=f"{prefix}_scoring")
+        scoring = st.number_input("Scoring", 0, 50, 0, key=f"{prefix}_scoring", help="Active scoring streak length")
     with c2:
-        over05 = st.number_input("Over 0.5", 0, 50, 0, key=f"{prefix}_over05")
+        over05 = st.number_input("Over 0.5", 0, 50, 0, key=f"{prefix}_over05", help="Active Over 0.5 streak length")
     
     st.markdown('<p style="color:#f97316; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">📊 OVER DATA</p>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
@@ -369,114 +355,141 @@ def team_signal_input(team_name: str, prefix: str) -> TeamSignals:
         without_win=without_win, loss=loss, cold_form=cold_form,
     )
 
+# ============================================================================
+# MAIN APP
+# ============================================================================
 def main():
     st.title("⚽ Streak Predictor V3")
     st.caption("5-Step Decision Flow | 29/29 Backtested | Both Unbeaten → Home Scoring → Away Dominant → Under Default → Skip")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
+    # ============================================================================
+    # TAB 1: ANALYZE
+    # ============================================================================
     with tab1:
         st.markdown("### 📋 Match Details")
         c1, c2 = st.columns(2)
         with c1:
-            home_name = st.text_input("🏠 Home Team", "Home", key="home_name")
+            home_name = st.text_input("🏠 Home Team", "", key="home_name", placeholder="e.g. Manchester United")
         with c2:
-            away_name = st.text_input("✈️ Away Team", "Away", key="away_name")
+            away_name = st.text_input("✈️ Away Team", "", key="away_name", placeholder="e.g. Liverpool")
         
         match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
         
+        if home_name and away_name and home_name == away_name:
+            st.warning("⚠️ Home and Away teams cannot be the same.")
+        
         st.divider()
         st.markdown("### 🏠 Home Team")
-        home_data = team_signal_input(home_name, "home")
+        home_data = team_signal_input(home_name if home_name else "Home", "home")
         
         st.divider()
         st.markdown("### ✈️ Away Team")
-        away_data = team_signal_input(away_name, "away")
+        away_data = team_signal_input(away_name if away_name else "Away", "away")
         
         st.divider()
         
         if st.button("🔮 RUN ANALYSIS", type="primary"):
-            output = run_analysis(home_data, away_data)
-            
-            # Save to database
-            analysis_id = save_analysis_to_db(home_data, away_data, output, match_date)
-            if analysis_id:
-                st.success(f"✅ Saved (ID: {analysis_id})")
-            
-            # Display signal summary
-            st.markdown("### 📊 Signal Summary")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"""
-                <div class="step-box" style="border:2px solid #ef4444;">
-                <strong>🏠 {home_data.name}</strong><br>
-                Scoring: {home_data.scoring} | Over 0.5: {home_data.over05}<br>
-                Over 2.5 Goals: {home_data.over25_goals} | Over 2.5: {home_data.over25} | Over 1.5(h): {home_data.over15_hidden}<br>
-                Unbeaten: {home_data.unbeaten} | Win: {home_data.win} | Hot: {home_data.hot_form}<br>
-                Goals 2+: {home_data.goals2} | Cold: {home_data.cold_form} | Loss: {home_data.loss}
-                </div>
-                """, unsafe_allow_html=True)
-            with col2:
-                st.markdown(f"""
-                <div class="step-box" style="border:2px solid #3b82f6;">
-                <strong>✈️ {away_data.name}</strong><br>
-                Scoring: {away_data.scoring} | Over 0.5: {away_data.over05}<br>
-                Over 2.5 Goals: {away_data.over25_goals} | Over 2.5: {away_data.over25} | Over 1.5(h): {away_data.over15_hidden}<br>
-                Unbeaten: {away_data.unbeaten} | Win: {away_data.win} | Hot: {away_data.hot_form}<br>
-                Goals 2+: {away_data.goals2} | Cold: {away_data.cold_form} | Loss: {away_data.loss}
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Display steps
-            st.markdown("### 🔍 Decision Flow")
-            for step in output.steps:
-                if step.step_number == output.final_step:
-                    card_class = "step-current"
-                    status = "✅ MATCHED — OUTPUT"
-                elif step.passed:
-                    card_class = "step-pass"
-                    status = "✅ PASSED"
+            # Validate
+            if not home_name.strip():
+                st.error("⚠️ Please enter the Home Team name.")
+            elif not away_name.strip():
+                st.error("⚠️ Please enter the Away Team name.")
+            elif home_name.strip() == away_name.strip():
+                st.error("⚠️ Home and Away teams cannot be the same.")
+            else:
+                # Update names
+                home_data.name = home_name.strip()
+                away_data.name = away_name.strip()
+                
+                # Run analysis
+                output = run_analysis(home_data, away_data)
+                
+                # Save to database
+                analysis_id = save_analysis(home_data, away_data, output, match_date)
+                if analysis_id:
+                    st.success(f"✅ Saved to database")
+                
+                # Display signal summary
+                st.markdown("### 📊 Signal Summary")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"""
+                    <div class="step-box" style="border:2px solid #ef4444;">
+                    <strong>🏠 {home_data.name}</strong><br>
+                    Scoring: {home_data.scoring} | Over 0.5: {home_data.over05}<br>
+                    Over 2.5 Goals: {home_data.over25_goals} | Over 2.5: {home_data.over25} | Over 1.5(h): {home_data.over15_hidden}<br>
+                    Unbeaten: {home_data.unbeaten} | Win: {home_data.win} | Hot: {home_data.hot_form}<br>
+                    Goals 2+: {home_data.goals2} | Cold: {home_data.cold_form} | Loss: {home_data.loss} | Without Win: {home_data.without_win}
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f"""
+                    <div class="step-box" style="border:2px solid #3b82f6;">
+                    <strong>✈️ {away_data.name}</strong><br>
+                    Scoring: {away_data.scoring} | Over 0.5: {away_data.over05}<br>
+                    Over 2.5 Goals: {away_data.over25_goals} | Over 2.5: {away_data.over25} | Over 1.5(h): {away_data.over15_hidden}<br>
+                    Unbeaten: {away_data.unbeaten} | Win: {away_data.win} | Hot: {away_data.hot_form}<br>
+                    Goals 2+: {away_data.goals2} | Cold: {away_data.cold_form} | Loss: {away_data.loss} | Without Win: {away_data.without_win}
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Display steps
+                st.markdown("### 🔍 Decision Flow")
+                for step in output.steps:
+                    if step.step_number == output.final_step:
+                        card_class = "step-current"
+                        status = "✅ MATCHED — OUTPUT"
+                    elif step.passed:
+                        card_class = "step-pass"
+                        status = "✅ PASSED"
+                    else:
+                        card_class = "step-fail"
+                        status = "✗ FAILED"
+                    
+                    st.markdown(f"""
+                    <div class="step-box {card_class}">
+                        <div style="display:flex;justify-content:space-between;">
+                            <strong>STEP {step.step_number}: {step.step_name}</strong>
+                            <span>{status}</span>
+                        </div>
+                        <div style="font-size:0.8rem;color:#94a3b8;">{step.condition}</div>
+                        <div style="font-size:0.8rem;margin-top:0.2rem;">{step.details}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Display prediction
+                st.markdown("### 🎯 Prediction")
+                if output.prediction == "SKIP":
+                    emoji = "⏭️"
+                elif "OVER" in output.prediction:
+                    emoji = "🔥"
                 else:
-                    card_class = "step-fail"
-                    status = "✗ FAILED"
+                    emoji = "🛡️"
                 
                 st.markdown(f"""
-                <div class="step-box {card_class}">
-                    <div style="display:flex;justify-content:space-between;">
-                        <strong>STEP {step.step_number}: {step.step_name}</strong>
-                        <span>{status}</span>
+                <div class="output-card {output.prediction_card}">
+                    <div style="text-align:center;">
+                        <div style="font-size:3rem;">{emoji}</div>
+                        <div style="font-size:1.8rem;font-weight:800;">{output.prediction}</div>
+                        <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.5rem;">Step {output.final_step}: {output.reasoning}</div>
                     </div>
-                    <div style="font-size:0.8rem;color:#94a3b8;">{step.condition}</div>
-                    <div style="font-size:0.8rem;margin-top:0.2rem;">{step.details}</div>
                 </div>
                 """, unsafe_allow_html=True)
-            
-            # Display prediction
-            st.markdown("### 🎯 Prediction")
-            if output.prediction == "SKIP":
-                emoji = "⏭️"
-            elif "OVER" in output.prediction:
-                emoji = "🔥"
-            else:
-                emoji = "🛡️"
-            
-            st.markdown(f"""
-            <div class="output-card {output.prediction_card}">
-                <div style="text-align:center;">
-                    <div style="font-size:3rem;">{emoji}</div>
-                    <div style="font-size:1.8rem;font-weight:800;">{output.prediction}</div>
-                    <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.5rem;">Step {output.final_step}: {output.reasoning}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
     
+    # ============================================================================
+    # TAB 2: POST-MATCH
+    # ============================================================================
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending_analyses()
         if pending:
+            st.write(f"{len(pending)} pending result(s)")
             for analysis in pending:
-                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — Step {analysis.get('final_step', '?')}: {analysis.get('prediction', '?')}"):
+                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('prediction', '?')}"):
                     st.write(f"**Date:** {analysis.get('match_date', '?')}")
+                    st.write(f"**Prediction:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')})")
                     st.write(f"**Reasoning:** {analysis.get('reasoning', '?')}")
                     total_goals = st.number_input("Total Goals", 0, 20, 0, key=f"goals_{analysis['id']}")
                     
@@ -485,8 +498,11 @@ def main():
                             st.success("Result submitted!")
                             st.rerun()
         else:
-            st.info("No pending analyses.")
+            st.info("No pending analyses. All results have been entered.")
     
+    # ============================================================================
+    # TAB 3: RECORDS
+    # ============================================================================
     with tab3:
         st.subheader("📊 Live Records")
         overall, step_stats = get_records()
@@ -502,7 +518,7 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         
-        if step_stats:
+        if step_stats and any(s["total"] > 0 for s in step_stats.values()):
             st.markdown("### By Step")
             for step_num in [1, 2, 3, 4, 5]:
                 stats = step_stats[step_num]
@@ -518,6 +534,9 @@ def main():
         else:
             st.info("No results recorded yet. Submit post-match results to build your records.")
     
+    # ============================================================================
+    # FOOTER
+    # ============================================================================
     st.divider()
     st.markdown("""
     ### 📋 5-Step Decision Flow
