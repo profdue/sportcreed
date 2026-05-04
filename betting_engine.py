@@ -380,7 +380,7 @@ def run_auto_analysis(results):
             "winner": r.get("winner"),
             "winner_confidence": r.get("winner_confidence"),
             "final_step": r.get("final_step"),
-            "confidence_score": r.get("confidence_score", 0),
+            "confidence_score": r.get("confidence_score") or 0,
             "correct": r.get("correct"),
             "winner_correct": r.get("winner_correct"),
             "actual_total_goals": r.get("actual_total_goals"),
@@ -432,12 +432,12 @@ def run_auto_analysis(results):
         wdf = df[(df["winner_confidence"] == conf) & (df["winner"] != "UNCLEAR") & (df["winner"] != "DRAW")]
         if len(wdf) > 0:
             wc = wdf["winner_correct"].sum()
-            insights["by_winner_conf"][conf] = {"total": len(wdf), "correct": int(wc), "rate": round(wc / len(wdf) * 100)}
+            insights["by_winner_conf"][conf] = {"total": len(wdf), "correct": int(wc), "rate": round(wc / len(wdf) * 100) if len(wdf) > 0 else 0}
     
     # Recent form
     recent = non_skip.tail(10)
     if len(recent) > 0:
-        insights["recent"] = {"total": len(recent), "correct": int(recent["correct"].sum()), "rate": round(recent["correct"].sum() / len(recent) * 100)}
+        insights["recent"] = {"total": len(recent), "correct": int(recent["correct"].sum()), "rate": round(recent["correct"].sum() / len(recent) * 100) if len(recent) > 0 else 0}
     
     # Wrong patterns
     wrong_overs = df[(df["prediction"] == "OVER 2.5") & (df["correct"] == False)]
@@ -668,7 +668,9 @@ def main():
                 with st.expander(f"{home_team} vs {away_team} — {analysis.get('prediction', '?')} | Winner: {analysis.get('winner', '?')}"):
                     st.write(f"**Date:** {analysis.get('match_date', '?')}")
                     st.write(f"**League:** {analysis.get('league', '?')}")
-                    st.write(f"**Over/Under:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')}, {analysis.get('confidence_score', 0):.0%})")
+                    
+                    conf = analysis.get('confidence_score') or 0
+                    st.write(f"**Over/Under:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')}, {conf:.0%})")
                     st.write(f"**Winner:** {analysis.get('winner', '?')} ({analysis.get('winner_confidence', '?')})")
                     
                     st.markdown("### 📝 Enter Correct Score")
