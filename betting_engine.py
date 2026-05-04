@@ -256,12 +256,15 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
 def save_analysis(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, 
                   match_date: date, league: str, home_odds: float, away_odds: float):
     try:
+        ho = home_odds if (home_odds is not None and home_odds > 1.0) else None
+        ao = away_odds if (away_odds is not None and away_odds > 1.0) else None
+        
         record = {
             "home_team": home.name, "away_team": away.name,
             "match_date": str(match_date),
             "league": league,
-            "home_odds if (home_odds is not None and home_odds > 1.0) else None,
-            "away_odds if (away_odds is not None and away_odds > 1.0) else None,
+            "home_odds": ho,
+            "away_odds": ao,
             "confidence_score": output.confidence_score,
             "home_data": {
                 "scoring": home.scoring, "over05": home.over05,
@@ -405,48 +408,79 @@ def run_auto_analysis(results):
     # Overall
     non_skip = df[df["prediction"] != "SKIP"]
     total = len(non_skip)
-    correct = non_skip["correct"].sum() if total > 0 else 0
-    insights["overall"] = {"total": total, "correct": int(correct), "rate": round(correct / total * 100) if total > 0 else 0}
+    correct = int(non_skip["correct"].sum()) if total > 0 else 0
+    insights["overall"] = {"total": total, "correct": correct, "rate": round(correct / total * 100) if total > 0 else 0}
     
     # By Step
     step_names = {1: "Both Unbeaten", 2: "Home Scoring + Over", 3: "Away Dominant", 4: "Under Default"}
     for step in [1, 2, 3, 4]:
         step_df = non_skip[non_skip["final_step"] == step]
         if len(step_df) > 0:
-            insights["by_step"][step] = {"name": step_names.get(step, f"Step {step}"), "total": len(step_df), "correct": int(step_df["correct"].sum()), "rate": round(step_df["correct"].sum() / len(step_df) * 100)}
+            insights["by_step"][step] = {
+                "name": step_names.get(step, f"Step {step}"),
+                "total": len(step_df),
+                "correct": int(step_df["correct"].sum()),
+                "rate": round(step_df["correct"].sum() / len(step_df) * 100)
+            }
     
     # By League
     for league in df["league"].unique():
         ldf = non_skip[non_skip["league"] == league]
         if len(ldf) >= 3:
-            insights["by_league"][league] = {"total": len(ldf), "correct": int(ldf["correct"].sum()), "rate": round(ldf["correct"].sum() / len(ldf) * 100)}
+            insights["by_league"][league] = {
+                "total": len(ldf),
+                "correct": int(ldf["correct"].sum()),
+                "rate": round(ldf["correct"].sum() / len(ldf) * 100)
+            }
     
     # By Confidence Score
     for tier, bounds in [("HIGH (85%+)", (0.85, 1.0)), ("MEDIUM (70-84%)", (0.70, 0.84)), ("LOW (<70%)", (0, 0.69))]:
         tdf = non_skip[(non_skip["confidence_score"] >= bounds[0]) & (non_skip["confidence_score"] <= bounds[1])]
         if len(tdf) > 0:
-            insights["by_confidence"][tier] = {"total": len(tdf), "correct": int(tdf["correct"].sum()), "rate": round(tdf["correct"].sum() / len(tdf) * 100)}
+            insights["by_confidence"][tier] = {
+                "total": len(tdf),
+                "correct": int(tdf["correct"].sum()),
+                "rate": round(tdf["correct"].sum() / len(tdf) * 100)
+            }
     
     # By Winner Confidence
     for conf in ["HIGH", "MEDIUM", "LOW"]:
         wdf = df[(df["winner_confidence"] == conf) & (df["winner"] != "UNCLEAR") & (df["winner"] != "DRAW")]
         if len(wdf) > 0:
-            wc = wdf["winner_correct"].sum()
-            insights["by_winner_conf"][conf] = {"total": len(wdf), "correct": int(wc), "rate": round(wc / len(wdf) * 100) if len(wdf) > 0 else 0}
+            wc = int(wdf["winner_correct"].sum())
+            insights["by_winner_conf"][conf] = {
+                "total": len(wdf),
+                "correct": wc,
+                "rate": round(wc / len(wdf) * 100) if len(wdf) > 0 else 0
+            }
     
     # Recent form
     recent = non_skip.tail(10)
     if len(recent) > 0:
-        insights["recent"] = {"total": len(recent), "correct": int(recent["correct"].sum()), "rate": round(recent["correct"].sum() / len(recent) * 100) if len(recent) > 0 else 0}
+        recent_correct = int(recent["correct"].sum())
+        insights["recent"] = {
+            "total": len(recent),
+            "correct": recent_correct,
+            "rate": round(recent_correct / len(recent) * 100) if len(recent) > 0 else 0
+        }
     
     # Wrong patterns
     wrong_overs = df[(df["prediction"] == "OVER 2.5") & (df["correct"] == False)]
     wrong_unders = df[(df["prediction"] == "UNDER 2.5") & (df["correct"] == False)]
     
     if len(wrong_overs) > 0:
-        insights["wrong_patterns"].append({"type": "OVER misses", "count": len(wrong_overs), "avg_home_scoring": round(wrong_overs["home_scoring"].mean(), 1), "avg_home_over": round(wrong_overs["home_over_max"].mean(), 1), "avg_away_over": round(wrong_overs["away_over_max"].mean(), 1)})
+        insights["wrong_patterns"].append({
+            "type": "OVER misses",
+            "count": len(wrong_overs),
+            "avg_home_scoring": round(float(wrong_overs["home_scoring"].mean()), 1),
+            "avg_home_over": round(float(wrong_overs["home_over_max"].mean()), 1),
+            "avg_away_over": round(float(wrong_overs["away_over_max"].mean()), 1)
+        })
     if len(wrong_unders) > 0:
-        insights["wrong_patterns"].append({"type": "UNDER misses", "count": len(wrong_unders)})
+        insights["wrong_patterns"].append({
+            "type": "UNDER misses",
+            "count": len(wrong_unders)
+        })
     
     # Suggestions
     if insights["by_step"].get(2, {}).get("rate", 0) >= 90:
@@ -532,19 +566,17 @@ def main():
         with c2:
             away_name = st.text_input("✈️ Away Team", "", key="away_name", placeholder="e.g. Liverpool")
         
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
             match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
         with c2:
             league = st.selectbox("🏆 League", LEAGUES, key="league_select")
-        with c3:
-            st.markdown("<br>", unsafe_allow_html=True)
         
         c1, c2 = st.columns(2)
         with c1:
-            home_odds = st.number_input("🏠 Home Odds", 1.0, 50.0, 1.0, 0.01, key="home_odds_input", help="Decimal odds. Leave 1.0 if unknown.")
+            home_odds = st.number_input("🏠 Home Odds (optional)", 1.0, 50.0, 1.0, 0.01, key="home_odds_input", help="Decimal odds. Leave 1.00 if unknown.")
         with c2:
-            away_odds = st.number_input("✈️ Away Odds", 1.0, 50.0, 1.0, 0.01, key="away_odds_input", help="Decimal odds. Leave 1.0 if unknown.")
+            away_odds = st.number_input("✈️ Away Odds (optional)", 1.0, 50.0, 1.0, 0.01, key="away_odds_input", help="Decimal odds. Leave 1.00 if unknown.")
         
         if home_name and away_name and home_name == away_name:
             st.warning("⚠️ Home and Away teams cannot be the same.")
@@ -575,8 +607,8 @@ def main():
                 analysis_id = save_analysis(
                     home_data, away_data, output, match_date,
                     league=league,
-                    home_odds=home_odds if home_odds > 1.0 else None,
-                    away_odds=away_odds if away_odds > 1.0 else None
+                    home_odds=home_odds,
+                    away_odds=away_odds
                 )
                 if analysis_id:
                     st.success(f"✅ Saved to database")
@@ -720,17 +752,17 @@ def main():
         else:
             insights = run_auto_analysis(results)
             
-            overall = insights["overall"]
-            rate = overall["rate"]
+            overall = insights.get("overall", {})
+            rate = overall.get("rate", 0)
             color = "#10b981" if rate >= 90 else "#fbbf24" if rate >= 70 else "#ef4444"
             st.markdown(f"""
             <div class="output-card" style="text-align:center;">
                 <div style="font-size:0.9rem;color:#94a3b8;">Over/Under Hit Rate</div>
-                <div style="font-size:2rem;font-weight:800;color:{color};">{overall['correct']}/{overall['total']} ({rate}%)</div>
+                <div style="font-size:2rem;font-weight:800;color:{color};">{overall.get('correct', 0)}/{overall.get('total', 0)} ({rate}%)</div>
             </div>
             """, unsafe_allow_html=True)
             
-            if insights["by_step"]:
+            if insights.get("by_step"):
                 st.markdown("### By Step")
                 for step, stats in insights["by_step"].items():
                     rate = stats["rate"]
@@ -742,7 +774,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
             
-            if insights["by_league"]:
+            if insights.get("by_league"):
                 st.markdown("### By League")
                 for league, stats in sorted(insights["by_league"].items(), key=lambda x: x[1]["total"], reverse=True):
                     rate = stats["rate"]
@@ -754,7 +786,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
             
-            if insights["by_confidence"]:
+            if insights.get("by_confidence"):
                 st.markdown("### By Confidence Score")
                 for tier, stats in insights["by_confidence"].items():
                     rate = stats["rate"]
@@ -766,7 +798,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
             
-            if insights["recent"]:
+            if insights.get("recent"):
                 recent = insights["recent"]
                 r_color = "#10b981" if recent["rate"] >= 70 else "#ef4444"
                 st.markdown(f"### Recent Form (Last 10): {recent['correct']}/{recent['total']} ({recent['rate']}%)")
@@ -783,7 +815,7 @@ def main():
         else:
             insights = run_auto_analysis(results)
             
-            if insights["suggestions"]:
+            if insights and insights.get("suggestions"):
                 st.markdown("### 💡 Suggestions")
                 for s in insights["suggestions"]:
                     if "✅" in s:
@@ -793,10 +825,12 @@ def main():
                     else:
                         st.markdown(f'<div class="info-box">{s}</div>', unsafe_allow_html=True)
             
-            if insights["wrong_patterns"]:
+            if insights and insights.get("wrong_patterns"):
                 st.markdown("### 🔍 Wrong Prediction Patterns")
                 for wp in insights["wrong_patterns"]:
-                    note = f"Avg home scoring: {wp.get('avg_home_scoring', '?')}, home over: {wp.get('avg_home_over', '?')}, away over: {wp.get('avg_away_over', '?')}" if "avg_home_scoring" in wp else ""
+                    note = ""
+                    if "avg_home_scoring" in wp:
+                        note = f"Avg home scoring: {wp['avg_home_scoring']}, home over: {wp['avg_home_over']}, away over: {wp['avg_away_over']}"
                     st.markdown(f"""
                     <div class="warning-box">
                         <strong>{wp['type']}</strong> ({wp['count']} times)<br>
@@ -804,7 +838,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
             
-            if insights["by_winner_conf"]:
+            if insights and insights.get("by_winner_conf"):
                 st.markdown("### 🏆 Winner Prediction by Confidence")
                 for conf, stats in insights["by_winner_conf"].items():
                     rate = stats["rate"]
@@ -853,7 +887,7 @@ def main():
     | Both Unbeaten ≥ 5 | DRAW | — |
     
     **Key Rules:**
-    - Venue (🏠/✈️) is IGNORED — use highest streak length
+    - Venue ignored — use highest streak length
     - Over data = Over 2.5 Goals OR Over 2.5 OR Over 1.5(hidden)
     """)
 
