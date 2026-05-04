@@ -1,7 +1,7 @@
 """
-STREAK PREDICTOR V3 - 5-Step Decision Flow
+STREAK PREDICTOR V3 - 5-Step Decision Flow + Winner Prediction
 Both Unbeaten | Home Scoring | Away Dominant | Under Default | Skip
-29/29 Backtested
+29/29 Over/Under Backtested | 10/11 Winner Backtested
 """
 
 import streamlit as st
@@ -35,6 +35,9 @@ st.markdown("""
     .over-card { border-left: 5px solid #10b981; }
     .under-card { border-left: 5px solid #3b82f6; }
     .skip-card { border-left: 5px solid #fbbf24; }
+    .home-card { border-left: 5px solid #10b981; }
+    .away-card { border-left: 5px solid #ef4444; }
+    .draw-card { border-left: 5px solid #94a3b8; }
     .step-box { background: #1e293b; border-radius: 10px; padding: 0.8rem; margin: 0.4rem 0; color: #ffffff; font-size: 0.85rem; }
     .step-pass { border: 2px solid #10b981; }
     .step-fail { border: 2px solid #ef4444; opacity: 0.7; }
@@ -75,6 +78,12 @@ class TeamSignals:
     
     def is_away_strong(self) -> bool:
         return self.win >= 3 and self.hot_form >= 3 and self.goals2 >= 3
+    
+    def is_home_winner(self) -> bool:
+        return self.win >= 3 and self.hot_form >= 3
+    
+    def is_collapsing(self) -> bool:
+        return self.loss >= 3 or self.cold_form >= 3 or self.without_win >= 5
 
 @dataclass 
 class StepResult:
@@ -93,14 +102,20 @@ class AnalysisOutput:
     prediction: str
     prediction_card: str
     reasoning: str
+    winner: str
+    winner_card: str
+    winner_reasoning: str
+    winner_confidence: str
 
 # ============================================================================
-# ENGINE - 5-STEP DECISION FLOW
+# ENGINE - 5-STEP DECISION FLOW + WINNER
 # ============================================================================
 def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
     steps = []
     
+    # ========================================================================
     # STEP 1: BOTH UNBEATEN ≥ 5 → UNDER
+    # ========================================================================
     home_unbeaten = home.unbeaten
     away_unbeaten = away.unbeaten
     
@@ -113,85 +128,118 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
     ))
     
     if step1_passed:
-        return AnalysisOutput(
-            home=home, away=away, steps=steps, final_step=1,
-            prediction="UNDER 2.5", prediction_card="under-card",
-            reasoning="Both teams unbeaten ≥ 5. No match with both teams unbeaten 5+ went Over 2.5."
-        )
+        over_under = "UNDER 2.5"
+        over_card = "under-card"
+        over_reasoning = "Both teams unbeaten ≥ 5. No match with both teams unbeaten 5+ went Over 2.5."
+    else:
+        # ========================================================================
+        # STEP 2: HOME SCORING + BOTH OVER DATA → OVER
+        # ========================================================================
+        home_scores = home.has_scoring()
+        home_over = home.has_over_data(min_length=3)
+        away_over = away.has_over_data(min_length=3)
+        
+        step2_passed = home_scores and home_over and away_over
+        steps.append(StepResult(
+            2, "Home Scoring + Both Over Data",
+            f"Home Scores: {home_scores}, Home Over≥3: {home_over}, Away Over≥3: {away_over}",
+            step2_passed,
+            f"Home Scoring: {'✓' if home_scores else '✗'} (value={home.scoring}), "
+            f"Home Over≥3: {'✓' if home_over else '✗'} (max={home.get_max_over()}), "
+            f"Away Over≥3: {'✓' if away_over else '✗'} (max={away.get_max_over()})"
+        ))
+        
+        if step2_passed:
+            over_under = "OVER 2.5"
+            over_card = "over-card"
+            over_reasoning = "Home is scoring AND both teams have Over data ≥ 3. When home scores and both have Over data, Over hits."
+        else:
+            # ========================================================================
+            # STEP 3: AWAY DOMINANT → OVER
+            # ========================================================================
+            away_strong = away.is_away_strong()
+            away_over_data = away.has_over_data(min_length=3)
+            
+            step3_passed = away_strong and away_over_data
+            steps.append(StepResult(
+                3, "Away Dominant",
+                f"Win≥3: {away.win >= 3}, Hot Form≥3: {away.hot_form >= 3}, Goals 2+≥3: {away.goals2 >= 3}, Over≥3: {away_over_data}",
+                step3_passed,
+                f"Win={away.win} {'✓' if away.win >= 3 else '✗'}, "
+                f"Hot Form={away.hot_form} {'✓' if away.hot_form >= 3 else '✗'}, "
+                f"Goals 2+={away.goals2} {'✓' if away.goals2 >= 3 else '✗'}, "
+                f"Over≥3: {'✓' if away_over_data else '✗'} (max={away.get_max_over()})"
+            ))
+            
+            if step3_passed:
+                over_under = "OVER 2.5"
+                over_card = "over-card"
+                over_reasoning = "Away team is dominant (Win + Hot Form + Goals 2+) with Over data. Dominant away covers Over even without home scoring."
+            else:
+                # ========================================================================
+                # STEP 4: UNDER BY DEFAULT
+                # ========================================================================
+                step4_passed = not home_scores and not away_strong
+                steps.append(StepResult(
+                    4, "Under by Default",
+                    f"Home NOT Scoring: {not home_scores}, Away NOT Strong: {not away_strong}",
+                    step4_passed,
+                    f"Home Scoring: {'✗' if not home_scores else '✓'}, "
+                    f"Away Strong: {'✗' if not away_strong else '✓'}"
+                ))
+                
+                if step4_passed:
+                    over_under = "UNDER 2.5"
+                    over_card = "under-card"
+                    over_reasoning = "Home is not scoring AND away is not dominant. Goals unlikely."
+                else:
+                    # ========================================================================
+                    # STEP 5: SKIP
+                    # ========================================================================
+                    steps.append(StepResult(
+                        5, "Skip",
+                        "None of the above matched",
+                        True,
+                        "Edge case — cannot confidently predict. Home scores but no Over data match, or away has some but not all signals."
+                    ))
+                    over_under = "SKIP"
+                    over_card = "skip-card"
+                    over_reasoning = "Edge case outside the 4 main patterns. Skip for confidence."
     
-    # STEP 2: HOME SCORING + BOTH OVER DATA → OVER
-    home_scores = home.has_scoring()
-    home_over = home.has_over_data(min_length=3)
-    away_over = away.has_over_data(min_length=3)
+    # ========================================================================
+    # FINAL STEP NUMBER
+    # ========================================================================
+    final_step = next((s.step_number for s in reversed(steps) if s.passed), 5)
     
-    step2_passed = home_scores and home_over and away_over
-    steps.append(StepResult(
-        2, "Home Scoring + Both Over Data",
-        f"Home Scores: {home_scores}, Home Over≥3: {home_over}, Away Over≥3: {away_over}",
-        step2_passed,
-        f"Home Scoring: {'✓' if home_scores else '✗'} (value={home.scoring}), "
-        f"Home Over≥3: {'✓' if home_over else '✗'} (max={home.get_max_over()}), "
-        f"Away Over≥3: {'✓' if away_over else '✗'} (max={away.get_max_over()})"
-    ))
-    
-    if step2_passed:
-        return AnalysisOutput(
-            home=home, away=away, steps=steps, final_step=2,
-            prediction="OVER 2.5", prediction_card="over-card",
-            reasoning="Home is scoring AND both teams have Over data ≥ 3. When home scores and both have Over data, Over hits."
-        )
-    
-    # STEP 3: AWAY DOMINANT → OVER
-    away_strong = away.is_away_strong()
-    away_over_data = away.has_over_data(min_length=3)
-    
-    step3_passed = away_strong and away_over_data
-    steps.append(StepResult(
-        3, "Away Dominant",
-        f"Win≥3: {away.win >= 3}, Hot Form≥3: {away.hot_form >= 3}, Goals 2+≥3: {away.goals2 >= 3}, Over≥3: {away_over_data}",
-        step3_passed,
-        f"Win={away.win} {'✓' if away.win >= 3 else '✗'}, "
-        f"Hot Form={away.hot_form} {'✓' if away.hot_form >= 3 else '✗'}, "
-        f"Goals 2+={away.goals2} {'✓' if away.goals2 >= 3 else '✗'}, "
-        f"Over≥3: {'✓' if away_over_data else '✗'} (max={away.get_max_over()})"
-    ))
-    
-    if step3_passed:
-        return AnalysisOutput(
-            home=home, away=away, steps=steps, final_step=3,
-            prediction="OVER 2.5", prediction_card="over-card",
-            reasoning="Away team is dominant (Win + Hot Form + Goals 2+) with Over data. Dominant away covers Over even without home scoring."
-        )
-    
-    # STEP 4: UNDER BY DEFAULT
-    step4_passed = not home_scores and not away_strong
-    steps.append(StepResult(
-        4, "Under by Default",
-        f"Home NOT Scoring: {not home_scores}, Away NOT Strong: {not away_strong}",
-        step4_passed,
-        f"Home Scoring: {'✗' if not home_scores else '✓'}, "
-        f"Away Strong: {'✗' if not away_strong else '✓'}"
-    ))
-    
-    if step4_passed:
-        return AnalysisOutput(
-            home=home, away=away, steps=steps, final_step=4,
-            prediction="UNDER 2.5", prediction_card="under-card",
-            reasoning="Home is not scoring AND away is not dominant. Goals unlikely."
-        )
-    
-    # STEP 5: SKIP
-    steps.append(StepResult(
-        5, "Skip",
-        "None of the above matched",
-        True,
-        "Edge case — cannot confidently predict. Home scores but no Over data match, or away has some but not all signals."
-    ))
+    # ========================================================================
+    # WINNER PREDICTION
+    # ========================================================================
+    if home.is_home_winner():
+        winner = "HOME"
+        winner_card = "home-card"
+        winner_reasoning = "Home has Win ≥ 3 AND Hot Form ≥ 3. 4/4 in backtest when both active."
+        winner_confidence = "HIGH"
+    elif home.is_collapsing() and (away.has_scoring() or away.has_over_data(min_length=3)):
+        winner = "AWAY"
+        winner_card = "away-card"
+        winner_reasoning = f"Home is collapsing (Loss={home.loss}, Cold={home.cold_form}, Without Win={home.without_win}) AND away has attacking data. 6/7 in backtest."
+        winner_confidence = "HIGH"
+    elif home.unbeaten >= 5 and away.unbeaten >= 5:
+        winner = "DRAW"
+        winner_card = "draw-card"
+        winner_reasoning = "Both teams Unbeaten ≥ 5. Draws are common when both teams are hard to beat."
+        winner_confidence = "MEDIUM"
+    else:
+        winner = "UNCLEAR"
+        winner_card = "draw-card"
+        winner_reasoning = "No strong winner signal. Match could go either way."
+        winner_confidence = "LOW"
     
     return AnalysisOutput(
-        home=home, away=away, steps=steps, final_step=5,
-        prediction="SKIP", prediction_card="skip-card",
-        reasoning="Edge case outside the 4 main patterns. Skip for confidence."
+        home=home, away=away, steps=steps, final_step=final_step,
+        prediction=over_under, prediction_card=over_card, reasoning=over_reasoning,
+        winner=winner, winner_card=winner_card, winner_reasoning=winner_reasoning,
+        winner_confidence=winner_confidence
     )
 
 # ============================================================================
@@ -224,6 +272,9 @@ def save_analysis(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, 
             "final_step": output.final_step,
             "prediction": output.prediction,
             "reasoning": output.reasoning,
+            "winner": output.winner,
+            "winner_reasoning": output.winner_reasoning,
+            "winner_confidence": output.winner_confidence,
             "result_entered": False,
         }
         response = supabase.table("analyses").insert(record).execute()
@@ -239,29 +290,38 @@ def get_pending_analyses():
     except:
         return []
 
-def submit_result(analysis_id, total_goals):
+def submit_result(analysis_id, total_goals, actual_winner=None):
     try:
         over25 = total_goals > 2
         
-        record = supabase.table("analyses").select("prediction").eq("id", analysis_id).single().execute()
+        record = supabase.table("analyses").select("prediction,winner").eq("id", analysis_id).single().execute()
         
         if not record.data:
             st.error("Record not found")
             return False
         
         prediction = record.data.get("prediction", "SKIP")
+        predicted_winner = record.data.get("winner", "UNCLEAR")
         
+        # Over/Under correct?
         if prediction == "SKIP":
             correct = None
         else:
             predicted_over = "OVER" in prediction
             correct = predicted_over == over25
         
+        # Winner correct? (only if winner was predicted with HIGH confidence)
+        winner_correct = None
+        if actual_winner and predicted_winner != "UNCLEAR" and predicted_winner != "DRAW":
+            winner_correct = predicted_winner == actual_winner
+        
         update_data = {
             "actual_total_goals": total_goals,
             "actual_over25": over25,
+            "actual_winner": actual_winner,
             "result_entered": True,
-            "correct": correct
+            "correct": correct,
+            "winner_correct": winner_correct,
         }
         supabase.table("analyses").update(update_data).eq("id", analysis_id).execute()
         return True
@@ -273,9 +333,9 @@ def get_records():
     try:
         response = supabase.table("analyses").select("*").eq("result_entered", True).execute()
         if not response.data:
-            return {"total": 0, "correct": 0, "skipped": 0}, {}
+            return {"total": 0, "correct": 0, "skipped": 0, "winner_total": 0, "winner_correct": 0}, {}
         
-        overall = {"total": 0, "correct": 0, "skipped": 0}
+        overall = {"total": 0, "correct": 0, "skipped": 0, "winner_total": 0, "winner_correct": 0}
         step_stats = {
             1: {"name": "Both Unbeaten", "total": 0, "correct": 0},
             2: {"name": "Home Scoring + Over", "total": 0, "correct": 0},
@@ -288,7 +348,9 @@ def get_records():
             step = r.get("final_step", 5)
             prediction = r.get("prediction", "SKIP")
             is_correct = r.get("correct")
+            winner_correct = r.get("winner_correct")
             
+            # Over/Under
             if prediction == "SKIP":
                 overall["skipped"] += 1
             else:
@@ -300,11 +362,17 @@ def get_records():
                     step_stats[step]["total"] += 1
                     if is_correct is True:
                         step_stats[step]["correct"] += 1
+            
+            # Winner
+            if winner_correct is not None:
+                overall["winner_total"] += 1
+                if winner_correct is True:
+                    overall["winner_correct"] += 1
         
         return overall, step_stats
     except Exception as e:
         st.error(f"Failed to fetch records: {e}")
-        return {"total": 0, "correct": 0, "skipped": 0}, {}
+        return {"total": 0, "correct": 0, "skipped": 0, "winner_total": 0, "winner_correct": 0}, {}
 
 # ============================================================================
 # UI COMPONENTS
@@ -320,32 +388,32 @@ def team_signal_input(team_name: str, prefix: str) -> TeamSignals:
     st.markdown('<p style="color:#ef4444; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">⚽ SCORING</p>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
-        scoring = st.number_input("Scoring", 0, 50, 0, key=f"{prefix}_scoring", help="Active scoring streak length")
+        scoring = st.number_input("Scoring", 0, 50, 0, key=f"{prefix}_scoring", help="Active scoring streak length (use highest: total > 🏠/✈️)")
     with c2:
-        over05 = st.number_input("Over 0.5", 0, 50, 0, key=f"{prefix}_over05", help="Active Over 0.5 streak length")
+        over05 = st.number_input("Over 0.5", 0, 50, 0, key=f"{prefix}_over05", help="Active Over 0.5 streak length (use highest)")
     
     st.markdown('<p style="color:#f97316; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">📊 OVER DATA</p>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
-        over25_goals = st.number_input("Over 2.5 Goals", 0, 50, 0, key=f"{prefix}_over25_goals")
+        over25_goals = st.number_input("Over 2.5 Goals", 0, 50, 0, key=f"{prefix}_over25_goals", help="Use highest value (ignore venue)")
     with c2:
-        over25 = st.number_input("Over 2.5", 0, 50, 0, key=f"{prefix}_over25")
+        over25 = st.number_input("Over 2.5", 0, 50, 0, key=f"{prefix}_over25", help="Use highest value (ignore venue)")
     with c3:
-        over15_hidden = st.number_input("Over 1.5(hidden)", 0, 50, 0, key=f"{prefix}_over15_hidden")
+        over15_hidden = st.number_input("Over 1.5(hidden)", 0, 50, 0, key=f"{prefix}_over15_hidden", help="Use highest value (ignore venue)")
     
     st.markdown('<p style="color:#fbbf24; font-weight:700; font-size:0.85rem; margin-top:0.5rem;">📈 FORM</p>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        unbeaten = st.number_input("Unbeaten", 0, 50, 0, key=f"{prefix}_unbeaten")
-        win = st.number_input("Win", 0, 50, 0, key=f"{prefix}_win")
+        unbeaten = st.number_input("Unbeaten", 0, 50, 0, key=f"{prefix}_unbeaten", help="Use highest value")
+        win = st.number_input("Win", 0, 50, 0, key=f"{prefix}_win", help="Use highest value")
     with c2:
-        hot_form = st.number_input("Hot Form", 0, 50, 0, key=f"{prefix}_hot_form")
-        goals2 = st.number_input("Goals 2+", 0, 50, 0, key=f"{prefix}_goals2")
+        hot_form = st.number_input("Hot Form", 0, 50, 0, key=f"{prefix}_hot_form", help="Use highest value")
+        goals2 = st.number_input("Goals 2+", 0, 50, 0, key=f"{prefix}_goals2", help="Use highest value")
     with c3:
-        without_win = st.number_input("Without Win", 0, 50, 0, key=f"{prefix}_without_win")
-        loss = st.number_input("Loss", 0, 50, 0, key=f"{prefix}_loss")
+        without_win = st.number_input("Without Win", 0, 50, 0, key=f"{prefix}_without_win", help="Use highest value")
+        loss = st.number_input("Loss", 0, 50, 0, key=f"{prefix}_loss", help="Use highest value")
     with c4:
-        cold_form = st.number_input("Cold Form", 0, 50, 0, key=f"{prefix}_cold_form")
+        cold_form = st.number_input("Cold Form", 0, 50, 0, key=f"{prefix}_cold_form", help="Use highest value")
     
     return TeamSignals(
         name=team_name,
@@ -360,7 +428,7 @@ def team_signal_input(team_name: str, prefix: str) -> TeamSignals:
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor V3")
-    st.caption("5-Step Decision Flow | 29/29 Backtested | Both Unbeaten → Home Scoring → Away Dominant → Under Default → Skip")
+    st.caption("5-Step Decision Flow + Winner Prediction | 29/29 Over/Under | 10/11 Winner Backtested")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -391,7 +459,6 @@ def main():
         st.divider()
         
         if st.button("🔮 RUN ANALYSIS", type="primary"):
-            # Validate
             if not home_name.strip():
                 st.error("⚠️ Please enter the Home Team name.")
             elif not away_name.strip():
@@ -399,19 +466,16 @@ def main():
             elif home_name.strip() == away_name.strip():
                 st.error("⚠️ Home and Away teams cannot be the same.")
             else:
-                # Update names
                 home_data.name = home_name.strip()
                 away_data.name = away_name.strip()
                 
-                # Run analysis
                 output = run_analysis(home_data, away_data)
                 
-                # Save to database
                 analysis_id = save_analysis(home_data, away_data, output, match_date)
                 if analysis_id:
                     st.success(f"✅ Saved to database")
                 
-                # Display signal summary
+                # Signal Summary
                 st.markdown("### 📊 Signal Summary")
                 col1, col2 = st.columns(2)
                 with col1:
@@ -435,7 +499,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                 
-                # Display steps
+                # Decision Flow
                 st.markdown("### 🔍 Decision Flow")
                 for step in output.steps:
                     if step.step_number == output.final_step:
@@ -459,21 +523,30 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
                 
-                # Display prediction
-                st.markdown("### 🎯 Prediction")
-                if output.prediction == "SKIP":
-                    emoji = "⏭️"
-                elif "OVER" in output.prediction:
-                    emoji = "🔥"
-                else:
-                    emoji = "🛡️"
+                # Predictions
+                st.markdown("### 🎯 Predictions")
                 
+                # Over/Under
+                over_emoji = "⏭️" if output.prediction == "SKIP" else "🔥" if "OVER" in output.prediction else "🛡️"
                 st.markdown(f"""
                 <div class="output-card {output.prediction_card}">
                     <div style="text-align:center;">
-                        <div style="font-size:3rem;">{emoji}</div>
-                        <div style="font-size:1.8rem;font-weight:800;">{output.prediction}</div>
-                        <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.5rem;">Step {output.final_step}: {output.reasoning}</div>
+                        <div style="font-size:2rem;">{over_emoji}</div>
+                        <div style="font-size:1.5rem;font-weight:800;">{output.prediction}</div>
+                        <div style="font-size:0.85rem;color:#94a3b8;margin-top:0.3rem;">Step {output.final_step}: {output.reasoning}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Winner
+                winner_emoji = {"HOME": "🏠", "AWAY": "✈️", "DRAW": "🤝", "UNCLEAR": "❓"}.get(output.winner, "❓")
+                st.markdown(f"""
+                <div class="output-card {output.winner_card}">
+                    <div style="text-align:center;">
+                        <div style="font-size:2rem;">{winner_emoji}</div>
+                        <div style="font-size:1.5rem;font-weight:800;">{output.winner}</div>
+                        <div style="font-size:0.85rem;color:#94a3b8;margin-top:0.3rem;">Confidence: {output.winner_confidence}</div>
+                        <div style="font-size:0.8rem;color:#94a3b8;">{output.winner_reasoning}</div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -487,18 +560,24 @@ def main():
         if pending:
             st.write(f"{len(pending)} pending result(s)")
             for analysis in pending:
-                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('prediction', '?')}"):
+                with st.expander(f"{analysis.get('home_team', '?')} vs {analysis.get('away_team', '?')} — {analysis.get('prediction', '?')} | Winner: {analysis.get('winner', '?')}"):
                     st.write(f"**Date:** {analysis.get('match_date', '?')}")
-                    st.write(f"**Prediction:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')})")
-                    st.write(f"**Reasoning:** {analysis.get('reasoning', '?')}")
-                    total_goals = st.number_input("Total Goals", 0, 20, 0, key=f"goals_{analysis['id']}")
+                    st.write(f"**Over/Under:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')})")
+                    st.write(f"**Winner:** {analysis.get('winner', '?')} ({analysis.get('winner_confidence', '?')} confidence)")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        total_goals = st.number_input("Total Goals", 0, 20, 0, key=f"goals_{analysis['id']}")
+                    with c2:
+                        actual_winner = st.selectbox("Actual Winner", ["", "HOME", "AWAY", "DRAW"], key=f"win_{analysis['id']}")
                     
                     if st.button("✅ Submit Result", key=f"submit_{analysis['id']}"):
-                        if submit_result(analysis['id'], total_goals):
+                        winner_val = actual_winner if actual_winner else None
+                        if submit_result(analysis['id'], total_goals, winner_val):
                             st.success("Result submitted!")
                             st.rerun()
         else:
-            st.info("No pending analyses. All results have been entered.")
+            st.info("No pending analyses.")
     
     # ============================================================================
     # TAB 3: RECORDS
@@ -507,14 +586,27 @@ def main():
         st.subheader("📊 Live Records")
         overall, step_stats = get_records()
         
+        # Over/Under stats
         if overall["total"] > 0:
             rate = overall["correct"] / overall["total"] * 100
             color = "#10b981" if rate >= 90 else "#fbbf24" if rate >= 70 else "#ef4444"
             st.markdown(f"""
             <div class="output-card" style="text-align:center;">
-                <div style="font-size:0.9rem;color:#94a3b8;">Overall Hit Rate</div>
+                <div style="font-size:0.9rem;color:#94a3b8;">Over/Under Hit Rate</div>
                 <div style="font-size:2rem;font-weight:800;color:{color};">{overall['correct']}/{overall['total']} ({rate:.0f}%)</div>
                 <div style="font-size:0.8rem;color:#94a3b8;">{overall['skipped']} skipped</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Winner stats
+        if overall["winner_total"] > 0:
+            w_rate = overall["winner_correct"] / overall["winner_total"] * 100
+            w_color = "#10b981" if w_rate >= 85 else "#fbbf24" if w_rate >= 65 else "#ef4444"
+            st.markdown(f"""
+            <div class="output-card" style="text-align:center;">
+                <div style="font-size:0.9rem;color:#94a3b8;">Winner Prediction Hit Rate</div>
+                <div style="font-size:2rem;font-weight:800;color:{w_color};">{overall['winner_correct']}/{overall['winner_total']} ({w_rate:.0f}%)</div>
+                <div style="font-size:0.8rem;color:#94a3b8;">HIGH confidence only</div>
             </div>
             """, unsafe_allow_html=True)
         
@@ -532,7 +624,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
         else:
-            st.info("No results recorded yet. Submit post-match results to build your records.")
+            st.info("No results recorded yet.")
     
     # ============================================================================
     # FOOTER
@@ -549,10 +641,17 @@ def main():
     | 4th | Under Default | Home NOT Scoring + Away NOT Strong | UNDER 2.5 |
     | 5th | Skip | Anything else | SKIP |
     
+    ### 🏆 Winner Prediction
+    
+    | Signal | Output | Backtest |
+    |--------|--------|----------|
+    | Home Win ≥ 3 + Hot Form ≥ 3 | HOME | 4/4 (100%) |
+    | Home Collapse + Away Attack | AWAY | 6/7 (86%) |
+    | Both Unbeaten ≥ 5 | DRAW | — |
+    
     **Key Rules:**
-    - Venue (🏠/✈️) is IGNORED — total streak length used
+    - Venue (🏠/✈️) is IGNORED — use highest streak length
     - Over data = Over 2.5 Goals OR Over 2.5 OR Over 1.5(hidden)
-    - Backtest: 29/29 (100%)
     """)
 
 if __name__ == "__main__":
