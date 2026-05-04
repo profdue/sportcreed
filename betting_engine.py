@@ -5,9 +5,10 @@ Both Unbeaten | Home Scoring | Away Dominant | Under Default | Skip
 
 import streamlit as st
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from supabase import create_client, Client
 import pandas as pd
+import json
 
 # ============================================================================
 # SUPABASE SETUP
@@ -51,6 +52,22 @@ st.markdown("""
     .info-box { background: #1a2a3a; border-left: 4px solid #3b82f6; padding: 0.8rem; border-radius: 8px; margin: 0.4rem 0; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
+
+# ============================================================================
+# LEAGUES
+# ============================================================================
+LEAGUES = [
+    "Premier League", "Bundesliga", "La Liga", "Serie A", "Ligue 1",
+    "Primeira Liga", "1. Lig", "2. Bundesliga", "Championship",
+    "Süper Lig", "Serie A (Brazil)", "Liga Profesional Argentina",
+    "Pro League (Saudi)", "Ligue 2", "Premiership (Scotland)",
+    "Championship (Scotland)", "Liga MX", "Primera A (Colombia)",
+    "Primera División (Venezuela)", "Liga Nacional (Guatemala)",
+    "Liga Nacional (Honduras)", "Liga Pro (Ecuador)",
+    "First League (Russia)", "Liga I (Romania)",
+    "Super League 1 (Greece)", "Indian Super League",
+    "Division Profesional (Paraguay)", "Other"
+]
 
 # ============================================================================
 # DATA MODELS
@@ -108,6 +125,7 @@ class AnalysisOutput:
     prediction: str
     prediction_card: str
     reasoning: str
+    confidence_score: float
     winner: str
     winner_card: str
     winner_reasoning: str
@@ -134,6 +152,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
         over_under = "UNDER 2.5"
         over_card = "under-card"
         over_reasoning = "Both teams unbeaten ≥ 5. No match with both teams unbeaten 5+ went Over 2.5."
+        confidence_score = 0.90
     else:
         home_scores = home.has_scoring()
         home_over = home.has_over_data(min_length=3)
@@ -153,6 +172,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
             over_under = "OVER 2.5"
             over_card = "over-card"
             over_reasoning = "Home is scoring AND both teams have Over data ≥ 3. When home scores and both have Over data, Over hits."
+            confidence_score = 0.88
         else:
             away_strong = away.is_away_strong()
             away_over_data = away.has_over_data(min_length=3)
@@ -172,6 +192,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
                 over_under = "OVER 2.5"
                 over_card = "over-card"
                 over_reasoning = "Away team is dominant (Win + Hot Form + Goals 2+) with Over data. Dominant away covers Over even without home scoring."
+                confidence_score = 0.82
             else:
                 step4_passed = not home_scores and not away_strong
                 steps.append(StepResult(
@@ -186,6 +207,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
                     over_under = "UNDER 2.5"
                     over_card = "under-card"
                     over_reasoning = "Home is not scoring AND away is not dominant. Goals unlikely."
+                    confidence_score = 0.65
                 else:
                     steps.append(StepResult(
                         5, "Skip", "None of the above matched", True,
@@ -194,6 +216,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
                     over_under = "SKIP"
                     over_card = "skip-card"
                     over_reasoning = "Edge case outside the 4 main patterns. Skip for confidence."
+                    confidence_score = 0.50
     
     final_step = next((s.step_number for s in reversed(steps) if s.passed), 5)
     
@@ -222,6 +245,7 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
     return AnalysisOutput(
         home=home, away=away, steps=steps, final_step=final_step,
         prediction=over_under, prediction_card=over_card, reasoning=over_reasoning,
+        confidence_score=confidence_score,
         winner=winner, winner_card=winner_card, winner_reasoning=winner_reasoning,
         winner_confidence=winner_confidence
     )
@@ -229,11 +253,16 @@ def run_analysis(home: TeamSignals, away: TeamSignals) -> AnalysisOutput:
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_analysis(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, match_date: date):
+def save_analysis(home: TeamSignals, away: TeamSignals, output: AnalysisOutput, 
+                  match_date: date, league: str, home_odds: float, away_odds: float):
     try:
         record = {
             "home_team": home.name, "away_team": away.name,
             "match_date": str(match_date),
+            "league": league,
+            "home_odds": home_odds if home_odds > 1.0 else None,
+            "away_odds": away_odds if away_odds > 1.0 else None,
+            "confidence_score": output.confidence_score,
             "home_data": {
                 "scoring": home.scoring, "over05": home.over05,
                 "over25_goals": home.over25_goals, "over25": home.over25,
@@ -330,35 +359,28 @@ def get_all_results():
 # AUTO-ANALYSIS ENGINE
 # ============================================================================
 def run_auto_analysis(results):
-    """Analyze all results and return insights."""
     if not results:
         return None
     
     insights = {
-        "overall": {},
-        "by_step": {},
-        "by_winner_conf": {},
-        "recent": {},
-        "wrong_patterns": [],
-        "suggestions": [],
+        "overall": {}, "by_step": {}, "by_league": {}, "by_confidence": {},
+        "by_winner_conf": {}, "recent": {}, "wrong_patterns": [], "suggestions": [],
     }
     
-    # Convert to DataFrame
     rows = []
     for r in results:
         hd = r.get("home_data", {})
         ad = r.get("away_data", {})
-        if isinstance(hd, str):
-            import json
-            hd = json.loads(hd)
-        if isinstance(ad, str):
-            ad = json.loads(ad)
+        if isinstance(hd, str): hd = json.loads(hd)
+        if isinstance(ad, str): ad = json.loads(ad)
         
         rows.append({
+            "league": r.get("league", "Unknown"),
             "prediction": r.get("prediction"),
             "winner": r.get("winner"),
             "winner_confidence": r.get("winner_confidence"),
             "final_step": r.get("final_step"),
+            "confidence_score": r.get("confidence_score", 0),
             "correct": r.get("correct"),
             "winner_correct": r.get("winner_correct"),
             "actual_total_goals": r.get("actual_total_goals"),
@@ -380,79 +402,64 @@ def run_auto_analysis(results):
     
     df = pd.DataFrame(rows)
     
-    # Overall stats
+    # Overall
     non_skip = df[df["prediction"] != "SKIP"]
     total = len(non_skip)
     correct = non_skip["correct"].sum() if total > 0 else 0
-    insights["overall"] = {
-        "total": total,
-        "correct": int(correct),
-        "rate": round(correct / total * 100) if total > 0 else 0,
-    }
+    insights["overall"] = {"total": total, "correct": int(correct), "rate": round(correct / total * 100) if total > 0 else 0}
     
-    # By step
+    # By Step
+    step_names = {1: "Both Unbeaten", 2: "Home Scoring + Over", 3: "Away Dominant", 4: "Under Default"}
     for step in [1, 2, 3, 4]:
         step_df = non_skip[non_skip["final_step"] == step]
         if len(step_df) > 0:
-            insights["by_step"][step] = {
-                "total": len(step_df),
-                "correct": int(step_df["correct"].sum()),
-                "rate": round(step_df["correct"].sum() / len(step_df) * 100),
-            }
+            insights["by_step"][step] = {"name": step_names.get(step, f"Step {step}"), "total": len(step_df), "correct": int(step_df["correct"].sum()), "rate": round(step_df["correct"].sum() / len(step_df) * 100)}
     
-    # By winner confidence
+    # By League
+    for league in df["league"].unique():
+        ldf = non_skip[non_skip["league"] == league]
+        if len(ldf) >= 3:
+            insights["by_league"][league] = {"total": len(ldf), "correct": int(ldf["correct"].sum()), "rate": round(ldf["correct"].sum() / len(ldf) * 100)}
+    
+    # By Confidence Score
+    for tier, bounds in [("HIGH (85%+)", (0.85, 1.0)), ("MEDIUM (70-84%)", (0.70, 0.84)), ("LOW (<70%)", (0, 0.69))]:
+        tdf = non_skip[(non_skip["confidence_score"] >= bounds[0]) & (non_skip["confidence_score"] <= bounds[1])]
+        if len(tdf) > 0:
+            insights["by_confidence"][tier] = {"total": len(tdf), "correct": int(tdf["correct"].sum()), "rate": round(tdf["correct"].sum() / len(tdf) * 100)}
+    
+    # By Winner Confidence
     for conf in ["HIGH", "MEDIUM", "LOW"]:
         wdf = df[(df["winner_confidence"] == conf) & (df["winner"] != "UNCLEAR") & (df["winner"] != "DRAW")]
         if len(wdf) > 0:
             wc = wdf["winner_correct"].sum()
-            insights["by_winner_conf"][conf] = {
-                "total": len(wdf),
-                "correct": int(wc),
-                "rate": round(wc / len(wdf) * 100),
-            }
+            insights["by_winner_conf"][conf] = {"total": len(wdf), "correct": int(wc), "rate": round(wc / len(wdf) * 100)}
     
-    # Recent form (last 10)
+    # Recent form
     recent = non_skip.tail(10)
     if len(recent) > 0:
-        insights["recent"] = {
-            "total": len(recent),
-            "correct": int(recent["correct"].sum()),
-            "rate": round(recent["correct"].sum() / len(recent) * 100),
-        }
+        insights["recent"] = {"total": len(recent), "correct": int(recent["correct"].sum()), "rate": round(recent["correct"].sum() / len(recent) * 100)}
     
-    # Wrong pattern detection
+    # Wrong patterns
     wrong_overs = df[(df["prediction"] == "OVER 2.5") & (df["correct"] == False)]
     wrong_unders = df[(df["prediction"] == "UNDER 2.5") & (df["correct"] == False)]
     
     if len(wrong_overs) > 0:
-        avg_home_score = wrong_overs["home_scoring"].mean()
-        avg_home_over = wrong_overs["home_over_max"].mean()
-        avg_away_over = wrong_overs["away_over_max"].mean()
-        insights["wrong_patterns"].append({
-            "type": "OVER misses",
-            "count": len(wrong_overs),
-            "avg_home_scoring": round(avg_home_score, 1),
-            "avg_home_over": round(avg_home_over, 1),
-            "avg_away_over": round(avg_away_over, 1),
-            "note": f"Avg home scoring: {avg_home_score:.0f}, home over: {avg_home_over:.0f}, away over: {avg_away_over:.0f}"
-        })
-    
+        insights["wrong_patterns"].append({"type": "OVER misses", "count": len(wrong_overs), "avg_home_scoring": round(wrong_overs["home_scoring"].mean(), 1), "avg_home_over": round(wrong_overs["home_over_max"].mean(), 1), "avg_away_over": round(wrong_overs["away_over_max"].mean(), 1)})
     if len(wrong_unders) > 0:
-        insights["wrong_patterns"].append({
-            "type": "UNDER misses",
-            "count": len(wrong_unders),
-            "note": f"{len(wrong_unders)} UNDER predictions went Over"
-        })
+        insights["wrong_patterns"].append({"type": "UNDER misses", "count": len(wrong_unders)})
     
     # Suggestions
     if insights["by_step"].get(2, {}).get("rate", 0) >= 90:
         insights["suggestions"].append("✅ Step 2 (Home Scoring + Over) is elite. Prioritize these bets.")
-    if insights["by_step"].get(4, {}).get("rate", 0) < 70:
-        insights["suggestions"].append("⚠️ Step 4 (Under Default) is weak. Reduce stakes or skip until improved.")
-    if insights["recent"].get("rate", 100) < insights["overall"].get("rate", 100):
+    if insights["by_step"].get(4, {}).get("rate", 0) < 70 and insights["by_step"].get(4, {}).get("total", 0) >= 5:
+        insights["suggestions"].append("⚠️ Step 4 (Under Default) is underperforming. Reduce stakes or review.")
+    if insights["recent"].get("rate", 100) < insights["overall"].get("rate", 100) and insights["recent"].get("total", 0) >= 5:
         insights["suggestions"].append("📉 Recent form is below overall average — check for pattern drift.")
     if insights["by_winner_conf"].get("HIGH", {}).get("rate", 0) >= 85:
-        insights["suggestions"].append("✅ HIGH confidence winner picks are reliable. Bet these with confidence.")
+        insights["suggestions"].append("✅ HIGH confidence winner picks are reliable.")
+    for league, stats in insights.get("by_league", {}).items():
+        if stats["rate"] < 60 and stats["total"] >= 5:
+            insights["suggestions"].append(f"⚠️ {league} is underperforming ({stats['rate']}%). Consider skipping this league.")
     
     return insights
 
@@ -510,7 +517,7 @@ def team_signal_input(team_name: str, prefix: str) -> TeamSignals:
 # ============================================================================
 def main():
     st.title("⚽ Streak Predictor V3")
-    st.caption("5-Step Decision Flow + Winner Prediction + Auto-Analysis")
+    st.caption("5-Step Decision Flow + Winner + League/Odds + Auto-Analysis")
     
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records", "🧠 Insights"])
     
@@ -525,7 +532,19 @@ def main():
         with c2:
             away_name = st.text_input("✈️ Away Team", "", key="away_name", placeholder="e.g. Liverpool")
         
-        match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            match_date = st.date_input("📅 Match Date", date.today(), key="match_date")
+        with c2:
+            league = st.selectbox("🏆 League", LEAGUES, key="league_select")
+        with c3:
+            st.markdown("<br>", unsafe_allow_html=True)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            home_odds = st.number_input("🏠 Home Odds", 1.0, 50.0, 1.0, 0.01, key="home_odds_input", help="Decimal odds. Leave 1.0 if unknown.")
+        with c2:
+            away_odds = st.number_input("✈️ Away Odds", 1.0, 50.0, 1.0, 0.01, key="away_odds_input", help="Decimal odds. Leave 1.0 if unknown.")
         
         if home_name and away_name and home_name == away_name:
             st.warning("⚠️ Home and Away teams cannot be the same.")
@@ -553,7 +572,12 @@ def main():
                 
                 output = run_analysis(home_data, away_data)
                 
-                analysis_id = save_analysis(home_data, away_data, output, match_date)
+                analysis_id = save_analysis(
+                    home_data, away_data, output, match_date,
+                    league=league,
+                    home_odds=home_odds if home_odds > 1.0 else None,
+                    away_odds=away_odds if away_odds > 1.0 else None
+                )
                 if analysis_id:
                     st.success(f"✅ Saved to database")
                 
@@ -611,7 +635,8 @@ def main():
                     <div style="text-align:center;">
                         <div style="font-size:2rem;">{over_emoji}</div>
                         <div style="font-size:1.5rem;font-weight:800;">{output.prediction}</div>
-                        <div style="font-size:0.85rem;color:#94a3b8;margin-top:0.3rem;">Step {output.final_step}: {output.reasoning}</div>
+                        <div style="font-size:0.85rem;color:#94a3b8;margin-top:0.3rem;">Confidence: {output.confidence_score:.0%}</div>
+                        <div style="font-size:0.85rem;color:#94a3b8;">Step {output.final_step}: {output.reasoning}</div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -642,7 +667,8 @@ def main():
                 
                 with st.expander(f"{home_team} vs {away_team} — {analysis.get('prediction', '?')} | Winner: {analysis.get('winner', '?')}"):
                     st.write(f"**Date:** {analysis.get('match_date', '?')}")
-                    st.write(f"**Over/Under:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')})")
+                    st.write(f"**League:** {analysis.get('league', '?')}")
+                    st.write(f"**Over/Under:** {analysis.get('prediction', '?')} (Step {analysis.get('final_step', '?')}, {analysis.get('confidence_score', 0):.0%})")
                     st.write(f"**Winner:** {analysis.get('winner', '?')} ({analysis.get('winner_confidence', '?')})")
                     
                     st.markdown("### 📝 Enter Correct Score")
@@ -692,7 +718,6 @@ def main():
         else:
             insights = run_auto_analysis(results)
             
-            # Overall
             overall = insights["overall"]
             rate = overall["rate"]
             color = "#10b981" if rate >= 90 else "#fbbf24" if rate >= 70 else "#ef4444"
@@ -703,30 +728,46 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
-            # By Step
             if insights["by_step"]:
                 st.markdown("### By Step")
-                step_names = {1: "Both Unbeaten", 2: "Home Scoring + Over", 3: "Away Dominant", 4: "Under Default"}
                 for step, stats in insights["by_step"].items():
                     rate = stats["rate"]
                     color = "#10b981" if rate >= 85 else "#fbbf24" if rate >= 65 else "#ef4444"
                     st.markdown(f"""
                     <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
-                        <div><strong>Step {step}: {step_names.get(step, 'Unknown')}</strong></div>
+                        <div><strong>Step {step}: {stats['name']}</strong></div>
                         <div style="color:{color};">{stats['correct']}/{stats['total']} ({rate}%)</div>
                     </div>
                     """, unsafe_allow_html=True)
             
-            # Recent
+            if insights["by_league"]:
+                st.markdown("### By League")
+                for league, stats in sorted(insights["by_league"].items(), key=lambda x: x[1]["total"], reverse=True):
+                    rate = stats["rate"]
+                    color = "#10b981" if rate >= 85 else "#fbbf24" if rate >= 65 else "#ef4444"
+                    st.markdown(f"""
+                    <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
+                        <div><strong>{league}</strong> <small>({stats['total']})</small></div>
+                        <div style="color:{color};">{stats['correct']}/{stats['total']} ({rate}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            if insights["by_confidence"]:
+                st.markdown("### By Confidence Score")
+                for tier, stats in insights["by_confidence"].items():
+                    rate = stats["rate"]
+                    color = "#10b981" if rate >= 85 else "#fbbf24" if rate >= 65 else "#ef4444"
+                    st.markdown(f"""
+                    <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
+                        <div><strong>{tier}</strong></div>
+                        <div style="color:{color};">{stats['correct']}/{stats['total']} ({rate}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
             if insights["recent"]:
                 recent = insights["recent"]
-                st.markdown(f"### Recent Form (Last 10)")
                 r_color = "#10b981" if recent["rate"] >= 70 else "#ef4444"
-                st.markdown(f"""
-                <div style="background:#1e293b;padding:0.5rem;border-radius:8px;color:#fff;text-align:center;">
-                    <span style="color:{r_color};font-weight:800;">{recent['correct']}/{recent['total']} ({recent['rate']}%)</span>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"### Recent Form (Last 10): {recent['correct']}/{recent['total']} ({recent['rate']}%)")
     
     # ============================================================================
     # TAB 4: INSIGHTS
@@ -740,7 +781,6 @@ def main():
         else:
             insights = run_auto_analysis(results)
             
-            # Suggestions
             if insights["suggestions"]:
                 st.markdown("### 💡 Suggestions")
                 for s in insights["suggestions"]:
@@ -751,18 +791,17 @@ def main():
                     else:
                         st.markdown(f'<div class="info-box">{s}</div>', unsafe_allow_html=True)
             
-            # Wrong patterns
             if insights["wrong_patterns"]:
                 st.markdown("### 🔍 Wrong Prediction Patterns")
                 for wp in insights["wrong_patterns"]:
+                    note = f"Avg home scoring: {wp.get('avg_home_scoring', '?')}, home over: {wp.get('avg_home_over', '?')}, away over: {wp.get('avg_away_over', '?')}" if "avg_home_scoring" in wp else ""
                     st.markdown(f"""
                     <div class="warning-box">
                         <strong>{wp['type']}</strong> ({wp['count']} times)<br>
-                        <small>{wp.get('note', '')}</small>
+                        <small>{note}</small>
                     </div>
                     """, unsafe_allow_html=True)
             
-            # Winner stats
             if insights["by_winner_conf"]:
                 st.markdown("### 🏆 Winner Prediction by Confidence")
                 for conf, stats in insights["by_winner_conf"].items():
@@ -775,10 +814,12 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
             
-            # Raw data
             if st.checkbox("📋 Show raw analysis data"):
                 st.dataframe(pd.DataFrame([{
+                    "date": r.get("match_date"),
+                    "league": r.get("league"),
                     "prediction": r.get("prediction"),
+                    "confidence": r.get("confidence_score"),
                     "correct": r.get("correct"),
                     "step": r.get("final_step"),
                     "winner": r.get("winner"),
