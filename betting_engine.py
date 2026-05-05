@@ -1,3 +1,4 @@
+python
 """
 STREAK PREDICTOR V4 - Edge-Based Analysis
 Paste raw active streaks → Auto-parse → Compare edges → Predict Over/Under, Winner, BTTS
