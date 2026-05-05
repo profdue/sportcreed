@@ -53,24 +53,9 @@ st.markdown("""
 # PARSER - HANDLES BOTH FORMATS
 # ============================================================================
 def parse_raw_text(raw_text: str) -> dict:
-    """Parse raw active streaks text into structured data.
-    Handles both 'Streak Name   Number' and 'Streak Name\nNumber' formats."""
+    """Parse raw active streaks text into structured data."""
     
-    # Pre-process: join split lines where a number is alone on a line
     lines = raw_text.strip().split('\n')
-    merged = []
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            i += 1
-            continue
-        # If this line is just a number and previous line exists, merge with previous
-        if re.match(r'^\d+$', line) and merged:
-            merged[-1] = merged[-1] + ' ' + line
-        else:
-            merged.append(line)
-        i += 1
     
     home_name = ""
     away_name = ""
@@ -79,6 +64,7 @@ def parse_raw_text(raw_text: str) -> dict:
     current_team = None
     found_home = False
     found_away = False
+    pending_number = None
     
     streak_keywords = [
         'scoring', 'over', 'under', 'unbeaten', 'win', 'loss', 'cold', 'hot',
@@ -86,53 +72,59 @@ def parse_raw_text(raw_text: str) -> dict:
         'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil'
     ]
     
-    for line in merged:
-        line = line.strip()
-        if not line:
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
             continue
         
-        if line.lower().startswith('active streaks'):
+        if stripped.lower().startswith('active streaks'):
             continue
         
-        # Extract all numbers from the line (including merged ones)
-        numbers = re.findall(r'(\d+)', line)
-        line_lower = line.lower()
+        # Check if this line is just a number
+        is_just_number = re.match(r'^\d+$', stripped)
+        
+        if is_just_number:
+            pending_number = int(stripped)
+            continue
+        
+        numbers = re.findall(r'(\d+)', stripped)
+        line_lower = stripped.lower()
         has_streak_keyword = any(kw in line_lower for kw in streak_keywords)
         
-        # Team name: no numbers AND no streak keywords
-        if not numbers and not has_streak_keyword:
+        # Team name detection
+        if not numbers and not has_streak_keyword and not is_just_number:
             if not found_home:
-                home_name = line
+                home_name = stripped
                 current_team = 'home'
                 found_home = True
             elif not found_away:
-                away_name = line
+                away_name = stripped
                 current_team = 'away'
                 found_away = True
             continue
         
-        # Parse streak lines
-        if numbers and current_team:
-            streak_value = int(numbers[-1])
-            streak_name = line
+        # Process streak line
+        if current_team:
+            # Use pending number if no number on this line
+            if numbers:
+                streak_value = int(numbers[-1])
+            elif pending_number is not None:
+                streak_value = pending_number
+            else:
+                pending_number = None
+                continue
             
-            # Remove the number(s)
-            for num in numbers:
+            pending_number = None
+            
+            # Clean streak name
+            streak_name = stripped
+            for num in re.findall(r'\d+', streak_name):
                 streak_name = streak_name.replace(num, '')
             
-            # Remove status words and symbols
-            for word in ['Landed', 'landed', 'Broken', 'broken', 'Extended', 'extended',
-                        'Needs 1 more goal', 'Under threat', 'At risk', 'On track', 'Alive',
-                        'Needs', 'need', 'more', 'goal', 'at', 'risk']:
-                streak_name = re.sub(r'\b' + word + r'\b', '', streak_name, flags=re.IGNORECASE)
-            
-            for sym in ['✓', '✕', '🏠', '✈️', '·']:
+            for sym in ['✓', '✕', '🏠', '✈️', '·', '(', ')']:
                 streak_name = streak_name.replace(sym, '')
             
-            # Clean up and normalize
             streak_name = ' '.join(streak_name.split()).strip()
-            # Remove trailing/leading special chars
-            streak_name = streak_name.strip(' -–—')
             
             if current_team == 'home' and streak_name:
                 home_data[streak_name] = max(home_data.get(streak_name, 0), streak_value)
