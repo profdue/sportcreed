@@ -1,4 +1,3 @@
-```python
 """
 STREAK PREDICTOR V4 - Edge-Based Analysis
 Paste raw active streaks → Auto-parse → Compare edges → Predict Over/Under, Winner, BTTS
@@ -73,14 +72,12 @@ def parse_raw_text(raw_text: str) -> dict:
         if line.lower().startswith('active streaks'):
             continue
         
-        # Check if line has a number or status keyword
         numbers = re.findall(r'(\d+)', line)
         has_status = any(kw in line.lower() for kw in [
             'landed', 'broken', 'under threat', 'needs', 'alive',
             'extended', 'at risk', 'on track'
         ])
         
-        # No numbers and no status = team name
         if not numbers and not has_status:
             if not found_home:
                 home_name = line
@@ -91,7 +88,6 @@ def parse_raw_text(raw_text: str) -> dict:
                 current_team = 'away'
             continue
         
-        # Parse streak lines
         if numbers and current_team:
             streak_value = int(numbers[-1])
             streak_name = line
@@ -168,7 +164,6 @@ def calculate_edges(home: dict, away: dict) -> dict:
     defensive_score = 0
     
     comparisons = [
-        # (display, h_key, a_key, h_type, a_type, weight)
         ("Scoring", "scoring", "scoring", "attack", "attack", 2),
         ("Over 2.5 Goals", "over25_goals", "over25_goals", "attack", "attack", 2),
         ("Over 2.5", "over25", "over25", "attack", "attack", 2),
@@ -219,8 +214,6 @@ def calculate_edges(home: dict, away: dict) -> dict:
             "home_val": h_val,
             "away_val": a_val,
             "edge": edge_to,
-            "h_type": h_type,
-            "a_type": a_type
         })
     
     return {
@@ -241,8 +234,6 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
     
     home_edges = edge_data["home_edge_count"]
     away_edges = edge_data["away_edge_count"]
-    att_score = edge_data["attacking_score"]
-    def_score = edge_data["defensive_score"]
     net = edge_data["net_score"]
     
     # Over/Under
@@ -317,7 +308,7 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_to_db(home_name, away_name, home_signals, away_signals, edge_data, predictions, raw_text):
+def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
     try:
         record = {
             "home_team": home_name,
@@ -413,7 +404,7 @@ def main():
         st.markdown("### 📋 Paste Raw Active Streaks")
         
         raw_text = st.text_area("Raw Data", height=300, key="raw_input",
-                                placeholder="Active streaks\nChelsea\nOver 0.5                19\nScoring                 0\n...\n\nNottingham Forest\nOver 0.5 ✈️            17\nScoring ✈️             8\n...")
+                                placeholder="Active streaks\nTeam A\nScoring              5\nOver 0.5             10\n\nTeam B\nScoring              3\nOver 0.5              8")
         
         if st.button("🔮 ANALYZE", type="primary"):
             if not raw_text.strip():
@@ -422,15 +413,14 @@ def main():
                 parsed = parse_raw_text(raw_text)
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
-                    st.error("Could not detect team names. Check the format.")
-                    st.write("Parsed data:", parsed)
+                    st.error(f"Could not detect team names. Home: '{parsed['home_name']}', Away: '{parsed['away_name']}'")
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
                     edge_data = calculate_edges(home_signals, away_signals)
                     predictions = predict(edge_data, home_signals, away_signals)
                     save_to_db(parsed["home_name"], parsed["away_name"],
-                              home_signals, away_signals, predictions, raw_text)
+                              home_signals, away_signals, predictions)
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -464,7 +454,7 @@ def main():
                             arrow = "←" if row["edge"] == "home" else "→" if row["edge"] == "away" else "↔"
                             st.markdown(f"""
                             <div class="edge-box {edge_class}">
-                                <strong>{row['signal']}</strong> ({row['h_type']}) &nbsp; {arrow} &nbsp;
+                                <strong>{row['signal']}</strong> &nbsp; {arrow} &nbsp;
                                 Home: {row['home_val']} | Away: {row['away_val']}
                             </div>
                             """, unsafe_allow_html=True)
@@ -611,7 +601,7 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             
-            if st.checkbox("📋 Show all results"):
+            if st.checkbox("Show all results"):
                 st.dataframe(pd.DataFrame([{
                     "date": r.get("match_date"),
                     "home": r.get("home_team"),
@@ -627,4 +617,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
