@@ -88,19 +88,20 @@ def parse_raw_text(raw_text: str) -> dict:
         if stripped.lower().startswith('active streaks'):
             continue
         
-        # Check if this line is just a number
-        is_just_number = re.match(r'^\d+$', stripped)
+        # Check if line is just a whole number (streak value on own line)
+        is_whole_number = re.match(r'^\d+$', stripped)
         
-        if is_just_number:
+        if is_whole_number:
             pending_number = int(stripped)
             continue
         
-        numbers = re.findall(r'(\d+)', stripped)
+        # Check for numbers (whole numbers only, not decimals like 0.5)
+        whole_numbers = re.findall(r'(?<!\d\.)\b(\d+)\b(?!\.\d)', stripped)
         line_lower = stripped.lower()
         has_streak_keyword = any(kw in line_lower for kw in streak_keywords)
         
         # Team name detection
-        if not numbers and not has_streak_keyword and not is_just_number:
+        if not whole_numbers and not has_streak_keyword:
             if not found_home:
                 home_name = stripped
                 current_team = 'home'
@@ -113,8 +114,9 @@ def parse_raw_text(raw_text: str) -> dict:
         
         # Process streak line
         if current_team:
-            if numbers:
-                streak_value = int(numbers[-1])
+            # Get the streak value: prefer number on same line, else use pending
+            if whole_numbers:
+                streak_value = int(whole_numbers[-1])
             elif pending_number is not None:
                 streak_value = pending_number
             else:
@@ -123,11 +125,11 @@ def parse_raw_text(raw_text: str) -> dict:
             
             pending_number = None
             
-            # Clean streak name - only remove the LAST number (the streak value)
+            # Clean streak name: remove ONLY the streak value number
             streak_name = stripped
-            if numbers:
-                last_num = numbers[-1]
-                streak_name = reverse_replace_last(streak_name, last_num, '')
+            if whole_numbers:
+                # Remove only the last whole number
+                streak_name = reverse_replace_last(streak_name, whole_numbers[-1], '')
             
             # Remove symbols
             for sym in ['✓', '✕', '🏠', '✈️', '·']:
