@@ -50,7 +50,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PARSER - HANDLES BOTH FORMATS
+# HELPERS
+# ============================================================================
+def reverse_replace_last(text, old, new):
+    """Replace the last occurrence of old in text with new."""
+    parts = text.rsplit(old, 1)
+    return new.join(parts)
+
+# ============================================================================
+# PARSER
 # ============================================================================
 def parse_raw_text(raw_text: str) -> dict:
     """Parse raw active streaks text into structured data."""
@@ -105,7 +113,6 @@ def parse_raw_text(raw_text: str) -> dict:
         
         # Process streak line
         if current_team:
-            # Use pending number if no number on this line
             if numbers:
                 streak_value = int(numbers[-1])
             elif pending_number is not None:
@@ -116,12 +123,14 @@ def parse_raw_text(raw_text: str) -> dict:
             
             pending_number = None
             
-            # Clean streak name
+            # Clean streak name - only remove the LAST number (the streak value)
             streak_name = stripped
-            for num in re.findall(r'\d+', streak_name):
-                streak_name = streak_name.replace(num, '')
+            if numbers:
+                last_num = numbers[-1]
+                streak_name = reverse_replace_last(streak_name, last_num, '')
             
-            for sym in ['✓', '✕', '🏠', '✈️', '·', '(', ')']:
+            # Remove symbols
+            for sym in ['✓', '✕', '🏠', '✈️', '·']:
                 streak_name = streak_name.replace(sym, '')
             
             streak_name = ' '.join(streak_name.split()).strip()
@@ -440,14 +449,9 @@ def main():
                 st.error("Please paste the raw active streaks data.")
             else:
                 parsed = parse_raw_text(raw_text)
-                st.write("DEBUG Home keys:", list(parsed["home_data"].items()))
-                st.write("DEBUG Away keys:", list(parsed["away_data"].items()))
-                
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
                     st.error(f"Could not detect team names. Found home: '{parsed['home_name']}', away: '{parsed['away_name']}'.")
-                    st.info(f"Home data keys found: {list(parsed['home_data'].keys())}")
-                    st.info(f"Away data keys found: {list(parsed['away_data'].keys())}")
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
