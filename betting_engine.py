@@ -1,14 +1,12 @@
-python
 """
 STREAK PREDICTOR V4 - Edge-Based Analysis
 Paste raw active streaks → Auto-parse → Compare edges → Predict Over/Under, Winner, BTTS
 """
 
 import streamlit as st
-from datetime import date, datetime
+from datetime import date
 from supabase import create_client, Client
 import pandas as pd
-import json
 import re
 
 # ============================================================================
@@ -48,8 +46,6 @@ st.markdown("""
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
     .score-label { font-size: 0.8rem; color: #94a3b8; }
-    .insight-box { background: #1a2a1a; border-left: 4px solid #10b981; padding: 0.8rem; border-radius: 8px; margin: 0.4rem 0; color: #fff; }
-    .warning-box { background: #2a1a1a; border-left: 4px solid #ef4444; padding: 0.8rem; border-radius: 8px; margin: 0.4rem 0; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -59,60 +55,61 @@ st.markdown("""
 def parse_raw_text(raw_text: str) -> dict:
     """Parse raw active streaks text into structured data"""
     
-    # Split into home and away sections
-    # Pattern: "Active streaks" followed by team data
-    sections = re.split(r'\n(?=[A-Z])', raw_text)
+    lines = raw_text.strip().split('\n')
     
-    home_data = {}
-    away_data = {}
     home_name = ""
     away_name = ""
+    home_data = {}
+    away_data = {}
     current_team = None
-    current_section = None
-    
-    lines = raw_text.strip().split('\n')
     
     for line in lines:
         line = line.strip()
         if not line:
             continue
         
-        # Skip header lines
         if line.lower().startswith('active streaks'):
             continue
         
-        # Check if this is a team name line (usually just text, no numbers)
-        if not re.search(r'\d', line) and not any(kw in line.lower() for kw in ['landed', 'broken', 'under threat', 'needs', 'alive', 'extended', 'at risk', 'on track']):
-            if not home_name:
-                home_name = line
-                current_team = 'home'
-            elif not away_name:
-                away_name = line
-                current_team = 'away'
+        # Check if this is a team name line
+        has_number = bool(re.search(r'\d', line))
+        has_status = any(kw in line.lower() for kw in [
+            'landed', 'broken', 'under threat', 'needs', 'alive',
+            'extended', 'at risk', 'on track'
+        ])
+        
+        if not has_number and not has_status and not home_name:
+            home_name = line
+            current_team = 'home'
+            continue
+        elif not has_number and not has_status and home_name and not away_name:
+            away_name = line
+            current_team = 'away'
             continue
         
-        # Parse streak lines
-        streak_match = re.match(r'(.+?)\s+(\d+)', line)
-        if streak_match:
-            streak_name = streak_match.group(1).strip()
-            streak_value = int(streak_match.group(2))
+        # Parse streak lines - extract number
+        numbers = re.findall(r'(\d+)', line)
+        if numbers:
+            streak_value = int(numbers[-1])
             
             # Clean streak name
-            streak_name = streak_name.replace('Landed', '').replace('✓', '').replace('✕', '').strip()
-            streak_name = streak_name.replace('Broken', '').strip()
-            streak_name = streak_name.replace('Extended', '').strip()
-            streak_name = streak_name.replace('Needs 1 more goal', '').strip()
-            streak_name = streak_name.replace('Under threat', '').strip()
-            streak_name = streak_name.replace('At risk', '').strip()
-            streak_name = streak_name.replace('On track', '').strip()
-            streak_name = streak_name.replace('Alive', '').strip()
+            streak_name = line
+            for num in numbers:
+                streak_name = streak_name.replace(num, '')
+            streak_name = streak_name.replace('Landed', '').replace('✓', '').replace('✕', '')
+            streak_name = streak_name.replace('Broken', '').replace('Extended', '')
+            streak_name = streak_name.replace('Needs 1 more goal', '')
+            streak_name = streak_name.replace('Under threat', '')
+            streak_name = streak_name.replace('At risk', '')
+            streak_name = streak_name.replace('On track', '')
+            streak_name = streak_name.replace('Alive', '')
+            streak_name = streak_name.replace('🏠', '').replace('✈️', '')
+            streak_name = streak_name.replace('(hidden)', '(hidden)')
+            streak_name = ' '.join(streak_name.split()).strip()
             
-            # Remove emojis
-            streak_name = streak_name.replace('🏠', '').replace('✈️', '').strip()
-            
-            if current_team == 'home':
+            if current_team == 'home' and streak_name:
                 home_data[streak_name] = streak_value
-            elif current_team == 'away':
+            elif current_team == 'away' and streak_name:
                 away_data[streak_name] = streak_value
     
     return {
@@ -123,37 +120,38 @@ def parse_raw_text(raw_text: str) -> dict:
     }
 
 
-def get_signal_value(data: dict, signal_keys: list) -> int:
-    """Get the highest value from multiple possible keys"""
-    for key in signal_keys:
+def get_signal(data: dict, keys: list) -> int:
+    """Get highest value from multiple possible keys"""
+    best = 0
+    for key in keys:
         if key in data:
-            return data[key]
-    return 0
+            best = max(best, data[key])
+    return best
 
 
 def extract_signals(team_data: dict) -> dict:
     """Extract all relevant signals from parsed team data"""
     return {
-        "scoring": get_signal_value(team_data, ["Scoring"]),
-        "over05": get_signal_value(team_data, ["Over 0.5"]),
-        "over25_goals": get_signal_value(team_data, ["Over 2.5 Goals"]),
-        "over25": get_signal_value(team_data, ["Over 2.5"]),
-        "over15_hidden": get_signal_value(team_data, ["Over 1.5 (hidden)"]),
-        "unbeaten": get_signal_value(team_data, ["Unbeaten"]),
-        "win": get_signal_value(team_data, ["Win"]),
-        "hot_form": get_signal_value(team_data, ["Hot Form"]),
-        "goals2": get_signal_value(team_data, ["Goals 2+"]),
-        "goals3": get_signal_value(team_data, ["Goals 3+"]),
-        "without_win": get_signal_value(team_data, ["Without Win"]),
-        "loss": get_signal_value(team_data, ["Loss"]),
-        "cold_form": get_signal_value(team_data, ["Cold Form"]),
-        "btts": get_signal_value(team_data, ["BTTS"]),
-        "no_btts": get_signal_value(team_data, ["No BTTS"]),
-        "clean_sheet": get_signal_value(team_data, ["Clean Sheet"]),
-        "under25": get_signal_value(team_data, ["Under 2.5 Goals"]),
-        "goal_drought": get_signal_value(team_data, ["Goal Drought"]),
-        "first_to_score": get_signal_value(team_data, ["First to Score"]),
-        "heavy_defeats": get_signal_value(team_data, ["Heavy Defeats"]),
+        "scoring": get_signal(team_data, ["Scoring"]),
+        "over05": get_signal(team_data, ["Over 0.5"]),
+        "over25_goals": get_signal(team_data, ["Over 2.5 Goals"]),
+        "over25": get_signal(team_data, ["Over 2.5"]),
+        "over15_hidden": get_signal(team_data, ["Over 1.5 (hidden)"]),
+        "unbeaten": get_signal(team_data, ["Unbeaten"]),
+        "win": get_signal(team_data, ["Win"]),
+        "hot_form": get_signal(team_data, ["Hot Form"]),
+        "goals2": get_signal(team_data, ["Goals 2+"]),
+        "goals3": get_signal(team_data, ["Goals 3+"]),
+        "without_win": get_signal(team_data, ["Without Win"]),
+        "loss": get_signal(team_data, ["Loss"]),
+        "cold_form": get_signal(team_data, ["Cold Form"]),
+        "btts": get_signal(team_data, ["BTTS"]),
+        "no_btts": get_signal(team_data, ["No BTTS"]),
+        "clean_sheet": get_signal(team_data, ["Clean Sheet"]),
+        "under25": get_signal(team_data, ["Under 2.5 Goals"]),
+        "goal_drought": get_signal(team_data, ["Goal Drought"]),
+        "first_to_score": get_signal(team_data, ["First to Score"]),
+        "heavy_defeats": get_signal(team_data, ["Heavy Defeats"]),
     }
 
 
@@ -169,33 +167,29 @@ def calculate_edges(home: dict, away: dict) -> dict:
     attacking_score = 0
     defensive_score = 0
     
-    # Define signal comparisons
     comparisons = [
-        # (display_name, home_key, away_key, type, home_weight, away_weight)
-        ("Scoring", "scoring", "scoring", "attack", 2, 2),
-        ("Over 2.5 Goals", "over25_goals", "over25_goals", "attack", 2, 2),
-        ("Over 2.5", "over25", "over25", "attack", 2, 2),
-        ("Over 1.5(hidden)", "over15_hidden", "over15_hidden", "attack", 2, 2),
-        ("Goals 2+", "goals2", "goals2", "attack", 1, 1),
-        ("Goals 3+", "goals3", "goals3", "attack", 1, 1),
-        ("BTTS", "btts", "btts", "attack", 1, 1),
-        ("First to Score", "first_to_score", "first_to_score", "attack", 1, 1),
-        
-        ("Unbeaten", "unbeaten", "unbeaten", "defense", -1, -1),
-        ("Win", "win", "win", "attack", 2, 2),
-        ("Hot Form", "hot_form", "hot_form", "attack", 2, 2),
-        ("Clean Sheet", "clean_sheet", "clean_sheet", "defense", -2, -2),
-        ("No BTTS", "no_btts", "no_btts", "defense", -1, -1),
-        ("Under 2.5 Goals", "under25", "under25", "defense", -1, -1),
-        
-        ("Without Win", "without_win", "without_win", "defense", -1, -1),
-        ("Loss", "loss", "loss", "defense", -2, -2),
-        ("Cold Form", "cold_form", "cold_form", "defense", -2, -2),
-        ("Goal Drought", "goal_drought", "goal_drought", "defense", -1, -1),
-        ("Heavy Defeats", "heavy_defeats", "heavy_defeats", "defense", -2, -2),
+        ("Scoring", "scoring", "scoring", "attack", 2),
+        ("Over 2.5 Goals", "over25_goals", "over25_goals", "attack", 2),
+        ("Over 2.5", "over25", "over25", "attack", 2),
+        ("Over 1.5(hidden)", "over15_hidden", "over15_hidden", "attack", 2),
+        ("Goals 2+", "goals2", "goals2", "attack", 1),
+        ("Goals 3+", "goals3", "goals3", "attack", 1),
+        ("BTTS", "btts", "btts", "attack", 1),
+        ("First to Score", "first_to_score", "first_to_score", "attack", 1),
+        ("Unbeaten", "unbeaten", "unbeaten", "defense", 1),
+        ("Win", "win", "win", "attack", 2),
+        ("Hot Form", "hot_form", "hot_form", "attack", 2),
+        ("Clean Sheet", "clean_sheet", "clean_sheet", "defense", 2),
+        ("No BTTS", "no_btts", "no_btts", "defense", 1),
+        ("Under 2.5 Goals", "under25", "under25", "defense", 1),
+        ("Without Win", "without_win", "without_win", "defense", 1),
+        ("Loss", "loss", "loss", "defense", 2),
+        ("Cold Form", "cold_form", "cold_form", "defense", 2),
+        ("Goal Drought", "goal_drought", "goal_drought", "defense", 1),
+        ("Heavy Defeats", "heavy_defeats", "heavy_defeats", "defense", 2),
     ]
     
-    for display, h_key, a_key, sig_type, h_weight, a_weight in comparisons:
+    for display, h_key, a_key, sig_type, weight in comparisons:
         h_val = home.get(h_key, 0)
         a_val = away.get(a_key, 0)
         
@@ -206,16 +200,16 @@ def calculate_edges(home: dict, away: dict) -> dict:
             edge_to = "home"
             home_edge_count += 1
             if sig_type == "attack":
-                attacking_score += h_weight
+                attacking_score += weight
             else:
-                defensive_score += abs(h_weight)
+                defensive_score += weight
         elif a_val > h_val:
             edge_to = "away"
             away_edge_count += 1
             if sig_type == "attack":
-                attacking_score += a_weight
+                attacking_score += weight
             else:
-                defensive_score += abs(a_weight)
+                defensive_score += weight
         else:
             edge_to = "even"
         
@@ -266,6 +260,8 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
         over_under = "SKIP"
         over_conf = 50
     
+    over_conf = min(95, max(35, over_conf))
+    
     # Winner
     edge_diff = home_edges - away_edges
     if home_edges >= 6 and edge_diff >= 3:
@@ -284,20 +280,22 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
         winner = "AWAY"
         win_conf = 55 + abs(edge_diff) * 3
     
+    win_conf = min(95, max(35, win_conf))
+    
     # BTTS
     home_scores = home.get("scoring", 0) > 0
     away_scores = away.get("scoring", 0) > 0
-    has_btts_signal = home.get("btts", 0) >= 3 or away.get("btts", 0) >= 3
-    home_no_btts = home.get("no_btts", 0) >= 3
-    away_no_btts = away.get("no_btts", 0) >= 3
+    has_btts = home.get("btts", 0) >= 3 or away.get("btts", 0) >= 3
+    home_nobtts = home.get("no_btts", 0) >= 3
+    away_nobtts = away.get("no_btts", 0) >= 3
     
-    if home_scores and away_scores and has_btts_signal:
+    if home_scores and away_scores and has_btts:
         btts = "BTTS YES"
         btts_conf = 75
     elif home_scores and away_scores:
         btts = "BTTS YES"
         btts_conf = 60
-    elif home_no_btts or away_no_btts:
+    elif home_nobtts or away_nobtts:
         btts = "BTTS NO"
         btts_conf = 65
     else:
@@ -306,9 +304,9 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
     
     return {
         "over_under": over_under,
-        "over_confidence": min(95, max(35, over_conf)),
+        "over_confidence": over_conf,
         "winner": winner,
-        "winner_confidence": min(95, max(35, win_conf)),
+        "winner_confidence": win_conf,
         "btts": btts,
         "btts_confidence": min(95, max(35, btts_conf)),
     }
@@ -317,8 +315,7 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
 # ============================================================================
 # SUPABASE FUNCTIONS
 # ============================================================================
-def save_to_db(home_name: str, away_name: str, home_signals: dict, away_signals: dict,
-               edge_data: dict, predictions: dict, raw_text: str):
+def save_to_db(home_name, away_name, home_signals, away_signals, edge_data, predictions, raw_text):
     try:
         record = {
             "home_team": home_name,
@@ -326,14 +323,12 @@ def save_to_db(home_name: str, away_name: str, home_signals: dict, away_signals:
             "match_date": str(date.today()),
             "home_data": home_signals,
             "away_data": away_signals,
-            "edge_data": edge_data,
             "prediction": predictions["over_under"],
             "confidence_score": predictions["over_confidence"] / 100,
             "winner": predictions["winner"],
             "winner_confidence": f"{predictions['winner_confidence']:.0f}%",
             "btts": predictions["btts"],
             "btts_confidence": predictions["btts_confidence"] / 100,
-            "raw_text": raw_text,
             "result_entered": False,
         }
         response = supabase.table("analyses").insert(record).execute()
@@ -412,12 +407,8 @@ def main():
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
-    # ============================================================================
-    # TAB 1: ANALYZE
-    # ============================================================================
     with tab1:
         st.markdown("### 📋 Paste Raw Active Streaks")
-        st.caption("Copy the full 'Active streaks' section from the source site and paste below")
         
         raw_text = st.text_area("Raw Data", height=300, key="raw_input",
                                 placeholder="Active streaks\nChelsea\nOver 0.5                19\nScoring                 0\n...\n\nNottingham Forest\nOver 0.5 ✈️            17\nScoring ✈️             8\n...")
@@ -426,7 +417,6 @@ def main():
             if not raw_text.strip():
                 st.error("Please paste the raw active streaks data.")
             else:
-                # Parse
                 parsed = parse_raw_text(raw_text)
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
@@ -434,23 +424,12 @@ def main():
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
-                    
-                    # Calculate edges
                     edge_data = calculate_edges(home_signals, away_signals)
-                    
-                    # Predict
                     predictions = predict(edge_data, home_signals, away_signals)
-                    
-                    # Save
                     save_to_db(parsed["home_name"], parsed["away_name"],
                               home_signals, away_signals, edge_data, predictions, raw_text)
                     
-                    # ============================================================
-                    # DISPLAY RESULTS
-                    # ============================================================
-                    
                     col1, col2 = st.columns(2)
-                    
                     with col1:
                         st.markdown(f"""
                         <div class="edge-box edge-home">
@@ -462,7 +441,6 @@ def main():
                             Without Win: {home_signals['without_win']} | Loss: {home_signals['loss']} | Cold: {home_signals['cold_form']}
                         </div>
                         """, unsafe_allow_html=True)
-                    
                     with col2:
                         st.markdown(f"""
                         <div class="edge-box edge-away">
@@ -475,9 +453,7 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # Edge comparison
                     st.markdown("### ⚔️ Edge Comparison")
-                    
                     edge_df = pd.DataFrame(edge_data["edges"])
                     if not edge_df.empty:
                         for _, row in edge_df.iterrows():
@@ -486,11 +462,10 @@ def main():
                             st.markdown(f"""
                             <div class="edge-box {edge_class}">
                                 <strong>{row['signal']}</strong> ({row['type']}) &nbsp; {arrow} &nbsp;
-                                Home: {row['home_val']} | Away: {row['away_val']} | Edge: {row['edge'].upper()}
+                                Home: {row['home_val']} | Away: {row['away_val']}
                             </div>
                             """, unsafe_allow_html=True)
                     
-                    # Summary
                     st.markdown("### 📊 Edge Summary")
                     c1, c2, c3, c4 = st.columns(4)
                     with c1:
@@ -502,9 +477,7 @@ def main():
                     with c4:
                         st.metric("Net Score", edge_data["net_score"])
                     
-                    # Predictions
                     st.markdown("### 🎯 Predictions")
-                    
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
@@ -546,9 +519,6 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
     
-    # ============================================================================
-    # TAB 2: POST-MATCH
-    # ============================================================================
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending()
@@ -596,9 +566,6 @@ def main():
         else:
             st.info("No pending analyses.")
     
-    # ============================================================================
-    # TAB 3: RECORDS
-    # ============================================================================
     with tab3:
         st.subheader("📊 Records")
         results = get_results()
@@ -657,4 +624,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    """
