@@ -63,6 +63,13 @@ def parse_raw_text(raw_text: str) -> dict:
     away_data = {}
     current_team = None
     found_home = False
+    found_away = False
+    
+    streak_keywords = [
+        'scoring', 'over', 'under', 'unbeaten', 'win', 'loss', 'cold', 'hot',
+        'goals', 'btts', 'clean', 'without', 'first', 'goal', 'heavy', 'rampage',
+        'frenzy', 'drought', 'defeats', 'sheet', 'form'
+    ]
     
     for line in lines:
         line = line.strip()
@@ -73,34 +80,36 @@ def parse_raw_text(raw_text: str) -> dict:
             continue
         
         numbers = re.findall(r'(\d+)', line)
-        has_status = any(kw in line.lower() for kw in [
-            'landed', 'broken', 'under threat', 'needs', 'alive',
-            'extended', 'at risk', 'on track'
-        ])
+        line_lower = line.lower()
+        has_streak_keyword = any(kw in line_lower for kw in streak_keywords)
         
-        if not numbers and not has_status:
+        # Team name: no numbers AND no streak keywords
+        if not numbers and not has_streak_keyword:
             if not found_home:
                 home_name = line
                 current_team = 'home'
                 found_home = True
-            elif not away_name:
+            elif not found_away:
                 away_name = line
                 current_team = 'away'
+                found_away = True
             continue
         
+        # Parse streak lines
         if numbers and current_team:
             streak_value = int(numbers[-1])
             streak_name = line
+            
             for num in numbers:
                 streak_name = streak_name.replace(num, '')
-            streak_name = streak_name.replace('Landed', '').replace('✓', '').replace('✕', '')
-            streak_name = streak_name.replace('Broken', '').replace('Extended', '')
-            streak_name = streak_name.replace('Needs 1 more goal', '')
-            streak_name = streak_name.replace('Under threat', '')
-            streak_name = streak_name.replace('At risk', '')
-            streak_name = streak_name.replace('On track', '')
-            streak_name = streak_name.replace('Alive', '')
-            streak_name = streak_name.replace('🏠', '').replace('✈️', '')
+            
+            for word in ['Landed', 'landed', 'Broken', 'broken', 'Extended', 'extended',
+                        'Needs 1 more goal', 'Under threat', 'At risk', 'On track', 'Alive']:
+                streak_name = streak_name.replace(word, '')
+            
+            for sym in ['✓', '✕', '🏠', '✈️']:
+                streak_name = streak_name.replace(sym, '')
+            
             streak_name = ' '.join(streak_name.split()).strip()
             
             if current_team == 'home' and streak_name:
@@ -148,6 +157,8 @@ def extract_signals(team_data: dict) -> dict:
         "goal_drought": get_signal(team_data, ["Goal Drought"]),
         "first_to_score": get_signal(team_data, ["First to Score"]),
         "heavy_defeats": get_signal(team_data, ["Heavy Defeats"]),
+        "goal_frenzy": get_signal(team_data, ["Goal Frenzy"]),
+        "rampage_attack": get_signal(team_data, ["Rampage Attack"]),
     }
 
 
@@ -174,6 +185,8 @@ def calculate_edges(home: dict, away: dict) -> dict:
         ("First to Score", "first_to_score", "first_to_score", "attack", "attack", 1),
         ("Win", "win", "win", "attack", "attack", 2),
         ("Hot Form", "hot_form", "hot_form", "attack", "attack", 2),
+        ("Goal Frenzy", "goal_frenzy", "goal_frenzy", "attack", "attack", 2),
+        ("Rampage Attack", "rampage_attack", "rampage_attack", "attack", "attack", 3),
         ("Unbeaten", "unbeaten", "unbeaten", "defense", "defense", 1),
         ("Clean Sheet", "clean_sheet", "clean_sheet", "defense", "defense", 2),
         ("No BTTS", "no_btts", "no_btts", "defense", "defense", 1),
@@ -413,7 +426,7 @@ def main():
                 parsed = parse_raw_text(raw_text)
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
-                    st.error(f"Could not detect team names. Home: '{parsed['home_name']}', Away: '{parsed['away_name']}'")
+                    st.error(f"Could not detect team names. Found home: '{parsed['home_name']}', away: '{parsed['away_name']}'. Check the format.")
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
