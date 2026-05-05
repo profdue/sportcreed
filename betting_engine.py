@@ -50,12 +50,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PARSER
+# PARSER - HANDLES BOTH FORMATS
 # ============================================================================
 def parse_raw_text(raw_text: str) -> dict:
-    """Parse raw active streaks text into structured data"""
+    """Parse raw active streaks text into structured data.
+    Handles both 'Streak Name   Number' and 'Streak Name\nNumber' formats."""
     
+    # Pre-process: join split lines where a number is alone on a line
     lines = raw_text.strip().split('\n')
+    merged = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        # If this line is just a number and previous line exists, merge with previous
+        if re.match(r'^\d+$', line) and merged:
+            merged[-1] = merged[-1] + ' ' + line
+        else:
+            merged.append(line)
+        i += 1
     
     home_name = ""
     away_name = ""
@@ -68,10 +83,10 @@ def parse_raw_text(raw_text: str) -> dict:
     streak_keywords = [
         'scoring', 'over', 'under', 'unbeaten', 'win', 'loss', 'cold', 'hot',
         'goals', 'btts', 'clean', 'without', 'first', 'goal', 'heavy', 'rampage',
-        'frenzy', 'drought', 'defeats', 'sheet', 'form'
+        'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil'
     ]
     
-    for line in lines:
+    for line in merged:
         line = line.strip()
         if not line:
             continue
@@ -79,6 +94,7 @@ def parse_raw_text(raw_text: str) -> dict:
         if line.lower().startswith('active streaks'):
             continue
         
+        # Extract all numbers from the line (including merged ones)
         numbers = re.findall(r'(\d+)', line)
         line_lower = line.lower()
         has_streak_keyword = any(kw in line_lower for kw in streak_keywords)
@@ -100,17 +116,23 @@ def parse_raw_text(raw_text: str) -> dict:
             streak_value = int(numbers[-1])
             streak_name = line
             
+            # Remove the number(s)
             for num in numbers:
                 streak_name = streak_name.replace(num, '')
             
+            # Remove status words and symbols
             for word in ['Landed', 'landed', 'Broken', 'broken', 'Extended', 'extended',
-                        'Needs 1 more goal', 'Under threat', 'At risk', 'On track', 'Alive']:
-                streak_name = streak_name.replace(word, '')
+                        'Needs 1 more goal', 'Under threat', 'At risk', 'On track', 'Alive',
+                        'Needs', 'need', 'more', 'goal', 'at', 'risk']:
+                streak_name = re.sub(r'\b' + word + r'\b', '', streak_name, flags=re.IGNORECASE)
             
-            for sym in ['✓', '✕', '🏠', '✈️']:
+            for sym in ['✓', '✕', '🏠', '✈️', '·']:
                 streak_name = streak_name.replace(sym, '')
             
+            # Clean up and normalize
             streak_name = ' '.join(streak_name.split()).strip()
+            # Remove trailing/leading special chars
+            streak_name = streak_name.strip(' -–—')
             
             if current_team == 'home' and streak_name:
                 home_data[streak_name] = max(home_data.get(streak_name, 0), streak_value)
@@ -159,6 +181,7 @@ def extract_signals(team_data: dict) -> dict:
         "heavy_defeats": get_signal(team_data, ["Heavy Defeats"]),
         "goal_frenzy": get_signal(team_data, ["Goal Frenzy"]),
         "rampage_attack": get_signal(team_data, ["Rampage Attack"]),
+        "win_to_nil": get_signal(team_data, ["Win to Nil"]),
     }
 
 
@@ -187,6 +210,7 @@ def calculate_edges(home: dict, away: dict) -> dict:
         ("Hot Form", "hot_form", "hot_form", "attack", "attack", 2),
         ("Goal Frenzy", "goal_frenzy", "goal_frenzy", "attack", "attack", 2),
         ("Rampage Attack", "rampage_attack", "rampage_attack", "attack", "attack", 3),
+        ("Win to Nil", "win_to_nil", "win_to_nil", "defense", "defense", 2),
         ("Unbeaten", "unbeaten", "unbeaten", "defense", "defense", 1),
         ("Clean Sheet", "clean_sheet", "clean_sheet", "defense", "defense", 2),
         ("No BTTS", "no_btts", "no_btts", "defense", "defense", 1),
@@ -426,7 +450,9 @@ def main():
                 parsed = parse_raw_text(raw_text)
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
-                    st.error(f"Could not detect team names. Found home: '{parsed['home_name']}', away: '{parsed['away_name']}'. Check the format.")
+                    st.error(f"Could not detect team names. Found home: '{parsed['home_name']}', away: '{parsed['away_name']}'.")
+                    st.info(f"Home data keys found: {list(parsed['home_data'].keys())}")
+                    st.info(f"Away data keys found: {list(parsed['away_data'].keys())}")
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
@@ -434,6 +460,8 @@ def main():
                     predictions = predict(edge_data, home_signals, away_signals)
                     save_to_db(parsed["home_name"], parsed["away_name"],
                               home_signals, away_signals, predictions)
+                    
+                    st.success(f"✅ Parsed: {parsed['home_name']} vs {parsed['away_name']}")
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -459,16 +487,15 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    st.markdown("### ⚔️ Edge Comparison")
-                    edge_df = pd.DataFrame(edge_data["edges"])
-                    if not edge_df.empty:
-                        for _, row in edge_df.iterrows():
-                            edge_class = "edge-home" if row["edge"] == "home" else "edge-away" if row["edge"] == "away" else "edge-even"
-                            arrow = "←" if row["edge"] == "home" else "→" if row["edge"] == "away" else "↔"
+                    if edge_data["edges"]:
+                        st.markdown("### ⚔️ Edge Comparison")
+                        for edge in edge_data["edges"]:
+                            edge_class = "edge-home" if edge["edge"] == "home" else "edge-away" if edge["edge"] == "away" else "edge-even"
+                            arrow = "←" if edge["edge"] == "home" else "→" if edge["edge"] == "away" else "↔"
                             st.markdown(f"""
                             <div class="edge-box {edge_class}">
-                                <strong>{row['signal']}</strong> &nbsp; {arrow} &nbsp;
-                                Home: {row['home_val']} | Away: {row['away_val']}
+                                <strong>{edge['signal']}</strong> &nbsp; {arrow} &nbsp;
+                                Home: {edge['home_val']} | Away: {edge['away_val']}
                             </div>
                             """, unsafe_allow_html=True)
                     
@@ -547,13 +574,10 @@ def main():
                         over25 = total > 2
                         if home_goals > away_goals:
                             actual_winner = "HOME"
-                            winner_display = f"🏠 {home_team} WIN"
                         elif away_goals > home_goals:
                             actual_winner = "AWAY"
-                            winner_display = f"✈️ {away_team} WIN"
                         else:
                             actual_winner = "DRAW"
-                            winner_display = "🤝 DRAW"
                         
                         btts_yes = home_goals > 0 and away_goals > 0
                         
@@ -561,7 +585,6 @@ def main():
                         <div class="score-box">
                             <div class="score-number">{home_goals} - {away_goals}</div>
                             <div class="score-label">Total: {total} | {'Over 2.5' if over25 else 'Under 2.5'} | BTTS: {'Yes' if btts_yes else 'No'}</div>
-                            <div class="score-label">{winner_display}</div>
                         </div>
                         """, unsafe_allow_html=True)
                     
