@@ -440,6 +440,9 @@ def main():
                 st.error("Please paste the raw active streaks data.")
             else:
                 parsed = parse_raw_text(raw_text)
+                st.write("DEBUG Home keys:", list(parsed["home_data"].items()))
+                st.write("DEBUG Away keys:", list(parsed["away_data"].items()))
+                
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
                     st.error(f"Could not detect team names. Found home: '{parsed['home_name']}', away: '{parsed['away_name']}'.")
