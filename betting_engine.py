@@ -77,7 +77,7 @@ def parse_raw_text(raw_text: str) -> dict:
     streak_keywords = [
         'scoring', 'over', 'under', 'unbeaten', 'win', 'loss', 'cold', 'hot',
         'goals', 'btts', 'clean', 'without', 'first', 'goal', 'heavy', 'rampage',
-        'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil'
+        'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil', 'dominance',
     ]
     
     for line in lines:
