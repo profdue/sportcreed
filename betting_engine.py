@@ -64,6 +64,7 @@ def reverse_replace_last(text, old, new):
     parts = text.rsplit(old, 1)
     return new.join(parts)
 
+
 # ============================================================================
 # PARSER
 # ============================================================================
@@ -192,7 +193,7 @@ def extract_signals(team_data: dict) -> dict:
 # TIER 1: LOCK DETECTOR
 # ============================================================================
 def check_locks(home: dict, away: dict) -> dict:
-    """Check all lock conditions. Locks always override edge predictions."""
+    """Check all lock conditions. Returns dict of locked markets with confidence (0-100 scale)."""
     locks = {}
     
     # ========================================================================
@@ -202,19 +203,19 @@ def check_locks(home: dict, away: dict) -> dict:
     # Lock 1: Scoring ≥ 10 (one team) + Opponent over25_goals ≥ 7
     if (home.get("scoring", 0) >= 10 and away.get("over25_goals", 0) >= 7):
         locks["over_under"] = {
-            "prediction": "OVER 2.5", "confidence": 0.95, "tier": "LOCK",
+            "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
             "reason": "Home scoring ≥ 10 + Away over25_goals ≥ 7"
         }
     elif (away.get("scoring", 0) >= 10 and home.get("over25_goals", 0) >= 7):
         locks["over_under"] = {
-            "prediction": "OVER 2.5", "confidence": 0.95, "tier": "LOCK",
+            "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
             "reason": "Away scoring ≥ 10 + Home over25_goals ≥ 7"
         }
     
     # Lock 2: Both teams scoring ≥ 10
     elif home.get("scoring", 0) >= 10 and away.get("scoring", 0) >= 10:
         locks["over_under"] = {
-            "prediction": "OVER 2.5", "confidence": 0.90, "tier": "LOCK",
+            "prediction": "OVER 2.5", "confidence": 90, "tier": "LOCK",
             "reason": "Both teams scoring ≥ 10"
         }
     
@@ -225,19 +226,19 @@ def check_locks(home: dict, away: dict) -> dict:
     # BTTS YES Lock: Both btts ≥ 5
     if home.get("btts", 0) >= 5 and away.get("btts", 0) >= 5:
         locks["btts"] = {
-            "prediction": "BTTS YES", "confidence": 0.85, "tier": "LOCK",
+            "prediction": "BTTS YES", "confidence": 85, "tier": "LOCK",
             "reason": "Both btts ≥ 5"
         }
     
     # BTTS NO Lock: Either no_btts ≥ 4 + Opponent scoring ≤ 5
     if (home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5):
         locks["btts"] = {
-            "prediction": "BTTS NO", "confidence": 0.75, "tier": "LOCK",
+            "prediction": "BTTS NO", "confidence": 75, "tier": "LOCK",
             "reason": "Home no_btts ≥ 4 + Away scoring ≤ 5"
         }
     elif (away.get("no_btts", 0) >= 4 and home.get("scoring", 0) <= 5):
         locks["btts"] = {
-            "prediction": "BTTS NO", "confidence": 0.75, "tier": "LOCK",
+            "prediction": "BTTS NO", "confidence": 75, "tier": "LOCK",
             "reason": "Away no_btts ≥ 4 + Home scoring ≤ 5"
         }
     
@@ -248,14 +249,14 @@ def check_locks(home: dict, away: dict) -> dict:
     # HOME WIN Lock: Home first_to_score ≥ 5 + Away first_to_score = 0
     if home.get("first_to_score", 0) >= 5 and away.get("first_to_score", 0) == 0:
         locks["winner"] = {
-            "prediction": "HOME", "confidence": 0.90, "tier": "LOCK",
+            "prediction": "HOME", "confidence": 90, "tier": "LOCK",
             "reason": "Home first_to_score ≥ 5 + Away first_to_score = 0"
         }
     
     # AWAY WIN Lock: Home without_win ≥ 4 + Home over25_goals ≥ 7 + Away win_to_nil ≥ 3
     if home.get("without_win", 0) >= 4 and home.get("over25_goals", 0) >= 7 and away.get("win_to_nil", 0) >= 3:
         locks["winner"] = {
-            "prediction": "AWAY", "confidence": 0.90, "tier": "LOCK",
+            "prediction": "AWAY", "confidence": 90, "tier": "LOCK",
             "reason": "Home collapse + Away win_to_nil ≥ 3"
         }
     
@@ -263,7 +264,7 @@ def check_locks(home: dict, away: dict) -> dict:
     if home.get("unbeaten", 0) >= 8 and away.get("unbeaten", 0) >= 8 and \
        home.get("first_to_score", 0) <= 3 and away.get("first_to_score", 0) <= 3:
         locks["winner"] = {
-            "prediction": "DRAW", "confidence": 0.70, "tier": "LOCK",
+            "prediction": "DRAW", "confidence": 70, "tier": "LOCK",
             "reason": "Both unbeaten ≥ 8 + low first_to_score"
         }
     
@@ -350,10 +351,10 @@ def calculate_edges(home: dict, away: dict) -> dict:
 
 
 # ============================================================================
-# TIER 2: EDGE-BASED PREDICTIONS
+# TIER 2: EDGE-BASED PREDICTIONS (returns confidence on 0-100 scale)
 # ============================================================================
 def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
-    """Generate predictions from edge data (Tier 2)"""
+    """Generate predictions from edge data (Tier 2). All confidences on 0-100 scale."""
     
     home_edges = edge_data["home_edge_count"]
     away_edges = edge_data["away_edge_count"]
@@ -429,10 +430,10 @@ def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
 
 
 # ============================================================================
-# TIER 3: MERGE LOCKS + EDGES
+# TIER 3: MERGE LOCKS + EDGES (all confidences on 0-100 scale)
 # ============================================================================
 def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
-    """Tier 1 locks override Tier 2 edges."""
+    """Tier 1 locks override Tier 2 edges. All confidences are percentages (0-100)."""
     
     locks = check_locks(home, away)
     edges = predict_from_edges(edge_data, home, away)
@@ -445,7 +446,7 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
     else:
         final["over_under"] = {
             "prediction": edges["over_under"],
-            "confidence": edges["over_confidence"] / 100,
+            "confidence": edges["over_confidence"],
             "tier": "EDGE",
             "reason": f"Edge comparison (net score: {edge_data['net_score']})"
         }
@@ -456,7 +457,7 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
     else:
         final["winner"] = {
             "prediction": edges["winner"],
-            "confidence": edges["winner_confidence"] / 100,
+            "confidence": edges["winner_confidence"],
             "tier": "EDGE",
             "reason": f"Edge comparison (diff: {edge_data['home_edge_count'] - edge_data['away_edge_count']})"
         }
@@ -467,7 +468,7 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
     else:
         final["btts"] = {
             "prediction": edges["btts"],
-            "confidence": edges["btts_confidence"] / 100,
+            "confidence": edges["btts_confidence"],
             "tier": "EDGE",
             "reason": "Edge comparison"
         }
@@ -479,6 +480,7 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
 # SUPABASE FUNCTIONS
 # ============================================================================
 def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
+    """Save analysis to database. predictions dict has confidences as percentages (0-100)."""
     try:
         record = {
             "home_team": home_name,
@@ -487,11 +489,11 @@ def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
             "home_data": home_signals,
             "away_data": away_signals,
             "prediction": predictions["over_under"]["prediction"],
-            "confidence_score": predictions["over_under"]["confidence"],
+            "confidence_score": predictions["over_under"]["confidence"] / 100,
             "winner": predictions["winner"]["prediction"],
             "winner_confidence": f"{predictions['winner']['confidence']:.0f}%",
             "btts": predictions["btts"]["prediction"],
-            "btts_confidence": predictions["btts"]["confidence"],
+            "btts_confidence": predictions["btts"]["confidence"] / 100,
             "result_entered": False,
         }
         response = supabase.table("analyses").insert(record).execute()
@@ -594,7 +596,6 @@ def main():
                     
                     st.success(f"✅ Parsed: {parsed['home_name']} vs {parsed['away_name']}")
                     
-                    # Signal Summary
                     col1, col2 = st.columns(2)
                     with col1:
                         st.markdown(f"""
@@ -619,7 +620,6 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # Edge Comparison
                     if edge_data["edges"]:
                         st.markdown("### ⚔️ Edge Comparison")
                         for edge in edge_data["edges"]:
@@ -632,7 +632,6 @@ def main():
                             </div>
                             """, unsafe_allow_html=True)
                     
-                    # Predictions
                     st.markdown("### 🎯 Predictions")
                     col1, col2, col3 = st.columns(3)
                     
@@ -663,7 +662,7 @@ def main():
                                     {lock_badge}
                                     <div style="font-size:2rem;">{emoji}</div>
                                     <div style="font-size:1.3rem;font-weight:800;">{pred['prediction']}</div>
-                                    <div style="font-size:0.85rem;color:#94a3b8;">{pred['confidence']:.0%} confidence</div>
+                                    <div style="font-size:0.85rem;color:#94a3b8;">{pred['confidence']:.0f}% confidence</div>
                                     <div style="font-size:0.75rem;color:#94a3b8;">{pred['reason']}</div>
                                 </div>
                             </div>
