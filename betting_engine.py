@@ -66,6 +66,13 @@ def reverse_replace_last(text, old, new):
     return new.join(parts)
 
 
+def clean_streak_name(raw_name: str) -> str:
+    """Clean a streak name by removing symbols and extra whitespace."""
+    for sym in ['✓', '✕', '🏠', '✈️', '·']:
+        raw_name = raw_name.replace(sym, '')
+    return ' '.join(raw_name.split()).strip()
+
+
 def is_defensively_fragile(team: dict) -> bool:
     """Team concedes heavily and is in poor form."""
     return (
@@ -80,11 +87,18 @@ def is_defensively_fragile(team: dict) -> bool:
 
 
 # ============================================================================
-# PARSER
+# PARSER — HANDLES BOTH FORMATS
 # ============================================================================
 def parse_raw_text(raw_text: str) -> dict:
     """Parse raw active streaks text into structured data.
-    Uses the HIGHEST value when duplicate keys exist (venue-agnostic)."""
+    
+    Handles BOTH formats:
+    Format A: 'Signal Name   Number' (same line)
+    Format B: 'Signal Name' then 'Number' (separate lines with spaces)
+    
+    Uses the HIGHEST value when the same signal appears multiple times
+    (e.g., Scoring 🏠 and Scoring → takes max).
+    """
     
     lines = raw_text.strip().split('\n')
     
@@ -95,7 +109,7 @@ def parse_raw_text(raw_text: str) -> dict:
     current_team = None
     found_home = False
     found_away = False
-    pending_number = None
+    pending_signal = None  # Signal name waiting for its number
     
     streak_keywords = [
         'scoring', 'over', 'under', 'unbeaten', 'win', 'loss', 'cold', 'hot',
@@ -103,25 +117,47 @@ def parse_raw_text(raw_text: str) -> dict:
         'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil', 'dominance'
     ]
     
+    def process_signal(signal_name: str, value: int):
+        """Store a signal, taking the max if it already exists."""
+        if current_team == 'home':
+            home_data[signal_name] = max(home_data.get(signal_name, 0), value)
+        elif current_team == 'away':
+            away_data[signal_name] = max(away_data.get(signal_name, 0), value)
+    
     for line in lines:
         stripped = line.strip()
+        
+        # Skip completely empty lines
         if not stripped:
             continue
         
         if stripped.lower().startswith('active streaks'):
             continue
         
+        # Check if line is just a whole number
         is_whole_number = re.match(r'^\d+$', stripped)
         
-        if is_whole_number:
-            pending_number = int(stripped)
-            continue
-        
+        # Check for whole numbers within the line (not decimals like 0.5)
         whole_numbers = re.findall(r'(?<!\d\.)\b(\d+)\b(?!\.\d)', stripped)
         line_lower = stripped.lower()
         has_streak_keyword = any(kw in line_lower for kw in streak_keywords)
         
+        # ====================================================================
+        # CASE 1: Line is just a number → it belongs to the pending signal
+        # ====================================================================
+        if is_whole_number:
+            if pending_signal is not None and current_team is not None:
+                process_signal(pending_signal, int(stripped))
+                pending_signal = None
+            continue
+        
+        # ====================================================================
+        # CASE 2: Team name detection (no numbers, no streak keywords)
+        # ====================================================================
         if not whole_numbers and not has_streak_keyword:
+            # Flush any pending signal before switching teams
+            pending_signal = None
+            
             if not found_home:
                 home_name = stripped
                 current_team = 'home'
@@ -132,30 +168,28 @@ def parse_raw_text(raw_text: str) -> dict:
                 found_away = True
             continue
         
+        # ====================================================================
+        # CASE 3: Streak line — may or may not have a number
+        # ====================================================================
         if current_team:
+            # Clean the signal name
+            signal_name = clean_streak_name(stripped)
+            
             if whole_numbers:
-                streak_value = int(whole_numbers[-1])
-            elif pending_number is not None:
-                streak_value = pending_number
+                # Format A: Number is on the same line
+                value = int(whole_numbers[-1])
+                # Remove the number from the name
+                signal_name = clean_streak_name(reverse_replace_last(stripped, whole_numbers[-1], ''))
+                process_signal(signal_name, value)
+                pending_signal = None
             else:
-                pending_number = None
-                continue
-            
-            pending_number = None
-            
-            streak_name = stripped
-            if whole_numbers:
-                streak_name = reverse_replace_last(streak_name, whole_numbers[-1], '')
-            
-            for sym in ['✓', '✕', '🏠', '✈️', '·']:
-                streak_name = streak_name.replace(sym, '')
-            
-            streak_name = ' '.join(streak_name.split()).strip()
-            
-            if current_team == 'home' and streak_name:
-                home_data[streak_name] = max(home_data.get(streak_name, 0), streak_value)
-            elif current_team == 'away' and streak_name:
-                away_data[streak_name] = max(away_data.get(streak_name, 0), streak_value)
+                # Format B: Signal name only — number on next line(s)
+                pending_signal = signal_name
+    
+    # Flush any remaining pending signal
+    if pending_signal is not None and current_team is not None:
+        # No number found — ignore
+        pass
     
     return {
         "home_name": home_name,
@@ -208,10 +242,9 @@ def extract_signals(team_data: dict) -> dict:
 # TIER 1: LOCK DETECTOR
 # ============================================================================
 def check_locks(home: dict, away: dict) -> dict:
-    """Check all lock conditions. Returns dict of locked markets with confidence (0-100 scale)."""
+    """Check all lock conditions."""
     locks = {}
     
-    # OVER 2.5 LOCKS
     if home.get("scoring", 0) >= 10 and is_defensively_fragile(away):
         locks["over_under"] = {
             "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
@@ -228,24 +261,22 @@ def check_locks(home: dict, away: dict) -> dict:
             "reason": "Both teams scoring ≥ 10"
         }
     
-    # BTTS LOCKS
     if home.get("btts", 0) >= 5 and away.get("btts", 0) >= 5:
         locks["btts"] = {
             "prediction": "BTTS YES", "confidence": 85, "tier": "LOCK",
             "reason": "Both btts ≥ 5"
         }
-    elif (home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5):
+    elif home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5:
         locks["btts"] = {
             "prediction": "BTTS NO", "confidence": 75, "tier": "LOCK",
             "reason": "Home no_btts ≥ 4 + Away scoring ≤ 5"
         }
-    elif (away.get("no_btts", 0) >= 4 and home.get("scoring", 0) <= 5):
+    elif away.get("no_btts", 0) >= 4 and home.get("scoring", 0) <= 5:
         locks["btts"] = {
             "prediction": "BTTS NO", "confidence": 75, "tier": "LOCK",
             "reason": "Away no_btts ≥ 4 + Home scoring ≤ 5"
         }
     
-    # WINNER LOCKS
     if home.get("first_to_score", 0) >= 5 and away.get("first_to_score", 0) == 0:
         locks["winner"] = {
             "prediction": "HOME", "confidence": 90, "tier": "LOCK",
@@ -270,8 +301,6 @@ def check_locks(home: dict, away: dict) -> dict:
 # TIER 2: EDGE CALCULATOR
 # ============================================================================
 def calculate_edges(home: dict, away: dict) -> dict:
-    """Calculate edge comparison between home and away"""
-    
     edges = []
     home_edge_count = 0
     away_edge_count = 0
@@ -307,33 +336,20 @@ def calculate_edges(home: dict, away: dict) -> dict:
     for display, h_key, a_key, h_type, a_type, weight in comparisons:
         h_val = home.get(h_key, 0)
         a_val = away.get(a_key, 0)
-        
         if h_val == 0 and a_val == 0:
             continue
-        
         if h_val > a_val:
-            edge_to = "home"
             home_edge_count += 1
-            if h_type == "attack":
-                attacking_score += weight
-            else:
-                defensive_score += weight
+            if h_type == "attack": attacking_score += weight
+            else: defensive_score += weight
+            edges.append({"signal": display, "home_val": h_val, "away_val": a_val, "edge": "home"})
         elif a_val > h_val:
-            edge_to = "away"
             away_edge_count += 1
-            if a_type == "attack":
-                attacking_score += weight
-            else:
-                defensive_score += weight
+            if a_type == "attack": attacking_score += weight
+            else: defensive_score += weight
+            edges.append({"signal": display, "home_val": h_val, "away_val": a_val, "edge": "away"})
         else:
-            edge_to = "even"
-        
-        edges.append({
-            "signal": display,
-            "home_val": h_val,
-            "away_val": a_val,
-            "edge": edge_to,
-        })
+            edges.append({"signal": display, "home_val": h_val, "away_val": a_val, "edge": "even"})
     
     return {
         "edges": edges,
@@ -349,52 +365,35 @@ def calculate_edges(home: dict, away: dict) -> dict:
 # TIER 2: EDGE-BASED PREDICTIONS
 # ============================================================================
 def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
-    """Generate predictions from edge data (Tier 2). All confidences on 0-100 scale."""
-    
     home_edges = edge_data["home_edge_count"]
     away_edges = edge_data["away_edge_count"]
     net = edge_data["net_score"]
     
-    # Over/Under
     if net >= 4:
-        over_under = "OVER 2.5"
-        over_conf = min(85, 60 + net * 4)
+        over_under, over_conf = "OVER 2.5", min(85, 60 + net * 4)
     elif net >= 1:
-        over_under = "OVER 2.5"
-        over_conf = 50 + net * 4
+        over_under, over_conf = "OVER 2.5", 50 + net * 4
     elif net <= -4:
-        over_under = "UNDER 2.5"
-        over_conf = min(85, 60 + abs(net) * 4)
+        over_under, over_conf = "UNDER 2.5", min(85, 60 + abs(net) * 4)
     elif net <= -1:
-        over_under = "UNDER 2.5"
-        over_conf = 50 + abs(net) * 4
+        over_under, over_conf = "UNDER 2.5", 50 + abs(net) * 4
     else:
-        over_under = "SKIP"
-        over_conf = 50
-    
+        over_under, over_conf = "SKIP", 50
     over_conf = min(85, max(35, over_conf))
     
-    # Winner
     edge_diff = home_edges - away_edges
     if home_edges >= 6 and edge_diff >= 3:
-        winner = "HOME"
-        win_conf = 65 + edge_diff * 4
+        winner, win_conf = "HOME", 65 + edge_diff * 4
     elif away_edges >= 6 and edge_diff <= -3:
-        winner = "AWAY"
-        win_conf = 65 + abs(edge_diff) * 4
+        winner, win_conf = "AWAY", 65 + abs(edge_diff) * 4
     elif abs(edge_diff) <= 2:
-        winner = "DRAW"
-        win_conf = 50 + (5 - abs(edge_diff)) * 3
+        winner, win_conf = "DRAW", 50 + (5 - abs(edge_diff)) * 3
     elif edge_diff > 0:
-        winner = "HOME"
-        win_conf = 50 + edge_diff * 3
+        winner, win_conf = "HOME", 50 + edge_diff * 3
     else:
-        winner = "AWAY"
-        win_conf = 50 + abs(edge_diff) * 3
-    
+        winner, win_conf = "AWAY", 50 + abs(edge_diff) * 3
     win_conf = min(85, max(35, win_conf))
     
-    # BTTS
     home_scores = home.get("scoring", 0) > 0
     away_scores = away.get("scoring", 0) > 0
     has_btts = home.get("btts", 0) >= 3 or away.get("btts", 0) >= 3
@@ -402,83 +401,65 @@ def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
     away_nobtts = away.get("no_btts", 0) >= 3
     
     if home_scores and away_scores and has_btts:
-        btts = "BTTS YES"
-        btts_conf = 70
+        btts, btts_conf = "BTTS YES", 70
     elif home_scores and away_scores:
-        btts = "BTTS YES"
-        btts_conf = 55
+        btts, btts_conf = "BTTS YES", 55
     elif home_nobtts or away_nobtts:
-        btts = "BTTS NO"
-        btts_conf = 65
+        btts, btts_conf = "BTTS NO", 65
     else:
-        btts = "BTTS NO"
-        btts_conf = 55
+        btts, btts_conf = "BTTS NO", 55
     
     return {
-        "over_under": over_under,
-        "over_confidence": over_conf,
-        "winner": winner,
-        "winner_confidence": win_conf,
-        "btts": btts,
-        "btts_confidence": min(85, max(35, btts_conf)),
+        "over_under": over_under, "over_confidence": over_conf,
+        "winner": winner, "winner_confidence": win_conf,
+        "btts": btts, "btts_confidence": min(85, max(35, btts_conf)),
     }
 
 
 # ============================================================================
-# TIER 3: MERGE LOCKS + EDGES
+# MERGE
 # ============================================================================
 def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
-    """Tier 1 locks override Tier 2 edges."""
-    
     locks = check_locks(home, away)
     edges = predict_from_edges(edge_data, home, away)
-    
     final = {}
     
     if "over_under" in locks:
         final["over_under"] = locks["over_under"]
     else:
         final["over_under"] = {
-            "prediction": edges["over_under"],
-            "confidence": edges["over_confidence"],
-            "tier": "EDGE",
-            "reason": f"Edge comparison (net score: {edge_data['net_score']})"
+            "prediction": edges["over_under"], "confidence": edges["over_confidence"],
+            "tier": "EDGE", "reason": f"Edge comparison (net score: {edge_data['net_score']})"
         }
     
     if "winner" in locks:
         final["winner"] = locks["winner"]
     else:
         final["winner"] = {
-            "prediction": edges["winner"],
-            "confidence": edges["winner_confidence"],
-            "tier": "EDGE",
-            "reason": f"Edge comparison (diff: {edge_data['home_edge_count'] - edge_data['away_edge_count']})"
+            "prediction": edges["winner"], "confidence": edges["winner_confidence"],
+            "tier": "EDGE", "reason": f"Edge comparison (diff: {edge_data['home_edge_count'] - edge_data['away_edge_count']})"
         }
     
     if "btts" in locks:
         final["btts"] = locks["btts"]
     else:
         final["btts"] = {
-            "prediction": edges["btts"],
-            "confidence": edges["btts_confidence"],
-            "tier": "EDGE",
-            "reason": "Edge comparison"
+            "prediction": edges["btts"], "confidence": edges["btts_confidence"],
+            "tier": "EDGE", "reason": "Edge comparison"
         }
     
     return final
 
 
 # ============================================================================
-# SUPABASE FUNCTIONS
+# SUPABASE
 # ============================================================================
 def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
     try:
         record = {
-            "home_team": home_name,
-            "away_team": away_name,
+            "home_team": home_name, "away_team": away_name,
             "match_date": str(date.today()),
-            "home_data": home_signals,
-            "away_data": away_signals,
+            "home_data": home_signals, "away_data": away_signals,
             "prediction": predictions["over_under"]["prediction"],
             "confidence_score": predictions["over_under"]["confidence"] / 100,
             "winner": predictions["winner"]["prediction"],
@@ -506,18 +487,11 @@ def submit_result(analysis_id, home_goals, away_goals):
     try:
         total = home_goals + away_goals
         over25 = total > 2
-        if home_goals > away_goals:
-            actual_winner = "HOME"
-        elif away_goals > home_goals:
-            actual_winner = "AWAY"
-        else:
-            actual_winner = "DRAW"
-        
+        actual_winner = "HOME" if home_goals > away_goals else "AWAY" if away_goals > home_goals else "DRAW"
         btts_yes = home_goals > 0 and away_goals > 0
         
         record = supabase.table("analyses").select("prediction,winner,btts").eq("id", analysis_id).single().execute()
-        if not record.data:
-            return False
+        if not record.data: return False
         
         pred = record.data.get("prediction", "SKIP")
         pred_winner = record.data.get("winner", "UNCLEAR")
@@ -527,19 +501,13 @@ def submit_result(analysis_id, home_goals, away_goals):
         winner_correct = None if pred_winner in ["UNCLEAR", "DRAW"] else (pred_winner == actual_winner)
         btts_correct = ("YES" in pred_btts) == btts_yes if pred_btts else None
         
-        update_data = {
-            "actual_home_goals": home_goals,
-            "actual_away_goals": away_goals,
-            "actual_total_goals": total,
-            "actual_over25": over25,
-            "actual_winner": actual_winner,
-            "actual_btts": btts_yes,
-            "result_entered": True,
-            "correct": over_correct,
-            "winner_correct": winner_correct,
-            "btts_correct": btts_correct,
-        }
-        supabase.table("analyses").update(update_data).eq("id", analysis_id).execute()
+        supabase.table("analyses").update({
+            "actual_home_goals": home_goals, "actual_away_goals": away_goals,
+            "actual_total_goals": total, "actual_over25": over25,
+            "actual_winner": actual_winner, "actual_btts": btts_yes,
+            "result_entered": True, "correct": over_correct,
+            "winner_correct": winner_correct, "btts_correct": btts_correct,
+        }).eq("id", analysis_id).execute()
         return True
     except Exception as e:
         st.error(f"Failed to submit: {e}")
@@ -565,9 +533,7 @@ def main():
     
     with tab1:
         st.markdown("### 📋 Paste Raw Active Streaks")
-        
-        raw_text = st.text_area("Raw Data", height=300, key="raw_input",
-                                placeholder="Active streaks\nTeam A\nScoring              5\nOver 0.5             10\n\nTeam B\nScoring              3\nOver 0.5              8")
+        raw_text = st.text_area("Raw Data", height=300, key="raw_input")
         
         if st.button("🔮 ANALYZE", type="primary"):
             if not raw_text.strip():
@@ -576,9 +542,8 @@ def main():
                 parsed = parse_raw_text(raw_text)
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
-                    st.error(f"Could not detect team names.")
+                    st.error("Could not detect team names.")
                 else:
-                    # DEBUG: Show raw parsed keys
                     with st.expander("🔧 DEBUG: Raw Parsed Data"):
                         st.markdown("**Home data keys:**")
                         st.code(str(parsed["home_data"]))
@@ -589,8 +554,7 @@ def main():
                     away_signals = extract_signals(parsed["away_data"])
                     edge_data = calculate_edges(home_signals, away_signals)
                     predictions = get_final_predictions(home_signals, away_signals, edge_data)
-                    save_to_db(parsed["home_name"], parsed["away_name"],
-                              home_signals, away_signals, predictions)
+                    save_to_db(parsed["home_name"], parsed["away_name"], home_signals, away_signals, predictions)
                     
                     st.success(f"✅ Parsed: {parsed['home_name']} vs {parsed['away_name']}")
                     
@@ -602,8 +566,7 @@ def main():
                             Scoring: {home_signals['scoring']} | Over 2.5 Goals: {home_signals['over25_goals']}<br>
                             First to Score: {home_signals['first_to_score']} | BTTS: {home_signals['btts']} | No BTTS: {home_signals['no_btts']}<br>
                             Unbeaten: {home_signals['unbeaten']} | Win: {home_signals['win']} | Hot: {home_signals['hot_form']}<br>
-                            Without Win: {home_signals['without_win']} | Loss: {home_signals['loss']} | Heavy Defeats: {home_signals['heavy_defeats']}<br>
-                            Goal Frenzy: {home_signals['goal_frenzy']} | Rampage: {home_signals['rampage_attack']}
+                            Without Win: {home_signals['without_win']} | Loss: {home_signals['loss']} | Heavy Defeats: {home_signals['heavy_defeats']}
                         </div>
                         """, unsafe_allow_html=True)
                     with col2:
@@ -613,8 +576,7 @@ def main():
                             Scoring: {away_signals['scoring']} | Over 2.5 Goals: {away_signals['over25_goals']}<br>
                             First to Score: {away_signals['first_to_score']} | BTTS: {away_signals['btts']} | No BTTS: {away_signals['no_btts']}<br>
                             Unbeaten: {away_signals['unbeaten']} | Win: {away_signals['win']} | Hot: {away_signals['hot_form']}<br>
-                            Without Win: {away_signals['without_win']} | Loss: {away_signals['loss']} | Heavy Defeats: {away_signals['heavy_defeats']}<br>
-                            Goal Frenzy: {away_signals['goal_frenzy']} | Rampage: {away_signals['rampage_attack']}
+                            Without Win: {away_signals['without_win']} | Loss: {away_signals['loss']} | Heavy Defeats: {away_signals['heavy_defeats']}
                         </div>
                         """, unsafe_allow_html=True)
                     
@@ -633,11 +595,7 @@ def main():
                     st.markdown("### 🎯 Predictions")
                     col1, col2, col3 = st.columns(3)
                     
-                    for col, market, key in [
-                        (col1, "Over/Under", "over_under"),
-                        (col2, "Winner", "winner"),
-                        (col3, "BTTS", "btts")
-                    ]:
+                    for col, market, key in [(col1, "Over/Under", "over_under"), (col2, "Winner", "winner"), (col3, "BTTS", "btts")]:
                         pred = predictions[key]
                         is_lock = pred.get("tier") == "LOCK"
                         
@@ -674,31 +632,22 @@ def main():
             for analysis in pending:
                 home_team = analysis.get('home_team', 'Home')
                 away_team = analysis.get('away_team', 'Away')
-                
                 with st.expander(f"{home_team} vs {away_team} — {analysis.get('prediction', '?')} | {analysis.get('winner', '?')} | {analysis.get('btts', '?')}"):
                     st.write(f"**Date:** {analysis.get('match_date', '?')}")
-                    
                     c1, c2, c3 = st.columns(3)
-                    with c1:
-                        home_goals = st.number_input(f"{home_team} Goals", 0, 15, 0, key=f"hg_{analysis['id']}")
-                    with c2:
-                        away_goals = st.number_input(f"{away_team} Goals", 0, 15, 0, key=f"ag_{analysis['id']}")
+                    with c1: home_goals = st.number_input(f"{home_team} Goals", 0, 15, 0, key=f"hg_{analysis['id']}")
+                    with c2: away_goals = st.number_input(f"{away_team} Goals", 0, 15, 0, key=f"ag_{analysis['id']}")
                     with c3:
                         total = home_goals + away_goals
-                        over25 = total > 2
-                        btts_yes = home_goals > 0 and away_goals > 0
-                        
                         st.markdown(f"""
                         <div class="score-box">
                             <div class="score-number">{home_goals} - {away_goals}</div>
-                            <div class="score-label">Total: {total} | {'Over 2.5' if over25 else 'Under 2.5'} | BTTS: {'Yes' if btts_yes else 'No'}</div>
+                            <div class="score-label">Total: {total} | {'Over 2.5' if total > 2 else 'Under 2.5'} | BTTS: {'Yes' if home_goals > 0 and away_goals > 0 else 'No'}</div>
                         </div>
                         """, unsafe_allow_html=True)
-                    
                     if st.button("✅ Submit", key=f"submit_{analysis['id']}"):
                         if submit_result(analysis['id'], home_goals, away_goals):
-                            st.success("Submitted!")
-                            st.rerun()
+                            st.success("Submitted!"); st.rerun()
         else:
             st.info("No pending analyses.")
     
@@ -716,11 +665,7 @@ def main():
             btts_total = len([r for r in results if r.get("btts_correct") is not None])
             
             c1, c2, c3 = st.columns(3)
-            for col, label, correct, t in [
-                (c1, "Over/Under", correct_ou, total),
-                (c2, "Winner", correct_winner, winner_total),
-                (c3, "BTTS", correct_btts, btts_total)
-            ]:
+            for col, label, correct, t in [(c1, "Over/Under", correct_ou, total), (c2, "Winner", correct_winner, winner_total), (c3, "BTTS", correct_btts, btts_total)]:
                 rate = round(correct / t * 100) if t > 0 else 0
                 color = "#10b981" if rate >= 70 else "#ef4444"
                 with col:
@@ -733,15 +678,10 @@ def main():
             
             if st.checkbox("Show all results"):
                 st.dataframe(pd.DataFrame([{
-                    "date": r.get("match_date"),
-                    "home": r.get("home_team"),
-                    "away": r.get("away_team"),
-                    "prediction": r.get("prediction"),
-                    "correct": r.get("correct"),
-                    "winner": r.get("winner"),
-                    "winner_correct": r.get("winner_correct"),
-                    "btts": r.get("btts"),
-                    "btts_correct": r.get("btts_correct"),
+                    "date": r.get("match_date"), "home": r.get("home_team"), "away": r.get("away_team"),
+                    "prediction": r.get("prediction"), "correct": r.get("correct"),
+                    "winner": r.get("winner"), "winner_correct": r.get("winner_correct"),
+                    "btts": r.get("btts"), "btts_correct": r.get("btts_correct"),
                     "score": f"{r.get('actual_home_goals', '-')}-{r.get('actual_away_goals', '-')}",
                 } for r in results]))
 
