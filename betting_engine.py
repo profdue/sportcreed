@@ -41,7 +41,6 @@ st.markdown("""
     .edge-box { background: #1e293b; border-radius: 10px; padding: 0.6rem; margin: 0.3rem 0; color: #ffffff; font-size: 0.8rem; }
     .edge-home { border-left: 3px solid #10b981; }
     .edge-away { border-left: 3px solid #ef4444; }
-    .edge-even { border-left: 3px solid #94a3b8; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
@@ -317,7 +316,8 @@ def predict_winner_edge(home: dict, away: dict, max_conf: int) -> dict:
         else:
             winner, conf = "DRAW", 50
     
-    return {"prediction": winner, "confidence": conf, "tier": "EDGE"}
+    return {"prediction": winner, "confidence": conf, "tier": "EDGE",
+            "reason": f"Winner scoring (diff={diff})"}
 
 def predict_over_edge(home: dict, away: dict, max_conf: int) -> dict:
     over_score = 0
@@ -350,23 +350,29 @@ def predict_over_edge(home: dict, away: dict, max_conf: int) -> dict:
     over_score -= subtract
     
     if over_score >= 40:
-        return {"prediction": "OVER 2.5", "confidence": min(85, max_conf), "tier": "EDGE"}
+        return {"prediction": "OVER 2.5", "confidence": min(85, max_conf), "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     elif over_score >= 25:
-        return {"prediction": "OVER 2.5", "confidence": 70, "tier": "EDGE"}
+        return {"prediction": "OVER 2.5", "confidence": 70, "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     elif over_score >= 15:
-        return {"prediction": "OVER 2.5", "confidence": 60, "tier": "EDGE"}
+        return {"prediction": "OVER 2.5", "confidence": 60, "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     elif over_score >= 5:
-        conf = 52
-        if conf < 55: return {"prediction": "NO BET", "confidence": 0, "tier": "NO_BET"}
-        return {"prediction": "OVER 2.5", "confidence": conf, "tier": "EDGE"}
+        return {"prediction": "OVER 2.5", "confidence": 52, "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     elif over_score <= -15:
-        return {"prediction": "UNDER 2.5", "confidence": 75, "tier": "EDGE"}
+        return {"prediction": "UNDER 2.5", "confidence": 75, "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     elif over_score <= -5:
-        return {"prediction": "UNDER 2.5", "confidence": 65, "tier": "EDGE"}
+        return {"prediction": "UNDER 2.5", "confidence": 65, "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     elif over_score <= 4:
-        return {"prediction": "UNDER 2.5", "confidence": 55, "tier": "EDGE"}
+        return {"prediction": "UNDER 2.5", "confidence": 55, "tier": "EDGE",
+                "reason": f"Over_Score={over_score}"}
     else:
-        return {"prediction": "NO BET", "confidence": 0, "tier": "NO_BET"}
+        return {"prediction": "NO BET", "confidence": 50, "tier": "NO_BET",
+                "reason": f"Over_Score={over_score} — insufficient signal"}
 
 def predict_btts_edge(home: dict, away: dict, max_conf: int) -> dict:
     score = 0
@@ -391,23 +397,29 @@ def predict_btts_edge(home: dict, away: dict, max_conf: int) -> dict:
     score -= subtract
     
     if score >= 25:
-        return {"prediction": "BTTS YES", "confidence": min(80, max_conf), "tier": "EDGE"}
+        return {"prediction": "BTTS YES", "confidence": min(80, max_conf), "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     elif score >= 15:
-        return {"prediction": "BTTS YES", "confidence": 70, "tier": "EDGE"}
+        return {"prediction": "BTTS YES", "confidence": 70, "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     elif score >= 8:
-        return {"prediction": "BTTS YES", "confidence": 60, "tier": "EDGE"}
+        return {"prediction": "BTTS YES", "confidence": 60, "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     elif score >= 0:
-        conf = 52
-        if conf < 55: return {"prediction": "NO BET", "confidence": 0, "tier": "NO_BET"}
-        return {"prediction": "BTTS YES", "confidence": conf, "tier": "EDGE"}
+        return {"prediction": "BTTS YES", "confidence": 52, "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     elif score <= -15:
-        return {"prediction": "BTTS NO", "confidence": 75, "tier": "EDGE"}
+        return {"prediction": "BTTS NO", "confidence": 75, "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     elif score <= -8:
-        return {"prediction": "BTTS NO", "confidence": 65, "tier": "EDGE"}
+        return {"prediction": "BTTS NO", "confidence": 65, "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     elif score <= -1:
-        return {"prediction": "BTTS NO", "confidence": 55, "tier": "EDGE"}
+        return {"prediction": "BTTS NO", "confidence": 55, "tier": "EDGE",
+                "reason": f"BTTS_Score={score}"}
     else:
-        return {"prediction": "NO BET", "confidence": 0, "tier": "NO_BET"}
+        return {"prediction": "NO BET", "confidence": 50, "tier": "NO_BET",
+                "reason": f"BTTS_Score={score} — insufficient signal"}
 
 # ============================================================================
 # MERGE
@@ -421,26 +433,17 @@ def get_final_predictions(home: dict, away: dict) -> dict:
     if "over_under" in locks:
         final["over_under"] = locks["over_under"]
     else:
-        edge = predict_over_edge(home, away, max_conf)
-        if edge["tier"] == "NO_BET":
-            final["over_under"] = edge
-        else:
-            final["over_under"] = {**edge, "reason": f"Over_Score calculated", "confidence": min(edge["confidence"], max_conf)}
+        final["over_under"] = predict_over_edge(home, away, max_conf)
     
     if "winner" in locks:
         final["winner"] = locks["winner"]
     else:
-        edge = predict_winner_edge(home, away, max_conf)
-        final["winner"] = {**edge, "reason": f"Winner scoring", "confidence": min(edge["confidence"], max_conf)}
+        final["winner"] = predict_winner_edge(home, away, max_conf)
     
     if "btts" in locks:
         final["btts"] = locks["btts"]
     else:
-        edge = predict_btts_edge(home, away, max_conf)
-        if edge["tier"] == "NO_BET":
-            final["btts"] = edge
-        else:
-            final["btts"] = {**edge, "reason": f"BTTS_Score calculated", "confidence": min(edge["confidence"], max_conf)}
+        final["btts"] = predict_btts_edge(home, away, max_conf)
     
     return final
 
@@ -452,16 +455,20 @@ def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
         ou = predictions.get("over_under", {})
         win = predictions.get("winner", {})
         bt = predictions.get("btts", {})
+        
+        ou_pred = ou.get("prediction", "SKIP")
+        bt_pred = bt.get("prediction", "")
+        
         record = {
             "home_team": home_name, "away_team": away_name,
             "match_date": str(date.today()),
             "home_data": home_signals, "away_data": away_signals,
-            "prediction": ou.get("prediction", "SKIP"),
-            "confidence_score": ou.get("confidence", 0) / 100,
+            "prediction": ou_pred if ou_pred != "NO BET" else "SKIP",
+            "confidence_score": ou.get("confidence", 50) / 100,
             "winner": win.get("prediction", "UNCLEAR"),
             "winner_confidence": f"{win.get('confidence', 0):.0f}%",
-            "btts": bt.get("prediction", ""),
-            "btts_confidence": bt.get("confidence", 0) / 100,
+            "btts": bt_pred if bt_pred != "NO BET" else "",
+            "btts_confidence": bt.get("confidence", 50) / 100,
             "result_entered": False,
         }
         response = supabase.table("analyses").insert(record).execute()
@@ -490,7 +497,7 @@ def submit_result(analysis_id, home_goals, away_goals):
         pred_winner = record.data.get("winner", "UNCLEAR")
         pred_btts = record.data.get("btts", "")
         
-        over_correct = None if pred == "SKIP" else (("OVER" in pred) == over25)
+        over_correct = None if pred in ["SKIP", "NO BET"] else (("OVER" in pred) == over25)
         winner_correct = None if pred_winner in ["UNCLEAR", "DRAW"] else (pred_winner == actual_winner)
         btts_correct = ("YES" in pred_btts) == btts_yes if pred_btts else None
         
@@ -558,7 +565,7 @@ def main():
                     c1, c2, c3 = st.columns(3)
                     
                     for col, market, key in [(c1, "Over/Under", "over_under"), (c2, "Winner", "winner"), (c3, "BTTS", "btts")]:
-                        pred = predictions.get(key, {"prediction": "NO BET", "confidence": 0, "tier": "NO_BET", "reason": "Unknown"})
+                        pred = predictions.get(key, {"prediction": "NO BET", "confidence": 50, "tier": "NO_BET", "reason": "Unknown"})
                         is_lock = pred.get("tier") == "LOCK"
                         is_nobet = pred.get("tier") == "NO_BET"
                         
@@ -624,7 +631,7 @@ def main():
         if not results:
             st.info("No results yet.")
         else:
-            total = len([r for r in results if r.get("prediction") not in ["SKIP", "NO BET"]])
+            total = len([r for r in results if r.get("prediction") not in ["SKIP", "NO BET", None]])
             c_ou = len([r for r in results if r.get("correct") == True])
             c_win = len([r for r in results if r.get("winner_correct") == True])
             c_btts = len([r for r in results if r.get("btts_correct") == True])
