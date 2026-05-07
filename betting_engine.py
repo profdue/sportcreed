@@ -1,6 +1,8 @@
 """
-STREAK PREDICTOR V4 - Edge-Based Analysis
-Paste raw active streaks → Auto-parse → Compare edges → Predict Over/Under, Winner, BTTS
+STREAK PREDICTOR V5 - Tiered Betting System
+Tier 1: Lock Detector (exact thresholds, 90-95% confidence)
+Tier 2: Edge Comparison (directional edges for gray zone matches)
+Tier 3: No Bet (discipline to pass)
 """
 
 import streamlit as st
@@ -23,7 +25,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Streak Predictor V4", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Streak Predictor V5", page_icon="⚽", layout="wide")
 
 # ============================================================================
 # CSS
@@ -38,6 +40,7 @@ st.markdown("""
     .home-card { border-left: 5px solid #10b981; }
     .away-card { border-left: 5px solid #ef4444; }
     .draw-card { border-left: 5px solid #94a3b8; }
+    .lock-card { border: 2px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
     .edge-box { background: #1e293b; border-radius: 10px; padding: 0.6rem; margin: 0.3rem 0; color: #ffffff; font-size: 0.8rem; }
     .edge-home { border-left: 3px solid #10b981; }
     .edge-away { border-left: 3px solid #ef4444; }
@@ -46,6 +49,10 @@ st.markdown("""
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
     .score-label { font-size: 0.8rem; color: #94a3b8; }
+    .tier-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .tier-lock { background: #f59e0b; color: #000; }
+    .tier-edge { background: #3b82f6; color: #fff; }
+    .tier-skip { background: #ef4444; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,7 +84,7 @@ def parse_raw_text(raw_text: str) -> dict:
     streak_keywords = [
         'scoring', 'over', 'under', 'unbeaten', 'win', 'loss', 'cold', 'hot',
         'goals', 'btts', 'clean', 'without', 'first', 'goal', 'heavy', 'rampage',
-        'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil', 'dominance',
+        'frenzy', 'drought', 'defeats', 'sheet', 'form', 'nil', 'dominance'
     ]
     
     for line in lines:
@@ -88,19 +95,16 @@ def parse_raw_text(raw_text: str) -> dict:
         if stripped.lower().startswith('active streaks'):
             continue
         
-        # Check if line is just a whole number (streak value on own line)
         is_whole_number = re.match(r'^\d+$', stripped)
         
         if is_whole_number:
             pending_number = int(stripped)
             continue
         
-        # Check for numbers (whole numbers only, not decimals like 0.5)
         whole_numbers = re.findall(r'(?<!\d\.)\b(\d+)\b(?!\.\d)', stripped)
         line_lower = stripped.lower()
         has_streak_keyword = any(kw in line_lower for kw in streak_keywords)
         
-        # Team name detection
         if not whole_numbers and not has_streak_keyword:
             if not found_home:
                 home_name = stripped
@@ -112,9 +116,7 @@ def parse_raw_text(raw_text: str) -> dict:
                 found_away = True
             continue
         
-        # Process streak line
         if current_team:
-            # Get the streak value: prefer number on same line, else use pending
             if whole_numbers:
                 streak_value = int(whole_numbers[-1])
             elif pending_number is not None:
@@ -125,13 +127,10 @@ def parse_raw_text(raw_text: str) -> dict:
             
             pending_number = None
             
-            # Clean streak name: remove ONLY the streak value number
             streak_name = stripped
             if whole_numbers:
-                # Remove only the last whole number
                 streak_name = reverse_replace_last(streak_name, whole_numbers[-1], '')
             
-            # Remove symbols
             for sym in ['✓', '✕', '🏠', '✈️', '·']:
                 streak_name = streak_name.replace(sym, '')
             
@@ -185,11 +184,94 @@ def extract_signals(team_data: dict) -> dict:
         "goal_frenzy": get_signal(team_data, ["Goal Frenzy"]),
         "rampage_attack": get_signal(team_data, ["Rampage Attack"]),
         "win_to_nil": get_signal(team_data, ["Win to Nil"]),
+        "dominance": get_signal(team_data, ["Dominance Mode"]),
     }
 
 
 # ============================================================================
-# EDGE CALCULATOR
+# TIER 1: LOCK DETECTOR
+# ============================================================================
+def check_locks(home: dict, away: dict) -> dict:
+    """Check all lock conditions. Locks always override edge predictions."""
+    locks = {}
+    
+    # ========================================================================
+    # OVER 2.5 LOCKS
+    # ========================================================================
+    
+    # Lock 1: Scoring ≥ 10 (one team) + Opponent over25_goals ≥ 7
+    if (home.get("scoring", 0) >= 10 and away.get("over25_goals", 0) >= 7):
+        locks["over_under"] = {
+            "prediction": "OVER 2.5", "confidence": 0.95, "tier": "LOCK",
+            "reason": "Home scoring ≥ 10 + Away over25_goals ≥ 7"
+        }
+    elif (away.get("scoring", 0) >= 10 and home.get("over25_goals", 0) >= 7):
+        locks["over_under"] = {
+            "prediction": "OVER 2.5", "confidence": 0.95, "tier": "LOCK",
+            "reason": "Away scoring ≥ 10 + Home over25_goals ≥ 7"
+        }
+    
+    # Lock 2: Both teams scoring ≥ 10
+    elif home.get("scoring", 0) >= 10 and away.get("scoring", 0) >= 10:
+        locks["over_under"] = {
+            "prediction": "OVER 2.5", "confidence": 0.90, "tier": "LOCK",
+            "reason": "Both teams scoring ≥ 10"
+        }
+    
+    # ========================================================================
+    # BTTS LOCKS
+    # ========================================================================
+    
+    # BTTS YES Lock: Both btts ≥ 5
+    if home.get("btts", 0) >= 5 and away.get("btts", 0) >= 5:
+        locks["btts"] = {
+            "prediction": "BTTS YES", "confidence": 0.85, "tier": "LOCK",
+            "reason": "Both btts ≥ 5"
+        }
+    
+    # BTTS NO Lock: Either no_btts ≥ 4 + Opponent scoring ≤ 5
+    if (home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5):
+        locks["btts"] = {
+            "prediction": "BTTS NO", "confidence": 0.75, "tier": "LOCK",
+            "reason": "Home no_btts ≥ 4 + Away scoring ≤ 5"
+        }
+    elif (away.get("no_btts", 0) >= 4 and home.get("scoring", 0) <= 5):
+        locks["btts"] = {
+            "prediction": "BTTS NO", "confidence": 0.75, "tier": "LOCK",
+            "reason": "Away no_btts ≥ 4 + Home scoring ≤ 5"
+        }
+    
+    # ========================================================================
+    # WINNER LOCKS
+    # ========================================================================
+    
+    # HOME WIN Lock: Home first_to_score ≥ 5 + Away first_to_score = 0
+    if home.get("first_to_score", 0) >= 5 and away.get("first_to_score", 0) == 0:
+        locks["winner"] = {
+            "prediction": "HOME", "confidence": 0.90, "tier": "LOCK",
+            "reason": "Home first_to_score ≥ 5 + Away first_to_score = 0"
+        }
+    
+    # AWAY WIN Lock: Home without_win ≥ 4 + Home over25_goals ≥ 7 + Away win_to_nil ≥ 3
+    if home.get("without_win", 0) >= 4 and home.get("over25_goals", 0) >= 7 and away.get("win_to_nil", 0) >= 3:
+        locks["winner"] = {
+            "prediction": "AWAY", "confidence": 0.90, "tier": "LOCK",
+            "reason": "Home collapse + Away win_to_nil ≥ 3"
+        }
+    
+    # DRAW Lock: Both unbeaten ≥ 8 + Both first_to_score ≤ 3
+    if home.get("unbeaten", 0) >= 8 and away.get("unbeaten", 0) >= 8 and \
+       home.get("first_to_score", 0) <= 3 and away.get("first_to_score", 0) <= 3:
+        locks["winner"] = {
+            "prediction": "DRAW", "confidence": 0.70, "tier": "LOCK",
+            "reason": "Both unbeaten ≥ 8 + low first_to_score"
+        }
+    
+    return locks
+
+
+# ============================================================================
+# TIER 2: EDGE CALCULATOR
 # ============================================================================
 def calculate_edges(home: dict, away: dict) -> dict:
     """Calculate edge comparison between home and away"""
@@ -203,12 +285,12 @@ def calculate_edges(home: dict, away: dict) -> dict:
     comparisons = [
         ("Scoring", "scoring", "scoring", "attack", "attack", 2),
         ("Over 2.5 Goals", "over25_goals", "over25_goals", "attack", "attack", 2),
-        ("Over 2.5", "over25", "over25", "attack", "attack", 2),
+        ("Over 2.5", "over25", "over25", "attack", "attack", 1),
         ("Over 1.5(hidden)", "over15_hidden", "over15_hidden", "attack", "attack", 2),
         ("Goals 2+", "goals2", "goals2", "attack", "attack", 1),
         ("Goals 3+", "goals3", "goals3", "attack", "attack", 1),
         ("BTTS", "btts", "btts", "attack", "attack", 1),
-        ("First to Score", "first_to_score", "first_to_score", "attack", "attack", 1),
+        ("First to Score", "first_to_score", "first_to_score", "attack", "attack", 2),
         ("Win", "win", "win", "attack", "attack", 2),
         ("Hot Form", "hot_form", "hot_form", "attack", "attack", 2),
         ("Goal Frenzy", "goal_frenzy", "goal_frenzy", "attack", "attack", 2),
@@ -218,6 +300,7 @@ def calculate_edges(home: dict, away: dict) -> dict:
         ("Clean Sheet", "clean_sheet", "clean_sheet", "defense", "defense", 2),
         ("No BTTS", "no_btts", "no_btts", "defense", "defense", 1),
         ("Under 2.5 Goals", "under25", "under25", "defense", "defense", 1),
+        ("Dominance Mode", "dominance", "dominance", "attack", "attack", 3),
         ("Without Win", "without_win", "without_win", "attack", "defense", 1),
         ("Loss", "loss", "loss", "attack", "defense", 2),
         ("Cold Form", "cold_form", "cold_form", "attack", "defense", 2),
@@ -267,10 +350,10 @@ def calculate_edges(home: dict, away: dict) -> dict:
 
 
 # ============================================================================
-# PREDICTION ENGINE
+# TIER 2: EDGE-BASED PREDICTIONS
 # ============================================================================
-def predict(edge_data: dict, home: dict, away: dict) -> dict:
-    """Generate predictions from edge data"""
+def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
+    """Generate predictions from edge data (Tier 2)"""
     
     home_edges = edge_data["home_edge_count"]
     away_edges = edge_data["away_edge_count"]
@@ -279,41 +362,41 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
     # Over/Under
     if net >= 4:
         over_under = "OVER 2.5"
-        over_conf = min(95, 65 + net * 5)
+        over_conf = min(85, 60 + net * 4)
     elif net >= 1:
         over_under = "OVER 2.5"
-        over_conf = 55 + net * 5
+        over_conf = 50 + net * 4
     elif net <= -4:
         over_under = "UNDER 2.5"
-        over_conf = min(95, 65 + abs(net) * 5)
+        over_conf = min(85, 60 + abs(net) * 4)
     elif net <= -1:
         over_under = "UNDER 2.5"
-        over_conf = 55 + abs(net) * 5
+        over_conf = 50 + abs(net) * 4
     else:
         over_under = "SKIP"
         over_conf = 50
     
-    over_conf = min(95, max(35, over_conf))
+    over_conf = min(85, max(35, over_conf))
     
     # Winner
     edge_diff = home_edges - away_edges
     if home_edges >= 6 and edge_diff >= 3:
         winner = "HOME"
-        win_conf = 70 + edge_diff * 5
+        win_conf = 65 + edge_diff * 4
     elif away_edges >= 6 and edge_diff <= -3:
         winner = "AWAY"
-        win_conf = 70 + abs(edge_diff) * 5
+        win_conf = 65 + abs(edge_diff) * 4
     elif abs(edge_diff) <= 2:
         winner = "DRAW"
-        win_conf = 50 + (5 - abs(edge_diff)) * 5
+        win_conf = 50 + (5 - abs(edge_diff)) * 3
     elif edge_diff > 0:
         winner = "HOME"
-        win_conf = 55 + edge_diff * 3
+        win_conf = 50 + edge_diff * 3
     else:
         winner = "AWAY"
-        win_conf = 55 + abs(edge_diff) * 3
+        win_conf = 50 + abs(edge_diff) * 3
     
-    win_conf = min(95, max(35, win_conf))
+    win_conf = min(85, max(35, win_conf))
     
     # BTTS
     home_scores = home.get("scoring", 0) > 0
@@ -324,10 +407,10 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
     
     if home_scores and away_scores and has_btts:
         btts = "BTTS YES"
-        btts_conf = 75
+        btts_conf = 70
     elif home_scores and away_scores:
         btts = "BTTS YES"
-        btts_conf = 60
+        btts_conf = 55
     elif home_nobtts or away_nobtts:
         btts = "BTTS NO"
         btts_conf = 65
@@ -341,8 +424,55 @@ def predict(edge_data: dict, home: dict, away: dict) -> dict:
         "winner": winner,
         "winner_confidence": win_conf,
         "btts": btts,
-        "btts_confidence": min(95, max(35, btts_conf)),
+        "btts_confidence": min(85, max(35, btts_conf)),
     }
+
+
+# ============================================================================
+# TIER 3: MERGE LOCKS + EDGES
+# ============================================================================
+def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
+    """Tier 1 locks override Tier 2 edges."""
+    
+    locks = check_locks(home, away)
+    edges = predict_from_edges(edge_data, home, away)
+    
+    final = {}
+    
+    # Over/Under
+    if "over_under" in locks:
+        final["over_under"] = locks["over_under"]
+    else:
+        final["over_under"] = {
+            "prediction": edges["over_under"],
+            "confidence": edges["over_confidence"] / 100,
+            "tier": "EDGE",
+            "reason": f"Edge comparison (net score: {edge_data['net_score']})"
+        }
+    
+    # Winner
+    if "winner" in locks:
+        final["winner"] = locks["winner"]
+    else:
+        final["winner"] = {
+            "prediction": edges["winner"],
+            "confidence": edges["winner_confidence"] / 100,
+            "tier": "EDGE",
+            "reason": f"Edge comparison (diff: {edge_data['home_edge_count'] - edge_data['away_edge_count']})"
+        }
+    
+    # BTTS
+    if "btts" in locks:
+        final["btts"] = locks["btts"]
+    else:
+        final["btts"] = {
+            "prediction": edges["btts"],
+            "confidence": edges["btts_confidence"] / 100,
+            "tier": "EDGE",
+            "reason": "Edge comparison"
+        }
+    
+    return final
 
 
 # ============================================================================
@@ -356,12 +486,12 @@ def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
             "match_date": str(date.today()),
             "home_data": home_signals,
             "away_data": away_signals,
-            "prediction": predictions["over_under"],
-            "confidence_score": predictions["over_confidence"] / 100,
-            "winner": predictions["winner"],
-            "winner_confidence": f"{predictions['winner_confidence']:.0f}%",
-            "btts": predictions["btts"],
-            "btts_confidence": predictions["btts_confidence"] / 100,
+            "prediction": predictions["over_under"]["prediction"],
+            "confidence_score": predictions["over_under"]["confidence"],
+            "winner": predictions["winner"]["prediction"],
+            "winner_confidence": f"{predictions['winner']['confidence']:.0f}%",
+            "btts": predictions["btts"]["prediction"],
+            "btts_confidence": predictions["btts"]["confidence"],
             "result_entered": False,
         }
         response = supabase.table("analyses").insert(record).execute()
@@ -435,8 +565,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("⚽ Streak Predictor V4")
-    st.caption("Paste raw active streaks → Auto-parse → Compare edges → Predict Over/Under, Winner, BTTS")
+    st.title("⚽ Streak Predictor V5")
+    st.caption("Tier 1: Lock Detector → Tier 2: Edge Comparison → Tier 3: No Bet")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -453,41 +583,43 @@ def main():
                 parsed = parse_raw_text(raw_text)
                 
                 if not parsed["home_name"] or not parsed["away_name"]:
-                    st.error(f"Could not detect team names. Found home: '{parsed['home_name']}', away: '{parsed['away_name']}'.")
+                    st.error(f"Could not detect team names.")
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
                     edge_data = calculate_edges(home_signals, away_signals)
-                    predictions = predict(edge_data, home_signals, away_signals)
+                    predictions = get_final_predictions(home_signals, away_signals, edge_data)
                     save_to_db(parsed["home_name"], parsed["away_name"],
                               home_signals, away_signals, predictions)
                     
                     st.success(f"✅ Parsed: {parsed['home_name']} vs {parsed['away_name']}")
                     
+                    # Signal Summary
                     col1, col2 = st.columns(2)
                     with col1:
                         st.markdown(f"""
                         <div class="edge-box edge-home">
                             <strong>🏠 {parsed['home_name']}</strong><br>
-                            Scoring: {home_signals['scoring']} | Over 0.5: {home_signals['over05']}<br>
-                            Over 2.5 Goals: {home_signals['over25_goals']} | Over 2.5: {home_signals['over25']} | Over 1.5(h): {home_signals['over15_hidden']}<br>
+                            Scoring: {home_signals['scoring']} | Over 2.5 Goals: {home_signals['over25_goals']}<br>
+                            First to Score: {home_signals['first_to_score']} | BTTS: {home_signals['btts']} | No BTTS: {home_signals['no_btts']}<br>
                             Unbeaten: {home_signals['unbeaten']} | Win: {home_signals['win']} | Hot: {home_signals['hot_form']}<br>
-                            Goals 2+: {home_signals['goals2']} | BTTS: {home_signals['btts']} | No BTTS: {home_signals['no_btts']}<br>
-                            Without Win: {home_signals['without_win']} | Loss: {home_signals['loss']} | Cold: {home_signals['cold_form']}
+                            Without Win: {home_signals['without_win']} | Win to Nil: {home_signals['win_to_nil']}<br>
+                            Goal Frenzy: {home_signals['goal_frenzy']} | Rampage: {home_signals['rampage_attack']}
                         </div>
                         """, unsafe_allow_html=True)
                     with col2:
                         st.markdown(f"""
                         <div class="edge-box edge-away">
                             <strong>✈️ {parsed['away_name']}</strong><br>
-                            Scoring: {away_signals['scoring']} | Over 0.5: {away_signals['over05']}<br>
-                            Over 2.5 Goals: {away_signals['over25_goals']} | Over 2.5: {away_signals['over25']} | Over 1.5(h): {away_signals['over15_hidden']}<br>
+                            Scoring: {away_signals['scoring']} | Over 2.5 Goals: {away_signals['over25_goals']}<br>
+                            First to Score: {away_signals['first_to_score']} | BTTS: {away_signals['btts']} | No BTTS: {away_signals['no_btts']}<br>
                             Unbeaten: {away_signals['unbeaten']} | Win: {away_signals['win']} | Hot: {away_signals['hot_form']}<br>
-                            Goals 2+: {away_signals['goals2']} | BTTS: {away_signals['btts']} | No BTTS: {away_signals['no_btts']}<br>
-                            Without Win: {away_signals['without_win']} | Loss: {away_signals['loss']} | Cold: {away_signals['cold_form']}
+                            Without Win: {away_signals['without_win']} | Win to Nil: {away_signals['win_to_nil']}<br>
+                            Goal Frenzy: {away_signals['goal_frenzy']} | Rampage: {away_signals['rampage_attack']}
                         </div>
                         """, unsafe_allow_html=True)
                     
+                    # Edge Comparison
                     if edge_data["edges"]:
                         st.markdown("### ⚔️ Edge Comparison")
                         for edge in edge_data["edges"]:
@@ -500,58 +632,42 @@ def main():
                             </div>
                             """, unsafe_allow_html=True)
                     
-                    st.markdown("### 📊 Edge Summary")
-                    c1, c2, c3, c4 = st.columns(4)
-                    with c1:
-                        st.metric("Home Edges", edge_data["home_edge_count"])
-                    with c2:
-                        st.metric("Away Edges", edge_data["away_edge_count"])
-                    with c3:
-                        st.metric("Attacking Score", edge_data["attacking_score"])
-                    with c4:
-                        st.metric("Net Score", edge_data["net_score"])
-                    
+                    # Predictions
                     st.markdown("### 🎯 Predictions")
                     col1, col2, col3 = st.columns(3)
                     
-                    with col1:
-                        over_emoji = "🔥" if "OVER" in predictions["over_under"] else "🛡️" if "UNDER" in predictions["over_under"] else "⏭️"
-                        ou_card = "over-card" if "OVER" in predictions["over_under"] else "under-card" if "UNDER" in predictions["over_under"] else "skip-card"
-                        st.markdown(f"""
-                        <div class="output-card {ou_card}">
-                            <div style="text-align:center;">
-                                <div style="font-size:2rem;">{over_emoji}</div>
-                                <div style="font-size:1.3rem;font-weight:800;">{predictions['over_under']}</div>
-                                <div style="font-size:0.85rem;color:#94a3b8;">{predictions['over_confidence']:.0f}% confidence</div>
+                    for col, market, key in [
+                        (col1, "Over/Under", "over_under"),
+                        (col2, "Winner", "winner"),
+                        (col3, "BTTS", "btts")
+                    ]:
+                        pred = predictions[key]
+                        is_lock = pred.get("tier") == "LOCK"
+                        
+                        if key == "over_under":
+                            emoji = "🔥" if "OVER" in pred["prediction"] else "🛡️" if "UNDER" in pred["prediction"] else "⏭️"
+                            card_class = "over-card" if "OVER" in pred["prediction"] else "under-card" if "UNDER" in pred["prediction"] else "skip-card"
+                        elif key == "winner":
+                            emoji = {"HOME": "🏠", "AWAY": "✈️", "DRAW": "🤝"}.get(pred["prediction"], "❓")
+                            card_class = "home-card" if pred["prediction"] == "HOME" else "away-card" if pred["prediction"] == "AWAY" else "draw-card"
+                        else:
+                            emoji = "✅" if "YES" in pred["prediction"] else "❌"
+                            card_class = "over-card" if "YES" in pred["prediction"] else "under-card"
+                        
+                        lock_badge = '<span class="tier-badge tier-lock">🔒 LOCK</span>' if is_lock else '<span class="tier-badge tier-edge">📊 EDGE</span>'
+                        
+                        with col:
+                            st.markdown(f"""
+                            <div class="output-card {card_class} {'lock-card' if is_lock else ''}">
+                                <div style="text-align:center;">
+                                    {lock_badge}
+                                    <div style="font-size:2rem;">{emoji}</div>
+                                    <div style="font-size:1.3rem;font-weight:800;">{pred['prediction']}</div>
+                                    <div style="font-size:0.85rem;color:#94a3b8;">{pred['confidence']:.0%} confidence</div>
+                                    <div style="font-size:0.75rem;color:#94a3b8;">{pred['reason']}</div>
+                                </div>
                             </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col2:
-                        win_emoji = {"HOME": "🏠", "AWAY": "✈️", "DRAW": "🤝"}.get(predictions["winner"], "❓")
-                        win_card = "home-card" if predictions["winner"] == "HOME" else "away-card" if predictions["winner"] == "AWAY" else "draw-card"
-                        st.markdown(f"""
-                        <div class="output-card {win_card}">
-                            <div style="text-align:center;">
-                                <div style="font-size:2rem;">{win_emoji}</div>
-                                <div style="font-size:1.3rem;font-weight:800;">{predictions['winner']}</div>
-                                <div style="font-size:0.85rem;color:#94a3b8;">{predictions['winner_confidence']:.0f}% confidence</div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col3:
-                        btts_emoji = "✅" if "YES" in predictions["btts"] else "❌"
-                        btts_card = "over-card" if "YES" in predictions["btts"] else "under-card"
-                        st.markdown(f"""
-                        <div class="output-card {btts_card}">
-                            <div style="text-align:center;">
-                                <div style="font-size:2rem;">{btts_emoji}</div>
-                                <div style="font-size:1.3rem;font-weight:800;">{predictions['btts']}</div>
-                                <div style="font-size:0.85rem;color:#94a3b8;">{predictions['btts_confidence']:.0f}% confidence</div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """, unsafe_allow_html=True)
     
     with tab2:
         st.subheader("📝 Enter Match Results")
@@ -573,13 +689,6 @@ def main():
                     with c3:
                         total = home_goals + away_goals
                         over25 = total > 2
-                        if home_goals > away_goals:
-                            actual_winner = "HOME"
-                        elif away_goals > home_goals:
-                            actual_winner = "AWAY"
-                        else:
-                            actual_winner = "DRAW"
-                        
                         btts_yes = home_goals > 0 and away_goals > 0
                         
                         st.markdown(f"""
@@ -610,33 +719,20 @@ def main():
             btts_total = len([r for r in results if r.get("btts_correct") is not None])
             
             c1, c2, c3 = st.columns(3)
-            with c1:
-                rate = round(correct_ou / total * 100) if total > 0 else 0
+            for col, label, correct, t in [
+                (c1, "Over/Under", correct_ou, total),
+                (c2, "Winner", correct_winner, winner_total),
+                (c3, "BTTS", correct_btts, btts_total)
+            ]:
+                rate = round(correct / t * 100) if t > 0 else 0
                 color = "#10b981" if rate >= 70 else "#ef4444"
-                st.markdown(f"""
-                <div class="output-card" style="text-align:center;">
-                    <div style="font-size:0.9rem;">Over/Under</div>
-                    <div style="font-size:2rem;font-weight:800;color:{color};">{correct_ou}/{total} ({rate}%)</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with c2:
-                wrate = round(correct_winner / winner_total * 100) if winner_total > 0 else 0
-                wcolor = "#10b981" if wrate >= 70 else "#ef4444"
-                st.markdown(f"""
-                <div class="output-card" style="text-align:center;">
-                    <div style="font-size:0.9rem;">Winner</div>
-                    <div style="font-size:2rem;font-weight:800;color:{wcolor};">{correct_winner}/{winner_total} ({wrate}%)</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with c3:
-                brate = round(correct_btts / btts_total * 100) if btts_total > 0 else 0
-                bcolor = "#10b981" if brate >= 70 else "#ef4444"
-                st.markdown(f"""
-                <div class="output-card" style="text-align:center;">
-                    <div style="font-size:0.9rem;">BTTS</div>
-                    <div style="font-size:2rem;font-weight:800;color:{bcolor};">{correct_btts}/{btts_total} ({brate}%)</div>
-                </div>
-                """, unsafe_allow_html=True)
+                with col:
+                    st.markdown(f"""
+                    <div class="output-card" style="text-align:center;">
+                        <div style="font-size:0.9rem;">{label}</div>
+                        <div style="font-size:2rem;font-weight:800;color:{color};">{correct}/{t} ({rate}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             if st.checkbox("Show all results"):
                 st.dataframe(pd.DataFrame([{
