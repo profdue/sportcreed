@@ -65,6 +65,21 @@ def reverse_replace_last(text, old, new):
     return new.join(parts)
 
 
+def is_defensively_fragile(team: dict) -> bool:
+    """Team concedes heavily and is in poor form.
+    over25_goals alone is NOT enough — must be paired with poor form indicators
+    to distinguish 'dominant team whose matches go Over' from 'collapsing team conceding heavily'."""
+    return (
+        team.get("heavy_defeats", 0) >= 3 or
+        team.get("loss", 0) >= 5 or
+        team.get("without_win", 0) >= 8 or
+        team.get("cold_form", 0) >= 5 or
+        (team.get("over25_goals", 0) >= 7 and team.get("without_win", 0) >= 4) or
+        (team.get("over25_goals", 0) >= 7 and team.get("loss", 0) >= 3) or
+        (team.get("over25_goals", 0) >= 7 and team.get("cold_form", 0) >= 3)
+    )
+
+
 # ============================================================================
 # PARSER
 # ============================================================================
@@ -190,26 +205,31 @@ def extract_signals(team_data: dict) -> dict:
 
 
 # ============================================================================
-# TIER 1: LOCK DETECTOR
+# TIER 1: LOCK DETECTOR (CORRECTED)
 # ============================================================================
 def check_locks(home: dict, away: dict) -> dict:
-    """Check all lock conditions. Returns dict of locked markets with confidence (0-100 scale)."""
+    """Check all lock conditions. Returns dict of locked markets with confidence (0-100 scale).
+    
+    KEY CORRECTION: over25_goals is NOT a defensive fragility signal by itself.
+    It means 'matches that went Over 2.5' — which could be attacking strength (Bayern)
+    or defensive weakness (Al Khaleej). Must pair with form indicators to distinguish.
+    """
     locks = {}
     
     # ========================================================================
-    # OVER 2.5 LOCKS
+    # OVER 2.5 LOCKS (CORRECTED)
     # ========================================================================
     
-    # Lock 1: Scoring ≥ 10 (one team) + Opponent over25_goals ≥ 7
-    if (home.get("scoring", 0) >= 10 and away.get("over25_goals", 0) >= 7):
+    # Lock 1: Scoring ≥ 10 (one team) + Opponent is defensively fragile
+    if home.get("scoring", 0) >= 10 and is_defensively_fragile(away):
         locks["over_under"] = {
             "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
-            "reason": "Home scoring ≥ 10 + Away over25_goals ≥ 7"
+            "reason": "Home scoring ≥ 10 + Away defensively fragile"
         }
-    elif (away.get("scoring", 0) >= 10 and home.get("over25_goals", 0) >= 7):
+    elif away.get("scoring", 0) >= 10 and is_defensively_fragile(home):
         locks["over_under"] = {
             "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
-            "reason": "Away scoring ≥ 10 + Home over25_goals ≥ 7"
+            "reason": "Away scoring ≥ 10 + Home defensively fragile"
         }
     
     # Lock 2: Both teams scoring ≥ 10
@@ -604,7 +624,7 @@ def main():
                             Scoring: {home_signals['scoring']} | Over 2.5 Goals: {home_signals['over25_goals']}<br>
                             First to Score: {home_signals['first_to_score']} | BTTS: {home_signals['btts']} | No BTTS: {home_signals['no_btts']}<br>
                             Unbeaten: {home_signals['unbeaten']} | Win: {home_signals['win']} | Hot: {home_signals['hot_form']}<br>
-                            Without Win: {home_signals['without_win']} | Win to Nil: {home_signals['win_to_nil']}<br>
+                            Without Win: {home_signals['without_win']} | Loss: {home_signals['loss']} | Heavy Defeats: {home_signals['heavy_defeats']}<br>
                             Goal Frenzy: {home_signals['goal_frenzy']} | Rampage: {home_signals['rampage_attack']}
                         </div>
                         """, unsafe_allow_html=True)
@@ -615,7 +635,7 @@ def main():
                             Scoring: {away_signals['scoring']} | Over 2.5 Goals: {away_signals['over25_goals']}<br>
                             First to Score: {away_signals['first_to_score']} | BTTS: {away_signals['btts']} | No BTTS: {away_signals['no_btts']}<br>
                             Unbeaten: {away_signals['unbeaten']} | Win: {away_signals['win']} | Hot: {away_signals['hot_form']}<br>
-                            Without Win: {away_signals['without_win']} | Win to Nil: {away_signals['win_to_nil']}<br>
+                            Without Win: {away_signals['without_win']} | Loss: {away_signals['loss']} | Heavy Defeats: {away_signals['heavy_defeats']}<br>
                             Goal Frenzy: {away_signals['goal_frenzy']} | Rampage: {away_signals['rampage_attack']}
                         </div>
                         """, unsafe_allow_html=True)
