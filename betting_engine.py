@@ -45,6 +45,7 @@ st.markdown("""
     .edge-home { border-left: 3px solid #10b981; }
     .edge-away { border-left: 3px solid #ef4444; }
     .edge-even { border-left: 3px solid #94a3b8; }
+    .debug-box { background: #1a0a0a; border: 1px solid #ef4444; border-radius: 8px; padding: 0.8rem; margin: 0.5rem 0; color: #ff6b6b; font-family: monospace; font-size: 0.75rem; max-height: 400px; overflow-y: auto; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
@@ -66,9 +67,7 @@ def reverse_replace_last(text, old, new):
 
 
 def is_defensively_fragile(team: dict) -> bool:
-    """Team concedes heavily and is in poor form.
-    over25_goals alone is NOT enough — must be paired with poor form indicators
-    to distinguish 'dominant team whose matches go Over' from 'collapsing team conceding heavily'."""
+    """Team concedes heavily and is in poor form."""
     return (
         team.get("heavy_defeats", 0) >= 3 or
         team.get("loss", 0) >= 5 or
@@ -84,7 +83,8 @@ def is_defensively_fragile(team: dict) -> bool:
 # PARSER
 # ============================================================================
 def parse_raw_text(raw_text: str) -> dict:
-    """Parse raw active streaks text into structured data."""
+    """Parse raw active streaks text into structured data.
+    Uses the HIGHEST value when duplicate keys exist (venue-agnostic)."""
     
     lines = raw_text.strip().split('\n')
     
@@ -205,22 +205,13 @@ def extract_signals(team_data: dict) -> dict:
 
 
 # ============================================================================
-# TIER 1: LOCK DETECTOR (CORRECTED)
+# TIER 1: LOCK DETECTOR
 # ============================================================================
 def check_locks(home: dict, away: dict) -> dict:
-    """Check all lock conditions. Returns dict of locked markets with confidence (0-100 scale).
-    
-    KEY CORRECTION: over25_goals is NOT a defensive fragility signal by itself.
-    It means 'matches that went Over 2.5' — which could be attacking strength (Bayern)
-    or defensive weakness (Al Khaleej). Must pair with form indicators to distinguish.
-    """
+    """Check all lock conditions. Returns dict of locked markets with confidence (0-100 scale)."""
     locks = {}
     
-    # ========================================================================
-    # OVER 2.5 LOCKS (CORRECTED)
-    # ========================================================================
-    
-    # Lock 1: Scoring ≥ 10 (one team) + Opponent is defensively fragile
+    # OVER 2.5 LOCKS
     if home.get("scoring", 0) >= 10 and is_defensively_fragile(away):
         locks["over_under"] = {
             "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
@@ -231,27 +222,19 @@ def check_locks(home: dict, away: dict) -> dict:
             "prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
             "reason": "Away scoring ≥ 10 + Home defensively fragile"
         }
-    
-    # Lock 2: Both teams scoring ≥ 10
     elif home.get("scoring", 0) >= 10 and away.get("scoring", 0) >= 10:
         locks["over_under"] = {
             "prediction": "OVER 2.5", "confidence": 90, "tier": "LOCK",
             "reason": "Both teams scoring ≥ 10"
         }
     
-    # ========================================================================
     # BTTS LOCKS
-    # ========================================================================
-    
-    # BTTS YES Lock: Both btts ≥ 5
     if home.get("btts", 0) >= 5 and away.get("btts", 0) >= 5:
         locks["btts"] = {
             "prediction": "BTTS YES", "confidence": 85, "tier": "LOCK",
             "reason": "Both btts ≥ 5"
         }
-    
-    # BTTS NO Lock: Either no_btts ≥ 4 + Opponent scoring ≤ 5
-    if (home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5):
+    elif (home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5):
         locks["btts"] = {
             "prediction": "BTTS NO", "confidence": 75, "tier": "LOCK",
             "reason": "Home no_btts ≥ 4 + Away scoring ≤ 5"
@@ -262,27 +245,19 @@ def check_locks(home: dict, away: dict) -> dict:
             "reason": "Away no_btts ≥ 4 + Home scoring ≤ 5"
         }
     
-    # ========================================================================
     # WINNER LOCKS
-    # ========================================================================
-    
-    # HOME WIN Lock: Home first_to_score ≥ 5 + Away first_to_score = 0
     if home.get("first_to_score", 0) >= 5 and away.get("first_to_score", 0) == 0:
         locks["winner"] = {
             "prediction": "HOME", "confidence": 90, "tier": "LOCK",
             "reason": "Home first_to_score ≥ 5 + Away first_to_score = 0"
         }
-    
-    # AWAY WIN Lock: Home without_win ≥ 4 + Home over25_goals ≥ 7 + Away win_to_nil ≥ 3
-    if home.get("without_win", 0) >= 4 and home.get("over25_goals", 0) >= 7 and away.get("win_to_nil", 0) >= 3:
+    elif home.get("without_win", 0) >= 4 and home.get("over25_goals", 0) >= 7 and away.get("win_to_nil", 0) >= 3:
         locks["winner"] = {
             "prediction": "AWAY", "confidence": 90, "tier": "LOCK",
             "reason": "Home collapse + Away win_to_nil ≥ 3"
         }
-    
-    # DRAW Lock: Both unbeaten ≥ 8 + Both first_to_score ≤ 3
-    if home.get("unbeaten", 0) >= 8 and away.get("unbeaten", 0) >= 8 and \
-       home.get("first_to_score", 0) <= 3 and away.get("first_to_score", 0) <= 3:
+    elif home.get("unbeaten", 0) >= 8 and away.get("unbeaten", 0) >= 8 and \
+         home.get("first_to_score", 0) <= 3 and away.get("first_to_score", 0) <= 3:
         locks["winner"] = {
             "prediction": "DRAW", "confidence": 70, "tier": "LOCK",
             "reason": "Both unbeaten ≥ 8 + low first_to_score"
@@ -371,7 +346,7 @@ def calculate_edges(home: dict, away: dict) -> dict:
 
 
 # ============================================================================
-# TIER 2: EDGE-BASED PREDICTIONS (returns confidence on 0-100 scale)
+# TIER 2: EDGE-BASED PREDICTIONS
 # ============================================================================
 def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
     """Generate predictions from edge data (Tier 2). All confidences on 0-100 scale."""
@@ -450,17 +425,16 @@ def predict_from_edges(edge_data: dict, home: dict, away: dict) -> dict:
 
 
 # ============================================================================
-# TIER 3: MERGE LOCKS + EDGES (all confidences on 0-100 scale)
+# TIER 3: MERGE LOCKS + EDGES
 # ============================================================================
 def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
-    """Tier 1 locks override Tier 2 edges. All confidences are percentages (0-100)."""
+    """Tier 1 locks override Tier 2 edges."""
     
     locks = check_locks(home, away)
     edges = predict_from_edges(edge_data, home, away)
     
     final = {}
     
-    # Over/Under
     if "over_under" in locks:
         final["over_under"] = locks["over_under"]
     else:
@@ -471,7 +445,6 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
             "reason": f"Edge comparison (net score: {edge_data['net_score']})"
         }
     
-    # Winner
     if "winner" in locks:
         final["winner"] = locks["winner"]
     else:
@@ -482,7 +455,6 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
             "reason": f"Edge comparison (diff: {edge_data['home_edge_count'] - edge_data['away_edge_count']})"
         }
     
-    # BTTS
     if "btts" in locks:
         final["btts"] = locks["btts"]
     else:
@@ -500,7 +472,6 @@ def get_final_predictions(home: dict, away: dict, edge_data: dict) -> dict:
 # SUPABASE FUNCTIONS
 # ============================================================================
 def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
-    """Save analysis to database. predictions dict has confidences as percentages (0-100)."""
     try:
         record = {
             "home_team": home_name,
@@ -607,6 +578,13 @@ def main():
                 if not parsed["home_name"] or not parsed["away_name"]:
                     st.error(f"Could not detect team names.")
                 else:
+                    # DEBUG: Show raw parsed keys
+                    with st.expander("🔧 DEBUG: Raw Parsed Data"):
+                        st.markdown("**Home data keys:**")
+                        st.code(str(parsed["home_data"]))
+                        st.markdown("**Away data keys:**")
+                        st.code(str(parsed["away_data"]))
+                    
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
                     edge_data = calculate_edges(home_signals, away_signals)
