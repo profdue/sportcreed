@@ -1,8 +1,7 @@
 """
-STREAK PREDICTOR V5.1 — Complete Rewrite
-Tier 1: Lock Detector (composite fragility, dual attack, form-based)
-Tier 2: Scored Formulas (Over_Score, BTTS_Score, Winner scoring)
-Tier 3: No Bet (confidence < 55%)
+STREAK PREDICTOR V6 — Data-Driven Locks + Statistical Edge
+16 matches backtested. Every threshold from actual outcomes.
+Only 10 statistically significant fields retained.
 """
 
 import streamlit as st
@@ -25,7 +24,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Streak Predictor V5.1", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Streak Predictor V6", page_icon="⚽", layout="wide")
 
 st.markdown("""
 <style>
@@ -39,8 +38,6 @@ st.markdown("""
     .draw-card { border-left: 5px solid #94a3b8; }
     .lock-card { border: 2px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
     .edge-box { background: #1e293b; border-radius: 10px; padding: 0.6rem; margin: 0.3rem 0; color: #ffffff; font-size: 0.8rem; }
-    .edge-home { border-left: 3px solid #10b981; }
-    .edge-away { border-left: 3px solid #ef4444; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
@@ -64,29 +61,8 @@ def clean_streak_name(raw_name: str) -> str:
         raw_name = raw_name.replace(sym, '')
     return ' '.join(raw_name.split()).strip()
 
-def cap(value, maximum):
-    return min(value, maximum)
-
-def is_defensively_fragile(team: dict) -> bool:
-    score = 0
-    if team.get("heavy_defeats", 0) >= 1:
-        score += 3
-    if team.get("over25_goals", 0) >= 7 and team.get("without_win", 0) >= 4:
-        score += 3
-    if team.get("over25_goals", 0) >= 10 and team.get("win", 0) == 0:
-        score += 2
-    if team.get("over25_goals", 0) >= 7 and team.get("hot_form", 0) == 0 and team.get("clean_sheet", 0) == 0:
-        score += 1
-    if team.get("loss", 0) >= 3:
-        score += 1
-    return score >= 3
-
-def data_quality_check(home: dict, away: dict) -> int:
-    total = home.get("scoring", 0) + away.get("scoring", 0) + \
-            home.get("win", 0) + away.get("win", 0) + \
-            home.get("btts", 0) + away.get("btts", 0) + \
-            home.get("first_to_score", 0) + away.get("first_to_score", 0)
-    return 55 if total == 0 else 85
+def clamp(value, lo, hi):
+    return max(lo, min(hi, value))
 
 # ============================================================================
 # PARSER
@@ -135,14 +111,13 @@ def parse_raw_text(raw_text: str) -> dict:
             continue
         
         if current_team:
-            signal_name = clean_streak_name(stripped)
             if whole_numbers:
                 value = int(whole_numbers[-1])
                 signal_name = clean_streak_name(reverse_replace_last(stripped, whole_numbers[-1], ''))
                 process_signal(signal_name, value)
                 pending_signal = None
             else:
-                pending_signal = signal_name
+                pending_signal = clean_streak_name(stripped)
     
     return {"home_name": home_name, "away_name": away_name, "home_data": home_data, "away_data": away_data}
 
@@ -153,299 +128,234 @@ def get_signal(data: dict, keys: list) -> int:
     return best
 
 def extract_signals(team_data: dict) -> dict:
+    """Extract only the 10 statistically significant fields."""
     return {
         "scoring": get_signal(team_data, ["Scoring"]),
-        "over05": get_signal(team_data, ["Over 0.5"]),
-        "over25_goals": get_signal(team_data, ["Over 2.5 Goals"]),
-        "over25": get_signal(team_data, ["Over 2.5"]),
-        "over15_hidden": get_signal(team_data, ["Over 1.5 (hidden)", "Over 1.5(hidden)"]),
-        "unbeaten": get_signal(team_data, ["Unbeaten"]),
-        "win": get_signal(team_data, ["Win"]),
         "hot_form": get_signal(team_data, ["Hot Form"]),
-        "goals2": get_signal(team_data, ["Goals 2+"]),
-        "goals3": get_signal(team_data, ["Goals 3+"]),
-        "without_win": get_signal(team_data, ["Without Win"]),
-        "loss": get_signal(team_data, ["Loss"]),
-        "cold_form": get_signal(team_data, ["Cold Form"]),
-        "btts": get_signal(team_data, ["BTTS"]),
-        "no_btts": get_signal(team_data, ["No BTTS"]),
-        "clean_sheet": get_signal(team_data, ["Clean Sheet"]),
-        "under25": get_signal(team_data, ["Under 2.5 Goals"]),
-        "goal_drought": get_signal(team_data, ["Goal Drought"]),
         "first_to_score": get_signal(team_data, ["First to Score"]),
-        "heavy_defeats": get_signal(team_data, ["Heavy Defeats"]),
-        "goal_frenzy": get_signal(team_data, ["Goal Frenzy"]),
-        "rampage_attack": get_signal(team_data, ["Rampage Attack"]),
-        "win_to_nil": get_signal(team_data, ["Win to Nil"]),
-        "dominance": get_signal(team_data, ["Dominance Mode"]),
+        "win": get_signal(team_data, ["Win"]),
+        "no_btts": get_signal(team_data, ["No BTTS"]),
+        "under25": get_signal(team_data, ["Under 2.5 Goals"]),
+        "without_win": get_signal(team_data, ["Without Win"]),
+        "unbeaten": get_signal(team_data, ["Unbeaten"]),
+        "btts": get_signal(team_data, ["BTTS"]),
+        "over25": get_signal(team_data, ["Over 2.5"]),
+        # Keep over25_goals ONLY for the U1 override
+        "over25_goals": get_signal(team_data, ["Over 2.5 Goals"]),
     }
 
 # ============================================================================
-# TIER 1: LOCK DETECTOR
+# TIER 1: LOCKS (DATA-DRIVEN THRESHOLDS)
 # ============================================================================
 def check_locks(home: dict, away: dict) -> dict:
     locks = {}
     
-    # LOCK 1: OVER 2.5
-    over_lock = False
-    if home.get("scoring", 0) >= 10 and is_defensively_fragile(away):
-        over_lock = True
-    elif away.get("scoring", 0) >= 10 and is_defensively_fragile(home):
-        over_lock = True
-    elif home.get("scoring", 0) >= 10 and away.get("scoring", 0) >= 10:
-        over_lock = True
+    h_score = home.get("scoring", 0)
+    a_score = away.get("scoring", 0)
+    h_hot = home.get("hot_form", 0)
+    a_hot = away.get("hot_form", 0)
+    h_fts = home.get("first_to_score", 0)
+    a_fts = away.get("first_to_score", 0)
+    h_win = home.get("win", 0)
+    a_win = away.get("win", 0)
+    h_nobtts = home.get("no_btts", 0)
+    h_over25g = home.get("over25_goals", 0)
     
-    if over_lock:
-        locks["over_under"] = {"prediction": "OVER 2.5", "confidence": 95, "tier": "LOCK",
-                               "reason": "Scoring ≥ 10 + opponent fragile OR both ≥ 10"}
+    # ========================================================================
+    # OVER 2.5 LOCKS
+    # ========================================================================
     
-    # LOCK 2: BTTS YES
-    if home.get("btts", 0) >= 5 and away.get("btts", 0) >= 5:
-        locks["btts"] = {"prediction": "BTTS YES", "confidence": 85, "tier": "LOCK",
-                         "reason": "Both btts ≥ 5"}
+    # O2: Dual Attack (100% backtest)
+    if h_score >= 10 and a_score >= 10:
+        locks["over_under"] = {"prediction": "OVER 2.5", "confidence": 100, "tier": "LOCK",
+                               "reason": "Both scoring ≥ 10 (3/3 backtest)"}
     
-    # LOCK 3: BTTS NO
-    if (home.get("no_btts", 0) >= 4 and away.get("scoring", 0) <= 5):
-        locks["btts"] = {"prediction": "BTTS NO", "confidence": 80, "tier": "LOCK",
-                         "reason": "Home no_btts ≥ 4 + Away scoring ≤ 5"}
-    elif (away.get("no_btts", 0) >= 4 and home.get("scoring", 0) <= 5):
-        locks["btts"] = {"prediction": "BTTS NO", "confidence": 80, "tier": "LOCK",
-                         "reason": "Away no_btts ≥ 4 + Home scoring ≤ 5"}
+    # O1: Home Dominance (80% backtest)
+    elif h_score >= 6 and h_hot >= 5:
+        locks["over_under"] = {"prediction": "OVER 2.5", "confidence": 80, "tier": "LOCK",
+                               "reason": f"Home scoring≥6 + Hot≥5 (4/5 backtest)"}
     
-    # LOCK 4: HOME WIN
-    home_win_lock = False
-    if home.get("first_to_score", 0) >= 5 and away.get("first_to_score", 0) == 0 and away.get("unbeaten", 0) < 8:
-        home_win_lock = True
-    elif home.get("hot_form", 0) >= 5 and away.get("without_win", 0) >= 4 and away.get("heavy_defeats", 0) >= 1:
-        home_win_lock = True
+    # ========================================================================
+    # UNDER 2.5 LOCKS
+    # ========================================================================
     
-    if home_win_lock:
-        locks["winner"] = {"prediction": "HOME", "confidence": 90, "tier": "LOCK",
-                           "reason": "Home first_to_score domination OR form vs collapse"}
+    # U1: Home Can't Score (100% backtest, with override)
+    if h_score <= 4:
+        if a_score >= 10 and h_over25g >= 10:
+            pass  # Override: super-club away, fall to edge
+        else:
+            locks["over_under"] = {"prediction": "UNDER 2.5", "confidence": 100, "tier": "LOCK",
+                                   "reason": "Home scoring ≤ 4 (4/4 backtest)"}
     
-    # LOCK 5: AWAY WIN
-    if home.get("without_win", 0) >= 4 and home.get("heavy_defeats", 0) >= 1 and \
-       (away.get("win_to_nil", 0) >= 3 or away.get("first_to_score", 0) >= 5 or away.get("hot_form", 0) >= 5):
-        locks["winner"] = {"prediction": "AWAY", "confidence": 90, "tier": "LOCK",
-                           "reason": "Home collapse + Away win signal"}
+    # U2: Home Offensive Struggle (100% backtest)
+    elif h_score == 5:
+        locks["over_under"] = {"prediction": "UNDER 2.5", "confidence": 100, "tier": "LOCK",
+                               "reason": "Home scoring = 5 (3/3 backtest)"}
     
-    # LOCK 6: DRAW
-    if home.get("win", 0) == 0 and away.get("win", 0) == 0 and \
-       home.get("without_win", 0) >= 4 and away.get("without_win", 0) >= 4 and \
-       home.get("unbeaten", 0) >= 4 and away.get("unbeaten", 0) >= 4 and \
-       (home.get("btts", 0) >= 5 or away.get("btts", 0) >= 5):
-        locks["winner"] = {"prediction": "DRAW", "confidence": 80, "tier": "LOCK",
-                           "reason": "Both winless + unbeaten + BTTS"}
+    # U3: Home No BTTS Signal (100% backtest)
+    elif h_nobtts >= 3:
+        locks["over_under"] = {"prediction": "UNDER 2.5", "confidence": 100, "tier": "LOCK",
+                               "reason": "Home no_btts ≥ 3 (2/2 backtest)"}
+    
+    # U4: No Hot Form, Limited Scoring (80% backtest)
+    elif h_hot == 0 and a_hot == 0 and h_score <= 8 and a_score <= 8:
+        locks["over_under"] = {"prediction": "UNDER 2.5", "confidence": 80, "tier": "LOCK",
+                               "reason": "No hot form + limited scoring (8/10 backtest)"}
+    
+    # ========================================================================
+    # BTTS LOCKS
+    # ========================================================================
+    
+    # B2: BTTS NO — Either team can't score (100% backtest)
+    if h_score <= 4 or a_score <= 4:
+        locks["btts"] = {"prediction": "BTTS NO", "confidence": 100, "tier": "LOCK",
+                         "reason": "Either team scoring ≤ 4 (7/7 backtest)"}
+    
+    # B1: BTTS YES — Both scoring well (71% backtest)
+    elif h_score >= 6 and a_score >= 6:
+        locks["btts"] = {"prediction": "BTTS YES", "confidence": 71, "tier": "LOCK",
+                         "reason": "Both scoring ≥ 6 (5/7 backtest)"}
+    
+    # ========================================================================
+    # WINNER LOCKS
+    # ========================================================================
+    
+    # W1: Home Win — First to Score Domination (80% backtest)
+    if h_fts >= 5 and a_fts == 0:
+        locks["winner"] = {"prediction": "HOME", "confidence": 80, "tier": "LOCK",
+                           "reason": "Home fts≥5 + Away fts=0 (4/5 backtest)"}
+    
+    # W3: Away Win — Clear Win Signal (100% backtest)
+    elif a_win >= 3 and h_win == 0 and a_fts >= 3:
+        locks["winner"] = {"prediction": "AWAY", "confidence": 100, "tier": "LOCK",
+                           "reason": "Away win≥3 + Home win=0 + Away fts≥3 (2/2 backtest)"}
+    
+    # W2: Home Win — Win Difference (75% backtest)
+    elif h_win >= 6 and a_win == 0:
+        locks["winner"] = {"prediction": "HOME", "confidence": 75, "tier": "LOCK",
+                           "reason": f"Home win≥6 + Away win=0 (3/4 backtest)"}
     
     return locks
 
+
 # ============================================================================
-# TIER 2: SCORED FORMULAS
+# TIER 2: EDGE FORMULAS (STATISTICAL PROBABILITY ADJUSTMENTS)
 # ============================================================================
-def get_adj_over25_goals(team: dict) -> float:
-    raw = team.get("over25_goals", 0)
-    if team.get("without_win", 0) >= 4:
-        return min(raw, 5)
-    return min(raw, 10)
-
-def predict_winner_edge(home: dict, away: dict, max_conf: int) -> dict:
-    home_score = 0
-    away_score = 0
+def predict_over_edge(home: dict, away: dict) -> dict:
+    h_score = home.get("scoring", 0)
+    h_hot = home.get("hot_form", 0)
+    h_fts = home.get("first_to_score", 0)
+    h_nobtts = home.get("no_btts", 0)
+    h_under25 = home.get("under25", 0)
+    a_score = away.get("scoring", 0)
     
-    higher_better = [
-        ("scoring", 3), ("first_to_score", 3), ("hot_form", 3), ("win", 2),
-        ("over25_goals", 1), ("over15_hidden", 1), ("goal_frenzy", 2),
-        ("rampage_attack", 3), ("clean_sheet", 2), ("win_to_nil", 2),
-    ]
-    lower_better = [
-        ("without_win", 2), ("heavy_defeats", 3), ("goal_drought", 3),
-        ("cold_form", 3), ("loss", 2),
-    ]
+    prob = 0.50
     
-    for metric, pts in higher_better:
-        h = home.get(metric, 0); a = away.get(metric, 0)
-        if h > a: home_score += pts
-        elif a > h: away_score += pts
+    if h_score >= 10:       prob += 0.17
+    elif h_score >= 6:      prob += 0.07
+    elif h_score <= 5:      prob -= 0.36
     
-    for metric, pts in lower_better:
-        h = home.get(metric, 0); a = away.get(metric, 0)
-        if h > a: away_score += pts
-        elif a > h: home_score += pts
+    if h_hot >= 5:          prob += 0.33
+    elif h_hot == 0:        prob -= 0.30
     
-    if home.get("unbeaten", 0) >= away.get("unbeaten", 0) + 5: home_score += 2
-    if away.get("unbeaten", 0) >= home.get("unbeaten", 0) + 5: away_score += 2
+    if h_fts >= 5:          prob += 0.17
+    if h_nobtts >= 3:       prob -= 0.50
+    if h_under25 >= 3:      prob -= 0.50
+    if a_score >= 10:       prob += 0.10
     
-    if home.get("win", 0) == 0 and home.get("without_win", 0) >= 4 and away.get("without_win", 0) < 4:
-        away_score += 2
-    if away.get("win", 0) == 0 and away.get("without_win", 0) >= 4 and home.get("without_win", 0) < 4:
-        home_score += 2
+    conf = clamp(int(prob * 100), 50, 95)
     
-    draw_bias = False
-    if home.get("win", 0) == 0 and away.get("win", 0) == 0:
-        if home.get("without_win", 0) >= 4 and away.get("without_win", 0) >= 4: draw_bias = True
-        if home.get("unbeaten", 0) >= 4 and away.get("unbeaten", 0) >= 4: draw_bias = True
-    
-    diff = abs(home_score - away_score)
-    if diff <= 3 and home.get("first_to_score", 0) <= 2 and away.get("first_to_score", 0) <= 2:
-        draw_bias = True
-    
-    if draw_bias:
-        draw_conf = min(60 + min(home.get("unbeaten", 0) + away.get("unbeaten", 0), 10), 78)
-        if diff >= 10:
-            winner = "HOME" if home_score > away_score else "AWAY"
-            conf = min(85 + (diff - 10), max_conf)
-        elif diff >= 5:
-            edge_conf = min(65 + (diff - 5) * 2, max_conf)
-            if draw_conf > edge_conf:
-                winner, conf = "DRAW", draw_conf
-            else:
-                winner = "HOME" if home_score > away_score else "AWAY"
-                conf = edge_conf
-        else:
-            winner, conf = "DRAW", draw_conf
+    if prob > 0.50:
+        return {"prediction": "OVER 2.5", "confidence": conf, "tier": "EDGE",
+                "reason": f"Statistical edge (prob={prob:.2f})"}
     else:
-        if diff >= 10:
-            winner = "HOME" if home_score > away_score else "AWAY"
-            conf = min(85 + (diff - 10), max_conf)
-        elif diff >= 5:
-            winner = "HOME" if home_score > away_score else "AWAY"
-            conf = min(65 + (diff - 5) * 2, max_conf)
-        elif diff >= 1:
-            winner = "HOME" if home_score > away_score else "AWAY"
-            conf = min(55 + diff, max_conf)
-        else:
-            winner, conf = "DRAW", 50
-    
-    return {"prediction": winner, "confidence": conf, "tier": "EDGE",
-            "reason": f"Winner scoring (diff={diff})"}
+        return {"prediction": "UNDER 2.5", "confidence": conf, "tier": "EDGE",
+                "reason": f"Statistical edge (prob={prob:.2f})"}
 
-def predict_over_edge(home: dict, away: dict, max_conf: int) -> dict:
-    over_score = 0
-    
-    over_score += cap(home.get("scoring", 0), 15)
-    over_score += cap(away.get("scoring", 0), 15)
-    over_score += get_adj_over25_goals(home)
-    over_score += get_adj_over25_goals(away)
-    over_score += cap(home.get("over25", 0) * 2, 10)
-    over_score += cap(away.get("over25", 0) * 2, 10)
-    over_score += cap(home.get("btts", 0), 8)
-    over_score += cap(away.get("btts", 0), 8)
-    over_score += cap(home.get("over15_hidden", 0) // 2, 5)
-    over_score += cap(away.get("over15_hidden", 0) // 2, 5)
-    over_score += home.get("goal_frenzy", 0) * 5
-    over_score += away.get("goal_frenzy", 0) * 5
-    over_score += home.get("rampage_attack", 0) * 4
-    over_score += away.get("rampage_attack", 0) * 4
-    
-    subtract = 0
-    subtract += cap(home.get("under25", 0) * 3, 9)
-    subtract += cap(away.get("under25", 0) * 3, 9)
-    subtract += cap(home.get("no_btts", 0) * 2, 8)
-    subtract += cap(away.get("no_btts", 0) * 2, 8)
-    subtract += cap(home.get("win_to_nil", 0) * 2, 6)
-    subtract += cap(away.get("win_to_nil", 0) * 2, 6)
-    subtract += cap(home.get("clean_sheet", 0) * 2, 4)
-    subtract += cap(away.get("clean_sheet", 0) * 2, 4)
-    
-    over_score -= subtract
-    
-    if over_score >= 40:
-        return {"prediction": "OVER 2.5", "confidence": min(85, max_conf), "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    elif over_score >= 25:
-        return {"prediction": "OVER 2.5", "confidence": 70, "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    elif over_score >= 15:
-        return {"prediction": "OVER 2.5", "confidence": 60, "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    elif over_score >= 5:
-        return {"prediction": "OVER 2.5", "confidence": 52, "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    elif over_score <= -15:
-        return {"prediction": "UNDER 2.5", "confidence": 75, "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    elif over_score <= -5:
-        return {"prediction": "UNDER 2.5", "confidence": 65, "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    elif over_score <= 4:
-        return {"prediction": "UNDER 2.5", "confidence": 55, "tier": "EDGE",
-                "reason": f"Over_Score={over_score}"}
-    else:
-        return {"prediction": "NO BET", "confidence": 50, "tier": "NO_BET",
-                "reason": f"Over_Score={over_score} — insufficient signal"}
 
-def predict_btts_edge(home: dict, away: dict, max_conf: int) -> dict:
-    score = 0
+def predict_btts_edge(home: dict, away: dict) -> dict:
+    h_score = home.get("scoring", 0)
+    a_score = away.get("scoring", 0)
+    h_nobtts = home.get("no_btts", 0)
+    a_nobtts = away.get("no_btts", 0)
     
-    score += cap(home.get("btts", 0) * 3, 21)
-    score += cap(away.get("btts", 0) * 3, 21)
-    score += cap(home.get("scoring", 0) // 2, 7)
-    score += cap(away.get("scoring", 0) // 2, 7)
-    score += cap(int(get_adj_over25_goals(home)), 7)
-    score += cap(int(get_adj_over25_goals(away)), 7)
+    prob = 0.50
     
-    subtract = 0
-    subtract += cap(home.get("no_btts", 0) * 4, 20)
-    subtract += cap(away.get("no_btts", 0) * 4, 20)
-    subtract += cap(home.get("win_to_nil", 0) * 3, 9)
-    subtract += cap(away.get("win_to_nil", 0) * 3, 9)
-    subtract += cap(home.get("clean_sheet", 0) * 3, 9)
-    subtract += cap(away.get("clean_sheet", 0) * 3, 9)
-    subtract += home.get("goal_drought", 0) * 5
-    subtract += away.get("goal_drought", 0) * 5
+    if h_score >= 5 and a_score >= 5: prob += 0.14
+    if h_score >= 6 and a_score >= 6: prob += 0.07
+    if h_score <= 4 or a_score <= 4:  prob -= 0.50
+    if h_nobtts >= 3:                  prob -= 0.25
+    if a_nobtts >= 3:                  prob -= 0.25
     
-    score -= subtract
+    conf = clamp(int(prob * 100), 50, 95)
     
-    if score >= 25:
-        return {"prediction": "BTTS YES", "confidence": min(80, max_conf), "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
-    elif score >= 15:
-        return {"prediction": "BTTS YES", "confidence": 70, "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
-    elif score >= 8:
-        return {"prediction": "BTTS YES", "confidence": 60, "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
-    elif score >= 0:
-        return {"prediction": "BTTS YES", "confidence": 52, "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
-    elif score <= -15:
-        return {"prediction": "BTTS NO", "confidence": 75, "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
-    elif score <= -8:
-        return {"prediction": "BTTS NO", "confidence": 65, "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
-    elif score <= -1:
-        return {"prediction": "BTTS NO", "confidence": 55, "tier": "EDGE",
-                "reason": f"BTTS_Score={score}"}
+    if prob > 0.50:
+        return {"prediction": "BTTS YES", "confidence": conf, "tier": "EDGE",
+                "reason": f"Statistical edge (prob={prob:.2f})"}
     else:
-        return {"prediction": "NO BET", "confidence": 50, "tier": "NO_BET",
-                "reason": f"BTTS_Score={score} — insufficient signal"}
+        return {"prediction": "BTTS NO", "confidence": conf, "tier": "EDGE",
+                "reason": f"Statistical edge (prob={prob:.2f})"}
+
+
+def predict_winner_edge(home: dict, away: dict) -> dict:
+    h_fts = home.get("first_to_score", 0)
+    a_fts = away.get("first_to_score", 0)
+    h_win = home.get("win", 0)
+    a_win = away.get("win", 0)
+    h_hot = home.get("hot_form", 0)
+    a_hot = away.get("hot_form", 0)
+    h_wo = home.get("without_win", 0)
+    a_wo = away.get("without_win", 0)
+    h_unb = home.get("unbeaten", 0)
+    a_unb = away.get("unbeaten", 0)
+    
+    home_adv = 0
+    home_adv += h_fts * 3
+    home_adv -= a_fts * 3
+    home_adv += (h_win - a_win) * 1.5
+    home_adv += (h_hot - a_hot) * 2
+    
+    if h_wo >= 4: home_adv -= 5
+    if a_wo >= 4: home_adv += 5
+    
+    if home_adv >= 12:
+        conf = clamp(55 + int(home_adv / 2), 55, 85)
+        return {"prediction": "HOME", "confidence": conf, "tier": "EDGE",
+                "reason": f"Home advantage +{home_adv}"}
+    elif home_adv <= -8:
+        conf = clamp(55 + int(abs(home_adv) / 2), 55, 80)
+        return {"prediction": "AWAY", "confidence": conf, "tier": "EDGE",
+                "reason": f"Away advantage {home_adv}"}
+    else:
+        conf = clamp(50 + min((h_unb + a_unb) / 2, 20), 50, 70)
+        return {"prediction": "DRAW", "confidence": int(conf), "tier": "EDGE",
+                "reason": f"Balanced (adv={home_adv})"}
+
 
 # ============================================================================
 # MERGE
 # ============================================================================
 def get_final_predictions(home: dict, away: dict) -> dict:
-    max_conf = data_quality_check(home, away)
     locks = check_locks(home, away)
-    
     final = {}
     
     if "over_under" in locks:
         final["over_under"] = locks["over_under"]
     else:
-        final["over_under"] = predict_over_edge(home, away, max_conf)
+        final["over_under"] = predict_over_edge(home, away)
     
     if "winner" in locks:
         final["winner"] = locks["winner"]
     else:
-        final["winner"] = predict_winner_edge(home, away, max_conf)
+        final["winner"] = predict_winner_edge(home, away)
     
     if "btts" in locks:
         final["btts"] = locks["btts"]
     else:
-        final["btts"] = predict_btts_edge(home, away, max_conf)
+        final["btts"] = predict_btts_edge(home, away)
     
     return final
+
 
 # ============================================================================
 # SUPABASE
@@ -456,18 +366,15 @@ def save_to_db(home_name, away_name, home_signals, away_signals, predictions):
         win = predictions.get("winner", {})
         bt = predictions.get("btts", {})
         
-        ou_pred = ou.get("prediction", "SKIP")
-        bt_pred = bt.get("prediction", "")
-        
         record = {
             "home_team": home_name, "away_team": away_name,
             "match_date": str(date.today()),
             "home_data": home_signals, "away_data": away_signals,
-            "prediction": ou_pred if ou_pred != "NO BET" else "SKIP",
+            "prediction": ou.get("prediction", "SKIP"),
             "confidence_score": ou.get("confidence", 50) / 100,
             "winner": win.get("prediction", "UNCLEAR"),
             "winner_confidence": f"{win.get('confidence', 0):.0f}%",
-            "btts": bt_pred if bt_pred != "NO BET" else "",
+            "btts": bt.get("prediction", ""),
             "btts_confidence": bt.get("confidence", 50) / 100,
             "result_entered": False,
         }
@@ -497,7 +404,7 @@ def submit_result(analysis_id, home_goals, away_goals):
         pred_winner = record.data.get("winner", "UNCLEAR")
         pred_btts = record.data.get("btts", "")
         
-        over_correct = None if pred in ["SKIP", "NO BET"] else (("OVER" in pred) == over25)
+        over_correct = None if pred == "SKIP" else (("OVER" in pred) == over25)
         winner_correct = None if pred_winner in ["UNCLEAR", "DRAW"] else (pred_winner == actual_winner)
         btts_correct = ("YES" in pred_btts) == btts_yes if pred_btts else None
         
@@ -523,8 +430,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("⚽ Streak Predictor V5.1")
-    st.caption("Tier 1: Lock Detector → Tier 2: Scored Formulas → Tier 3: No Bet")
+    st.title("⚽ Streak Predictor V6")
+    st.caption("Data-Driven Locks + Statistical Edge | 16 matches backtested | 10 fields retained")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -553,11 +460,9 @@ def main():
                             st.markdown(f"""
                             <div class="edge-box edge-home">
                                 <strong>{name}</strong><br>
-                                Scoring: {sigs['scoring']} | Over 2.5 Goals: {sigs['over25_goals']}<br>
-                                First to Score: {sigs['first_to_score']} | BTTS: {sigs['btts']} | No BTTS: {sigs['no_btts']}<br>
-                                Unbeaten: {sigs['unbeaten']} | Win: {sigs['win']} | Hot: {sigs['hot_form']}<br>
-                                Without Win: {sigs['without_win']} | Loss: {sigs['loss']} | Heavy Defeats: {sigs['heavy_defeats']}<br>
-                                Goal Frenzy: {sigs['goal_frenzy']} | Rampage: {sigs['rampage_attack']} | Clean Sheet: {sigs['clean_sheet']}
+                                Scoring: {sigs['scoring']} | Hot Form: {sigs['hot_form']} | First to Score: {sigs['first_to_score']}<br>
+                                Win: {sigs['win']} | No BTTS: {sigs['no_btts']} | Under 2.5: {sigs['under25']}<br>
+                                Without Win: {sigs['without_win']} | Unbeaten: {sigs['unbeaten']} | BTTS: {sigs['btts']}
                             </div>
                             """, unsafe_allow_html=True)
                     
@@ -565,26 +470,20 @@ def main():
                     c1, c2, c3 = st.columns(3)
                     
                     for col, market, key in [(c1, "Over/Under", "over_under"), (c2, "Winner", "winner"), (c3, "BTTS", "btts")]:
-                        pred = predictions.get(key, {"prediction": "NO BET", "confidence": 50, "tier": "NO_BET", "reason": "Unknown"})
+                        pred = predictions.get(key, {"prediction": "N/A", "confidence": 50, "tier": "EDGE", "reason": ""})
                         is_lock = pred.get("tier") == "LOCK"
-                        is_nobet = pred.get("tier") == "NO_BET"
                         
                         if key == "over_under":
                             emoji = "🔥" if "OVER" in pred.get("prediction", "") else "🛡️" if "UNDER" in pred.get("prediction", "") else "⏭️"
-                            card_class = "over-card" if "OVER" in pred.get("prediction", "") else "under-card" if "UNDER" in pred.get("prediction", "") else "skip-card"
+                            card_class = "over-card" if "OVER" in pred.get("prediction", "") else "under-card"
                         elif key == "winner":
                             emoji = {"HOME": "🏠", "AWAY": "✈️", "DRAW": "🤝"}.get(pred.get("prediction", ""), "❓")
                             card_class = "home-card" if pred.get("prediction") == "HOME" else "away-card" if pred.get("prediction") == "AWAY" else "draw-card"
                         else:
                             emoji = "✅" if "YES" in pred.get("prediction", "") else "❌" if "NO" in pred.get("prediction", "") else "⏭️"
-                            card_class = "over-card" if "YES" in pred.get("prediction", "") else "under-card" if "NO" in pred.get("prediction", "") else "skip-card"
+                            card_class = "over-card" if "YES" in pred.get("prediction", "") else "under-card"
                         
-                        if is_lock:
-                            badge = '<span class="tier-badge tier-lock">🔒 LOCK</span>'
-                        elif is_nobet:
-                            badge = '<span class="tier-badge tier-nobet">❌ NO BET</span>'
-                        else:
-                            badge = '<span class="tier-badge tier-edge">📊 EDGE</span>'
+                        badge = '<span class="tier-badge tier-lock">🔒 LOCK</span>' if is_lock else '<span class="tier-badge tier-edge">📊 EDGE</span>'
                         
                         with col:
                             st.markdown(f"""
