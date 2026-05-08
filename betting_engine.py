@@ -102,7 +102,7 @@ def parse_raw_text(raw_text: str) -> dict:
                 pending_signal = None
             continue
         
-        if not whole_numbers and not has_keyword:
+        if not has_keyword:
             pending_signal = None
             if not found_home:
                 home_name = stripped; current_team = 'home'; found_home = True
