@@ -46,48 +46,42 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PARSER
+# HELPERS
 # ============================================================================
 def parse_probability(text: str) -> dict:
     """Parse a probability line like '52.96% ▲ (+0.58)' or '52.96%'"""
     prob = None
     trend_val = 0
-    trend_dir = None
     
-    # Extract percentage
     pct_match = re.search(r'(\d+\.?\d*)\s*%', text)
     if pct_match:
         prob = float(pct_match.group(1))
     
-    # Extract trend arrow and value
-    trend_match = re.search(r'([▲▼])\s*\(?([+-]\d+\.?\d*)\)?', text)
+    trend_match = re.search(r'([+-]\d+\.?\d*)', text)
     if trend_match:
-        trend_dir = trend_match.group(1)
-        trend_val = float(trend_match.group(2))
+        trend_val = float(trend_match.group(1))
     
-    return {"probability": prob, "trend_direction": trend_dir, "trend_value": trend_val}
-
-
-def parse_form_line(text: str) -> list:
-    """Parse form like 'W-W-D-L-L-W' into list"""
-    results = re.findall(r'[WDL]', text)
-    return results if results else []
+    return {"probability": prob, "trend_value": trend_val}
 
 
 def parse_h2h_scores(text: str) -> list:
     """Extract scores from H2H section like '1-2', '1-4', etc."""
     scores = re.findall(r'(\d+)\s*[-–]\s*(\d+)', text)
-    return [(int(h), int(a)) for h, a in scores]
+    # Filter out year dates (like 2023) and other non-score numbers
+    filtered = []
+    for h, a in scores:
+        h_int, a_int = int(h), int(a)
+        if h_int < 20 and a_int < 20 and h_int + a_int > 0:
+            filtered.append((h_int, a_int))
+    return filtered
 
 
 def parse_match_data(raw_text: str) -> dict:
-    """Parse the full match data text block."""
+    """Parse the full match data text block using section headers."""
     
     data = {
-        "home_team": None,
-        "away_team": None,
+        "home_team": None, "away_team": None,
         "league": None,
-        "gameweek": None,
         "home_win": None, "draw": None, "away_win": None,
         "btts": None,
         "over_15": None, "over_25": None, "under_25": None, "over_35": None,
@@ -97,198 +91,193 @@ def parse_match_data(raw_text: str) -> dict:
         "btts_trend": 0, "over_25_trend": 0,
         "home_form_all": [], "away_form_all": [],
         "home_form_league": [], "away_form_league": [],
-        "home_last_6_results": [], "away_last_6_results": [],
         "h2h_scores": [],
         "h2h_btts_count": 0,
         "home_scoring_first_pct": None,
-        "away_scoring_first_pct": None,
-        "rosetta_match": None,
     }
     
     lines = raw_text.strip().split('\n')
     
-    # Extract team names from header
+    # ========================================================================
+    # EXTRACT TEAM NAMES
+    # ========================================================================
+    team_names = []
     for i, line in enumerate(lines):
         line = line.strip()
-        # Look for "Tottenham Hotspur" type headers followed by form
-        if re.match(r'^[A-Z][a-z]+(\s+[A-Z][a-z]+)*$', line) and i+1 < len(lines):
-            if re.match(r'^[WDL]', lines[i+1].strip()):
-                if not data["home_team"]:
-                    data["home_team"] = line
-                elif not data["away_team"] and line != data["home_team"]:
-                    data["away_team"] = line
+        if line and not re.search(r'[▲▼%]', line) and not re.search(r'\d{4}', line):
+            if i+1 < len(lines):
+                next_line = lines[i+1].strip()
+                if 'All competitions' in next_line or re.match(r'^[WDL]', next_line):
+                    if line not in team_names and line not in [
+                        'Form', 'Standings', 'Stats', 'Data analysis',
+                        'Head to Head', 'Form Data', 'Result', 'Goals',
+                        'First Half Winner', 'Team To Score First', 'Corners',
+                        'Score analysis', 'Premier League', 'La Liga', 'Bundesliga',
+                        'Serie A', 'Ligue 1', 'Championship', 'Süper Lig',
+                        'Pro League', 'Primeira Liga', 'EFL Cup'
+                    ]:
+                        team_names.append(line)
     
-    # Extract league
+    if len(team_names) >= 2:
+        data["home_team"] = team_names[0]
+        data["away_team"] = team_names[1]
+    
+    # ========================================================================
+    # EXTRACT LEAGUE
+    # ========================================================================
     for line in lines:
-        league_match = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|Süper Lig|Pro League|Primeira Liga)', line, re.IGNORECASE)
+        league_match = re.search(
+            r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|Süper Lig|Pro League|Primeira Liga|EFL Cup)',
+            line, re.IGNORECASE
+        )
         if league_match:
             data["league"] = league_match.group(1)
             break
     
-    # Parse Result section probabilities
+    # ========================================================================
+    # EXTRACT PROBABILITIES FROM "Result" SECTION
+    # ========================================================================
+    result_section = False
     for i, line in enumerate(lines):
         line = line.strip()
         
-        # Home Win
-        if data["home_team"] and f"{data['home_team']} " in line and '%' in line and '▲' in line or '▼' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"] and parsed["probability"] < 100:
-                data["home_win"] = parsed["probability"]
-                data["home_win_trend"] = parsed["trend_value"]
-        
-        # Draw
-        if line.startswith('Draw') and '%' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"] and parsed["probability"] < 100:
-                data["draw"] = parsed["probability"]
-                data["draw_trend"] = parsed["trend_value"]
-        
-        # Away Win
-        if data["away_team"] and f"{data['away_team']} " in line and '%' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"] and parsed["probability"] < 100:
-                data["away_win"] = parsed["probability"]
-                data["away_win_trend"] = parsed["trend_value"]
-        
-        # BTTS
-        if 'Both Teams to Score' in line or 'BTTS' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["btts"] = parsed["probability"]
-                data["btts_trend"] = parsed["trend_value"]
-        
-        # Over 1.5
-        if 'Over 1.5' in line and '%' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["over_15"] = parsed["probability"]
-        
-        # Over 2.5
-        if 'Over 2.5' in line and '%' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["over_25"] = parsed["probability"]
-                data["over_25_trend"] = parsed["trend_value"]
-        
-        # Under 2.5
-        if 'Under 2.5' in line and '%' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["under_25"] = parsed["probability"]
-        
-        # Over 3.5
-        if 'Over 3.5' in line and '%' in line:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["over_35"] = parsed["probability"]
-        
-        # Home Over 1.5 Goals
-        if data["home_team"] and 'Over 1.5' in line and data["home_team"].split()[-1] in line:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["home_over_15_goals"] = parsed["probability"]
-        
-        # Away Over 0.5 Goals
-        if data["away_team"] and 'Over 0.5' in line and 'Goals' in lines[i-1] if i > 0 else False:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["away_over_05_goals"] = parsed["probability"]
-        
-        # Away Over 1.5 Goals
-        if data["away_team"] and 'Over 1.5' in line and 'Goals' in lines[i-1] if i > 0 else False:
-            parsed = parse_probability(line)
-            if parsed["probability"]:
-                data["away_over_15_goals"] = parsed["probability"]
-    
-    # Parse team scoring first
-    for i, line in enumerate(lines):
-        if 'Team To Score First' in line:
-            # Next few lines contain the data
-            for j in range(i+1, min(i+6, len(lines))):
-                subline = lines[j].strip()
-                if data["home_team"] and data["home_team"].split()[-1] in subline and '%' in subline:
-                    parsed = parse_probability(subline)
-                    if parsed["probability"]:
-                        data["home_scoring_first_pct"] = parsed["probability"]
-                if data["away_team"] and data["away_team"].split()[-1] in subline and '%' in subline:
-                    parsed = parse_probability(subline)
-                    if parsed["probability"]:
-                        data["away_scoring_first_pct"] = parsed["probability"]
+        if line == 'Result':
+            result_section = True
+            continue
+        if result_section and line == 'Goals':
             break
+        
+        if result_section and '%' in line:
+            parsed = parse_probability(line)
+            prob = parsed["probability"]
+            trend = parsed["trend_value"]
+            
+            if data["home_team"] and data["home_team"].split()[-1] in line:
+                data["home_win"] = prob
+                data["home_win_trend"] = trend
+            elif line.startswith('Draw'):
+                data["draw"] = prob
+                data["draw_trend"] = trend
+            elif data["away_team"] and data["away_team"].split()[-1] in line:
+                data["away_win"] = prob
+                data["away_win_trend"] = trend
+            elif 'Both Teams to Score' in line:
+                data["btts"] = prob
+                data["btts_trend"] = trend
     
-    # Parse Form Data section
+    # ========================================================================
+    # EXTRACT GOALS PROBABILITIES
+    # ========================================================================
+    goals_section = False
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        if line == 'Goals':
+            goals_section = True
+            continue
+        if goals_section and 'First Half Winner' in line:
+            break
+        
+        if goals_section and '%' in line:
+            parsed = parse_probability(line)
+            prob = parsed["probability"]
+            trend = parsed["trend_value"]
+            
+            if 'Over 1.5' in line and 'Goals' not in line:
+                data["over_15"] = prob
+            elif 'Over 2.5' in line and 'Goals' not in line:
+                data["over_25"] = prob
+                data["over_25_trend"] = trend
+            elif 'Under 2.5' in line and 'Goals' not in line:
+                data["under_25"] = prob
+            elif 'Over 3.5' in line and 'Goals' not in line:
+                data["over_35"] = prob
+    
+    # ========================================================================
+    # EXTRACT TEAM-SPECIFIC GOALS
+    # ========================================================================
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        if data["home_team"] and f'{data["home_team"]} Goals' in line:
+            for j in range(i+1, min(i+10, len(lines))):
+                sub = lines[j].strip()
+                if 'Over 1.5' in sub and '%' in sub:
+                    parsed = parse_probability(sub)
+                    if parsed["probability"]:
+                        data["home_over_15_goals"] = parsed["probability"]
+                    break
+        
+        if data["away_team"] and f'{data["away_team"]} Goals' in line:
+            for j in range(i+1, min(i+10, len(lines))):
+                sub = lines[j].strip()
+                if 'Over 0.5' in sub and '%' in sub and not data["away_over_05_goals"]:
+                    parsed = parse_probability(sub)
+                    if parsed["probability"]:
+                        data["away_over_05_goals"] = parsed["probability"]
+                if 'Over 1.5' in sub and '%' in sub and not data["away_over_15_goals"]:
+                    parsed = parse_probability(sub)
+                    if parsed["probability"]:
+                        data["away_over_15_goals"] = parsed["probability"]
+                    break
+    
+    # ========================================================================
+    # EXTRACT FORM STRINGS
+    # ========================================================================
     form_section = False
-    form_lines = []
-    for line in lines:
-        if 'Form Data' in line:
+    form_count = 0
+    for i, line in enumerate(lines):
+        if 'Form, Standings, Stats' in line:
             form_section = True
             continue
-        if form_section:
-            form_lines.append(line.strip())
-    
-    # Extract form results (scores like "Aston Villa 1 - 2 Spurs")
-    for line in form_lines:
-        score_match = re.match(r'.+\s+(\d+)\s*[-–]\s*(\d+)\s+.+', line)
-        if score_match:
-            home_goals = int(score_match.group(1))
-            away_goals = int(score_match.group(2))
-            # Determine if the reference team is home or away based on name position
-            if data["home_team"] and data["home_team"].split()[-1].lower() in line.lower():
-                if line.lower().startswith(data["home_team"].split()[-1].lower()):
-                    # Home team listed first = home game
-                    pass
-                else:
-                    # Home team listed second = away game
-                    pass
-    
-    # Parse form strings (W-D-L from Form/Standings/Stats section)
-    form_strings = []
-    for i, line in enumerate(lines):
-        if re.match(r'^[WDL]', line.strip()):
-            results = parse_form_line(line)
+        if form_section and re.match(r'^[WDL]', line.strip()):
+            results = re.findall(r'[WDL]', line.strip())
             if len(results) >= 4:
-                form_strings.append(results)
+                if form_count == 0:
+                    data["home_form_all"] = results
+                elif form_count == 1:
+                    data["away_form_all"] = results
+                elif form_count == 2:
+                    data["home_form_league"] = results
+                elif form_count == 3:
+                    data["away_form_league"] = results
+                form_count += 1
     
-    if len(form_strings) >= 2:
-        data["home_form_all"] = form_strings[0] if form_strings else []
-        data["away_form_all"] = form_strings[1] if len(form_strings) > 1 else []
-    if len(form_strings) >= 4:
-        data["home_form_league"] = form_strings[2] if len(form_strings) > 2 else []
-        data["away_form_league"] = form_strings[3] if len(form_strings) > 3 else []
-    
-    # Parse H2H scores
+    # ========================================================================
+    # EXTRACT H2H
+    # ========================================================================
     h2h_section = False
     h2h_text = ""
     for line in lines:
         if 'Head to Head' in line:
             h2h_section = True
             continue
-        if h2h_section and ('Form Data' in line or 'Form, Standings' in line):
+        if h2h_section and 'Form Data' in line:
             break
         if h2h_section:
             h2h_text += line + " "
     
     data["h2h_scores"] = parse_h2h_scores(h2h_text)
     
-    # Count H2H BTTS
     btts_count = 0
     for h, a in data["h2h_scores"]:
         if h > 0 and a > 0:
             btts_count += 1
     data["h2h_btts_count"] = btts_count
     
-    # Parse last 6 results from Form Data
-    last_6 = []
-    for line in form_lines:
-        # Lines with just W D L letters (not scores)
-        if re.match(r'^[WDL]', line.strip()) and not re.search(r'\d', line):
-            results = parse_form_line(line)
-            if len(results) >= 3:
-                last_6.append(results)
-    
-    if len(last_6) >= 2:
-        data["home_last_6_results"] = last_6[0][-6:] if len(last_6[0]) >= 6 else last_6[0]
-        data["away_last_6_results"] = last_6[1][-6:] if len(last_6[1]) >= 6 else last_6[1]
+    # ========================================================================
+    # EXTRACT TEAM TO SCORE FIRST
+    # ========================================================================
+    for i, line in enumerate(lines):
+        if 'Team To Score First' in line:
+            for j in range(i+1, min(i+6, len(lines))):
+                sub = lines[j].strip()
+                if data["home_team"] and data["home_team"].split()[-1] in sub and '%' in sub:
+                    parsed = parse_probability(sub)
+                    if parsed["probability"]:
+                        data["home_scoring_first_pct"] = parsed["probability"]
+                        break
+            break
     
     return data
 
@@ -297,14 +286,12 @@ def parse_match_data(raw_text: str) -> dict:
 # ANALYSIS ENGINE
 # ============================================================================
 def analyze_match(data: dict) -> dict:
-    """Run the 6-step analysis framework."""
+    """Run the multi-step analysis framework."""
     
     result = {
         "bets": [],
-        "confidence_scores": {},
-        "reasons": [],
-        "warnings": [],
         "badges": [],
+        "warnings": [],
     }
     
     # ========================================================================
@@ -325,10 +312,10 @@ def analyze_match(data: dict) -> dict:
         trend_bonus = 0
         if strongest == "BTTS" and data["btts_trend"] >= 0.30:
             trend_bonus = 1
-            result["badges"].append("▲ BTTS Trend +{:.2f}".format(data["btts_trend"]))
+            result["badges"].append(f"▲ BTTS Trend +{data['btts_trend']:.2f}")
         elif strongest == "Over 2.5" and data["over_25_trend"] >= 0.30:
             trend_bonus = 1
-            result["badges"].append("▲ Over 2.5 Trend +{:.2f}".format(data["over_25_trend"]))
+            result["badges"].append(f"▲ Over 2.5 Trend +{data['over_25_trend']:.2f}")
         
         if strongest_pct >= 52:
             confidence = min(8.5, 6 + (strongest_pct - 50) / 10 + trend_bonus)
@@ -339,55 +326,52 @@ def analyze_match(data: dict) -> dict:
                 "probability": strongest_pct,
                 "reason": f"Strongest signal at {strongest_pct:.1f}%"
             })
-            result["confidence_scores"][strongest] = round(confidence, 1)
     
     # ========================================================================
     # STEP 2: Check Streak Rules
     # ========================================================================
-    home_form = data.get("home_form_league", data.get("home_form_all", []))
-    away_form = data.get("away_form_league", data.get("away_form_all", []))
+    home_form = data.get("home_form_league") or data.get("home_form_all") or []
+    away_form = data.get("away_form_league") or data.get("away_form_all") or []
     
-    # Check for draw streaks (4+)
     if home_form and away_form:
         home_draws = sum(1 for r in home_form[:6] if r == 'D')
         away_draws = sum(1 for r in away_form[:6] if r == 'D')
         
-        if home_draws >= 4 or away_draws >= 4:
-            if data["btts"] and data["btts"] >= 45:
+        if (home_draws >= 4 or away_draws >= 4) and data["btts"] and data["btts"] >= 45:
+            already_has_btts = any(b["market"] == "BTTS" for b in result["bets"])
+            if not already_has_btts:
                 result["bets"].append({
                     "market": "BTTS",
                     "tier": "TIER 1",
                     "confidence": 7.5,
                     "probability": data["btts"],
-                    "reason": f"Draw streak detected ({max(home_draws, away_draws)} draws) — BTTS value"
+                    "reason": f"Draw streak detected ({max(home_draws, away_draws)} draws)"
                 })
     
     # ========================================================================
-    # STEP 3: Two In-Form Collision
+    # STEP 3: Two In-Form Collision → Draw
     # ========================================================================
     if home_form and away_form:
         home_wins = sum(1 for r in home_form[:3] if r == 'W')
         away_wins = sum(1 for r in away_form[:3] if r == 'W')
         
-        if home_wins >= 3 and away_wins >= 3:
-            if data["draw"] and data["draw"] >= 22:
-                result["bets"].append({
-                    "market": "Draw",
-                    "tier": "TIER 2",
-                    "confidence": 6.5,
-                    "probability": data["draw"],
-                    "reason": "Both teams on win streaks — draw value"
-                })
-                result["badges"].append("In-Form Collision")
+        if home_wins >= 3 and away_wins >= 3 and data["draw"] and data["draw"] >= 22:
+            result["bets"].append({
+                "market": "Draw",
+                "tier": "TIER 2",
+                "confidence": 6.5,
+                "probability": data["draw"],
+                "reason": "Both on win streaks — draw value"
+            })
+            result["badges"].append("In-Form Collision")
     
     # ========================================================================
-    # STEP 4: H2H Patterns
+    # STEP 4: H2H BTTS Pattern
     # ========================================================================
-    if data["h2h_btts_count"] >= 4 and len(data["h2h_scores"]) >= 5:
+    if data["h2h_btts_count"] >= 4 and len(data.get("h2h_scores", [])) >= 5:
         if data["btts"] and data["btts"] >= 45:
-            # Check if BTTS is already in bets
-            already_btts = any(b["market"] == "BTTS" for b in result["bets"])
-            if not already_btts:
+            already_has_btts = any(b["market"] == "BTTS" for b in result["bets"])
+            if not already_has_btts:
                 result["bets"].append({
                     "market": "BTTS",
                     "tier": "TIER 1",
@@ -398,20 +382,17 @@ def analyze_match(data: dict) -> dict:
             result["badges"].append(f"H2H BTTS: {data['h2h_btts_count']}/5")
     
     # ========================================================================
-    # STEP 5: Generate Final Recommendations
+    # STEP 5: Finalize
     # ========================================================================
-    
-    # Sort by tier then confidence
     tier_order = {"TIER 1": 0, "TIER 2": 1, "TIER 3": 2}
     result["bets"].sort(key=lambda b: (tier_order.get(b["tier"], 3), -b["confidence"]))
     
-    # Add warnings
     if data["draw"] and data["draw"] >= 25:
-        result["warnings"].append(f"⚠️ High draw probability ({data['draw']:.1f}%) — avoid match result bets")
+        result["warnings"].append(f"High draw probability ({data['draw']:.1f}%) — avoid match result bets")
     
     if data["away_win"] and data["home_win"]:
         if abs(data["away_win"] - data["home_win"]) < 10:
-            result["warnings"].append("⚠️ Close match — no clear favorite")
+            result["warnings"].append("Close match — no clear favorite")
     
     return result
 
@@ -422,16 +403,25 @@ def analyze_match(data: dict) -> dict:
 def save_to_db(data: dict, analysis: dict):
     try:
         bets_str = " | ".join([b["market"] for b in analysis["bets"]]) if analysis["bets"] else "NO BET"
+        top_bet = analysis["bets"][0] if analysis["bets"] else None
+        
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": str(date.today()),
-            "home_data": {"league": data.get("league")},
-            "away_data": {"gameweek": data.get("gameweek")},
+            "home_data": {
+                "league": data.get("league"),
+                "home_win_pct": data.get("home_win"),
+                "draw_pct": data.get("draw"),
+                "away_win_pct": data.get("away_win"),
+                "btts_pct": data.get("btts"),
+                "over25_pct": data.get("over_25"),
+            },
+            "away_data": {},
             "prediction": bets_str,
-            "confidence_score": analysis["bets"][0]["confidence"] / 10 if analysis["bets"] else 0,
-            "winner": analysis["bets"][0]["market"] if analysis["bets"] else "NO BET",
-            "winner_confidence": f"{analysis['bets'][0]['confidence']}/10" if analysis["bets"] else "0",
+            "confidence_score": top_bet["confidence"] / 10 if top_bet else 0,
+            "winner": top_bet["market"] if top_bet else "NO BET",
+            "winner_confidence": f"{top_bet['confidence']}/10" if top_bet else "0",
             "btts": "BTTS YES" if any("BTTS" in b["market"] for b in analysis["bets"]) else "",
             "btts_confidence": max([b["confidence"]/10 for b in analysis["bets"] if "BTTS" in b["market"]]) if any("BTTS" in b["market"] for b in analysis["bets"]) else 0,
             "pattern": " | ".join([b["tier"] for b in analysis["bets"]]) if analysis["bets"] else "NO BET",
@@ -478,7 +468,7 @@ def get_results():
 # ============================================================================
 def main():
     st.title("📊 Match Analyzer V1")
-    st.caption("Multi-Source: Probabilities + Trends + Form + H2H | 76% accuracy across 22 matches")
+    st.caption("Multi-Source: Probabilities + Trends + Form + H2H | Section-based parsing")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -500,15 +490,14 @@ def main():
                     analysis = analyze_match(data)
                     save_to_db(data, analysis)
                     
-                    st.success(f"✅ Parsed: {data['home_team']} vs {data['away_team']}")
+                    st.success(f"✅ {data['home_team']} vs {data['away_team']} — {data.get('league', 'Unknown')}")
                     
-                    # Display extracted data
                     col1, col2 = st.columns(2)
                     with col1:
                         st.markdown(f"""
                         <div class="edge-box edge-home">
                             <strong>📊 Probabilities</strong><br>
-                            Home Win: {data.get('home_win', '?')}% | Draw: {data.get('draw', '?')}% | Away Win: {data.get('away_win', '?')}%<br>
+                            Home: {data.get('home_win', '?')}% | Draw: {data.get('draw', '?')}% | Away: {data.get('away_win', '?')}%<br>
                             BTTS: {data.get('btts', '?')}% | Over 2.5: {data.get('over_25', '?')}% | Under 2.5: {data.get('under_25', '?')}%<br>
                             Home Over 1.5: {data.get('home_over_15_goals', '?')}% | Away Over 1.5: {data.get('away_over_15_goals', '?')}%
                         </div>
@@ -516,7 +505,7 @@ def main():
                     with col2:
                         st.markdown(f"""
                         <div class="edge-box edge-away">
-                            <strong>📈 Trends & Form</strong><br>
+                            <strong>📈 Form & H2H</strong><br>
                             BTTS Trend: {data.get('btts_trend', 0):+.2f} | Over 2.5 Trend: {data.get('over_25_trend', 0):+.2f}<br>
                             Home Form: {'-'.join(data.get('home_form_all', [])[:6])}<br>
                             Away Form: {'-'.join(data.get('away_form_all', [])[:6])}<br>
@@ -524,7 +513,6 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # Display recommendations
                     st.markdown("### 🎯 Recommendations")
                     
                     if analysis["bets"]:
@@ -556,13 +544,15 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                     
-                    # Badges
                     if analysis["badges"]:
                         st.markdown("### 🏷️ Signals")
-                        badges_html = " ".join([f'<span class="badge-upgrade">{b}</span>' if '▲' in b else f'<span class="badge-info">{b}</span>' for b in analysis["badges"]])
+                        badges_html = " ".join([
+                            f'<span class="badge-upgrade">{b}</span>' if '▲' in b or 'H2H' in b
+                            else f'<span class="badge-info">{b}</span>'
+                            for b in analysis["badges"]
+                        ])
                         st.markdown(badges_html, unsafe_allow_html=True)
                     
-                    # Warnings
                     if analysis["warnings"]:
                         st.markdown("### ⚠️")
                         for w in analysis["warnings"]:
@@ -597,7 +587,7 @@ def main():
         st.subheader("📊 Records")
         results = get_results()
         if not results:
-            st.info("No results yet. Submit match results to build tracking.")
+            st.info("No results yet.")
         else:
             st.write(f"**Total tracked:** {len(results)}")
             if st.checkbox("Show all results"):
