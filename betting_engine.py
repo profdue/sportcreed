@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V1 — Complete Rewrite
-Multi-Source: Probabilities + Trends + Form + H2H Analysis
+MATCH ANALYZER V1 — Multi-Source Probability + Trend + Form + H2H Analysis
+Fixed: Goals parsing, Form parsing, H2H parsing
 """
 
 import streamlit as st
@@ -45,10 +45,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PARSER — COMPLETE REWRITE
+# PARSER — FULLY FIXED
 # ============================================================================
 def parse_match_data(raw_text: str) -> dict:
-    """Parse match data. Handles multi-line values (market name on one line, % on next)."""
+    """Parse match data. Handles multi-line values throughout."""
     
     lines = raw_text.strip().split('\n')
     
@@ -79,11 +79,11 @@ def parse_match_data(raw_text: str) -> dict:
         data["away_team"] = team_names[1]
     
     # ========================================================================
-    # LEAGUE: First league name found
+    # LEAGUE
     # ========================================================================
     for line in lines:
         m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|Süper Lig|Pro League|Primeira Liga|EFL Cup)', line, re.IGNORECASE)
-        if m:
+        if m and 'Gameweek' not in line:
             data["league"] = m.group(1)
             break
     
@@ -102,7 +102,7 @@ def parse_match_data(raw_text: str) -> dict:
         return None, 0
     
     # ========================================================================
-    # PARSE BY SECTIONS
+    # STATE MACHINE: Walk through lines tracking sections
     # ========================================================================
     current_section = None
     current_subsection = None
@@ -110,33 +110,38 @@ def parse_match_data(raw_text: str) -> dict:
     for i, line in enumerate(lines):
         stripped = line.strip()
         
-        # Track sections
+        # Section markers
         if stripped == 'Result':
             current_section = 'result'
+            current_subsection = None
             continue
         if stripped == 'Goals':
             current_section = 'goals'
+            current_subsection = None
             continue
         if stripped == 'First Half Winner':
             current_section = 'first_half'
+            current_subsection = None
             continue
         if stripped == 'Team To Score First':
             current_section = 'score_first'
+            current_subsection = None
             continue
         if stripped == 'Corners':
             current_section = 'corners'
-            continue
-        if 'Goals' in stripped and current_section not in ['result', 'goals']:
-            current_subsection = stripped
+            current_subsection = None
             continue
         if stripped == 'Score analysis':
             current_section = 'score_analysis'
+            current_subsection = None
             continue
         if stripped == 'Head to Head':
             current_section = 'h2h'
+            current_subsection = None
             continue
         if stripped == 'Form Data':
             current_section = 'form'
+            current_subsection = None
             continue
         
         # ====================================================================
@@ -160,30 +165,35 @@ def parse_match_data(raw_text: str) -> dict:
         # GOALS SECTION
         # ====================================================================
         if current_section == 'goals':
-            if 'Over 1.5' in stripped and 'Goals' not in current_subsection:
+            # Skip "Over 1.5" within team-specific subsections
+            if 'Over 1.5' in stripped and 'Goals' not in stripped:
                 prob, _ = find_pct(i)
                 if prob: data["over_15"] = prob
-            elif 'Over 2.5' in stripped and 'Goals' not in current_subsection:
+            elif 'Over 2.5' in stripped and 'Goals' not in stripped:
                 prob, trend = find_pct(i)
                 if prob: data["over_25"] = prob; data["over_25_trend"] = trend
-            elif 'Under 2.5' in stripped and 'Goals' not in current_subsection:
+            elif 'Under 2.5' in stripped and 'Goals' not in stripped:
                 prob, _ = find_pct(i)
                 if prob: data["under_25"] = prob
-            elif 'Over 3.5' in stripped and 'Goals' not in current_subsection:
+            elif 'Over 3.5' in stripped and 'Goals' not in stripped:
                 prob, _ = find_pct(i)
                 if prob: data["over_35"] = prob
         
         # ====================================================================
-        # TEAM-SPECIFIC GOALS
+        # TEAM-SPECIFIC GOALS SUBSECTIONS
         # ====================================================================
         if data["home_team"] and f'{data["home_team"]} Goals' in stripped:
             current_subsection = 'home_goals'
         if data["away_team"] and f'{data["away_team"]} Goals' in stripped:
             current_subsection = 'away_goals'
+        # Reset subsection when we hit another section marker
+        if stripped in ['Goals', 'First Half Winner', 'Team To Score First', 'Corners', 'Score analysis', 'Head to Head', 'Form Data']:
+            current_subsection = None
         
         if current_subsection == 'home_goals' and 'Over 1.5' in stripped:
             prob, _ = find_pct(i)
             if prob: data["home_over_15_goals"] = prob
+        
         if current_subsection == 'away_goals':
             if 'Over 0.5' in stripped:
                 prob, _ = find_pct(i)
@@ -193,47 +203,68 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["away_over_15_goals"] = prob
     
     # ========================================================================
-    # FORM STRINGS: Lines starting with W-D-L pattern
+    # FORM STRINGS: Collect single-letter W/D/L lines into groups
     # ========================================================================
-    form_strings = []
+    form_groups = []
+    current_group = []
+    
     for line in lines:
         stripped = line.strip()
-        if re.match(r'^[WDL]$', stripped) or (re.match(r'^[WDL\s-]+$', stripped) and len(stripped) > 3):
-            results = re.findall(r'[WDL]', stripped)
-            if len(results) >= 4:
-                form_strings.append(results)
+        # Single letter W, D, or L
+        if stripped in ['W', 'D', 'L']:
+            current_group.append(stripped)
+        else:
+            if len(current_group) >= 4:
+                form_groups.append(current_group)
+            current_group = []
     
-    if len(form_strings) >= 2:
-        data["home_form_all"] = form_strings[0]
-        data["away_form_all"] = form_strings[1]
+    # Don't forget the last group
+    if len(current_group) >= 4:
+        form_groups.append(current_group)
+    
+    if len(form_groups) >= 2:
+        data["home_form_all"] = form_groups[0]
+        data["away_form_all"] = form_groups[1]
     
     # ========================================================================
-    # H2H: Extract scores from Head to Head section
+    # H2H: Parse line by line looking for number pairs after FT
     # ========================================================================
     h2h_section = False
-    h2h_text = ""
+    h2h_scores = []
+    prev_number = None
+    
     for line in lines:
-        if 'Head to Head' in line:
+        stripped = line.strip()
+        
+        if 'Head to Head' in stripped:
             h2h_section = True
+            prev_number = None
             continue
-        if h2h_section and 'Form Data' in line:
+        if h2h_section and 'Form Data' in stripped:
             break
+        
         if h2h_section:
-            h2h_text += line + " "
+            # Look for standalone numbers (scores on their own lines after FT)
+            if stripped == 'FT':
+                # Next standalone numbers are the score
+                prev_number = None
+                continue
+            
+            m = re.match(r'^(\d+)$', stripped)
+            if m:
+                num = int(m.group(1))
+                if num < 20:
+                    if prev_number is not None:
+                        h2h_scores.append((prev_number, num))
+                        prev_number = None
+                    else:
+                        prev_number = num
+            elif re.search(r'[a-zA-Z]', stripped) and stripped != 'FT':
+                # Line with text resets the pair
+                prev_number = None
     
-    # Extract score pairs like "1\n2" or "4\n3"
-    score_pairs = re.findall(r'(\d+)\s*\n\s*(\d+)', h2h_text)
-    # Also try "1-2" format
-    inline_scores = re.findall(r'(\d+)\s*[-–]\s*(\d+)', h2h_text)
-    
-    all_scores = []
-    for h, a in score_pairs + inline_scores:
-        h_int, a_int = int(h), int(a)
-        if h_int < 20 and a_int < 20:
-            all_scores.append((h_int, a_int))
-    
-    data["h2h_scores"] = all_scores
-    data["h2h_btts_count"] = sum(1 for h, a in all_scores if h > 0 and a > 0)
+    data["h2h_scores"] = h2h_scores
+    data["h2h_btts_count"] = sum(1 for h, a in h2h_scores if h > 0 and a > 0)
     
     return data
 
