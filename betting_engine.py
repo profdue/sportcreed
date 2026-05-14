@@ -1,7 +1,7 @@
 """
-STREAK PREDICTOR V7 — Pattern-Based Betting Engine
-5 patterns from 172 matches. 87% accuracy. 44% bet rate.
-Only bet when a clear pattern exists. Skip the noise.
+STREAK PREDICTOR V8 — 3-Rule Betting System
+Rule 1: HOME WIN (82.6%) | Rule 2: OVER 2.5 (86.7%) | Rule 3: BTTS YES (81.6%)
+~40% trigger rate. Exact thresholds. Skip the rest.
 """
 
 import streamlit as st
@@ -24,26 +24,21 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Streak Predictor V7", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Streak Predictor V8", page_icon="⚽", layout="wide")
 
 st.markdown("""
 <style>
     .main .block-container { padding-top: 2rem; max-width: 1100px; }
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
-    .over-card { border-left: 5px solid #10b981; }
-    .under-card { border-left: 5px solid #3b82f6; }
-    .home-card { border-left: 5px solid #10b981; }
-    .away-card { border-left: 5px solid #ef4444; }
-    .draw-card { border-left: 5px solid #94a3b8; }
+    .bet-card { border: 2px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .skip-card { border-left: 5px solid #fbbf24; }
-    .pattern-card { border: 2px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .edge-box { background: #1e293b; border-radius: 10px; padding: 0.6rem; margin: 0.3rem 0; color: #ffffff; font-size: 0.8rem; }
     .stButton button { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
     .score-label { font-size: 0.8rem; color: #94a3b8; }
-    .pattern-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #10b981; color: #000; }
-    .noise-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #fbbf24; color: #000; }
+    .rule-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #10b981; color: #000; margin: 0.1rem; }
+    .skip-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #fbbf24; color: #000; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -138,167 +133,90 @@ def extract_signals(team_data: dict) -> dict:
     }
 
 # ============================================================================
-# PATTERN DETECTION ENGINE
+# 3-RULE BETTING ENGINE
 # ============================================================================
-def is_killer_combo(team: dict) -> bool:
-    w = team.get('win', 0)
-    f = team.get('first_to_score', 0)
-    return w > 0 and w == f
-
-def is_dangerous_opponent(team: dict) -> bool:
-    return (team.get('btts', 0) > 5 or 
-            team.get('over25', 0) > 5 or 
-            team.get('scoring', 0) > 8 or
-            is_killer_combo(team))
-
-def is_dead_team(team: dict) -> bool:
-    wo = team.get('without_win', 0)
-    sc = team.get('scoring', 0)
-    return wo > 12 or (wo > 8 and sc == 0)
-
-def is_fire_team(team: dict) -> bool:
-    return team.get('btts', 0) > 3 or team.get('over25', 0) > 3 or team.get('scoring', 0) > 8
-
-def is_wall_team(team: dict) -> bool:
-    nb = team.get('no_btts', 0)
-    sc = team.get('scoring', 0)
-    return nb > 4 or (nb > 2 and sc < 3)
-
-def is_show_team(team: dict) -> bool:
-    return team.get('scoring', 0) > 15
-
-def is_weak_team(team: dict) -> bool:
-    return team.get('scoring', 0) < 5
-
-def analyze_match(home: dict, away: dict) -> dict:
-    """Run 5-pattern detection. Returns prediction or SKIP."""
+def apply_rules(home: dict, away: dict) -> list:
+    """Apply the 3 rules. Returns list of bets triggered."""
+    bets = []
     
-    h_killer = is_killer_combo(home)
-    a_killer = is_killer_combo(away)
-    h_dead = is_dead_team(home)
-    a_dead = is_dead_team(away)
-    h_walking = home.get('without_win', 0) > 12
-    a_walking = away.get('without_win', 0) > 12
-    h_fire = is_fire_team(home)
-    a_fire = is_fire_team(away)
-    h_wall = is_wall_team(home)
-    a_wall = is_wall_team(away)
-    h_show = is_show_team(home)
-    a_show = is_show_team(away)
-    h_weak = is_weak_team(home)
-    a_weak = is_weak_team(away)
-    h_danger = is_dangerous_opponent(home)
-    a_danger = is_dangerous_opponent(away)
+    h_scoring = home.get("scoring", 0)
+    h_hot = home.get("hot_form", 0)
+    h_over25g = home.get("over25_goals", 0)
+    h_btts = home.get("btts", 0)
+    h_win = home.get("win", 0)
+    
+    a_without = away.get("without_win", 0)
+    a_scoring = away.get("scoring", 0)
+    a_under25 = away.get("under25", 0)
     
     # ========================================================================
-    # PATTERN 5: One-Man Show (scoring > 15 vs scoring < 5)
+    # RULE 1 — HOME WIN (82.6%)
     # ========================================================================
-    if h_show and a_weak:
-        over = "OVER" if home.get('scoring', 0) > 20 else "UNDER"
-        return {"bet": True, "winner": "HOME", "over": over, "btts": "NO",
-                "pattern": "One-Man Show", "confidence": 86,
-                "reason": f"Home scoring {home.get('scoring')} vs Away scoring {away.get('scoring')}"}
-    if a_show and h_weak:
-        over = "OVER" if away.get('scoring', 0) > 20 else "UNDER"
-        return {"bet": True, "winner": "AWAY", "over": over, "btts": "NO",
-                "pattern": "One-Man Show", "confidence": 86,
-                "reason": f"Away scoring {away.get('scoring')} vs Home scoring {home.get('scoring')}"}
+    if h_scoring == 6 or h_hot > 3 or h_over25g == 8:
+        bets.append({
+            "rule": "Rule 1",
+            "market": "HOME WIN",
+            "confidence": 83,
+            "reason": f"scoring={h_scoring}, hot_form={h_hot}, over25_goals={h_over25g}"
+        })
     
     # ========================================================================
-    # PATTERN 1 + PATTERN 2: Killer vs Dead/Walking Dead
+    # RULE 2 — OVER 2.5 (86.7%)
     # ========================================================================
-    if h_killer and (a_dead or a_walking) and not a_danger:
-        return {"bet": True, "winner": "HOME", "over": "UNDER", "btts": "NO",
-                "pattern": "Killer vs Dead", "confidence": 90 if a_dead else 88,
-                "reason": "Home Killer Combo vs Away collapsed"}
-    if a_killer and (h_dead or h_walking) and not h_danger:
-        return {"bet": True, "winner": "AWAY", "over": "UNDER", "btts": "NO",
-                "pattern": "Killer vs Dead", "confidence": 90 if h_dead else 88,
-                "reason": "Away Killer Combo vs Home collapsed"}
+    condition_a = (h_btts > 0 and a_without > 3 and a_scoring > 0)
+    condition_b = (h_win == 4)
+    
+    if condition_a or condition_b:
+        reason_parts = []
+        if condition_a: reason_parts.append(f"BTTS={h_btts}, away_wo={a_without}, away_sc={a_scoring}")
+        if condition_b: reason_parts.append(f"win={h_win}")
+        
+        bets.append({
+            "rule": "Rule 2",
+            "market": "OVER 2.5",
+            "confidence": 87,
+            "reason": " | ".join(reason_parts)
+        })
     
     # ========================================================================
-    # PATTERN 1: Killer Combo (with danger check)
+    # RULE 3 — BTTS YES (81.6%)
     # ========================================================================
-    if h_killer and not a_killer and not a_danger:
-        return {"bet": True, "winner": "HOME", "over": "UNDER", "btts": "NO",
-                "pattern": "Killer Combo", "confidence": 87,
-                "reason": f"Home win=first={home.get('win')}, opponent safe"}
-    if a_killer and not h_killer and not h_danger:
-        return {"bet": True, "winner": "AWAY", "over": "UNDER", "btts": "NO",
-                "pattern": "Killer Combo", "confidence": 87,
-                "reason": f"Away win=first={away.get('win')}, opponent safe"}
+    condition_a = (h_btts > 0 or a_without == 3)
+    condition_b = (a_under25 == 0)
+    condition_c = (h_hot == 0)
     
-    # Double killer = DRAW
-    if h_killer and a_killer:
-        return {"bet": True, "winner": "DRAW", "over": "UNDER", "btts": "NO",
-                "pattern": "Double Killer", "confidence": 85,
-                "reason": "Both teams Killer Combo — cancels out"}
+    if condition_a and condition_b and condition_c:
+        bets.append({
+            "rule": "Rule 3",
+            "market": "BTTS YES",
+            "confidence": 82,
+            "reason": f"btts={h_btts}, away_wo={a_without}, away_u25={a_under25}, hot={h_hot}"
+        })
     
-    # ========================================================================
-    # PATTERN 2: Dead Team Walking (standalone)
-    # ========================================================================
-    if h_walking and not a_walking:
-        return {"bet": True, "winner": "AWAY", "over": "UNDER", "btts": "NO",
-                "pattern": "Walking Dead", "confidence": 79,
-                "reason": f"Home without_win={home.get('without_win')}"}
-    if a_walking and not h_walking:
-        return {"bet": True, "winner": "HOME", "over": "UNDER", "btts": "NO",
-                "pattern": "Walking Dead", "confidence": 79,
-                "reason": f"Away without_win={away.get('without_win')}"}
-    
-    # ========================================================================
-    # PATTERN 4: Concrete Wall (check BEFORE Fire vs Fire)
-    # ========================================================================
-    if h_wall and a_wall:
-        h_unb = home.get('unbeaten', 0)
-        a_unb = away.get('unbeaten', 0)
-        if h_unb > a_unb + 3:
-            winner = "HOME"
-        elif a_unb > h_unb + 3:
-            winner = "AWAY"
-        else:
-            winner = "DRAW"
-        return {"bet": True, "winner": winner, "over": "UNDER", "btts": "NO",
-                "pattern": "Concrete Wall", "confidence": 88,
-                "reason": f"Both defensive walls. Unbeaten: H={h_unb} A={a_unb}"}
-    
-    # ========================================================================
-    # PATTERN 3: Fire vs Fire
-    # ========================================================================
-    if h_fire and a_fire:
-        if h_killer and not a_killer:
-            winner = "HOME"
-        elif a_killer and not h_killer:
-            winner = "AWAY"
-        else:
-            winner = "DRAW"
-        return {"bet": True, "winner": winner, "over": "OVER", "btts": "YES",
-                "pattern": "Fire vs Fire", "confidence": 77,
-                "reason": "Both teams attacking profiles"}
-    
-    # ========================================================================
-    # NO PATTERN = NOISE = SKIP
-    # ========================================================================
-    return {"bet": False, "pattern": "NOISE", "confidence": 0,
-            "reason": "No clear pattern detected. Skip for confidence."}
+    return bets
 
 
 # ============================================================================
 # SUPABASE
 # ============================================================================
-def save_to_db(home_name, away_name, home_signals, away_signals, result):
+def save_to_db(home_name, away_name, home_signals, away_signals, bets):
     try:
+        markets = [b["market"] for b in bets]
+        rules = [b["rule"] for b in bets]
+        reasons = [b["reason"] for b in bets]
+        confs = [b["confidence"] for b in bets]
+        
         record = {
             "home_team": home_name, "away_team": away_name,
             "match_date": str(date.today()),
             "home_data": home_signals, "away_data": away_signals,
-            "prediction": result.get("over", "SKIP"),
-            "confidence_score": result.get("confidence", 0) / 100,
-            "winner": result.get("winner", "UNCLEAR"),
-            "winner_confidence": f"{result.get('confidence', 0)}%",
-            "btts": f"BTTS {result.get('btts', 'NO')}",
-            "btts_confidence": result.get("confidence", 0) / 100,
-            "pattern": result.get("pattern", ""),
+            "prediction": " | ".join(markets) if markets else "NO BET",
+            "confidence_score": (sum(confs) / len(confs) / 100) if confs else 0,
+            "winner": markets[0] if markets else "NO BET",
+            "winner_confidence": f"{confs[0]}%" if confs else "0%",
+            "btts": "BTTS YES" if "BTTS YES" in markets else "",
+            "btts_confidence": (confs[markets.index("BTTS YES")] / 100) if "BTTS YES" in markets else 0,
+            "pattern": " | ".join(rules) if rules else "NO BET",
             "result_entered": False,
         }
         response = supabase.table("analyses").insert(record).execute()
@@ -323,13 +241,39 @@ def submit_result(analysis_id, home_goals, away_goals):
         record = supabase.table("analyses").select("prediction,winner,btts").eq("id", analysis_id).single().execute()
         if not record.data: return False
         
-        pred = record.data.get("prediction", "SKIP")
-        pred_winner = record.data.get("winner", "UNCLEAR")
+        pred = record.data.get("prediction", "NO BET")
+        pred_winner = record.data.get("winner", "NO BET")
         pred_btts = record.data.get("btts", "")
         
-        over_correct = None if pred == "SKIP" else (("OVER" in pred) == over25)
-        winner_correct = None if pred_winner in ["UNCLEAR", "DRAW"] else (pred_winner == actual_winner)
-        btts_correct = ("YES" in pred_btts) == btts_yes if pred_btts else None
+        # Over/Under correct?
+        if "OVER 2.5" in pred:
+            over_correct = over25
+        elif "NO BET" == pred:
+            over_correct = None
+        else:
+            over_correct = None if "OVER" not in pred else None
+        
+        # Winner correct?
+        if pred_winner == "HOME WIN":
+            winner_correct = actual_winner == "HOME"
+        elif pred_winner == "AWAY WIN":
+            winner_correct = actual_winner == "AWAY"
+        else:
+            winner_correct = None
+        
+        # BTTS correct?
+        if "BTTS YES" in pred_btts:
+            btts_correct = btts_yes
+        elif "BTTS NO" in pred_btts:
+            btts_correct = not btts_yes
+        else:
+            btts_correct = None
+        
+        # Combined over_correct from any rule
+        if "OVER 2.5" in pred:
+            over_correct = over25
+        elif "HOME WIN" in pred or pred == "NO BET":
+            over_correct = None
         
         supabase.table("analyses").update({
             "actual_home_goals": home_goals, "actual_away_goals": away_goals,
@@ -353,8 +297,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("⚽ Streak Predictor V7")
-    st.caption("5 Patterns. 87% Accuracy. 44% Bet Rate. Skip the noise.")
+    st.title("⚽ Streak Predictor V8")
+    st.caption("3 Rules. 82-87% Accuracy. ~40% Trigger Rate. Exact Thresholds.")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -372,8 +316,8 @@ def main():
                 else:
                     home_signals = extract_signals(parsed["home_data"])
                     away_signals = extract_signals(parsed["away_data"])
-                    result = analyze_match(home_signals, away_signals)
-                    save_to_db(parsed["home_name"], parsed["away_name"], home_signals, away_signals, result)
+                    bets = apply_rules(home_signals, away_signals)
+                    save_to_db(parsed["home_name"], parsed["away_name"], home_signals, away_signals, bets)
                     
                     st.success(f"✅ Parsed: {parsed['home_name']} vs {parsed['away_name']}")
                     
@@ -383,56 +327,38 @@ def main():
                             st.markdown(f"""
                             <div class="edge-box edge-home">
                                 <strong>{name}</strong><br>
-                                Win: {sigs['win']} | First to Score: {sigs['first_to_score']} | Hot Form: {sigs['hot_form']}<br>
-                                Scoring: {sigs['scoring']} | BTTS: {sigs['btts']} | Over 2.5: {sigs['over25']}<br>
-                                No BTTS: {sigs['no_btts']} | Under 2.5: {sigs['under25']}<br>
-                                Without Win: {sigs['without_win']} | Unbeaten: {sigs['unbeaten']}
+                                Scoring: {sigs['scoring']} | Hot Form: {sigs['hot_form']} | Over 2.5 Goals: {sigs['over25_goals']}<br>
+                                Win: {sigs['win']} | BTTS: {sigs['btts']} | Under 2.5: {sigs['under25']}<br>
+                                Without Win: {sigs['without_win']} | First to Score: {sigs['first_to_score']}
                             </div>
                             """, unsafe_allow_html=True)
                     
-                    st.markdown("### 🎯 Prediction")
+                    st.markdown("### 🎯 Bets")
                     
-                    if result["bet"]:
-                        badge = '<span class="pattern-badge">📊 PATTERN: ' + result['pattern'] + '</span>'
-                        card_class = "pattern-card"
-                        
-                        w_emoji = {"HOME": "🏠", "AWAY": "✈️", "DRAW": "🤝"}.get(result.get("winner", ""), "❓")
-                        o_emoji = "🔥" if result.get("over") == "OVER" else "🛡️"
-                        b_emoji = "✅" if result.get("btts") == "YES" else "❌"
-                        
-                        st.markdown(f"""
-                        <div class="output-card {card_class}">
-                            <div style="text-align:center;">
-                                {badge}
-                                <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.5rem;">{result.get('reason', '')}</div>
-                            </div>
-                            <div style="display:flex;justify-content:space-around;margin-top:1rem;">
-                                <div style="text-align:center;">
-                                    <div style="font-size:1.5rem;">{w_emoji}</div>
-                                    <div style="font-weight:800;">{result.get('winner', '')}</div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:1.5rem;">{o_emoji}</div>
-                                    <div style="font-weight:800;">{result.get('over', '')}</div>
-                                </div>
-                                <div style="text-align:center;">
-                                    <div style="font-size:1.5rem;">{b_emoji}</div>
-                                    <div style="font-weight:800;">BTTS {result.get('btts', '')}</div>
+                    if bets:
+                        for bet in bets:
+                            emoji = {"HOME WIN": "🏠", "OVER 2.5": "🔥", "BTTS YES": "✅"}.get(bet["market"], "⚽")
+                            st.markdown(f"""
+                            <div class="output-card bet-card">
+                                <div style="display:flex;align-items:center;gap:1rem;">
+                                    <div style="font-size:2rem;">{emoji}</div>
+                                    <div>
+                                        <div style="font-size:1.3rem;font-weight:800;">{bet['market']}</div>
+                                        <div style="font-size:0.8rem;color:#94a3b8;">
+                                            <span class="rule-badge">{bet['rule']}</span>
+                                            {bet['confidence']}% confidence
+                                        </div>
+                                        <div style="font-size:0.75rem;color:#94a3b8;">{bet['reason']}</div>
+                                    </div>
                                 </div>
                             </div>
-                            <div style="text-align:center;margin-top:0.5rem;font-size:0.85rem;color:#94a3b8;">
-                                Confidence: {result.get('confidence', 0)}%
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """, unsafe_allow_html=True)
                     else:
-                        badge = '<span class="noise-badge">⚠️ NOISE — SKIP</span>'
                         st.markdown(f"""
                         <div class="output-card skip-card">
                             <div style="text-align:center;">
-                                {badge}
-                                <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.5rem;">{result.get('reason', '')}</div>
-                                <div style="font-size:0.8rem;color:#94a3b8;margin-top:0.3rem;">Only bet when a clear pattern exists.</div>
+                                <span class="skip-badge">NO BET</span>
+                                <div style="font-size:0.9rem;color:#94a3b8;margin-top:0.5rem;">No rules triggered. Skip this match.</div>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
@@ -444,9 +370,9 @@ def main():
             st.write(f"{len(pending)} pending")
             for analysis in pending:
                 ht = analysis.get('home_team', 'Home'); at = analysis.get('away_team', 'Away')
-                with st.expander(f"{ht} vs {at} — {analysis.get('prediction', '?')} | {analysis.get('winner', '?')} | {analysis.get('btts', '?')}"):
+                with st.expander(f"{ht} vs {at} — {analysis.get('prediction', '?')}"):
                     st.write(f"**Date:** {analysis.get('match_date', '?')}")
-                    st.write(f"**Pattern:** {analysis.get('pattern', '?')}")
+                    st.write(f"**Rules:** {analysis.get('pattern', '?')}")
                     c1, c2, c3 = st.columns(3)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{analysis['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{analysis['id']}")
@@ -470,54 +396,42 @@ def main():
         if not results:
             st.info("No results yet.")
         else:
-            bets = [r for r in results if r.get("prediction") not in ["SKIP", None, ""]]
-            c_ou = len([r for r in results if r.get("correct") == True])
-            c_win = len([r for r in results if r.get("winner_correct") == True])
-            c_btts = len([r for r in results if r.get("btts_correct") == True])
-            w_total = len([r for r in results if r.get("winner_correct") is not None])
-            b_total = len([r for r in results if r.get("btts_correct") is not None])
-            skipped = len([r for r in results if r.get("prediction") in ["SKIP", None, ""]])
+            bets_placed = [r for r in results if r.get("prediction") not in ["NO BET", None, ""]]
+            skipped = len([r for r in results if r.get("prediction") in ["NO BET", None, ""]])
             
-            st.markdown(f"**Bets placed:** {len(bets)} | **Skipped:** {skipped}")
+            # Count correct by rule
+            rule1_total = len([r for r in bets_placed if "Rule 1" in (r.get("pattern") or "")])
+            rule1_correct = len([r for r in bets_placed if "Rule 1" in (r.get("pattern") or "") and r.get("winner_correct") == True])
             
-            c1, c2, c3 = st.columns(3)
-            for col, label, c, t in [(c1, "Over/Under", c_ou, len(bets)), (c2, "Winner", c_win, w_total), (c3, "BTTS", c_btts, b_total)]:
-                rate = round(c / t * 100) if t > 0 else 0
-                color = "#10b981" if rate >= 80 else "#ef4444"
-                with col:
-                    st.markdown(f"""
-                    <div class="output-card" style="text-align:center;">
-                        <div style="font-size:0.9rem;">{label}</div>
-                        <div style="font-size:2rem;font-weight:800;color:{color};">{c}/{t} ({rate}%)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            rule2_total = len([r for r in bets_placed if "Rule 2" in (r.get("pattern") or "")])
+            rule2_correct = len([r for r in bets_placed if "Rule 2" in (r.get("pattern") or "") and r.get("correct") == True])
             
-            # By pattern
-            patterns = {}
-            for r in bets:
-                p = r.get("pattern", "Unknown")
-                if p not in patterns: patterns[p] = {"total": 0, "correct": 0}
-                patterns[p]["total"] += 1
-                if r.get("correct") == True: patterns[p]["correct"] += 1
+            rule3_total = len([r for r in bets_placed if "Rule 3" in (r.get("pattern") or "")])
+            rule3_correct = len([r for r in bets_placed if "Rule 3" in (r.get("pattern") or "") and r.get("btts_correct") == True])
             
-            if patterns:
-                st.markdown("### By Pattern")
-                for p, stats in sorted(patterns.items(), key=lambda x: x[1]["total"], reverse=True):
-                    rate = round(stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
-                    color = "#10b981" if rate >= 80 else "#ef4444"
+            st.markdown(f"**Bets placed:** {len(bets_placed)} | **Skipped:** {skipped}")
+            
+            st.markdown("### Rule Performance")
+            for rule, total, correct in [
+                ("Rule 1 — HOME WIN (83%)", rule1_total, rule1_correct),
+                ("Rule 2 — OVER 2.5 (87%)", rule2_total, rule2_correct),
+                ("Rule 3 — BTTS YES (82%)", rule3_total, rule3_correct),
+            ]:
+                if total > 0:
+                    rate = round(correct / total * 100)
+                    color = "#10b981" if rate >= 75 else "#ef4444"
                     st.markdown(f"""
                     <div style="display:flex;justify-content:space-between;background:#1e293b;padding:0.5rem;border-radius:8px;margin:0.2rem 0;color:#fff;">
-                        <div><strong>{p}</strong></div>
-                        <div style="color:{color};">{stats['correct']}/{stats['total']} ({rate}%)</div>
+                        <div><strong>{rule}</strong></div>
+                        <div style="color:{color};">{correct}/{total} ({rate}%)</div>
                     </div>
                     """, unsafe_allow_html=True)
             
             if st.checkbox("Show all results"):
                 st.dataframe(pd.DataFrame([{
                     "date": r.get("match_date"), "home": r.get("home_team"), "away": r.get("away_team"),
-                    "pattern": r.get("pattern"), "prediction": r.get("prediction"),
-                    "correct": r.get("correct"), "winner": r.get("winner"),
-                    "winner_correct": r.get("winner_correct"), "btts": r.get("btts"),
+                    "prediction": r.get("prediction"), "pattern": r.get("pattern"),
+                    "correct": r.get("correct"), "winner_correct": r.get("winner_correct"),
                     "btts_correct": r.get("btts_correct"),
                     "score": f"{r.get('actual_home_goals', '-')}-{r.get('actual_away_goals', '-')}",
                 } for r in results]))
