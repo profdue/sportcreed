@@ -1,7 +1,8 @@
 """
-MATCH ANALYZER V1.5 — Production Final
+MATCH ANALYZER V1.6 — Production Final
 22-Match Backtested Strategy | 76% Win Rate
 All Parsers Working | All Rules Implemented
+Fixes: Form parser fuzzy matching + N/A display + Negative trend warnings
 """
 
 import streamlit as st
@@ -24,7 +25,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.5", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.6", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -42,8 +43,109 @@ st.markdown("""
     .badge-caution { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #ef4444; color: #fff; margin: 0.1rem; }
     .badge-info { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #3b82f6; color: #fff; margin: 0.1rem; }
     .badge-skip { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #fbbf24; color: #000; }
+    .badge-warning { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #f97316; color: #000; margin: 0.1rem; }
 </style>
 """, unsafe_allow_html=True)
+
+# ============================================================================
+# TEAM ABBREVIATIONS — For fuzzy matching in form parser
+# ============================================================================
+TEAM_ABBREVIATIONS = {
+    "Nottingham Forest": ["nott'm forest", "nottingham for", "nottm forest", "notts forest"],
+    "Manchester United": ["man utd", "manchester utd", "man united"],
+    "Manchester City": ["man city", "manchester city"],
+    "Wolverhampton Wanderers": ["wolves", "wolverhampton"],
+    "Newcastle United": ["newcastle", "newcastle utd"],
+    "Tottenham Hotspur": ["spurs", "tottenham"],
+    "West Ham United": ["west ham", "west ham utd"],
+    "Crystal Palace": ["crystal palace", "palace"],
+    "Leeds United": ["leeds", "leeds utd"],
+    "Brighton & Hove Albion": ["brighton", "brighton & hove"],
+    "Norwich City": ["norwich"],
+    "Brentford": ["brentford"],
+    "Everton": ["everton"],
+    "Chelsea": ["chelsea"],
+    "Arsenal": ["arsenal"],
+    "Liverpool": ["liverpool"],
+    "Aston Villa": ["aston villa", "villa"],
+    "Fulham": ["fulham"],
+    "Bournemouth": ["bournemouth"],
+    "Southampton": ["southampton"],
+    "Burnley": ["burnley"],
+    "Sheffield United": ["sheffield utd", "sheffield united", "sheff utd"],
+    "Luton Town": ["luton", "luton town"],
+    "Leicester City": ["leicester", "leicester city"],
+    "Ipswich Town": ["ipswich", "ipswich town"],
+    "Sunderland": ["sunderland"],
+    "St Louis City": ["st louis", "st. louis"],
+    "Los Angeles FC": ["los angeles", "lafc"],
+    "Los Angeles Galaxy": ["la galaxy", "los angeles galaxy"],
+    "Sporting Kansas City": ["sporting kc", "sporting kansas", "kansas city"],
+    "San Jose Earthquakes": ["san jose", "earthquakes"],
+    "Seattle Sounders": ["seattle", "sounders"],
+    "Austin FC": ["austin"],
+    "San Diego": ["san diego"],
+    "Real Salt Lake": ["real salt lake", "salt lake", "rsl"],
+    "Houston Dynamo": ["houston", "dynamo"],
+    "Minnesota United": ["minnesota", "minnesota utd", "minnesota united"],
+    "Colorado Rapids": ["colorado", "rapids"],
+    "Dallas": ["dallas", "fc dallas"],
+    "Vancouver Whitecaps": ["vancouver", "whitecaps"],
+    "Portland Timbers": ["portland", "timbers"],
+    "CD Guadalajara": ["guadalajara", "chivas"],
+    "Cruz Azul": ["cruz azul"],
+    "River Plate": ["river plate", "river"],
+    "Gimnasia": ["gimnasia", "gimnasia la plata"],
+    "Thun": ["thun", "fc thun"],
+    "Young Boys": ["young boys", "yb", "bern"],
+    "Basel": ["basel", "fc basel"],
+    "St Gallen": ["st gallen", "st. gallen", "sankt gallen"],
+    "Sion": ["sion", "fc sion"],
+    "Lugano": ["lugano", "fc lugano"],
+    "Al Fateh": ["al fateh", "fateh"],
+    "Al Najma": ["al najma", "najma"],
+    "Al Ettifaq": ["al ettifaq", "ettifaq"],
+    "Al Ittihad": ["al ittihad", "ittihad"],
+    "Al Quadisiya": ["al quadisiya", "quadisiya", "al qadsiah"],
+    "Al Hazem": ["al hazem", "hazem"],
+    "Gomel": ["gomel", "fc gomel"],
+    "Baranovichi": ["baranovichi", "fc baranovichi"],
+    "Kudrivka": ["kudrivka"],
+    "Rukh Lviv": ["rukh lviv", "rukh"],
+    "Bradford City": ["bradford", "bradford city"],
+    "Bolton Wanderers": ["bolton", "bolton wanderers"],
+    "Girona": ["girona", "girona fc"],
+    "Real Sociedad": ["real sociedad", "sociedad", "la real"],
+    "Valencia": ["valencia", "valencia cf"],
+    "Rayo Vallecano": ["rayo", "rayo vallecano"],
+}
+
+def fuzzy_team_match(team_name, text):
+    """Match team name including common abbreviations"""
+    if not team_name or not text:
+        return False
+    text_lower = text.lower().strip()
+    team_lower = team_name.lower().strip()
+    
+    # Direct match
+    if team_lower in text_lower or text_lower in team_lower:
+        return True
+    
+    # Check abbreviations
+    for abbr in TEAM_ABBREVIATIONS.get(team_name, []):
+        if abbr in text_lower:
+            return True
+    
+    # Also check if the text is an abbreviation for the team
+    for full_name, abbrs in TEAM_ABBREVIATIONS.items():
+        if team_name == full_name:
+            continue
+        if team_lower in [a.lower() for a in abbrs]:
+            if text_lower == full_name.lower() or text_lower in [a.lower() for a in abbrs]:
+                return True
+    
+    return False
+
 
 # ============================================================================
 # PARSER — COMPLETE REWRITE
@@ -150,13 +252,22 @@ def parse_match_data(raw_text: str) -> dict:
         if current_section == 'result':
             if data["home_team"] and data["home_team"] in stripped:
                 prob, trend = find_pct(i)
-                if prob: data["home_win"] = prob; data["home_win_trend"] = trend
+                if prob: 
+                    data["home_win"] = prob
+                    arrow_exists = has_arrow(i)
+                    data["home_win_trend"] = trend if arrow_exists else None
             elif stripped.startswith('Draw'):
                 prob, trend = find_pct(i)
-                if prob: data["draw"] = prob; data["draw_trend"] = trend
+                if prob: 
+                    data["draw"] = prob
+                    arrow_exists = has_arrow(i)
+                    data["draw_trend"] = trend if arrow_exists else None
             elif data["away_team"] and data["away_team"] in stripped:
                 prob, trend = find_pct(i)
-                if prob: data["away_win"] = prob; data["away_win_trend"] = trend
+                if prob: 
+                    data["away_win"] = prob
+                    arrow_exists = has_arrow(i)
+                    data["away_win_trend"] = trend if arrow_exists else None
             elif 'Both Teams to Score' in stripped:
                 prob, trend = find_pct(i)
                 arrow_exists = has_arrow(i)
@@ -209,7 +320,7 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["away_over_15_goals"] = prob
     
     # ========================================================================
-    # FORM STRINGS — Associate with team names
+    # FORM STRINGS — Associate with team names (FUZZY MATCHING)
     # ========================================================================
     form_data_started = False
     current_team_form = None
@@ -225,10 +336,10 @@ def parse_match_data(raw_text: str) -> dict:
         if not form_data_started:
             continue
         
-        # Check if this line is a team name (by matching against known teams)
+        # Check if this line is a team name (fuzzy match)
         is_team = False
         for team in team_names:
-            if team and team.lower() in stripped.lower():
+            if team and fuzzy_team_match(team, stripped):
                 is_team = True
                 current_team_form = team
                 if team not in team_forms:
@@ -238,13 +349,69 @@ def parse_match_data(raw_text: str) -> dict:
         if is_team:
             continue
         
-        # Collect form results
+        # Collect form results (these are the W/D/L from the top, not the scores)
+        # Skip score lines like "Aston Villa 4 - 0 Nott'm Forest"
         if stripped in ['W', 'D', 'L'] and current_team_form:
             team_forms[current_team_form].append(stripped)
     
-    if data["home_team"] and data["home_team"] in team_forms:
+    # ========================================================================
+    # ALSO PARSE FORM FROM THE TOP OF THE DATA BLOCK
+    # ========================================================================
+    # The form strings at the top: after "All competitions" line, the next 6 W/D/L lines
+    form_blocks = []
+    current_block = []
+    collecting = False
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Start collecting after "All competitions" or "Premier League" etc.
+        if stripped in ['All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 
+                         'Ligue 1', 'Championship', 'Süper Lig', 'Pro League', 'Primeira Liga',
+                         'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
+                         'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
+                         'Argentine Primera Division', 'Major League Soccer']:
+            if current_block and len(current_block) >= 4:
+                form_blocks.append(current_block)
+            current_block = []
+            collecting = True
+            continue
+        
+        # Stop collecting at "Last game" or "Goals scored" or "Top scorer"
+        if stripped.startswith('Last game') or stripped.startswith('Goals scored') or stripped.startswith('Top scorer'):
+            if current_block and len(current_block) >= 4:
+                form_blocks.append(current_block)
+            current_block = []
+            collecting = False
+            continue
+        
+        # Stop at "Data analysis"
+        if stripped == 'Data analysis':
+            if current_block and len(current_block) >= 4:
+                form_blocks.append(current_block)
+            current_block = []
+            collecting = False
+            continue
+        
+        if collecting and stripped in ['W', 'D', 'L']:
+            current_block.append(stripped)
+    
+    # Don't forget the last block
+    if current_block and len(current_block) >= 4:
+        form_blocks.append(current_block)
+    
+    # Assign form blocks to teams
+    # First block = home team all comps, Second block = home team league
+    # Third block = away team all comps, Fourth block = away team league
+    if len(form_blocks) >= 1 and not data["home_form_all"]:
+        data["home_form_all"] = form_blocks[0][:6]
+    if len(form_blocks) >= 3 and not data["away_form_all"]:
+        data["away_form_all"] = form_blocks[2][:6]
+    
+    # Fallback: use team_forms from Form Data section
+    if not data["home_form_all"] and data["home_team"] and data["home_team"] in team_forms:
         data["home_form_all"] = team_forms[data["home_team"]][:6]
-    if data["away_team"] and data["away_team"] in team_forms:
+    if not data["away_form_all"] and data["away_team"] and data["away_team"] in team_forms:
         data["away_form_all"] = team_forms[data["away_team"]][:6]
     
     # ========================================================================
@@ -281,8 +448,7 @@ def parse_match_data(raw_text: str) -> dict:
                         break
                 
                 if len(numbers_found) == 2:
-                    # The numbers are in reverse order (away, home because we searched backward)
-                    # Actually: the line before FT is away score, the one before that is home score
+                    # Numbers are in reverse order (we searched backward)
                     away_score = numbers_found[0]
                     home_score = numbers_found[1]
                     h2h_scores.append((home_score, away_score))
@@ -305,38 +471,39 @@ def analyze_match(data: dict) -> dict:
     # ========================================================================
     signals = {}
     if data["btts"] and data["btts"] >= 48: 
-        signals["BTTS"] = data["btts"]
+        signals["BTTS"] = (data["btts"], data.get("btts_trend"))
     if data["over_25"] and data["over_25"] >= 48: 
-        signals["Over 2.5"] = data["over_25"]
+        signals["Over 2.5"] = (data["over_25"], data.get("over_25_trend"))
     if data["under_25"] and data["under_25"] >= 48: 
-        signals["Under 2.5"] = data["under_25"]
+        signals["Under 2.5"] = (data["under_25"], None)
     if data["home_over_15_goals"] and data["home_over_15_goals"] >= 48: 
-        signals["Home Over 1.5 Goals"] = data["home_over_15_goals"]
+        signals["Home Over 1.5 Goals"] = (data["home_over_15_goals"], None)
     if data["away_over_15_goals"] and data["away_over_15_goals"] >= 48: 
-        signals["Away Over 1.5 Goals"] = data["away_over_15_goals"]
+        signals["Away Over 1.5 Goals"] = (data["away_over_15_goals"], None)
     
     if signals:
-        strongest = max(signals, key=signals.get)
-        strongest_pct = signals[strongest]
+        # Find strongest by probability
+        strongest = max(signals, key=lambda k: signals[k][0])
+        strongest_pct, strongest_trend = signals[strongest]
         
-        # Trend bonus
+        # Trend bonus (positive trends upgrade confidence)
         trend_bonus = 0
         trend_label = ""
-        if strongest == "BTTS" and data.get("btts_trend") is not None:
-            if data["btts_trend"] >= 0.30:
-                trend_bonus = 1.5
-                trend_label = f"▲ BTTS Trend +{data['btts_trend']:.2f}"
-        elif strongest == "Over 2.5" and data.get("over_25_trend") is not None:
-            if data["over_25_trend"] >= 0.30:
-                trend_bonus = 1.5
-                trend_label = f"▲ Over 2.5 Trend +{data['over_25_trend']:.2f}"
+        if strongest_trend is not None and strongest_trend >= 0.30:
+            trend_bonus = 1.5
+            trend_label = f"▲ {strongest} Trend +{strongest_trend:.2f}"
+        
+        # Negative trend warning
+        if strongest_trend is not None and strongest_trend < 0:
+            result["warnings"].append(f"▼ {strongest} trending down ({strongest_trend:+.2f}) — consider caution or reduced stake")
+            trend_bonus = -0.5  # Downgrade for negative trend
         
         if trend_label:
             result["badges"].append(trend_label)
         
         # Confidence formula: base 5.0 + probability bonus + trend bonus
         confidence = 5.0 + (strongest_pct - 48) * 0.15 + trend_bonus
-        confidence = min(9.0, max(3.0, confidence))
+        confidence = min(9.0, max(2.5, confidence))
         
         result["bets"].append({
             "market": strongest, 
@@ -361,9 +528,9 @@ def analyze_match(data: dict) -> dict:
                 result["bets"].append({
                     "market": "BTTS", "tier": "TIER 1", "confidence": 7.5,
                     "probability": data["btts"],
-                    "reason": f"Draw streak ({max(home_draws, away_draws)} draws in 6)"
+                    "reason": f"Draw streak ({max(home_draws, away_draws)} draws in last 6)"
                 })
-                result["badges"].append(f"Draw Streak: {max(home_draws, away_draws)}")
+                result["badges"].append(f"Draw Streak: {max(home_draws, away_draws)} draws")
     
     # ========================================================================
     # STEP 3: In-Form Collision → Draw
@@ -377,7 +544,7 @@ def analyze_match(data: dict) -> dict:
                 result["bets"].append({
                     "market": "Draw", "tier": "TIER 2", "confidence": 6.0,
                     "probability": data["draw"], 
-                    "reason": f"Both unbeaten (H:{home_unbeaten}/5 A:{away_unbeaten}/5)"
+                    "reason": f"Both teams unbeaten (Home: {home_unbeaten}/5, Away: {away_unbeaten}/5)"
                 })
                 result["badges"].append("Unbeaten Collision")
     
@@ -393,7 +560,7 @@ def analyze_match(data: dict) -> dict:
                     "probability": data["btts"],
                     "reason": f"H2H BTTS in {data['h2h_btts_count']}/{h2h_total} meetings"
                 })
-            result["badges"].append(f"H2H BTTS: {data['h2h_btts_count']}/{h2h_total}")
+            result["badges"].append(f"H2H BTTS Pattern: {data['h2h_btts_count']}/{h2h_total}")
     
     # ========================================================================
     # STEP 5: Dominant Favorite → Win to Nil
@@ -401,23 +568,23 @@ def analyze_match(data: dict) -> dict:
     # Home favorite
     if data["home_win"] and data["home_win"] >= 60:
         away_scoring = data.get("away_over_05_goals", 100)
-        if away_scoring and away_scoring < 52:
+        if away_scoring is not None and away_scoring < 52:
             if not any(b["market"] == "Home Win to Nil" for b in result["bets"]):
                 result["bets"].append({
                     "market": "Home Win to Nil", "tier": "TIER 1",
                     "confidence": 7.5, "probability": data["home_win"],
-                    "reason": f"Home dominant ({data['home_win']:.0f}%) + Away {away_scoring:.0f}% to score"
+                    "reason": f"Home dominant ({data['home_win']:.0f}%) + Away only {away_scoring:.0f}% to score"
                 })
     
     # Away favorite
     if data["away_win"] and data["away_win"] >= 60:
         home_scoring = data.get("home_over_05_goals", 100)
-        if home_scoring and home_scoring < 52:
+        if home_scoring is not None and home_scoring < 52:
             if not any(b["market"] == "Away Win to Nil" for b in result["bets"]):
                 result["bets"].append({
                     "market": "Away Win to Nil", "tier": "TIER 1",
                     "confidence": 7.5, "probability": data["away_win"],
-                    "reason": f"Away dominant ({data['away_win']:.0f}%) + Home {home_scoring:.0f}% to score"
+                    "reason": f"Away dominant ({data['away_win']:.0f}%) + Home only {home_scoring:.0f}% to score"
                 })
     
     # ========================================================================
@@ -443,7 +610,7 @@ def analyze_match(data: dict) -> dict:
     if data["away_win"] and data["home_win"] and abs(data["away_win"] - data["home_win"]) < 10:
         result["warnings"].append("Close match — no clear favorite")
     if data["btts"] and data["btts"] < 50 and not any(b["market"] == "BTTS" for b in result["bets"]):
-        result["warnings"].append("BTTS below 50% — BTTS is a trap here")
+        result["warnings"].append("BTTS below 50% — BTTS is likely a trap here")
     
     return result
 
@@ -526,8 +693,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V1.5")
-    st.caption("Production Final | 22-Match Backtest | 76% Win Rate | All Systems Working")
+    st.title("📊 Match Analyzer V1.6")
+    st.caption("Production Final | 22-Match Backtest | 76% Win Rate | All Parsers Fixed")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -555,26 +722,36 @@ def main():
                     # Probabilities + Form side by side
                     col1, col2 = st.columns(2)
                     with col1:
+                        # Handle trend displays
                         btts_trend_str = f"{data.get('btts_trend', 0):+.2f}" if data.get('btts_trend') is not None else "N/A"
                         o25_trend_str = f"{data.get('over_25_trend', 0):+.2f}" if data.get('over_25_trend') is not None else "N/A"
+                        
+                        # Handle None values gracefully
+                        home_o05 = f"{data['home_over_05_goals']:.1f}%" if data.get('home_over_05_goals') is not None else "N/A"
+                        home_o15 = f"{data['home_over_15_goals']:.1f}%" if data.get('home_over_15_goals') is not None else "N/A"
+                        away_o05 = f"{data['away_over_05_goals']:.1f}%" if data.get('away_over_05_goals') is not None else "N/A"
+                        away_o15 = f"{data['away_over_15_goals']:.1f}%" if data.get('away_over_15_goals') is not None else "N/A"
                         
                         st.markdown(f"""
                         <div class="edge-box">
                             <strong>📊 Probabilities</strong><br>
-                            Home Win: {data.get('home_win', '?')}% | Draw: {data.get('draw', '?')}% | Away Win: {data.get('away_win', '?')}%<br>
-                            BTTS: {data.get('btts', '?')}% | Over 2.5: {data.get('over_25', '?')}% | Under 2.5: {data.get('under_25', '?')}%<br>
-                            Home O1.5 Goals: {data.get('home_over_15_goals', '?')}% | Away O1.5 Goals: {data.get('away_over_15_goals', '?')}%<br>
-                            Away O0.5 Goals: {data.get('away_over_05_goals', '?')}% | Home O0.5 Goals: {data.get('home_over_05_goals', '?')}%
+                            Home Win: {data.get('home_win', '?'):.1f}% | Draw: {data.get('draw', '?'):.1f}% | Away Win: {data.get('away_win', '?'):.1f}%<br>
+                            BTTS: {data.get('btts', '?'):.1f}% | Over 2.5: {data.get('over_25', '?'):.1f}% | Under 2.5: {data.get('under_25', '?'):.1f}%<br>
+                            Home O0.5: {home_o05} | Home O1.5: {home_o15}<br>
+                            Away O0.5: {away_o05} | Away O1.5: {away_o15}
                         </div>
                         """, unsafe_allow_html=True)
                     
                     with col2:
+                        home_form_str = '-'.join(data.get('home_form_all', [])[:6]) if data.get('home_form_all') else 'N/A'
+                        away_form_str = '-'.join(data.get('away_form_all', [])[:6]) if data.get('away_form_all') else 'N/A'
+                        
                         st.markdown(f"""
                         <div class="edge-box">
                             <strong>📈 Form & H2H</strong><br>
                             BTTS Trend: {btts_trend_str} | Over 2.5 Trend: {o25_trend_str}<br>
-                            Home Form: {'-'.join(data.get('home_form_all', [])[:6]) if data.get('home_form_all') else 'N/A'}<br>
-                            Away Form: {'-'.join(data.get('away_form_all', [])[:6]) if data.get('away_form_all') else 'N/A'}<br>
+                            Home Form: {home_form_str}<br>
+                            Away Form: {away_form_str}<br>
                             H2H BTTS: {data.get('h2h_btts_count', 0)}/{data.get('h2h_total', 0)} matches
                         </div>
                         """, unsafe_allow_html=True)
