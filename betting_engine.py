@@ -1,7 +1,5 @@
 """
-MATCH ANALYZER V1.2 — Critical Fixes
-H2H parser fixed. Underdog scoring check added. Specific market output.
-Form parser debugged. Conflicting signal detection.
+MATCH ANALYZER V1.3 — H2H Parser Rewrite + Form Parser Fix + Dedup
 """
 
 import streamlit as st
@@ -24,7 +22,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.2", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.3", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -41,9 +39,8 @@ st.markdown("""
     .score-label { font-size: 0.8rem; color: #94a3b8; }
     .badge-upgrade { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #10b981; color: #000; margin: 0.1rem; }
     .badge-caution { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #ef4444; color: #fff; margin: 0.1rem; }
-    .badge-info { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #3b82f6; color: #fff; margin: 0.1rem; }
-    .badge-skip { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #fbbf24; color: #000; }
     .badge-conflict { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #f97316; color: #000; margin: 0.1rem; }
+    .badge-skip { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #fbbf24; color: #000; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -153,7 +150,7 @@ def parse_match_data(raw_text: str) -> dict:
             current_subsection = 'away_goals'
         
         if current_subsection == 'home_goals':
-            if 'Over 0.5' in stripped and not data["home_over_05_goals"]:
+            if 'Over 0.5' in stripped:
                 prob, _ = find_pct(i)
                 if prob: data["home_over_05_goals"] = prob
             if 'Over 1.5' in stripped:
@@ -169,67 +166,55 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["away_over_15_goals"] = prob
     
     # ========================================================================
-    # FORM STRINGS — FIXED: Only capture from Form/Standings/Stats section
+    # FORM STRINGS — FIXED: Match form to team by proximity
     # ========================================================================
-    form_groups = []
-    current_group = []
-    in_form_section = False
+    # Find the Form, Standings, Stats section
+    form_start = -1
+    for i, line in enumerate(lines):
+        if 'Form, Standings, Stats' in line:
+            form_start = i
+            break
     
-    for line in lines:
-        stripped = line.strip()
+    if form_start >= 0:
+        form_groups = []
+        current_group = []
+        current_team_for_group = None
         
-        # Start capturing after we see "Form, Standings, Stats" or after team names
-        if 'Form, Standings, Stats' in stripped:
-            in_form_section = True
-            continue
-        
-        # Stop at "Data analysis"
-        if stripped == 'Data analysis':
-            in_form_section = False
-            if len(current_group) >= 4:
-                form_groups.append(current_group)
-            current_group = []
-            continue
-        
-        if in_form_section:
+        for i in range(form_start, len(lines)):
+            stripped = lines[i].strip()
+            
+            if stripped == 'Data analysis':
+                if len(current_group) >= 4:
+                    form_groups.append({"team": current_team_for_group, "form": current_group})
+                break
+            
+            # Check if this is a team name (line before "All competitions")
+            if i+1 < len(lines) and lines[i+1].strip() == 'All competitions':
+                if len(current_group) >= 4:
+                    form_groups.append({"team": current_team_for_group, "form": current_group})
+                current_group = []
+                current_team_for_group = stripped
+                continue
+            
             if stripped in ['W', 'D', 'L']:
                 current_group.append(stripped)
-            else:
-                if len(current_group) >= 4:
-                    form_groups.append(current_group)
-                current_group = []
-    
-    if len(current_group) >= 4:
-        form_groups.append(current_group)
-    
-    if len(form_groups) >= 2:
-        data["home_form_all"] = form_groups[0]
-        data["away_form_all"] = form_groups[1]
+        
+        if len(current_group) >= 4:
+            form_groups.append({"team": current_team_for_group, "form": current_group})
+        
+        # Assign to home/away based on team name
+        for g in form_groups:
+            if g["team"] == data["home_team"]:
+                data["home_form_all"] = g["form"]
+            elif g["team"] == data["away_team"]:
+                data["away_form_all"] = g["form"]
     
     # ========================================================================
-    # H2H SCORES — FIXED: Only extract final scores, not inline goal events
+    # H2H SCORES — REWRITTEN
     # ========================================================================
     h2h_section = False
     h2h_scores = []
     
-    for line in lines:
-        stripped = line.strip()
-        
-        if 'Head to Head' in stripped:
-            h2h_section = True
-            continue
-        if h2h_section and 'Form Data' in stripped:
-            break
-        
-        if h2h_section:
-            # Look for the pattern: "FT" followed by team names on next lines,
-            # then score numbers. But simpler: find "FT" then score pairs near it.
-            # Actually: scores appear as standalone numbers on lines right after HT/FT lines
-            pass
-    
-    # Better H2H approach: Find all score pairs that appear on sequential lines
-    # after "FT" markers within the H2H section
-    h2h_section = False
     for i, line in enumerate(lines):
         stripped = line.strip()
         
@@ -240,19 +225,21 @@ def parse_match_data(raw_text: str) -> dict:
             break
         
         if h2h_section and stripped == 'FT':
-            # Look at the next 4-5 lines for score numbers
+            # Collect standalone numbers after FT
             nums = []
-            for j in range(i+1, min(i+8, len(lines))):
+            for j in range(i+1, min(i+10, len(lines))):
                 sub = lines[j].strip()
-                m = re.match(r'^(\d+)$', sub)
-                if m:
-                    nums.append(int(m.group(1)))
-                elif re.search(r'[a-zA-Z]{3,}', sub) and j > i+1:
-                    # Text line (player names, team names) breaks the sequence
+                # Stop at next FT, HT, team name, or text-heavy line
+                if sub in ['FT', 'HT']:
+                    break
+                if re.match(r'^\d+$', sub):
+                    nums.append(int(sub))
+                elif re.search(r'[a-zA-Z]{4,}', sub) and not re.search(r'\d', sub):
+                    # Team name or text line - stop collecting
                     if len(nums) >= 2:
                         break
             
-            # Take pairs of numbers as scores
+            # Pair numbers as (home, away)
             for k in range(0, len(nums)-1, 2):
                 h = nums[k]
                 a = nums[k+1]
@@ -267,14 +254,22 @@ def parse_match_data(raw_text: str) -> dict:
 
 
 # ============================================================================
-# ANALYSIS ENGINE — V1.2 WITH ALL CRITICAL FIXES
+# ANALYSIS ENGINE
 # ============================================================================
 def analyze_match(data: dict) -> dict:
     result = {"bets": [], "avoid": [], "badges": [], "warnings": []}
+    seen_markets = set()
     
-    # ========================================================================
+    def add_bet(market, tier, confidence, probability, reason):
+        if market not in seen_markets:
+            seen_markets.add(market)
+            result["bets"].append({
+                "market": market, "tier": tier,
+                "confidence": confidence, "probability": probability,
+                "reason": reason
+            })
+    
     # STEP 1: Strongest Signal
-    # ========================================================================
     signals = {}
     if data["btts"]: signals["BTTS"] = data["btts"]
     if data["over_25"]: signals["Over 2.5"] = data["over_25"]
@@ -302,15 +297,10 @@ def analyze_match(data: dict) -> dict:
         
         if strongest_pct >= threshold:
             confidence = min(8.5, 5 + (strongest_pct - threshold) / 10 + trend_bonus)
-            result["bets"].append({
-                "market": strongest, "tier": "TIER 1",
-                "confidence": round(confidence, 1), "probability": strongest_pct,
-                "reason": f"Strongest signal at {strongest_pct:.1f}%"
-            })
+            add_bet(strongest, "TIER 1", round(confidence, 1), strongest_pct,
+                    f"Strongest signal at {strongest_pct:.1f}%")
     
-    # ========================================================================
     # STEP 2: Draw Streak → BTTS
-    # ========================================================================
     home_form = data.get("home_form_all") or []
     away_form = data.get("away_form_all") or []
     
@@ -319,41 +309,25 @@ def analyze_match(data: dict) -> dict:
         away_draws = sum(1 for r in away_form[:6] if r == 'D')
         
         if (home_draws >= 4 or away_draws >= 4) and data["btts"] and data["btts"] >= 45:
-            if not any(b["market"] == "BTTS" for b in result["bets"]):
-                result["bets"].append({
-                    "market": "BTTS", "tier": "TIER 1", "confidence": 7.5,
-                    "probability": data["btts"],
-                    "reason": f"Draw streak ({max(home_draws, away_draws)} draws)"
-                })
+            add_bet("BTTS", "TIER 1", 7.5, data["btts"],
+                    f"Draw streak ({max(home_draws, away_draws)} draws)")
     
-    # ========================================================================
     # STEP 3: Two In-Form Collision → Draw
-    # ========================================================================
     if home_form and away_form:
         home_wins = sum(1 for r in home_form[:3] if r == 'W')
         away_wins = sum(1 for r in away_form[:3] if r == 'W')
-        home_unbeaten = sum(1 for r in home_form[:5] if r in ['W', 'D'])
-        away_unbeaten = sum(1 for r in away_form[:5] if r in ['W', 'D'])
+        home_unb = sum(1 for r in home_form[:5] if r in ['W', 'D'])
+        away_unb = sum(1 for r in away_form[:5] if r in ['W', 'D'])
         
         if home_wins >= 3 and away_wins >= 3 and data["draw"] and data["draw"] >= 22:
-            result["bets"].append({
-                "market": "Draw", "tier": "TIER 2", "confidence": 6.5,
-                "probability": data["draw"], "reason": "Both on win streaks (3+)"
-            })
+            add_bet("Draw", "TIER 2", 6.5, data["draw"], "Both on win streaks (3+)")
             result["badges"].append("Win Streak Collision")
-        
-        elif home_unbeaten >= 4 and away_unbeaten >= 4 and data["draw"] and data["draw"] >= 22:
-            if not any(b["market"] == "Draw" for b in result["bets"]):
-                result["bets"].append({
-                    "market": "Draw", "tier": "TIER 2", "confidence": 6.0,
-                    "probability": data["draw"],
-                    "reason": f"Both unbeaten (H:{home_unbeaten}/5 A:{away_unbeaten}/5)"
-                })
-                result["badges"].append("Unbeaten Collision")
+        elif home_unb >= 4 and away_unb >= 4 and data["draw"] and data["draw"] >= 22:
+            add_bet("Draw", "TIER 2", 6.0, data["draw"],
+                    f"Both unbeaten (H:{home_unb}/5 A:{away_unb}/5)")
+            result["badges"].append("Unbeaten Collision")
     
-    # ========================================================================
     # STEP 4: H2H BTTS Pattern (with underdog scoring check)
-    # ========================================================================
     h2h_total = data.get("h2h_total", 0)
     h2h_btts = data.get("h2h_btts_count", 0)
     
@@ -361,73 +335,61 @@ def analyze_match(data: dict) -> dict:
         away_scoring = data.get("away_over_05_goals", 100) or 100
         home_scoring = data.get("home_over_05_goals", 100) or 100
         
-        # CRITICAL FIX: Only recommend BTTS if underdog can actually score
         if data["btts"] and data["btts"] >= 45:
-            # Check which team is the underdog
             if data["home_win"] and data["away_win"] and data["home_win"] > data["away_win"]:
                 underdog_scoring = away_scoring
             else:
                 underdog_scoring = home_scoring
             
             if underdog_scoring >= 52:
-                # BTTS is viable
-                if not any(b["market"] == "BTTS" for b in result["bets"]):
-                    result["bets"].append({
-                        "market": "BTTS", "tier": "TIER 1", "confidence": 8.0,
-                        "probability": data["btts"],
-                        "reason": f"H2H BTTS in {h2h_btts}/{h2h_total} meetings"
-                    })
+                add_bet("BTTS", "TIER 1", 8.0, data["btts"],
+                        f"H2H BTTS in {h2h_btts}/{h2h_total} meetings")
                 result["badges"].append(f"H2H BTTS: {h2h_btts}/{h2h_total}")
             else:
-                # BTTS is a trap — flag it
                 result["avoid"].append({
                     "market": "BTTS",
-                    "reason": f"H2H says BTTS ({h2h_btts}/{h2h_total}) but underdog scoring only {underdog_scoring:.0f}%. Trap."
+                    "reason": f"H2H says BTTS ({h2h_btts}/{h2h_total}) but underdog only {underdog_scoring:.0f}% to score. Trap."
                 })
                 result["badges"].append(f"⚠️ H2H BTTS trap: underdog {underdog_scoring:.0f}% to score")
+    elif h2h_total > 0:
+        result["badges"].append(f"H2H BTTS: {h2h_btts}/{h2h_total}")
     
-    # ========================================================================
     # STEP 5: Dominant Favorite → Specific Markets
-    # ========================================================================
     if data["home_win"] and data["home_win"] >= 60:
         away_scoring = data.get("away_over_05_goals", 100) or 100
         home_over15 = data.get("home_over_15_goals", 0) or 0
         
         if away_scoring < 50:
-            result["bets"].append({
-                "market": "Home Win to Nil", "tier": "TIER 1", "confidence": 8.5,
-                "probability": data["home_win"],
-                "reason": f"Home dominant ({data['home_win']:.0f}%) + Away only {away_scoring:.0f}% to score"
-            })
+            add_bet("Home Win to Nil", "TIER 1", 8.5, data["home_win"],
+                    f"Home {data['home_win']:.0f}% + Away only {away_scoring:.0f}% to score")
             result["badges"].append("Dominant Home — Win to Nil")
         elif away_scoring < 55:
-            result["bets"].append({
-                "market": "Home Win to Nil", "tier": "TIER 1", "confidence": 7.5,
-                "probability": data["home_win"],
-                "reason": f"Home dominant ({data['home_win']:.0f}%) + Away {away_scoring:.0f}% to score"
-            })
+            add_bet("Home Win to Nil", "TIER 1", 7.5, data["home_win"],
+                    f"Home {data['home_win']:.0f}% + Away {away_scoring:.0f}% to score")
         
         if home_over15 >= 50:
-            result["bets"].append({
-                "market": "Home Over 1.5 Goals", "tier": "TIER 1", "confidence": 7.5,
-                "probability": home_over15,
-                "reason": f"Home scores 2+ regularly ({home_over15:.0f}%)"
-            })
+            add_bet("Home Over 1.5 Goals", "TIER 1", 7.5, home_over15,
+                    f"Home scores 2+ regularly ({home_over15:.0f}%)")
     
     if data["away_win"] and data["away_win"] >= 60:
         home_scoring = data.get("home_over_05_goals", 100) or 100
+        away_over15 = data.get("away_over_15_goals", 0) or 0
         
         if home_scoring < 50:
-            result["bets"].append({
-                "market": "Away Win to Nil", "tier": "TIER 1", "confidence": 8.5,
-                "probability": data["away_win"],
-                "reason": f"Away dominant ({data['away_win']:.0f}%) + Home only {home_scoring:.0f}% to score"
-            })
+            add_bet("Away Win to Nil", "TIER 1", 8.5, data["away_win"],
+                    f"Away {data['away_win']:.0f}% + Home only {home_scoring:.0f}% to score")
             result["badges"].append("Dominant Away — Win to Nil")
+        
+        if away_over15 >= 50:
+            add_bet("Away Over 1.5 Goals", "TIER 1", 7.5, away_over15,
+                    f"Away scores 2+ regularly ({away_over15:.0f}%)")
     
-    # ========================================================================
+    # Under 2.5 check for tight matches
+    if data["under_25"] and data["under_25"] >= 48 and data["under_25"] > (data.get("over_25") or 0):
+        add_bet("Under 2.5", "TIER 2", 6.5, data["under_25"],
+                "Under 2.5 edges Over 2.5 in probabilities")
+    
     # FINALIZE
-    # ========================================================================
     tier_order = {"TIER 1": 0, "TIER 2": 1}
     result["bets"].sort(key=lambda b: (tier_order.get(b["tier"], 3), -b["confidence"]))
     
@@ -511,8 +473,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V1.2")
-    st.caption("Critical Fixes: H2H parser + Underdog scoring check + Specific markets")
+    st.title("📊 Match Analyzer V1.3")
+    st.caption("H2H Parser Rewrite + Form Parser Fix + Dedup + Multi-Recommendation")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
