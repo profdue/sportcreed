@@ -112,19 +112,23 @@ def parse_raw_text(raw_text: str) -> dict:
     return {"home_name": home_name, "away_name": away_name, "home_data": home_data, "away_data": away_data}
 
 def get_signal(data: dict, keys: list) -> int:
+    """Get highest value from multiple possible keys."""
     best = 0
     for key in keys:
-        if key in data: best = max(best, data[key])
+        if key in data:
+            best = max(best, data[key])
     return best
 
 def extract_signals(team_data: dict) -> dict:
+    """Extract all relevant signals. 
+    'Over 0.5' is the primary scoring streak — take highest among Scoring/Over 0.5."""
     return {
         "win": get_signal(team_data, ["Win"]),
         "btts": get_signal(team_data, ["BTTS"]),
         "over25": get_signal(team_data, ["Over 2.5"]),
         "no_btts": get_signal(team_data, ["No BTTS"]),
         "under25": get_signal(team_data, ["Under 2.5 Goals"]),
-        "scoring": get_signal(team_data, ["Scoring"]),
+        "scoring": get_signal(team_data, ["Scoring", "Over 0.5"]),
         "hot_form": get_signal(team_data, ["Hot Form"]),
         "unbeaten": get_signal(team_data, ["Unbeaten"]),
         "without_win": get_signal(team_data, ["Without Win"]),
@@ -203,7 +207,6 @@ def save_to_db(home_name, away_name, home_signals, away_signals, bets):
     try:
         markets = [b["market"] for b in bets]
         rules = [b["rule"] for b in bets]
-        reasons = [b["reason"] for b in bets]
         confs = [b["confidence"] for b in bets]
         
         record = {
@@ -248,10 +251,8 @@ def submit_result(analysis_id, home_goals, away_goals):
         # Over/Under correct?
         if "OVER 2.5" in pred:
             over_correct = over25
-        elif "NO BET" == pred:
-            over_correct = None
         else:
-            over_correct = None if "OVER" not in pred else None
+            over_correct = None
         
         # Winner correct?
         if pred_winner == "HOME WIN":
@@ -268,12 +269,6 @@ def submit_result(analysis_id, home_goals, away_goals):
             btts_correct = not btts_yes
         else:
             btts_correct = None
-        
-        # Combined over_correct from any rule
-        if "OVER 2.5" in pred:
-            over_correct = over25
-        elif "HOME WIN" in pred or pred == "NO BET":
-            over_correct = None
         
         supabase.table("analyses").update({
             "actual_home_goals": home_goals, "actual_away_goals": away_goals,
@@ -399,7 +394,6 @@ def main():
             bets_placed = [r for r in results if r.get("prediction") not in ["NO BET", None, ""]]
             skipped = len([r for r in results if r.get("prediction") in ["NO BET", None, ""]])
             
-            # Count correct by rule
             rule1_total = len([r for r in bets_placed if "Rule 1" in (r.get("pattern") or "")])
             rule1_correct = len([r for r in bets_placed if "Rule 1" in (r.get("pattern") or "") and r.get("winner_correct") == True])
             
