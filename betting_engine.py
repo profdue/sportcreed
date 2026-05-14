@@ -1,6 +1,6 @@
 """
 MATCH ANALYZER V1 — Multi-Source Probability + Trend + Form + H2H Analysis
-Fixed: Goals parsing, Form parsing, H2H parsing
+Production Ready. All parsing fixed. All displays correct.
 """
 
 import streamlit as st
@@ -37,19 +37,17 @@ st.markdown("""
     .score-box { background: #0f172a; border-radius: 12px; padding: 1rem; text-align: center; color: #fff; margin: 0.5rem 0; }
     .score-number { font-size: 2.5rem; font-weight: 800; }
     .score-label { font-size: 0.8rem; color: #94a3b8; }
-    .badge-upgrade { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #10b981; color: #000; }
-    .badge-caution { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #ef4444; color: #fff; }
-    .badge-info { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #3b82f6; color: #fff; }
+    .badge-upgrade { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #10b981; color: #000; margin: 0.1rem; }
+    .badge-caution { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #ef4444; color: #fff; margin: 0.1rem; }
+    .badge-info { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #3b82f6; color: #fff; margin: 0.1rem; }
     .badge-skip { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #fbbf24; color: #000; }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PARSER — FULLY FIXED
+# PARSER
 # ============================================================================
 def parse_match_data(raw_text: str) -> dict:
-    """Parse match data. Handles multi-line values throughout."""
-    
     lines = raw_text.strip().split('\n')
     
     data = {
@@ -61,11 +59,11 @@ def parse_match_data(raw_text: str) -> dict:
         "away_over_05_goals": None,
         "home_win_trend": 0, "btts_trend": 0, "over_25_trend": 0,
         "home_form_all": [], "away_form_all": [],
-        "h2h_scores": [], "h2h_btts_count": 0,
+        "h2h_scores": [], "h2h_btts_count": 0, "h2h_total": 0,
     }
     
     # ========================================================================
-    # TEAM NAMES: Line immediately before "All competitions"
+    # TEAM NAMES
     # ========================================================================
     team_names = []
     for i, line in enumerate(lines):
@@ -88,7 +86,7 @@ def parse_match_data(raw_text: str) -> dict:
             break
     
     # ========================================================================
-    # HELPER: Find percentage value in current or next few lines
+    # HELPER
     # ========================================================================
     def find_pct(start_idx, max_lookahead=3):
         for j in range(start_idx, min(start_idx + max_lookahead, len(lines))):
@@ -102,7 +100,7 @@ def parse_match_data(raw_text: str) -> dict:
         return None, 0
     
     # ========================================================================
-    # STATE MACHINE: Walk through lines tracking sections
+    # STATE MACHINE
     # ========================================================================
     current_section = None
     current_subsection = None
@@ -110,37 +108,15 @@ def parse_match_data(raw_text: str) -> dict:
     for i, line in enumerate(lines):
         stripped = line.strip()
         
-        # Section markers
-        if stripped == 'Result':
-            current_section = 'result'
-            current_subsection = None
-            continue
-        if stripped == 'Goals':
-            current_section = 'goals'
-            current_subsection = None
-            continue
-        if stripped == 'First Half Winner':
-            current_section = 'first_half'
-            current_subsection = None
-            continue
-        if stripped == 'Team To Score First':
-            current_section = 'score_first'
-            current_subsection = None
-            continue
-        if stripped == 'Corners':
-            current_section = 'corners'
-            current_subsection = None
-            continue
-        if stripped == 'Score analysis':
-            current_section = 'score_analysis'
-            current_subsection = None
-            continue
-        if stripped == 'Head to Head':
-            current_section = 'h2h'
-            current_subsection = None
-            continue
-        if stripped == 'Form Data':
-            current_section = 'form'
+        # Section markers — reset subsection
+        if stripped in ['Result', 'Goals', 'First Half Winner', 'Team To Score First', 
+                        'Corners', 'Score analysis', 'Head to Head', 'Form Data']:
+            current_section = stripped.lower().replace(' ', '_')
+            if current_section == 'head_to_head': current_section = 'h2h'
+            if current_section == 'form_data': current_section = 'form'
+            if current_section == 'first_half_winner': current_section = 'first_half'
+            if current_section == 'team_to_score_first': current_section = 'score_first'
+            if current_section == 'score_analysis': current_section = 'score_analysis'
             current_subsection = None
             continue
         
@@ -165,7 +141,6 @@ def parse_match_data(raw_text: str) -> dict:
         # GOALS SECTION
         # ====================================================================
         if current_section == 'goals':
-            # Skip "Over 1.5" within team-specific subsections
             if 'Over 1.5' in stripped and 'Goals' not in stripped:
                 prob, _ = find_pct(i)
                 if prob: data["over_15"] = prob
@@ -180,15 +155,12 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["over_35"] = prob
         
         # ====================================================================
-        # TEAM-SPECIFIC GOALS SUBSECTIONS
+        # TEAM-SPECIFIC GOALS
         # ====================================================================
         if data["home_team"] and f'{data["home_team"]} Goals' in stripped:
             current_subsection = 'home_goals'
         if data["away_team"] and f'{data["away_team"]} Goals' in stripped:
             current_subsection = 'away_goals'
-        # Reset subsection when we hit another section marker
-        if stripped in ['Goals', 'First Half Winner', 'Team To Score First', 'Corners', 'Score analysis', 'Head to Head', 'Form Data']:
-            current_subsection = None
         
         if current_subsection == 'home_goals' and 'Over 1.5' in stripped:
             prob, _ = find_pct(i)
@@ -203,14 +175,13 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["away_over_15_goals"] = prob
     
     # ========================================================================
-    # FORM STRINGS: Collect single-letter W/D/L lines into groups
+    # FORM STRINGS
     # ========================================================================
     form_groups = []
     current_group = []
     
     for line in lines:
         stripped = line.strip()
-        # Single letter W, D, or L
         if stripped in ['W', 'D', 'L']:
             current_group.append(stripped)
         else:
@@ -218,16 +189,17 @@ def parse_match_data(raw_text: str) -> dict:
                 form_groups.append(current_group)
             current_group = []
     
-    # Don't forget the last group
     if len(current_group) >= 4:
         form_groups.append(current_group)
     
+    # First group = Home All Comps, Second = Away All Comps
+    # (Premier League forms are groups 3 and 4 if they exist)
     if len(form_groups) >= 2:
         data["home_form_all"] = form_groups[0]
         data["away_form_all"] = form_groups[1]
     
     # ========================================================================
-    # H2H: Parse line by line looking for number pairs after FT
+    # H2H SCORES
     # ========================================================================
     h2h_section = False
     h2h_scores = []
@@ -244,9 +216,7 @@ def parse_match_data(raw_text: str) -> dict:
             break
         
         if h2h_section:
-            # Look for standalone numbers (scores on their own lines after FT)
             if stripped == 'FT':
-                # Next standalone numbers are the score
                 prev_number = None
                 continue
             
@@ -259,11 +229,11 @@ def parse_match_data(raw_text: str) -> dict:
                         prev_number = None
                     else:
                         prev_number = num
-            elif re.search(r'[a-zA-Z]', stripped) and stripped != 'FT':
-                # Line with text resets the pair
+            elif re.search(r'[a-zA-Z]', stripped) and stripped not in ['HT', 'FT', 'Premier League', 'EFL Cup']:
                 prev_number = None
     
     data["h2h_scores"] = h2h_scores
+    data["h2h_total"] = len(h2h_scores)
     data["h2h_btts_count"] = sum(1 for h, a in h2h_scores if h > 0 and a > 0)
     
     return data
@@ -331,15 +301,16 @@ def analyze_match(data: dict) -> dict:
             result["badges"].append("In-Form Collision")
     
     # STEP 4: H2H BTTS
-    if data["h2h_btts_count"] >= 4 and len(data.get("h2h_scores", [])) >= 5:
+    h2h_total = data.get("h2h_total", 0)
+    if data["h2h_btts_count"] >= 4 and h2h_total >= 5:
         if data["btts"] and data["btts"] >= 45:
             if not any(b["market"] == "BTTS" for b in result["bets"]):
                 result["bets"].append({
                     "market": "BTTS", "tier": "TIER 1", "confidence": 8.0,
                     "probability": data["btts"],
-                    "reason": f"H2H BTTS in {data['h2h_btts_count']}/5"
+                    "reason": f"H2H BTTS in {data['h2h_btts_count']}/{h2h_total} meetings"
                 })
-            result["badges"].append(f"H2H BTTS: {data['h2h_btts_count']}/5")
+            result["badges"].append(f"H2H BTTS: {data['h2h_btts_count']}/{h2h_total}")
     
     # Finalize
     tier_order = {"TIER 1": 0, "TIER 2": 1}
@@ -365,7 +336,16 @@ def save_to_db(data: dict, analysis: dict):
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": str(date.today()),
-            "home_data": {"league": data.get("league"), "btts_pct": data.get("btts")},
+            "home_data": {
+                "league": data.get("league"),
+                "home_win_pct": data.get("home_win"),
+                "draw_pct": data.get("draw"),
+                "away_win_pct": data.get("away_win"),
+                "btts_pct": data.get("btts"),
+                "over25_pct": data.get("over_25"),
+                "home_form": '-'.join(data.get("home_form_all", [])),
+                "away_form": '-'.join(data.get("away_form_all", [])),
+            },
             "away_data": {},
             "prediction": bets_str,
             "confidence_score": top["confidence"] / 10 if top else 0,
@@ -417,7 +397,7 @@ def get_results():
 # ============================================================================
 def main():
     st.title("📊 Match Analyzer V1")
-    st.caption("Multi-Source: Probabilities + Trends + Form + H2H")
+    st.caption("Multi-Source: Probabilities + Trends + Form + H2H | Paste & Analyze")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -456,7 +436,7 @@ def main():
                             BTTS Trend: {data.get('btts_trend', 0):+.2f} | O2.5 Trend: {data.get('over_25_trend', 0):+.2f}<br>
                             Home: {'-'.join(data.get('home_form_all', [])[:6])}<br>
                             Away: {'-'.join(data.get('away_form_all', [])[:6])}<br>
-                            H2H BTTS: {data.get('h2h_btts_count', 0)}/{len(data.get('h2h_scores', []))}
+                            H2H BTTS: {data.get('h2h_btts_count', 0)}/{data.get('h2h_total', 0)}
                         </div>
                         """, unsafe_allow_html=True)
                     
@@ -465,7 +445,8 @@ def main():
                     if analysis["bets"]:
                         for bet in analysis["bets"]:
                             tier_class = "tier1-card" if bet["tier"] == "TIER 1" else "tier2-card"
-                            emoji = {"BTTS": "⚽⚽", "Over 2.5": "🔥", "Under 2.5": "🛡️", "Draw": "🤝"}.get(bet["market"], "📊")
+                            emoji = {"BTTS": "⚽⚽", "Over 2.5": "🔥", "Under 2.5": "🛡️", "Draw": "🤝", 
+                                     "Home Over 1.5 Goals": "🏠", "Away Over 1.5 Goals": "✈️"}.get(bet["market"], "📊")
                             st.markdown(f"""
                             <div class="output-card {tier_class}">
                                 <div style="display:flex;align-items:center;gap:1rem;">
