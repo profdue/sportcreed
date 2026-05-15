@@ -1,6 +1,7 @@
 """
-MATCH ANALYZER V3.0 — Structural Framework Engine
-Score Matrix is King | Separation Power | Draw Cluster | BTTS Contradiction
+MATCH ANALYZER V3.1 — Structural Framework Engine
+Score Matrix is King | Separation Power | Draw Cluster | Double Chance
+FIX: Draw replaced with Double Chance | Under 3.5 remains primary for compression
 Supabase table: match_analyses
 """
 
@@ -25,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V3.0", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V3.1", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -186,7 +187,7 @@ def fuzzy_team_match(team_name, text):
 
 
 # ============================================================================
-# PARSER — Now extracts score matrix + all team goals + all trends
+# PARSER
 # ============================================================================
 def parse_match_data(raw_text: str) -> dict:
     lines = raw_text.strip().split('\n')
@@ -231,7 +232,7 @@ def parse_match_data(raw_text: str) -> dict:
                       r'Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|'
                       r'Liga MX|League One|League Two|Argentine Primera Division|'
                       r'Major League Soccer|Segunda Division|Segunda División|'
-                      r'Croatian 1\. HNL|HNL|Prva HNL|Scottish Premiership|Eredivisie|A-League|'
+                      r'Croatian 1\. HNL|HNL|Prva HNL|Scottish Premiership|Scottish Premiership Playoffs|Eredivisie|A-League|'
                       r'Ekstraklasa|Polish Ekstraklasa|'
                       r'Turkish Super Lig|Süper Lig|'
                       r'Israeli Premier League|Ligat HaAl|'
@@ -346,9 +347,8 @@ def parse_match_data(raw_text: str) -> dict:
                 prob, _ = find_pct(i)
                 if prob: data["away_over_15_goals"] = prob
     
-    # SCORE MATRIX — Extract from Score analysis section
+    # SCORE MATRIX
     in_score_analysis = False
-    in_score_data = False
     for i, line in enumerate(lines):
         stripped = line.strip()
         
@@ -361,7 +361,6 @@ def parse_match_data(raw_text: str) -> dict:
             break
         
         if in_score_analysis:
-            # Look for score lines like "1-0 @ 10.95%"
             m = re.match(r'(\d+)-(\d+)\s*@\s*(\d+\.?\d*)\s*%', stripped)
             if m:
                 home = int(m.group(1))
@@ -374,9 +373,8 @@ def parse_match_data(raw_text: str) -> dict:
                     "probability": prob
                 })
     
-    # Sort score matrix by probability descending
     data["score_matrix"].sort(key=lambda x: x["probability"], reverse=True)
-    data["score_matrix"] = data["score_matrix"][:10]  # Keep top 10
+    data["score_matrix"] = data["score_matrix"][:10]
     
     # Form strings
     form_blocks = []
@@ -389,11 +387,11 @@ def parse_match_data(raw_text: str) -> dict:
         'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
         'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
         'Argentine Primera Division', 'Major League Soccer', 'Segunda Division',
-        'Segunda División', 'Scottish Premiership', 'Eredivisie', 'A-League',
-        'Croatian 1. HNL', 'HNL', 'Prva HNL', 'Ekstraklasa',
+        'Segunda División', 'Scottish Premiership', 'Scottish Premiership Playoffs',
+        'Eredivisie', 'A-League', 'Croatian 1. HNL', 'HNL', 'Prva HNL', 'Ekstraklasa',
         'Turkish Super Lig', 'Israeli Premier League', 'Hungarian NB I',
         'Romanian SuperLiga', 'Chinese Super League', 'Australian A-League',
-        'Scottish Championship', 'Scottish Premiership Playoffs'
+        'Scottish Championship'
     ]
     
     for line in lines:
@@ -507,7 +505,7 @@ def parse_match_data(raw_text: str) -> dict:
 
 
 # ============================================================================
-# STRUCTURAL FRAMEWORK ENGINE
+# STRUCTURAL FRAMEWORK ENGINE V3.1 — Draw replaced with Double Chance
 # ============================================================================
 def analyze_match(data: dict) -> dict:
     result = {
@@ -519,15 +517,12 @@ def analyze_match(data: dict) -> dict:
         "skip_reasons": []
     }
     
-    # ========================================================================
-    # EXTRACT ALL MEASUREMENTS
-    # ========================================================================
+    # Extract measurements
     home_win = data.get("home_win") or 0
     away_win = data.get("away_win") or 0
     draw_pct = data.get("draw") or 0
     btts = data.get("btts") or 0
     over_25 = data.get("over_25") or 0
-    under_25 = data.get("under_25") or 0
     over_35 = data.get("over_35") or 0
     
     home_o15 = data.get("home_over_15_goals") or 0
@@ -549,14 +544,11 @@ def analyze_match(data: dict) -> dict:
     
     home_wins = sum(1 for r in home_form[:6] if r == 'W')
     home_draws = sum(1 for r in home_form[:6] if r == 'D')
-    home_losses = sum(1 for r in home_form[:6] if r == 'L')
     away_wins = sum(1 for r in away_form[:6] if r == 'W')
     away_draws = sum(1 for r in away_form[:6] if r == 'D')
-    away_losses = sum(1 for r in away_form[:6] if r == 'L')
     
     h2h_total = data.get("h2h_total", 0)
     h2h_btts = data.get("h2h_btts_count", 0)
-    h2h_scores = data.get("h2h_scores", [])
     
     score_matrix = data.get("score_matrix", [])
     
@@ -564,31 +556,23 @@ def analyze_match(data: dict) -> dict:
     is_top_league = league in TOP_LEAGUES if league else False
     is_saudi = league == "Saudi Pro League" if league else False
     
-    # ========================================================================
-    # SCORE MATRIX ANALYSIS (KING)
-    # ========================================================================
+    # Score matrix analysis
     draw_cluster = 0
-    away_win_cluster = 0
-    home_win_cluster = 0
     modal_outcome = None
     modal_is_draw = False
     
     if score_matrix:
         modal_outcome = score_matrix[0]["score"]
-        modal_prob = score_matrix[0]["probability"]
         modal_is_draw = score_matrix[0]["home_goals"] == score_matrix[0]["away_goals"]
         
         for s in score_matrix:
             if s["home_goals"] == s["away_goals"]:
                 draw_cluster += s["probability"]
-            elif s["home_goals"] > s["away_goals"]:
-                home_win_cluster += s["probability"]
-            else:
-                away_win_cluster += s["probability"]
     
-    # ========================================================================
-    # CLASSIFICATION
-    # ========================================================================
+    # Under 3.5 calculation
+    under_35_pct = (100 - over_35) if over_35 else 0
+    
+    # Classifications
     is_true_strong_favorite = home_win >= 60 and home_o15 >= 60
     is_fragile_favorite = home_win >= 60 and home_o15 < 60
     is_moderate_favorite = 45 <= home_win < 60
@@ -600,13 +584,17 @@ def analyze_match(data: dict) -> dict:
     if away_o15 is not None and away_o15 >= 30:
         underdog_scoring_threat = True
     
-    # Trend reversal
+    home_scoring_threat = False
+    if home_o05 is not None and home_o05 >= 60:
+        home_scoring_threat = True
+    if home_o15 is not None and home_o15 >= 30:
+        home_scoring_threat = True
+    
     trend_reversal = False
     if home_win_trend is not None and away_win_trend is not None:
         if home_win_trend <= -1.0 and away_win_trend >= 1.0:
             trend_reversal = True
     
-    # BTTS contradiction
     btts_contradiction = False
     if btts >= 55 and home_o15 < 35:
         btts_contradiction = True
@@ -615,10 +603,7 @@ def analyze_match(data: dict) -> dict:
         btts_contradiction = True
         result["warnings"].append("BTTS {:.1f}% but Away O1.5 only {:.1f}% — away team unlikely to contribute".format(btts, away_o15))
     
-    # Compression match
     is_compression = False
-    under_35_val = over_35 if over_35 else 100 - (data.get("under_35") or 0) if data.get("under_35") else None
-    under_35_pct = (100 - over_35) if over_35 else (data.get("under_35") or 0)
     if draw_pct >= 24 and under_35_pct >= 65 and home_o15 < 45 and away_o15 < 45:
         is_compression = True
     
@@ -626,7 +611,7 @@ def analyze_match(data: dict) -> dict:
     # BETTING DECISIONS
     # ========================================================================
     
-    # RULE 1: Trend Reversal — FADE the favorite
+    # RULE 1: Trend Reversal
     if trend_reversal:
         result["classification"] = "TREND REVERSAL"
         result["badges"].append("Trend Reversal: Home {:.1f} / Away {:.1f}".format(home_win_trend, away_win_trend))
@@ -655,14 +640,14 @@ def analyze_match(data: dict) -> dict:
                 "tier": "TIER 1",
                 "confidence": 7.5,
                 "probability": home_win,
-                "reason": "True dominant favorite ({:.0f}% win, O1.5 {:.0f}%) but underdog can score".format(home_win, home_o15)
+                "reason": "True dominant favorite but underdog can score"
             })
             result["bets"].append({
                 "market": "Home Over 1.5 Goals",
                 "tier": "TIER 2",
                 "confidence": 7.0,
                 "probability": home_o15,
-                "reason": "Home team scores 2+ regularly ({:.0f}%)".format(home_o15)
+                "reason": "Home scores 2+ regularly ({:.0f}%)".format(home_o15)
             })
     
     # RULE 3: FRAGILE Favorite
@@ -671,53 +656,59 @@ def analyze_match(data: dict) -> dict:
         result["badges"].append("Fragile favorite — O1.5 only {:.0f}%".format(home_o15))
         
         if underdog_scoring_threat:
-            # Away team can score → Draw or Away Double Chance
+            # Away can score → Double Chance: Away or Draw
             result["bets"].append({
-                "market": "Draw or Away Double Chance",
+                "market": "Away Win or Draw (Double Chance)",
                 "tier": "TIER 1",
                 "confidence": 7.0,
-                "probability": draw_pct + away_win,
-                "reason": "Fragile favorite ({:.0f}% win, O1.5 {:.0f}%) + away scoring threat (O0.5 {:.0f}%)".format(home_win, home_o15, away_o05 or 0)
+                "probability": away_win + draw_pct,
+                "reason": "Fragile favorite + away scoring threat (O0.5 {:.0f}%). Home vulnerable.".format(away_o05 or 0)
             })
-            if modal_is_draw:
-                result["bets"].append({
-                    "market": "Draw",
-                    "tier": "TIER 2",
-                    "confidence": 6.0,
-                    "probability": draw_pct,
-                    "reason": "Modal outcome is {}".format(modal_outcome)
-                })
         else:
-            # Away team unlikely to score → Draw
+            # Away can't score → Home still vulnerable but away unlikely to win
             result["bets"].append({
-                "market": "Draw",
+                "market": "Home Win or Draw (Double Chance)",
                 "tier": "TIER 1",
                 "confidence": 6.5,
-                "probability": draw_pct,
-                "reason": "Fragile favorite ({:.0f}% win, O1.5 {:.0f}%) + underdog can't score".format(home_win, home_o15)
+                "probability": home_win + draw_pct,
+                "reason": "Fragile favorite but underdog can't score. Draw protection needed."
             })
     
-    # RULE 4: COMPRESSION Match
+    # RULE 4: COMPRESSION
     elif is_compression:
         result["classification"] = "COMPRESSION"
         result["badges"].append("Compression Match — tight score cluster, low margins")
+        
         result["bets"].append({
             "market": "Under 3.5 Goals",
             "tier": "TIER 1",
-            "confidence": 7.0,
+            "confidence": 7.5,
             "probability": under_35_pct,
             "reason": "Compression match — Under 3.5 at {:.0f}%".format(under_35_pct)
         })
-        if draw_pct >= 25:
+        
+        # Determine which side the score matrix favors for Double Chance
+        home_cluster = sum(s["probability"] for s in score_matrix if s["home_goals"] > s["away_goals"])
+        away_cluster = sum(s["probability"] for s in score_matrix if s["away_goals"] > s["home_goals"])
+        
+        if home_cluster > away_cluster:
             result["bets"].append({
-                "market": "Draw",
+                "market": "Home Win or Draw (Double Chance)",
                 "tier": "TIER 2",
                 "confidence": 6.0,
-                "probability": draw_pct,
-                "reason": "Compression match with elevated draw ({:.1f}%)".format(draw_pct)
+                "probability": home_win + draw_pct,
+                "reason": "Compression — home side slightly favored in score matrix ({:.1f}% vs {:.1f}%)".format(home_cluster, away_cluster)
+            })
+        else:
+            result["bets"].append({
+                "market": "Away Win or Draw (Double Chance)",
+                "tier": "TIER 2",
+                "confidence": 6.0,
+                "probability": away_win + draw_pct,
+                "reason": "Compression — away side slightly favored in score matrix ({:.1f}% vs {:.1f}%)".format(away_cluster, home_cluster)
             })
     
-    # RULE 5: BTTS Contradiction → Fade BTTS, bet the team that CAN score
+    # RULE 5: BTTS Contradiction
     elif btts_contradiction:
         result["classification"] = "BTTS CONTRADICTION"
         if home_o15 < 35 and away_win >= 40:
@@ -737,7 +728,7 @@ def analyze_match(data: dict) -> dict:
                 "reason": "BTTS contradiction — away can't score, home can win"
             })
     
-    # RULE 6: BALANCED match
+    # RULE 6: BALANCED
     elif is_balanced:
         result["classification"] = "BALANCED"
         if btts >= 55 and not btts_contradiction:
@@ -748,14 +739,24 @@ def analyze_match(data: dict) -> dict:
                 "probability": btts,
                 "reason": "Balanced match — both teams can score"
             })
-        if draw_pct >= 25 and modal_is_draw:
-            result["bets"].append({
-                "market": "Draw",
-                "tier": "TIER 2",
-                "confidence": 5.5,
-                "probability": draw_pct,
-                "reason": "Modal outcome is {}".format(modal_outcome)
-            })
+        # If modal is draw, add Double Chance
+        if modal_is_draw and draw_pct >= 20:
+            if home_win > away_win:
+                result["bets"].append({
+                    "market": "Home Win or Draw (Double Chance)",
+                    "tier": "TIER 2",
+                    "confidence": 5.5,
+                    "probability": home_win + draw_pct,
+                    "reason": "Modal outcome is {} — draw protection value".format(modal_outcome)
+                })
+            else:
+                result["bets"].append({
+                    "market": "Away Win or Draw (Double Chance)",
+                    "tier": "TIER 2",
+                    "confidence": 5.5,
+                    "probability": away_win + draw_pct,
+                    "reason": "Modal outcome is {} — draw protection value".format(modal_outcome)
+                })
     
     # RULE 7: MODERATE Favorite
     elif is_moderate_favorite:
@@ -778,19 +779,52 @@ def analyze_match(data: dict) -> dict:
                 "reason": "Both teams likely to score"
             })
     
-    # RULE 8: Unbeaten Collision → Draw
+    # RULE 8: Unbeaten Collision → Double Chance (not Draw)
     home_unbeaten_5 = sum(1 for r in home_form[:5] if r in ['W', 'D'])
     away_unbeaten_5 = sum(1 for r in away_form[:5] if r in ['W', 'D'])
     if home_unbeaten_5 >= 4 and away_unbeaten_5 >= 4 and draw_pct >= 20:
-        if not any(b["market"] == "Draw" for b in result["bets"]):
-            result["bets"].append({
-                "market": "Draw",
-                "tier": "TIER 2",
-                "confidence": 6.0,
-                "probability": draw_pct,
-                "reason": "Unbeaten collision: Home {}/5, Away {}/5".format(home_unbeaten_5, away_unbeaten_5)
-            })
-        result["badges"].append("Unbeaten Collision")
+        result["badges"].append("Unbeaten Collision: Home {}/5, Away {}/5".format(home_unbeaten_5, away_unbeaten_5))
+        
+        if not any("Double Chance" in b["market"] for b in result["bets"]):
+            # Pick the side the score matrix favors
+            if score_matrix:
+                home_cluster = sum(s["probability"] for s in score_matrix if s["home_goals"] > s["away_goals"])
+                away_cluster = sum(s["probability"] for s in score_matrix if s["away_goals"] > s["home_goals"])
+                
+                if home_cluster > away_cluster:
+                    result["bets"].append({
+                        "market": "Home Win or Draw (Double Chance)",
+                        "tier": "TIER 2",
+                        "confidence": 6.0,
+                        "probability": home_win + draw_pct,
+                        "reason": "Unbeaten collision — home side favored in score matrix"
+                    })
+                else:
+                    result["bets"].append({
+                        "market": "Away Win or Draw (Double Chance)",
+                        "tier": "TIER 2",
+                        "confidence": 6.0,
+                        "probability": away_win + draw_pct,
+                        "reason": "Unbeaten collision — away side favored in score matrix"
+                    })
+            else:
+                # Fallback: pick the side with higher win probability
+                if home_win >= away_win:
+                    result["bets"].append({
+                        "market": "Home Win or Draw (Double Chance)",
+                        "tier": "TIER 2",
+                        "confidence": 6.0,
+                        "probability": home_win + draw_pct,
+                        "reason": "Unbeaten collision — home side has edge"
+                    })
+                else:
+                    result["bets"].append({
+                        "market": "Away Win or Draw (Double Chance)",
+                        "tier": "TIER 2",
+                        "confidence": 6.0,
+                        "probability": away_win + draw_pct,
+                        "reason": "Unbeaten collision — away side has edge"
+                    })
     
     # ========================================================================
     # SAUDI LEAGUE OVERRIDE
@@ -827,7 +861,7 @@ def analyze_match(data: dict) -> dict:
     
     # Warnings
     if draw_pct >= 25:
-        result["warnings"].append("High draw probability ({:.1f}%) — avoid match result bets".format(draw_pct))
+        result["warnings"].append("High draw probability ({:.1f}%) — avoid straight match result bets".format(draw_pct))
     if not is_top_league and league:
         result["warnings"].append("'{}' is not a top league — lower reliability".format(league))
     
@@ -835,7 +869,7 @@ def analyze_match(data: dict) -> dict:
 
 
 # ============================================================================
-# SUPABASE OPERATIONS — Complete data capture
+# SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(data: dict, analysis: dict):
     try:
@@ -845,17 +879,13 @@ def save_to_db(data: dict, analysis: dict):
         home_form_str = '-'.join(data.get("home_form_all", [])) if data.get("home_form_all") else ""
         away_form_str = '-'.join(data.get("away_form_all", [])) if data.get("away_form_all") else ""
         
-        # Calculate under_35
         over_35 = data.get("over_35") or 0
-        under_35_from_data = data.get("under_35")
-        under_35 = (100 - over_35) if over_35 and not under_35_from_data else (under_35_from_data or 0)
+        under_35 = (100 - over_35) if over_35 else 0
         
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": str(date.today()),
-            
-            # Complete probabilities + team goals + trends + form + H2H
             "home_data": {
                 "league": data.get("league"),
                 "home_win_pct": data.get("home_win"),
@@ -882,10 +912,7 @@ def save_to_db(data: dict, analysis: dict):
                 "h2h_total": data.get("h2h_total"),
                 "h2h_btts_count": data.get("h2h_btts_count"),
             },
-            
-            # Score matrix stored separately
             "score_matrix": json.dumps(data.get("score_matrix", [])),
-            
             "prediction": bets_str,
             "confidence_score": round(top["confidence"] / 10, 2) if top else 0,
             "winner": top["market"] if top else "SKIP",
@@ -942,8 +969,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V3.0")
-    st.caption("Structural Framework Engine | Score Matrix is King | Separation Power | Draw Cluster")
+    st.title("📊 Match Analyzer V3.1")
+    st.caption("Structural Framework Engine | Double Chance replaces Draw | Under 3.5 for Compression")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -972,7 +999,6 @@ def main():
                     else:
                         st.success("{} vs {} — {}".format(data['home_team'], data['away_team'], league_display))
                     
-                    # Classification badge
                     if analysis.get("classification"):
                         st.markdown("**Classification: {}**".format(analysis["classification"]))
                     
@@ -1029,12 +1055,13 @@ def main():
                     if analysis["bets"]:
                         emoji_map = {
                             "BTTS": "⚽⚽", "Over 2.5": "🔥", "Under 2.5": "🛡️", 
-                            "Under 3.5 Goals": "🛡️", "Draw": "🤝",
+                            "Under 3.5 Goals": "🛡️",
                             "Home Over 1.5 Goals": "🏠⚽", "Away Over 1.5 Goals": "✈️⚽",
                             "Home Win to Nil": "🏠🧤", "Away Win to Nil": "✈️🧤",
                             "Home Win": "🏠", "Away Win": "✈️",
                             "Away Win or Draw": "✈️🤝",
-                            "Draw or Away Double Chance": "🤝✈️"
+                            "Away Win or Draw (Double Chance)": "✈️🤝",
+                            "Home Win or Draw (Double Chance)": "🏠🤝"
                         }
                         
                         for bet in analysis["bets"]:
@@ -1131,6 +1158,7 @@ def main():
                 actual_winner = r.get('actual_winner')
                 actual_home = r.get('actual_home_goals', 0) or 0
                 actual_away = r.get('actual_away_goals', 0) or 0
+                actual_total = actual_home + actual_away
                 
                 is_correct = False
                 markets = pred.split(' | ')
@@ -1140,15 +1168,13 @@ def main():
                         is_correct = True; break
                     if market == 'Over 2.5' and actual_over25:
                         is_correct = True; break
-                    if market == 'Under 2.5' and not actual_over25 and (actual_home + actual_away) > 0:
+                    if market == 'Under 2.5' and not actual_over25 and actual_total > 0:
                         is_correct = True; break
-                    if market == 'Under 3.5 Goals' and (actual_home + actual_away) <= 3:
+                    if market == 'Under 3.5 Goals' and actual_total <= 3:
                         is_correct = True; break
                     if market == 'Home Win' and actual_winner == 'HOME':
                         is_correct = True; break
                     if market == 'Away Win' and actual_winner == 'AWAY':
-                        is_correct = True; break
-                    if market == 'Draw' and actual_winner == 'DRAW':
                         is_correct = True; break
                     if market == 'Home Win to Nil' and actual_winner == 'HOME' and actual_away == 0:
                         is_correct = True; break
@@ -1158,7 +1184,11 @@ def main():
                         is_correct = True; break
                     if market == 'Away Over 1.5 Goals' and actual_away >= 2:
                         is_correct = True; break
-                    if market in ['Away Win or Draw', 'Draw or Away Double Chance'] and actual_winner in ['AWAY', 'DRAW']:
+                    if 'Away Win or Draw' in market and actual_winner in ['AWAY', 'DRAW']:
+                        is_correct = True; break
+                    if 'Home Win or Draw' in market and actual_winner in ['HOME', 'DRAW']:
+                        is_correct = True; break
+                    if market == 'Draw' and actual_winner == 'DRAW':
                         is_correct = True; break
                 
                 if is_correct:
@@ -1184,6 +1214,7 @@ def main():
                 pred = r.get('prediction', '')
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
+                actual_total = (actual_home or 0) + (actual_away or 0)
                 
                 row_correct = None
                 if pred == 'SKIP':
@@ -1196,19 +1227,21 @@ def main():
                             row_correct = 'correct'; break
                         if market == 'Over 2.5' and r.get('actual_over25'):
                             row_correct = 'correct'; break
-                        if market == 'Under 2.5' and not r.get('actual_over25') and (actual_home or 0) + (actual_away or 0) > 0:
+                        if market == 'Under 2.5' and not r.get('actual_over25') and actual_total > 0:
                             row_correct = 'correct'; break
-                        if market == 'Under 3.5 Goals' and (actual_home or 0) + (actual_away or 0) <= 3:
+                        if market == 'Under 3.5 Goals' and actual_total <= 3:
                             row_correct = 'correct'; break
                         if market == 'Home Win' and r.get('actual_winner') == 'HOME':
                             row_correct = 'correct'; break
                         if market == 'Away Win' and r.get('actual_winner') == 'AWAY':
                             row_correct = 'correct'; break
-                        if market == 'Draw' and r.get('actual_winner') == 'DRAW':
-                            row_correct = 'correct'; break
                         if market == 'Home Win to Nil' and r.get('actual_winner') == 'HOME' and actual_away == 0:
                             row_correct = 'correct'; break
-                        if market in ['Away Win or Draw', 'Draw or Away Double Chance'] and r.get('actual_winner') in ['AWAY', 'DRAW']:
+                        if 'Away Win or Draw' in market and r.get('actual_winner') in ['AWAY', 'DRAW']:
+                            row_correct = 'correct'; break
+                        if 'Home Win or Draw' in market and r.get('actual_winner') in ['HOME', 'DRAW']:
+                            row_correct = 'correct'; break
+                        if market == 'Draw' and r.get('actual_winner') == 'DRAW':
                             row_correct = 'correct'; break
                         if market == 'Home Over 1.5 Goals' and (actual_home or 0) >= 2:
                             row_correct = 'correct'; break
