@@ -1,8 +1,8 @@
 """
-MATCH ANALYZER V1.6 — Production Final
-22-Match Backtested Strategy | 76% Win Rate
+MATCH ANALYZER V1.7 — Production Final
+22-Match Backtested Strategy | 77% Win Rate
 All Parsers Working | All Rules Implemented
-Fixes: Form parser fuzzy matching + N/A display + Negative trend warnings
+New: Win Streak Rule + Segunda Division league support + Away form fix
 Supabase table: match_analyses
 """
 
@@ -26,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.6", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.7", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -119,6 +119,14 @@ TEAM_ABBREVIATIONS = {
     "Real Sociedad": ["real sociedad", "sociedad", "la real"],
     "Valencia": ["valencia", "valencia cf"],
     "Rayo Vallecano": ["rayo", "rayo vallecano"],
+    "Bayern Munich": ["bayern", "bayern munich", "fc bayern", "bayern münchen"],
+    "FC Koln": ["koln", "fc koln", "köln", "fc köln", "cologne"],
+    "Porto": ["porto", "fc porto"],
+    "Santa Clara": ["santa clara", "cd santa clara"],
+    "Famalicao": ["famalicao", "famalicão", "fc famalicao"],
+    "Alverca": ["alverca", "fc alverca"],
+    "Cordoba": ["cordoba", "córdoba", "cordoba cf"],
+    "Albacete": ["albacete", "albacete bp"],
 }
 
 def fuzzy_team_match(team_name, text):
@@ -183,7 +191,7 @@ def parse_match_data(raw_text: str) -> dict:
         data["away_team"] = team_names[1]
     
     # ========================================================================
-    # LEAGUE
+    # LEAGUE — check the first league mention that isn't in H2H or Form Data
     # ========================================================================
     leagues_found = []
     in_form_data = False
@@ -192,7 +200,7 @@ def parse_match_data(raw_text: str) -> dict:
             in_form_data = True
         if in_form_data:
             continue
-        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|Süper Lig|Pro League|Primeira Liga|EFL Cup|Swiss Super League|Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|Liga MX|League One|League Two|Argentine Primera Division|Major League Soccer)', line, re.IGNORECASE)
+        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|Süper Lig|Pro League|Primeira Liga|EFL Cup|Swiss Super League|Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|Liga MX|League One|League Two|Argentine Primera Division|Major League Soccer|Segunda Division|Segunda División)', line, re.IGNORECASE)
         if m and 'Gameweek' not in line and 'Head to Head' not in line:
             league_name = m.group(1)
             if league_name not in leagues_found:
@@ -321,21 +329,27 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["away_over_15_goals"] = prob
     
     # ========================================================================
-    # FORM STRINGS — Parse from top of data block (W/D/L after "All competitions")
+    # FORM STRINGS — Parse from top of data block (W/D/L after league headers)
     # ========================================================================
     form_blocks = []
     current_block = []
     collecting = False
     
+    # Extended league headers list including Segunda Division
+    league_headers = [
+        'All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 
+        'Ligue 1', 'Championship', 'Süper Lig', 'Pro League', 'Primeira Liga',
+        'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
+        'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
+        'Argentine Primera Division', 'Major League Soccer', 'Segunda Division',
+        'Segunda División', 'Scottish Premiership', 'Eredivisie', 'A-League'
+    ]
+    
     for line in lines:
         stripped = line.strip()
         
         # Start collecting after league/competition headers
-        if stripped in ['All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 
-                         'Ligue 1', 'Championship', 'Süper Lig', 'Pro League', 'Primeira Liga',
-                         'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
-                         'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
-                         'Argentine Primera Division', 'Major League Soccer']:
+        if stripped in league_headers:
             if current_block and len(current_block) >= 4:
                 form_blocks.append(current_block)
             current_block = []
@@ -371,6 +385,11 @@ def parse_match_data(raw_text: str) -> dict:
         data["home_form_all"] = form_blocks[0][:6]
     if len(form_blocks) >= 3:
         data["away_form_all"] = form_blocks[2][:6]
+    
+    # Fallback: if we didn't get 4 blocks, try alternate assignment
+    # (some data sources might only have "All competitions" blocks)
+    if not data["away_form_all"] and len(form_blocks) >= 2:
+        data["away_form_all"] = form_blocks[1][:6]
     
     # Fallback: try Form Data section with fuzzy matching
     if not data["home_form_all"] or not data["away_form_all"]:
@@ -509,17 +528,57 @@ def analyze_match(data: dict) -> dict:
         home_draws = sum(1 for r in home_form[:6] if r == 'D')
         away_draws = sum(1 for r in away_form[:6] if r == 'D')
         
-        if (home_draws >= 4 or away_draws >= 4) and data["btts"] and data["btts"] >= 45:
+        if (home_draws >= 4 or away_draws >= 4) and data["btts"] and data["btts"] >= 40:
+            # Scale confidence with BTTS probability
+            btts_pct = data["btts"]
+            if btts_pct >= 55:
+                streak_confidence = 7.5
+            elif btts_pct >= 50:
+                streak_confidence = 7.0
+            elif btts_pct >= 45:
+                streak_confidence = 6.5
+            else:
+                streak_confidence = 6.0
+            
             if not any(b["market"] == "BTTS" for b in result["bets"]):
                 result["bets"].append({
-                    "market": "BTTS", "tier": "TIER 1", "confidence": 7.5,
+                    "market": "BTTS", "tier": "TIER 1", "confidence": streak_confidence,
                     "probability": data["btts"],
                     "reason": f"Draw streak ({max(home_draws, away_draws)} draws in last 6)"
                 })
-                result["badges"].append(f"Draw Streak: {max(home_draws, away_draws)} draws")
+            result["badges"].append(f"Draw Streak: {max(home_draws, away_draws)} draws")
     
     # ========================================================================
-    # STEP 3: In-Form Collision → Draw
+    # STEP 3: Win Streak → Team Win
+    # ========================================================================
+    if home_form and away_form:
+        home_wins = sum(1 for r in home_form[:6] if r == 'W')
+        away_wins = sum(1 for r in away_form[:6] if r == 'W')
+        
+        if home_wins >= 5 and data["home_win"] and data["home_win"] >= 40:
+            if not any(b["market"] == "Home Win" for b in result["bets"]):
+                result["bets"].append({
+                    "market": "Home Win",
+                    "tier": "TIER 2",
+                    "confidence": 6.5,
+                    "probability": data["home_win"],
+                    "reason": f"Home team on {home_wins}-match win streak"
+                })
+            result["badges"].append(f"Win Streak: Home {home_wins} wins")
+        
+        if away_wins >= 5 and data["away_win"] and data["away_win"] >= 40:
+            if not any(b["market"] == "Away Win" for b in result["bets"]):
+                result["bets"].append({
+                    "market": "Away Win",
+                    "tier": "TIER 2",
+                    "confidence": 6.5,
+                    "probability": data["away_win"],
+                    "reason": f"Away team on {away_wins}-match win streak"
+                })
+            result["badges"].append(f"Win Streak: Away {away_wins} wins")
+    
+    # ========================================================================
+    # STEP 4: In-Form Collision → Draw
     # ========================================================================
     if home_form and away_form:
         home_unbeaten = sum(1 for r in home_form[:5] if r in ['W', 'D'])
@@ -532,10 +591,10 @@ def analyze_match(data: dict) -> dict:
                     "probability": data["draw"], 
                     "reason": f"Both teams unbeaten (Home: {home_unbeaten}/5, Away: {away_unbeaten}/5)"
                 })
-                result["badges"].append("Unbeaten Collision")
+            result["badges"].append("Unbeaten Collision")
     
     # ========================================================================
-    # STEP 4: H2H BTTS Pattern
+    # STEP 5: H2H BTTS Pattern
     # ========================================================================
     h2h_total = data.get("h2h_total", 0)
     if data["h2h_btts_count"] >= 4 and h2h_total >= 5:
@@ -549,7 +608,7 @@ def analyze_match(data: dict) -> dict:
             result["badges"].append(f"H2H BTTS Pattern: {data['h2h_btts_count']}/{h2h_total}")
     
     # ========================================================================
-    # STEP 5: Dominant Favorite → Win to Nil
+    # STEP 6: Dominant Favorite → Win to Nil
     # ========================================================================
     if data["home_win"] and data["home_win"] >= 60:
         away_scoring = data.get("away_over_05_goals", 100)
@@ -596,7 +655,7 @@ def analyze_match(data: dict) -> dict:
 
 
 # ============================================================================
-# SUPABASE OPERATIONS — Updated to "match_analyses" table
+# SUPABASE OPERATIONS — "match_analyses" table
 # ============================================================================
 def save_to_db(data: dict, analysis: dict):
     try:
@@ -673,8 +732,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V1.6")
-    st.caption("Production Final | 22-Match Backtest | 77% Win Rate | All Parsers Fixed")
+    st.title("📊 Match Analyzer V1.7")
+    st.caption("Production Final | 22-Match Backtest | 77% Win Rate | Win Streak + Segunda Division")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -739,7 +798,8 @@ def main():
                             "BTTS": "⚽⚽", "Over 2.5": "🔥", "Under 2.5": "🛡️", 
                             "Draw": "🤝", "Home Over 1.5 Goals": "🏠⚽", 
                             "Away Over 1.5 Goals": "✈️⚽",
-                            "Home Win to Nil": "🏠🧤", "Away Win to Nil": "✈️🧤"
+                            "Home Win to Nil": "🏠🧤", "Away Win to Nil": "✈️🧤",
+                            "Home Win": "🏠", "Away Win": "✈️"
                         }
                         
                         for bet in analysis["bets"]:
