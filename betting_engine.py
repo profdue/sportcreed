@@ -1,8 +1,8 @@
 """
-MATCH ANALYZER V1.7 — Production Final
+MATCH ANALYZER V1.7.1 — Production Final
 22-Match Backtested Strategy | 77% Win Rate
 All Parsers Working | All Rules Implemented
-New: Win Streak Rule + Segunda Division league support + Away form fix
+Fixes: Win to Nil fallback + Croatian league + Negative trend threshold + League display
 Supabase table: match_analyses
 """
 
@@ -26,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.7", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.7.1", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -127,6 +127,8 @@ TEAM_ABBREVIATIONS = {
     "Alverca": ["alverca", "fc alverca"],
     "Cordoba": ["cordoba", "córdoba", "cordoba cf"],
     "Albacete": ["albacete", "albacete bp"],
+    "Vukovar": ["vukovar", "hsk vukovar", "vukovar 1991"],
+    "NK Varazdin": ["varazdin", "nk varazdin", "varaždin", "nk varaždin"],
 }
 
 def fuzzy_team_match(team_name, text):
@@ -200,7 +202,13 @@ def parse_match_data(raw_text: str) -> dict:
             in_form_data = True
         if in_form_data:
             continue
-        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|Süper Lig|Pro League|Primeira Liga|EFL Cup|Swiss Super League|Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|Liga MX|League One|League Two|Argentine Primera Division|Major League Soccer|Segunda Division|Segunda División)', line, re.IGNORECASE)
+        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|'
+                      r'Süper Lig|Pro League|Primeira Liga|EFL Cup|Swiss Super League|'
+                      r'Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|'
+                      r'Liga MX|League One|League Two|Argentine Primera Division|'
+                      r'Major League Soccer|Segunda Division|Segunda División|'
+                      r'Croatian 1\. HNL|HNL|Prva HNL|Scottish Premiership|Eredivisie|A-League)', 
+                      line, re.IGNORECASE)
         if m and 'Gameweek' not in line and 'Head to Head' not in line:
             league_name = m.group(1)
             if league_name not in leagues_found:
@@ -335,14 +343,14 @@ def parse_match_data(raw_text: str) -> dict:
     current_block = []
     collecting = False
     
-    # Extended league headers list including Segunda Division
     league_headers = [
         'All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 
         'Ligue 1', 'Championship', 'Süper Lig', 'Pro League', 'Primeira Liga',
         'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
         'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
         'Argentine Primera Division', 'Major League Soccer', 'Segunda Division',
-        'Segunda División', 'Scottish Premiership', 'Eredivisie', 'A-League'
+        'Segunda División', 'Scottish Premiership', 'Eredivisie', 'A-League',
+        'Croatian 1. HNL', 'HNL', 'Prva HNL'
     ]
     
     for line in lines:
@@ -387,7 +395,6 @@ def parse_match_data(raw_text: str) -> dict:
         data["away_form_all"] = form_blocks[2][:6]
     
     # Fallback: if we didn't get 4 blocks, try alternate assignment
-    # (some data sources might only have "All competitions" blocks)
     if not data["away_form_all"] and len(form_blocks) >= 2:
         data["away_form_all"] = form_blocks[1][:6]
     
@@ -500,7 +507,8 @@ def analyze_match(data: dict) -> dict:
             trend_bonus = 1.5
             trend_label = f"▲ {strongest} Trend +{strongest_trend:.2f}"
         
-        if strongest_trend is not None and strongest_trend < 0:
+        # Only warn on meaningful negative trends (-0.05 or worse)
+        if strongest_trend is not None and strongest_trend < -0.05:
             result["warnings"].append(f"▼ {strongest} trending down ({strongest_trend:+.2f}) — consider caution or reduced stake")
             trend_bonus = -0.5
         
@@ -529,7 +537,6 @@ def analyze_match(data: dict) -> dict:
         away_draws = sum(1 for r in away_form[:6] if r == 'D')
         
         if (home_draws >= 4 or away_draws >= 4) and data["btts"] and data["btts"] >= 40:
-            # Scale confidence with BTTS probability
             btts_pct = data["btts"]
             if btts_pct >= 55:
                 streak_confidence = 7.5
@@ -609,9 +616,14 @@ def analyze_match(data: dict) -> dict:
     
     # ========================================================================
     # STEP 6: Dominant Favorite → Win to Nil
+    # (With fallback: if Over 0.5 missing, use BTTS as proxy)
     # ========================================================================
     if data["home_win"] and data["home_win"] >= 60:
-        away_scoring = data.get("away_over_05_goals", 100)
+        away_scoring = data.get("away_over_05_goals")
+        # Fallback: if data source omits away Over 0.5, use BTTS as proxy
+        if away_scoring is None and data.get("btts"):
+            away_scoring = data["btts"]
+        
         if away_scoring is not None and away_scoring < 52:
             if not any(b["market"] == "Home Win to Nil" for b in result["bets"]):
                 result["bets"].append({
@@ -621,7 +633,11 @@ def analyze_match(data: dict) -> dict:
                 })
     
     if data["away_win"] and data["away_win"] >= 60:
-        home_scoring = data.get("home_over_05_goals", 100)
+        home_scoring = data.get("home_over_05_goals")
+        # Fallback: if data source omits home Over 0.5, use BTTS as proxy
+        if home_scoring is None and data.get("btts"):
+            home_scoring = data["btts"]
+        
         if home_scoring is not None and home_scoring < 52:
             if not any(b["market"] == "Away Win to Nil" for b in result["bets"]):
                 result["bets"].append({
@@ -732,8 +748,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V1.7")
-    st.caption("Production Final | 22-Match Backtest | 77% Win Rate | Win Streak + Segunda Division")
+    st.title("📊 Match Analyzer V1.7.1")
+    st.caption("Production Final | 22-Match Backtest | 77% Win Rate | Win to Nil Fallback + Croatian League")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
@@ -755,7 +771,8 @@ def main():
                     analysis = analyze_match(data)
                     save_to_db(data, analysis)
                     
-                    st.success(f"✅ {data['home_team']} vs {data['away_team']} — {data.get('league', 'Unknown League')}")
+                    league_display = data.get('league') or 'Club Match'
+                    st.success(f"✅ {data['home_team']} vs {data['away_team']} — {league_display}")
                     
                     col1, col2 = st.columns(2)
                     with col1:
