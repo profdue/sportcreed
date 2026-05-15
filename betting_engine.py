@@ -52,7 +52,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# TOP LEAGUES — Higher reliability bonus
+# TOP LEAGUES
 # ============================================================================
 TOP_LEAGUES = [
     "Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1",
@@ -74,7 +74,6 @@ TEAM_ABBREVIATIONS = {
     "Crystal Palace": ["crystal palace", "palace"],
     "Leeds United": ["leeds", "leeds utd"],
     "Brighton & Hove Albion": ["brighton", "brighton & hove"],
-    "Norwich City": ["norwich"],
     "Brentford": ["brentford"],
     "Everton": ["everton"],
     "Chelsea": ["chelsea"],
@@ -85,94 +84,44 @@ TEAM_ABBREVIATIONS = {
     "Bournemouth": ["bournemouth"],
     "Southampton": ["southampton"],
     "Burnley": ["burnley"],
-    "Sheffield United": ["sheffield utd", "sheffield united", "sheff utd"],
-    "Luton Town": ["luton", "luton town"],
-    "Leicester City": ["leicester", "leicester city"],
-    "Ipswich Town": ["ipswich", "ipswich town"],
-    "Sunderland": ["sunderland"],
-    "St Louis City": ["st louis", "st. louis"],
-    "Los Angeles FC": ["los angeles", "lafc"],
-    "Los Angeles Galaxy": ["la galaxy", "los angeles galaxy"],
-    "Sporting Kansas City": ["sporting kc", "sporting kansas", "kansas city"],
-    "San Jose Earthquakes": ["san jose", "earthquakes"],
-    "Seattle Sounders": ["seattle", "sounders"],
-    "Austin FC": ["austin"],
-    "San Diego": ["san diego"],
-    "Real Salt Lake": ["real salt lake", "salt lake", "rsl"],
-    "Houston Dynamo": ["houston", "dynamo"],
-    "Minnesota United": ["minnesota", "minnesota utd", "minnesota united"],
-    "Colorado Rapids": ["colorado", "rapids"],
-    "Dallas": ["dallas", "fc dallas"],
-    "Vancouver Whitecaps": ["vancouver", "whitecaps"],
-    "Portland Timbers": ["portland", "timbers"],
-    "CD Guadalajara": ["guadalajara", "chivas"],
-    "Cruz Azul": ["cruz azul"],
-    "River Plate": ["river plate", "river"],
-    "Gimnasia": ["gimnasia", "gimnasia la plata"],
-    "Thun": ["thun", "fc thun"],
-    "Young Boys": ["young boys", "yb", "bern"],
-    "Basel": ["basel", "fc basel"],
-    "St Gallen": ["st gallen", "st. gallen", "sankt gallen"],
-    "Sion": ["sion", "fc sion"],
-    "Lugano": ["lugano", "fc lugano"],
-    "Al Fateh": ["al fateh", "fateh"],
-    "Al Najma": ["al najma", "najma"],
-    "Al Ettifaq": ["al ettifaq", "ettifaq"],
-    "Al Ittihad": ["al ittihad", "ittihad"],
-    "Al Quadisiya": ["al quadisiya", "quadisiya", "al qadsiah"],
-    "Al Hazem": ["al hazem", "hazem"],
-    "Gomel": ["gomel", "fc gomel"],
-    "Baranovichi": ["baranovichi", "fc baranovichi"],
-    "Kudrivka": ["kudrivka"],
-    "Rukh Lviv": ["rukh lviv", "rukh"],
-    "Bradford City": ["bradford", "bradford city"],
-    "Bolton Wanderers": ["bolton", "bolton wanderers"],
-    "Girona": ["girona", "girona fc"],
-    "Real Sociedad": ["real sociedad", "sociedad", "la real"],
-    "Valencia": ["valencia", "valencia cf"],
-    "Rayo Vallecano": ["rayo", "rayo vallecano"],
-    "Bayern Munich": ["bayern", "bayern munich", "fc bayern", "bayern münchen"],
-    "FC Koln": ["koln", "fc koln", "köln", "fc köln", "cologne"],
+    "Bayern Munich": ["bayern", "bayern munich", "fc bayern"],
+    "FC Koln": ["koln", "fc koln", "köln", "cologne"],
     "Porto": ["porto", "fc porto"],
     "Santa Clara": ["santa clara", "cd santa clara"],
     "Famalicao": ["famalicao", "famalicão", "fc famalicao"],
     "Alverca": ["alverca", "fc alverca"],
     "Cordoba": ["cordoba", "córdoba", "cordoba cf"],
     "Albacete": ["albacete", "albacete bp"],
-    "Vukovar": ["vukovar", "hsk vukovar", "vukovar 1991"],
-    "NK Varazdin": ["varazdin", "nk varazdin", "varaždin", "nk varaždin"],
-    "Bari": ["bari", "ssc bari", "as bari"],
-    "Sudtirol": ["sudtirol", "südtirol", "fc sudtirol", "fc südtirol"],
+    "Vukovar": ["vukovar", "hsk vukovar"],
+    "NK Varazdin": ["varazdin", "nk varazdin", "varaždin"],
     "Neman": ["neman", "fc neman", "neman grodno"],
-    "Isloch": ["isloch", "fc isloch", "isloch minsk"],
-    "Korona Kielce": ["korona", "korona kielce", "mks korona"],
-    "Widzew Lodz": ["widzew", "widzew lodz", "widzew łódź", "rts widzew"],
-    "Caykur Rizespor": ["rizespor", "caykur rizespor", "çaykur rizespor"],
-    "Besiktas": ["besiktas", "beşiktaş", "besiktas jk"],
-    "Zaglebie Lubin": ["zaglebie", "zaglebie lubin", "zagłębie lubin"],
-    "Pogon Szczecin": ["pogon", "pogon szczecin", "szczecin", "pogoń szczecin"],
+    "Isloch": ["isloch", "fc isloch"],
+    "Caykur Rizespor": ["rizespor", "caykur rizespor"],
+    "Besiktas": ["besiktas", "beşiktaş"],
+    "Zaglebie Lubin": ["zaglebie", "zaglebie lubin"],
+    "Pogon Szczecin": ["pogon", "pogon szczecin", "szczecin"],
     "Nyiregyhaza Spartacus": ["nyiregyhaza", "nyíregyháza", "spartacus"],
-    "Kazincbarcika": ["kazincbarcika", "kazincbarcikai"],
-    "Arges": ["arges", "arges pitesti", "argeș"],
-    "Rapid Bucuresti": ["rapid", "rapid bucuresti", "rapid bucurești"],
+    "Kazincbarcika": ["kazincbarcika"],
+    "Arges": ["arges", "arges pitesti"],
+    "Rapid Bucuresti": ["rapid", "rapid bucuresti"],
     "FC Minsk": ["fc minsk", "minsk"],
-    "Belshina": ["belshina", "belshina bobruisk"],
+    "Belshina": ["belshina"],
     "Hapoel Tel Aviv": ["hapoel tel aviv", "h. tel aviv"],
-    "Hapoel Be'er Sheva": ["hapoel be'er sheva", "h. be'er sheva", "hapoel beer sheva"],
+    "Hapoel Be'er Sheva": ["hapoel be'er sheva", "h. be'er sheva"],
     "Damac": ["damac", "damac fc"],
-    "Al Fayha": ["al fayha", "fayha", "al feiha"],
+    "Al Fayha": ["al fayha", "fayha"],
     "Adelaide United": ["adelaide", "adelaide united"],
     "Auckland FC": ["auckland", "auckland fc"],
-    "Shanghai Port": ["shanghai port", "shanghai sipg"],
-    "Zhejiang Professional": ["zhejiang", "zhejiang professional"],
-    "Henan": ["henan", "henan fc", "henan jianye"],
+    "Shanghai Port": ["shanghai port"],
+    "Zhejiang Professional": ["zhejiang"],
+    "Henan": ["henan", "henan fc"],
     "Sichuan Jiuniu": ["sichuan", "sichuan jiuniu"],
-    "Tianjin Jinmen Tiger": ["tianjin", "tianjin jinmen", "jinmen tiger"],
+    "Tianjin Jinmen Tiger": ["tianjin", "jinmen tiger"],
     "Chengdu Rongcheng": ["chengdu", "chengdu rongcheng"],
     "Beijing Guoan": ["beijing", "beijing guoan"],
     "Qingdao Hainiu": ["qingdao hainiu", "hainiu"],
     "Partick Thistle": ["partick", "partick thistle"],
-    "Dunfermline Athletic": ["dunfermline", "dunfermline athletic"],
+    "Dunfermline Athletic": ["dunfermline"],
     "Salford City": ["salford", "salford city"],
     "Grimsby Town": ["grimsby", "grimsby town"],
 }
@@ -493,9 +442,7 @@ def analyze_match(data: dict) -> dict:
         "skip_reasons": []
     }
     
-    # ========================================================================
-    # EXTRACT ALL MEASUREMENTS
-    # ========================================================================
+    # Extract measurements
     home_win = data.get("home_win") or 0
     away_win = data.get("away_win") or 0
     draw_pct = data.get("draw") or 0
@@ -508,7 +455,6 @@ def analyze_match(data: dict) -> dict:
     home_o05 = data.get("home_over_05_goals")
     away_o05 = data.get("away_over_05_goals")
     
-    # Fallback: use BTTS as proxy for Over 0.5
     if home_o05 is None and btts:
         home_o05 = btts
     if away_o05 is None and btts:
@@ -540,22 +486,26 @@ def analyze_match(data: dict) -> dict:
     is_top_league = league in TOP_LEAGUES if league else False
     
     # ========================================================================
-    # STEP 1: TREND REVERSAL — Market knows something
+    # STEP 1: TREND REVERSAL
     # ========================================================================
     trend_reversal = False
     if home_win_trend is not None and away_win_trend is not None:
         if home_win_trend <= -1.0 and away_win_trend >= 1.0:
             trend_reversal = True
-            result["badges"].append(f"⚠️ Trend Reversal: Home ▼{home_win_trend:.1f} / Away ▲{away_win_trend:.1f}")
+            result["badges"].append(
+                f"⚠️ Trend Reversal: Home ▼{home_win_trend:.1f} / Away ▲{away_win_trend:.1f}"
+            )
             
             if home_win_trend <= -3.0 and away_win_trend >= 3.0:
-                # MAJOR reversal
                 result["bets"].append({
                     "market": "Away Win or Draw",
                     "tier": "TIER 1",
                     "confidence": 8.0,
                     "probability": away_win + draw_pct,
-                    "reason": f"MAJOR market reversal: Home ▼{home_win_trend:.1f}, Away ▲{away_win_trend:.1f}. FADE home."
+                    "reason": (
+                        f"MAJOR market reversal: "
+                        f"Home ▼{home_win_trend:.1f}, Away ▲{away_win_trend:.1f}. FADE home."
+                    )
                 })
             else:
                 result["bets"].append({
@@ -563,33 +513,43 @@ def analyze_match(data: dict) -> dict:
                     "tier": "TIER 2",
                     "confidence": 6.5,
                     "probability": away_win + draw_pct,
-                    "reason": f"Market reversal detected: Home ▼{home_win_trend:.1f}, Away ▲{away_win_trend:.1f}"
+                    "reason": (
+                        f"Market reversal: "
+                        f"Home ▼{home_win_trend:.1f}, Away ▲{away_win_trend:.1f}"
+                    )
                 })
     
     # ========================================================================
-    # STEP 2: DOMINANT FAVORITE → Win to Nil or Home/Away Win
+    # STEP 2: DOMINANT FAVORITE
     # ========================================================================
-    # Home favorite
     if home_win >= 60 and not trend_reversal:
         underdog_scoring = away_o05 if away_o05 is not None else btts
         
         if underdog_scoring is not None and underdog_scoring < 52:
-            # Check if underdog is resilient (3+ draws)
             if away_draws >= 3:
                 result["bets"].append({
                     "market": "Home Win",
                     "tier": "TIER 2",
                     "confidence": 5.5,
                     "probability": home_win,
-                    "reason": f"Home favorite ({home_win:.0f}%) but away team draws often ({away_draws}/6). Win to Nil too risky."
+                    "reason": (
+                        f"Home favorite ({home_win:.0f}%) but away team draws often "
+                        f"({away_draws}/6). Win to Nil too risky."
+                    )
                 })
-                result["badges"].append(f"Resilient Away: {away_draws} draws in 6 — downgraded from Win to Nil")
+                result["badges"].append(
+                    f"Resilient Away: {away_draws} draws in 6 — downgraded from Win to Nil"
+                )
             else:
-                evidence = 1  # base
-                if home_o15 >= 60: evidence += 1
-                if under_25 >= 50: evidence += 1
-                if h2h_total >= 3 and h2h_btts <= 2: evidence += 1
-                if is_top_league: evidence += 1
+                evidence = 1
+                if home_o15 >= 60:
+                    evidence += 1
+                if under_25 >= 50:
+                    evidence += 1
+                if h2h_total >= 3 and h2h_btts <= 2:
+                    evidence += 1
+                if is_top_league:
+                    evidence += 1
                 
                 confidence = 8.5 if evidence >= 3 else 7.0
                 result["bets"].append({
@@ -597,10 +557,13 @@ def analyze_match(data: dict) -> dict:
                     "tier": "TIER 1",
                     "confidence": confidence,
                     "probability": home_win,
-                    "reason": f"Dominant favorite ({home_win:.0f}%) + underdog scoring only {underdog_scoring:.0f}% | Evidence: {evidence}/5"
+                    "reason": (
+                        f"Dominant favorite ({home_win:.0f}%) + "
+                        f"underdog scoring only {underdog_scoring:.0f}% | "
+                        f"Evidence: {evidence}/5"
+                    )
                 })
     
-    # Away favorite
     if away_win >= 60 and not trend_reversal:
         underdog_scoring = home_o05 if home_o05 is not None else btts
         
@@ -611,13 +574,19 @@ def analyze_match(data: dict) -> dict:
                     "tier": "TIER 2",
                     "confidence": 5.5,
                     "probability": away_win,
-                    "reason": f"Away favorite ({away_win:.0f}%) but home team draws often ({home_draws}/6). Win to Nil too risky."
+                    "reason": (
+                        f"Away favorite ({away_win:.0f}%) but home team draws often "
+                        f"({home_draws}/6). Win to Nil too risky."
+                    )
                 })
             else:
                 evidence = 1
-                if away_o15 >= 60: evidence += 1
-                if under_25 >= 50: evidence += 1
-                if is_top_league: evidence += 1
+                if away_o15 >= 60:
+                    evidence += 1
+                if under_25 >= 50:
+                    evidence += 1
+                if is_top_league:
+                    evidence += 1
                 
                 confidence = 8.5 if evidence >= 3 else 7.0
                 result["bets"].append({
@@ -625,77 +594,81 @@ def analyze_match(data: dict) -> dict:
                     "tier": "TIER 1",
                     "confidence": confidence,
                     "probability": away_win,
-                    "reason": f"Dominant favorite ({away_win:.0f}%) + underdog scoring only {underdog_scoring:.0f}% | Evidence: {evidence}/4"
+                    "reason": (
+                        f"Dominant favorite ({away_win:.0f}%) + "
+                        f"underdog scoring only {underdog_scoring:.0f}% | "
+                        f"Evidence: {evidence}/4"
+                    )
                 })
     
     # ========================================================================
-    # STEP 3: BTTS — Requires 2+ pieces of supporting evidence
+    # STEP 3: BTTS — Requires 2+ evidence
     # ========================================================================
     if btts >= 55:
         btts_evidence = 0
         evidence_details = []
         
-        # Evidence 1: Positive trend
         if btts_trend is not None and btts_trend >= 0.30:
-            btts_evidence += 1            evidence_details.append(f"▲ BTTS trend +{btts_trend:.2f}")
+            btts_evidence += 1
+            evidence_details.append(f"▲ BTTS trend +{btts_trend:.2f}")
         
-        # Evidence 2: H2H BTTS pattern (4+ out of 5+)
         if h2h_btts >= 4 and h2h_total >= 5:
             btts_evidence += 2
             evidence_details.append(f"H2H BTTS {h2h_btts}/{h2h_total}")
         
-        # Evidence 3: Both teams scoring in recent form
         home_scores_often = sum(1 for r in home_form[:6] if r in ['W', 'D']) >= 3
         away_scores_often = sum(1 for r in away_form[:6] if r in ['W', 'D']) >= 3
         if home_scores_often and away_scores_often:
             btts_evidence += 1
             evidence_details.append("Both teams scoring regularly")
         
-        # Evidence 4: Draw streak
         if home_draws >= 4 or away_draws >= 4:
             btts_evidence += 2
             evidence_details.append(f"Draw streak ({max(home_draws, away_draws)} draws)")
         
-        # Evidence 5: Opposing form extremes
         if (home_wins >= 5 and away_losses >= 4) or (away_wins >= 5 and home_losses >= 4):
             btts_evidence += 1
             evidence_details.append("Opposing form extremes")
         
-        # Evidence 6: Close match
         if abs(home_win - away_win) < 12:
             btts_evidence += 1
             evidence_details.append("Close match")
         
-        # Evidence 7: Both teams high O0.5
         if home_o05 is not None and away_o05 is not None and home_o05 >= 65 and away_o05 >= 60:
             btts_evidence += 1
-            evidence_details.append(f"Both teams likely to score (H:{home_o05:.0f}% A:{away_o05:.0f}%)")
+            evidence_details.append(
+                f"Both likely to score (H:{home_o05:.0f}% A:{away_o05:.0f}%)"
+            )
         
-        # CONTRADICTIONS
-        # Negative trend
+        # Contradictions
         if btts_trend is not None and btts_trend < -0.05:
             btts_evidence -= 1
             result["warnings"].append(f"▼ BTTS trending down ({btts_trend:+.2f})")
         
-        # H2H strongly contradicts
         if h2h_total >= 3 and h2h_btts <= 1:
             btts_evidence -= 2
             result["warnings"].append(f"H2H contradicts BTTS ({h2h_btts}/{h2h_total})")
         
         if btts_evidence >= 2:
             confidence = 7.5 if btts_evidence >= 4 else 6.5 if btts_evidence >= 3 else 5.5
+            details_str = ", ".join(evidence_details[:3])
             result["bets"].append({
                 "market": "BTTS",
                 "tier": "TIER 1" if btts_evidence >= 3 else "TIER 2",
                 "confidence": confidence,
                 "probability": btts,
-                "reason": f"BTTS {btts:.1f}% | Evidence: {btts_evidence}/7 ({', '.join(evidence_details[:3])})"
+                "reason": (
+                    f"BTTS {btts:.1f}% | "
+                    f"Evidence: {btts_evidence}/7 ({details_str})"
+                )
             })
         else:
-            result["skip_reasons"].append(f"BTTS {btts:.1f}% — insufficient evidence ({btts_evidence}/7)")
+            result["skip_reasons"].append(
+                f"BTTS {btts:.1f}% — insufficient evidence ({btts_evidence}/7)"
+            )
     
     # ========================================================================
-    # STEP 4: OVER 2.5 — Requires high probability + context
+    # STEP 4: OVER 2.5 — Requires 2+ evidence
     # ========================================================================
     if over_25 >= 58:
         over_evidence = 0
@@ -725,16 +698,20 @@ def analyze_match(data: dict) -> dict:
         
         if over_evidence >= 2:
             confidence = 7.5 if over_evidence >= 4 else 6.5 if over_evidence >= 3 else 5.5
+            details_str = ", ".join(over_details[:3])
             result["bets"].append({
                 "market": "Over 2.5",
                 "tier": "TIER 1" if over_evidence >= 3 else "TIER 2",
                 "confidence": confidence,
                 "probability": over_25,
-                "reason": f"Over 2.5 {over_25:.1f}% | Evidence: {over_evidence}/5 ({', '.join(over_details[:3])})"
+                "reason": (
+                    f"Over 2.5 {over_25:.1f}% | "
+                    f"Evidence: {over_evidence}/5 ({details_str})"
+                )
             })
     
     # ========================================================================
-    # STEP 5: UNDER 2.5 — Requires context + no contradictions
+    # STEP 5: UNDER 2.5 — Requires 2+ evidence + no contradictions
     # ========================================================================
     if under_25 >= 55:
         under_evidence = 0
@@ -754,23 +731,29 @@ def analyze_match(data: dict) -> dict:
                 under_evidence += 2
                 under_details.append(f"H2H Under 2.5: {h2h_under}/{h2h_total}")
         
-        # CONTRADICTION: Both teams on long losing streaks
+        # Contradiction
         if home_losses >= 4 and away_losses >= 4:
             under_evidence -= 2
-            result["warnings"].append("Both teams on losing streaks — Under 2.5 risky (bad teams concede)")
+            result["warnings"].append(
+                "Both teams on losing streaks — Under 2.5 risky (bad teams concede)"
+            )
         
         if under_evidence >= 2:
             confidence = 7.5 if under_evidence >= 4 else 6.5 if under_evidence >= 3 else 5.5
+            details_str = ", ".join(under_details[:3])
             result["bets"].append({
                 "market": "Under 2.5",
                 "tier": "TIER 1" if under_evidence >= 3 else "TIER 2",
                 "confidence": confidence,
                 "probability": under_25,
-                "reason": f"Under 2.5 {under_25:.1f}% | Evidence: {under_evidence}/4 ({', '.join(under_details[:3])})"
+                "reason": (
+                    f"Under 2.5 {under_25:.1f}% | "
+                    f"Evidence: {under_evidence}/4 ({details_str})"
+                )
             })
     
     # ========================================================================
-    # STEP 6: DRAW — Two in-form unbeaten teams collide
+    # STEP 6: DRAW — Unbeaten collision
     # ========================================================================
     if home_unbeaten_5 >= 4 and away_unbeaten_5 >= 4 and draw_pct >= 20:
         result["bets"].append({
@@ -778,12 +761,15 @@ def analyze_match(data: dict) -> dict:
             "tier": "TIER 2",
             "confidence": 6.0,
             "probability": draw_pct,
-            "reason": f"Unbeaten collision: Home {home_unbeaten_5}/5, Away {away_unbeaten_5}/5 unbeaten"
+            "reason": (
+                f"Unbeaten collision: "
+                f"Home {home_unbeaten_5}/5, Away {away_unbeaten_5}/5 unbeaten"
+            )
         })
         result["badges"].append("Unbeaten Collision")
     
     # ========================================================================
-    # STEP 7: TEAM GOALS — Dominant attack
+    # STEP 7: TEAM GOALS
     # ========================================================================
     if home_win >= 55 and home_o15 >= 55:
         result["bets"].append({
@@ -804,7 +790,7 @@ def analyze_match(data: dict) -> dict:
         })
     
     # ========================================================================
-    # STEP 8: WIN STREAK → Team Win
+    # STEP 8: WIN STREAK
     # ========================================================================
     if home_wins >= 5 and home_win >= 45:
         if not any(b["market"] == "Home Win" for b in result["bets"]):
@@ -834,7 +820,6 @@ def analyze_match(data: dict) -> dict:
     tier_order = {"TIER 1": 0, "TIER 2": 1}
     result["bets"].sort(key=lambda b: (tier_order.get(b["tier"], 3), -b["confidence"]))
     
-    # Deduplicate
     seen_markets = set()
     unique_bets = []
     for bet in result["bets"]:
@@ -843,21 +828,23 @@ def analyze_match(data: dict) -> dict:
             unique_bets.append(bet)
     result["bets"] = unique_bets
     
-    # Verdict
     if result["bets"]:
         result["verdict"] = "RECOMMENDED"
     else:
         result["verdict"] = "SKIP"
     
-    # Warnings
     if draw_pct >= 25:
-        result["warnings"].append(f"High draw probability ({draw_pct:.1f}%) — avoid match result bets")
+        result["warnings"].append(
+            f"High draw probability ({draw_pct:.1f}%) — avoid match result bets"
+        )
     if abs(home_win - away_win) < 10 and home_win > 0 and away_win > 0:
         result["warnings"].append("Close match — no clear favorite")
     if btts < 50 and not any(b["market"] == "BTTS" for b in result["bets"]) and btts > 0:
         result["warnings"].append("BTTS below 50% — BTTS is likely a trap here")
     if not is_top_league and league:
-        result["warnings"].append(f"'{league}' is not a top-5 league — lower reliability, consider reduced stakes")
+        result["warnings"].append(
+            f"'{league}' is not a top-5 league — lower reliability, consider reduced stakes"
+        )
     
     return result
 
@@ -944,7 +931,7 @@ def get_results():
 # ============================================================================
 def main():
     st.title("📊 Match Analyzer V2.0")
-    st.caption("Evidence-Based Decision Engine | 37-Match Backtest | Multi-Factor Scoring | No More max()")
+    st.caption("Evidence-Based Decision Engine | 37-Match Backtest | Multi-Factor Scoring | SKIP When Uncertain")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
