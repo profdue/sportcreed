@@ -1,8 +1,8 @@
 """
-MATCH ANALYZER V1.7.1 — Production Final
+MATCH ANALYZER V1.7.2 — Production Final
 22-Match Backtested Strategy | 77% Win Rate
 All Parsers Working | All Rules Implemented
-Fixes: Win to Nil fallback + Croatian league + Negative trend threshold + League display
+Fixes: Away form saving + Serie B/Ekstraklasa leagues + Float precision + Form fallback always runs
 Supabase table: match_analyses
 """
 
@@ -11,6 +11,7 @@ from datetime import date
 from supabase import create_client, Client
 import pandas as pd
 import re
+import json
 
 # ============================================================================
 # SUPABASE SETUP
@@ -26,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.7.1", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.7.2", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -129,6 +130,12 @@ TEAM_ABBREVIATIONS = {
     "Albacete": ["albacete", "albacete bp"],
     "Vukovar": ["vukovar", "hsk vukovar", "vukovar 1991"],
     "NK Varazdin": ["varazdin", "nk varazdin", "varaždin", "nk varaždin"],
+    "Bari": ["bari", "ssc bari", "as bari"],
+    "Sudtirol": ["sudtirol", "südtirol", "fc sudtirol", "fc südtirol"],
+    "Neman": ["neman", "fc neman", "neman grodno"],
+    "Isloch": ["isloch", "fc isloch", "isloch minsk"],
+    "Korona Kielce": ["korona", "korona kielce", "mks korona"],
+    "Widzew Lodz": ["widzew", "widzew lodz", "widzew łódź", "rts widzew"],
 }
 
 def fuzzy_team_match(team_name, text):
@@ -138,16 +145,13 @@ def fuzzy_team_match(team_name, text):
     text_lower = text.lower().strip()
     team_lower = team_name.lower().strip()
     
-    # Direct match
     if team_lower in text_lower or text_lower in team_lower:
         return True
     
-    # Check abbreviations
     for abbr in TEAM_ABBREVIATIONS.get(team_name, []):
         if abbr in text_lower:
             return True
     
-    # Also check if the text is an abbreviation for the team
     for full_name, abbrs in TEAM_ABBREVIATIONS.items():
         if team_name == full_name:
             continue
@@ -193,7 +197,7 @@ def parse_match_data(raw_text: str) -> dict:
         data["away_team"] = team_names[1]
     
     # ========================================================================
-    # LEAGUE — check the first league mention that isn't in H2H or Form Data
+    # LEAGUE
     # ========================================================================
     leagues_found = []
     in_form_data = False
@@ -202,12 +206,13 @@ def parse_match_data(raw_text: str) -> dict:
             in_form_data = True
         if in_form_data:
             continue
-        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Ligue 1|Championship|'
+        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Serie B|Ligue 1|Championship|'
                       r'Süper Lig|Pro League|Primeira Liga|EFL Cup|Swiss Super League|'
                       r'Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|'
                       r'Liga MX|League One|League Two|Argentine Primera Division|'
                       r'Major League Soccer|Segunda Division|Segunda División|'
-                      r'Croatian 1\. HNL|HNL|Prva HNL|Scottish Premiership|Eredivisie|A-League)', 
+                      r'Croatian 1\. HNL|HNL|Prva HNL|Scottish Premiership|Eredivisie|A-League|'
+                      r'Ekstraklasa|PKO Ekstraklasa|Polish Ekstraklasa)', 
                       line, re.IGNORECASE)
         if m and 'Gameweek' not in line and 'Head to Head' not in line:
             league_name = m.group(1)
@@ -218,7 +223,7 @@ def parse_match_data(raw_text: str) -> dict:
         data["league"] = leagues_found[0]
     
     # ========================================================================
-    # HELPER: Find percentage + trend near a line
+    # HELPER FUNCTIONS
     # ========================================================================
     def find_pct(start_idx, max_lookahead=3):
         for j in range(start_idx, min(start_idx + max_lookahead, len(lines))):
@@ -232,7 +237,6 @@ def parse_match_data(raw_text: str) -> dict:
         return None, 0
 
     def has_arrow(start_idx, max_lookahead=3):
-        """Check if line has an explicit trend arrow (▲ or ▼)"""
         for j in range(start_idx, min(start_idx + max_lookahead, len(lines))):
             sub = lines[j].strip()
             if '▲' in sub or '▼' in sub:
@@ -248,7 +252,6 @@ def parse_match_data(raw_text: str) -> dict:
     for i, line in enumerate(lines):
         stripped = line.strip()
         
-        # Section markers
         if stripped in ['Result', 'Goals', 'First Half Winner', 'Team To Score First', 
                         'Corners', 'Score analysis']:
             current_section = stripped.lower().replace(' ', '_')
@@ -263,9 +266,7 @@ def parse_match_data(raw_text: str) -> dict:
             current_subsection = None
             continue
         
-        # ====================================================================
         # RESULT SECTION
-        # ====================================================================
         if current_section == 'result':
             if data["home_team"] and data["home_team"] in stripped:
                 prob, trend = find_pct(i)
@@ -292,9 +293,7 @@ def parse_match_data(raw_text: str) -> dict:
                     data["btts"] = prob
                     data["btts_trend"] = trend if arrow_exists else None
         
-        # ====================================================================
         # GOALS SECTION
-        # ====================================================================
         if current_section == 'goals':
             if 'Over 1.5' in stripped and 'Goals' not in stripped:
                 prob, _ = find_pct(i)
@@ -312,9 +311,7 @@ def parse_match_data(raw_text: str) -> dict:
                 prob, _ = find_pct(i)
                 if prob: data["over_35"] = prob
         
-        # ====================================================================
         # TEAM-SPECIFIC GOALS
-        # ====================================================================
         if data["home_team"] and f'{data["home_team"]} Goals' in stripped:
             current_subsection = 'home_goals'
         if data["away_team"] and f'{data["away_team"]} Goals' in stripped:
@@ -337,26 +334,25 @@ def parse_match_data(raw_text: str) -> dict:
                 if prob: data["away_over_15_goals"] = prob
     
     # ========================================================================
-    # FORM STRINGS — Parse from top of data block (W/D/L after league headers)
+    # FORM STRINGS — Primary parser (top of data block)
     # ========================================================================
     form_blocks = []
     current_block = []
     collecting = False
     
     league_headers = [
-        'All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 
+        'All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 'Serie B',
         'Ligue 1', 'Championship', 'Süper Lig', 'Pro League', 'Primeira Liga',
         'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
         'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
         'Argentine Primera Division', 'Major League Soccer', 'Segunda Division',
         'Segunda División', 'Scottish Premiership', 'Eredivisie', 'A-League',
-        'Croatian 1. HNL', 'HNL', 'Prva HNL'
+        'Croatian 1. HNL', 'HNL', 'Prva HNL', 'Ekstraklasa', 'PKO Ekstraklasa'
     ]
     
     for line in lines:
         stripped = line.strip()
         
-        # Start collecting after league/competition headers
         if stripped in league_headers:
             if current_block and len(current_block) >= 4:
                 form_blocks.append(current_block)
@@ -364,7 +360,6 @@ def parse_match_data(raw_text: str) -> dict:
             collecting = True
             continue
         
-        # Stop collecting at metadata lines
         if stripped.startswith('Last game') or stripped.startswith('Goals scored') or stripped.startswith('Top scorer'):
             if current_block and len(current_block) >= 4:
                 form_blocks.append(current_block)
@@ -372,7 +367,6 @@ def parse_match_data(raw_text: str) -> dict:
             collecting = False
             continue
         
-        # Stop at Data analysis
         if stripped == 'Data analysis':
             if current_block and len(current_block) >= 4:
                 form_blocks.append(current_block)
@@ -383,59 +377,63 @@ def parse_match_data(raw_text: str) -> dict:
         if collecting and stripped in ['W', 'D', 'L']:
             current_block.append(stripped)
     
-    # Don't forget the last block
     if current_block and len(current_block) >= 4:
         form_blocks.append(current_block)
     
-    # Assign form blocks to teams
-    # Block 0 = home all comps, Block 1 = home league, Block 2 = away all comps, Block 3 = away league
+    # Assign primary form blocks
     if len(form_blocks) >= 1:
         data["home_form_all"] = form_blocks[0][:6]
     if len(form_blocks) >= 3:
         data["away_form_all"] = form_blocks[2][:6]
-    
-    # Fallback: if we didn't get 4 blocks, try alternate assignment
     if not data["away_form_all"] and len(form_blocks) >= 2:
         data["away_form_all"] = form_blocks[1][:6]
     
-    # Fallback: try Form Data section with fuzzy matching
-    if not data["home_form_all"] or not data["away_form_all"]:
-        form_data_started = False
-        current_team_form = None
-        team_forms = {}
+    # ========================================================================
+    # FORM STRINGS — Fallback: Form Data section with fuzzy matching
+    # (ALWAYS runs to ensure away_form is captured even if primary parser got it)
+    # ========================================================================
+    form_data_started = False
+    current_team_form = None
+    team_forms = {}
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
         
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            
-            if 'Form Data' in stripped:
-                form_data_started = True
-                continue
-            
-            if not form_data_started:
-                continue
-            
-            is_team = False
-            for team in team_names:
-                if team and fuzzy_team_match(team, stripped):
-                    is_team = True
-                    current_team_form = team
-                    if team not in team_forms:
-                        team_forms[team] = []
-                    break
-            
-            if is_team:
-                continue
-            
-            if stripped in ['W', 'D', 'L'] and current_team_form:
-                team_forms[current_team_form].append(stripped)
+        if 'Form Data' in stripped:
+            form_data_started = True
+            continue
         
-        if not data["home_form_all"] and data["home_team"] and data["home_team"] in team_forms:
-            data["home_form_all"] = team_forms[data["home_team"]][:6]
-        if not data["away_form_all"] and data["away_team"] and data["away_team"] in team_forms:
-            data["away_form_all"] = team_forms[data["away_team"]][:6]
+        if not form_data_started:
+            continue
+        
+        is_team = False
+        for team in team_names:
+            if team and fuzzy_team_match(team, stripped):
+                is_team = True
+                current_team_form = team
+                if team not in team_forms:
+                    team_forms[team] = []
+                break
+        
+        if is_team:
+            continue
+        
+        if stripped in ['W', 'D', 'L'] and current_team_form:
+            team_forms[current_team_form].append(stripped)
+    
+    # Fallback assignment (overwrites only if primary parser returned empty)
+    if data["home_team"] and data["home_team"] in team_forms:
+        fallback_home = team_forms[data["home_team"]][:6]
+        if not data["home_form_all"] or len(data["home_form_all"]) < 3:
+            data["home_form_all"] = fallback_home
+    
+    if data["away_team"] and data["away_team"] in team_forms:
+        fallback_away = team_forms[data["away_team"]][:6]
+        if not data["away_form_all"] or len(data["away_form_all"]) < 3:
+            data["away_form_all"] = fallback_away
     
     # ========================================================================
-    # H2H PARSER — Find FT markers, extract score pairs
+    # H2H PARSER
     # ========================================================================
     h2h_section = False
     h2h_scores = []
@@ -482,9 +480,7 @@ def parse_match_data(raw_text: str) -> dict:
 def analyze_match(data: dict) -> dict:
     result = {"bets": [], "badges": [], "warnings": []}
     
-    # ========================================================================
     # STEP 1: Strongest Goal Signal
-    # ========================================================================
     signals = {}
     if data["btts"] and data["btts"] >= 48: 
         signals["BTTS"] = (data["btts"], data.get("btts_trend"))
@@ -507,7 +503,6 @@ def analyze_match(data: dict) -> dict:
             trend_bonus = 1.5
             trend_label = f"▲ {strongest} Trend +{strongest_trend:.2f}"
         
-        # Only warn on meaningful negative trends (-0.05 or worse)
         if strongest_trend is not None and strongest_trend < -0.05:
             result["warnings"].append(f"▼ {strongest} trending down ({strongest_trend:+.2f}) — consider caution or reduced stake")
             trend_bonus = -0.5
@@ -526,12 +521,10 @@ def analyze_match(data: dict) -> dict:
             "reason": f"Strongest signal at {strongest_pct:.1f}%"
         })
     
-    # ========================================================================
-    # STEP 2: Draw Streak → BTTS
-    # ========================================================================
     home_form = data.get("home_form_all") or []
     away_form = data.get("away_form_all") or []
     
+    # STEP 2: Draw Streak → BTTS
     if home_form and away_form:
         home_draws = sum(1 for r in home_form[:6] if r == 'D')
         away_draws = sum(1 for r in away_form[:6] if r == 'D')
@@ -555,9 +548,7 @@ def analyze_match(data: dict) -> dict:
                 })
             result["badges"].append(f"Draw Streak: {max(home_draws, away_draws)} draws")
     
-    # ========================================================================
     # STEP 3: Win Streak → Team Win
-    # ========================================================================
     if home_form and away_form:
         home_wins = sum(1 for r in home_form[:6] if r == 'W')
         away_wins = sum(1 for r in away_form[:6] if r == 'W')
@@ -584,9 +575,7 @@ def analyze_match(data: dict) -> dict:
                 })
             result["badges"].append(f"Win Streak: Away {away_wins} wins")
     
-    # ========================================================================
     # STEP 4: In-Form Collision → Draw
-    # ========================================================================
     if home_form and away_form:
         home_unbeaten = sum(1 for r in home_form[:5] if r in ['W', 'D'])
         away_unbeaten = sum(1 for r in away_form[:5] if r in ['W', 'D'])
@@ -600,9 +589,7 @@ def analyze_match(data: dict) -> dict:
                 })
             result["badges"].append("Unbeaten Collision")
     
-    # ========================================================================
     # STEP 5: H2H BTTS Pattern
-    # ========================================================================
     h2h_total = data.get("h2h_total", 0)
     if data["h2h_btts_count"] >= 4 and h2h_total >= 5:
         if data["btts"] and data["btts"] >= 45:
@@ -614,13 +601,9 @@ def analyze_match(data: dict) -> dict:
                 })
             result["badges"].append(f"H2H BTTS Pattern: {data['h2h_btts_count']}/{h2h_total}")
     
-    # ========================================================================
-    # STEP 6: Dominant Favorite → Win to Nil
-    # (With fallback: if Over 0.5 missing, use BTTS as proxy)
-    # ========================================================================
+    # STEP 6: Dominant Favorite → Win to Nil (with BTTS fallback)
     if data["home_win"] and data["home_win"] >= 60:
         away_scoring = data.get("away_over_05_goals")
-        # Fallback: if data source omits away Over 0.5, use BTTS as proxy
         if away_scoring is None and data.get("btts"):
             away_scoring = data["btts"]
         
@@ -634,7 +617,6 @@ def analyze_match(data: dict) -> dict:
     
     if data["away_win"] and data["away_win"] >= 60:
         home_scoring = data.get("home_over_05_goals")
-        # Fallback: if data source omits home Over 0.5, use BTTS as proxy
         if home_scoring is None and data.get("btts"):
             home_scoring = data["btts"]
         
@@ -646,9 +628,7 @@ def analyze_match(data: dict) -> dict:
                     "reason": f"Away dominant ({data['away_win']:.0f}%) + Home only {home_scoring:.0f}% to score"
                 })
     
-    # ========================================================================
     # Finalize
-    # ========================================================================
     tier_order = {"TIER 1": 0, "TIER 2": 1}
     result["bets"].sort(key=lambda b: (tier_order.get(b["tier"], 3), -b["confidence"]))
     
@@ -678,6 +658,12 @@ def save_to_db(data: dict, analysis: dict):
         bets_str = " | ".join([b["market"] for b in analysis["bets"]]) if analysis["bets"] else "NO BET"
         top = analysis["bets"][0] if analysis["bets"] else None
         
+        # Ensure form data is properly captured with fallbacks
+        home_form_str = '-'.join(data.get("home_form_all", [])) if data.get("home_form_all") else ""
+        away_form_str = '-'.join(data.get("away_form_all", [])) if data.get("away_form_all") else ""
+        
+        top_confidence = round(top["confidence"] / 10, 2) if top else 0
+        
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
@@ -689,16 +675,16 @@ def save_to_db(data: dict, analysis: dict):
                 "away_win_pct": data.get("away_win"),
                 "btts_pct": data.get("btts"),
                 "over25_pct": data.get("over_25"),
-                "home_form": '-'.join(data.get("home_form_all", [])),
-                "away_form": '-'.join(data.get("away_form_all", [])),
+                "home_form": home_form_str,
+                "away_form": away_form_str,
             },
             "away_data": {},
             "prediction": bets_str,
-            "confidence_score": top["confidence"] / 10 if top else 0,
+            "confidence_score": top_confidence,
             "winner": top["market"] if top else "NO BET",
             "winner_confidence": f"{top['confidence']}/10" if top else "0",
             "btts": "BTTS YES" if any("BTTS" in b["market"] for b in analysis["bets"]) else "",
-            "btts_confidence": max([b["confidence"]/10 for b in analysis["bets"] if "BTTS" in b["market"]]) if any("BTTS" in b["market"] for b in analysis["bets"]) else 0,
+            "btts_confidence": round(max([b["confidence"]/10 for b in analysis["bets"] if "BTTS" in b["market"]]), 2) if any("BTTS" in b["market"] for b in analysis["bets"]) else 0,
             "pattern": " | ".join([b["tier"] for b in analysis["bets"]]) if analysis["bets"] else "NO BET",
             "result_entered": False,
         }
@@ -748,8 +734,8 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V1.7.1")
-    st.caption("Production Final | 22-Match Backtest | 77% Win Rate | Win to Nil Fallback + Croatian League")
+    st.title("📊 Match Analyzer V1.7.2")
+    st.caption("Production Final | 22-Match Backtest | 77% Win Rate | Away Form Save Fix + Serie B/Ekstraklasa")
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
