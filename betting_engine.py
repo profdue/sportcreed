@@ -3,6 +3,7 @@ MATCH ANALYZER V3.2 — Structural Framework Engine
 Score Matrix is King | Separation Power | Draw Cluster | Double Chance
 FIX: Score matrix drives classification | Single primary bet | Secondary clearly labeled
 FIX: Truth-based evaluation engine (no reliance on corrupted derived fields)
+FIX: Category performance breakdown in Records tab
 Supabase table: match_analyses
 """
 
@@ -901,6 +902,7 @@ def analyze_match(data: dict) -> dict:
     else:
         result["verdict"] = "SKIP"
         result["skip_reasons"].append("No structural pattern matched with sufficient confidence")
+        result["classification"] = "SKIP"
     
     # Warnings
     if draw_pct >= 25:
@@ -951,16 +953,6 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     else:
         winner = "DRAW"
     
-    # Actual outcomes (human readable)
-    actual_outcome = {
-        "score": f"{home}-{away}",
-        "btts": "BTTS YES" if btts else "BTTS NO",
-        "over25": "Over 2.5 YES" if over25 else "Over 2.5 NO",
-        "over35": "Over 3.5 YES" if over35 else "Over 3.5 NO",
-        "winner": winner,
-        "total": total
-    }
-    
     # Evaluate against prediction
     pred = primary_pred.strip()
     is_correct = False
@@ -971,7 +963,7 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     elif pred == "Over 2.5 Goals":
         is_correct = over25
     elif pred == "Under 2.5 Goals":
-        is_correct = not over25
+        is_correct = not over25  # Fixed: removed total > 0 requirement
     elif pred == "Over 3.5 Goals":
         is_correct = over35
     elif pred == "Under 3.5 Goals":
@@ -1013,7 +1005,7 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     
     return {
         "is_correct": is_correct,
-        "actual": f"{home}-{away} | {actual_outcome['btts']} | {actual_outcome['over25']}",
+        "actual": f"{home}-{away}",
         "message": f"{'✅ CORRECT' if is_correct else '❌ INCORRECT'}: {pred} vs {home}-{away}"
     }
 
@@ -1326,12 +1318,28 @@ def main():
             skip_count = sum(1 for r in results if r.get('prediction') == 'SKIP')
             bet_count = total - skip_count
             
+            # Track overall stats
             correct = 0
             incorrect = 0
             
+            # Track stats by classification
+            category_stats = {}
+            
             for r in results:
                 pred = r.get('prediction', '')
+                classification = r.get('classification', 'Unclassified')
+                
+                # Initialize category stats if not exists
+                if classification not in category_stats:
+                    category_stats[classification] = {
+                        "wins": 0,
+                        "losses": 0,
+                        "total": 0,
+                        "bets": []
+                    }
+                
                 if pred == 'SKIP':
+                    category_stats[classification]["total"] += 1
                     continue
                 
                 # Primary bet is the first one before " | "
@@ -1344,29 +1352,170 @@ def main():
                     r.get('actual_away_goals')
                 )
                 
+                # Store bet result
+                bet_result = {
+                    "match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
+                    "date": r.get('match_date', ''),
+                    "bet": primary_pred,
+                    "score": f"{r.get('actual_home_goals', '-')}-{r.get('actual_away_goals', '-')}",
+                    "result": "WIN" if evaluation["is_correct"] else "LOSS"
+                }
+                
                 if evaluation["is_correct"]:
                     correct += 1
+                    category_stats[classification]["wins"] += 1
                 else:
                     incorrect += 1
+                    category_stats[classification]["losses"] += 1
+                
+                category_stats[classification]["total"] += 1
+                category_stats[classification]["bets"].append(bet_result)
             
-            # Display stats
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
+            # Display overall stats
+            st.markdown("### 📈 Overall Performance")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
                 st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Total Tracked</div></div>'.format(total), unsafe_allow_html=True)
-            with c2:
+            with col2:
                 st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Bets Placed</div></div>'.format(bet_count), unsafe_allow_html=True)
-            with c3:
+            with col3:
                 win_rate = round(correct / bet_count * 100) if bet_count > 0 else 0
                 st.markdown('<div class="stat-box"><div class="stat-number">{}%</div><div class="stat-label">Win Rate (Primary)</div></div>'.format(win_rate), unsafe_allow_html=True)
-            with c4:
+            with col4:
                 st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Skipped</div></div>'.format(skip_count), unsafe_allow_html=True)
             
-            st.write("**Primary Bet: Correct: {} | Incorrect: {}**".format(correct, incorrect))
+            st.write(f"**Primary Bet: Correct: {correct} | Incorrect: {incorrect}**")
+            
+            # ========================================================================
+            # CATEGORY PERFORMANCE BREAKDOWN
+            # ========================================================================
+            st.markdown("---")
+            st.markdown("### 🏷️ Performance by Classification")
+            
+            # Prepare category data for display
+            category_data = []
+            for cat, stats in category_stats.items():
+                if cat == "SKIP":
+                    continue
+                
+                total_bets = stats["total"]
+                wins = stats["wins"]
+                losses = stats["losses"]
+                win_rate = round(wins / total_bets * 100) if total_bets > 0 else 0
+                
+                # Determine performance rating
+                if win_rate >= 70:
+                    rating = "🔥 Excellent"
+                    rating_color = "#10b981"
+                elif win_rate >= 60:
+                    rating = "✅ Good"
+                    rating_color = "#3b82f6"
+                elif win_rate >= 50:
+                    rating = "⚠️ Marginal"
+                    rating_color = "#f59e0b"
+                else:
+                    rating = "❌ Poor"
+                    rating_color = "#ef4444"
+                
+                category_data.append({
+                    "Classification": cat,
+                    "Wins": wins,
+                    "Losses": losses,
+                    "Total": total_bets,
+                    "Win Rate": f"{win_rate}%",
+                    "Rating": rating,
+                    "Rating Color": rating_color
+                })
+            
+            # Sort by win rate (highest first)
+            category_data.sort(key=lambda x: int(x["Win Rate"].replace("%", "")), reverse=True)
+            
+            # Display as styled table using columns
+            st.markdown("""
+            <style>
+            .cat-header { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.5fr; gap: 10px; padding: 10px; background: #1e293b; border-radius: 8px; margin-bottom: 5px; font-weight: 700; }
+            .cat-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.5fr; gap: 10px; padding: 8px 10px; background: #0f172a; border-radius: 8px; margin-bottom: 3px; }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            st.markdown('<div class="cat-header"><div>Classification</div><div>Wins</div><div>Losses</div><div>Total</div><div>Rating</div></div>', unsafe_allow_html=True)
+            
+            for cat in category_data:
+                st.markdown(f'''
+                <div class="cat-row">
+                    <div><strong>{cat["Classification"]}</strong></div>
+                    <div style="color:#10b981;">{cat["Wins"]}</div>
+                    <div style="color:#ef4444;">{cat["Losses"]}</div>
+                    <div>{cat["Total"]}</div>
+                    <div style="color:{cat["Rating Color"]}; font-weight:700;">{cat["Rating"]} ({cat["Win Rate"]})</div>
+                </div>
+                ''', unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # ========================================================================
+            # DETAILED BREAKDOWN WITH EXPANDERS
+            # ========================================================================
+            st.markdown("### 🔍 Detailed Category Breakdown")
+            
+            for cat, stats in sorted(category_stats.items(), key=lambda x: x[1]["total"], reverse=True):
+                if stats["total"] == 0:
+                    continue
+                
+                wins = stats["wins"]
+                losses = stats["losses"]
+                total_bets = stats["total"]
+                win_rate = round(wins / total_bets * 100) if total_bets > 0 else 0
+                
+                # Determine emoji and color for header
+                if win_rate >= 70:
+                    emoji = "🟢"
+                    color = "#10b981"
+                elif win_rate >= 60:
+                    emoji = "🔵"
+                    color = "#3b82f6"
+                elif win_rate >= 50:
+                    emoji = "🟡"
+                    color = "#f59e0b"
+                else:
+                    emoji = "🔴"
+                    color = "#ef4444"
+                
+                with st.expander(f"{emoji} {cat} — {wins}-{losses} ({win_rate}%)"):
+                    if cat == "SKIP":
+                        st.write(f"📋 **{stats['total']} matches skipped** (no bet recommended)")
+                        continue
+                    
+                    # Show summary stats
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Wins", wins)
+                    with col2:
+                        st.metric("Losses", losses)
+                    with col3:
+                        st.metric("Win Rate", f"{win_rate}%")
+                    
+                    # Show individual bets in this category
+                    if stats["bets"]:
+                        st.write("**Individual Bets:**")
+                        for bet in stats["bets"]:
+                            if bet["result"] == "WIN":
+                                st.markdown(f"- ✅ **{bet['match']}** ({bet['date']}) — {bet['bet']} — {bet['score']}")
+                            else:
+                                st.markdown(f"- ❌ **{bet['match']}** ({bet['date']}) — {bet['bet']} — {bet['score']}")
+            
+            st.markdown("---")
+            
+            # ========================================================================
+            # FULL RESULTS TABLE
+            # ========================================================================
+            st.markdown("### 📋 Complete Match Records")
             
             # Build results table
             rows = []
             for r in results:
                 pred = r.get('prediction', '')
+                classification = r.get('classification', 'Unclassified')
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
                 
@@ -1375,13 +1524,16 @@ def main():
                 if pred == 'SKIP':
                     badge = '<span class="skip-badge">SKIP</span>'
                     score_display = "—"
+                    result_text = "SKIP"
                 else:
                     # Use evaluator to determine result
                     evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
                     if evaluation["is_correct"]:
                         badge = '<span class="correct-badge">WIN</span>'
+                        result_text = "WIN"
                     else:
                         badge = '<span class="incorrect-badge">LOSS</span>'
+                        result_text = "LOSS"
                     
                     # Handle None values gracefully
                     if actual_home is not None and actual_away is not None:
@@ -1392,14 +1544,87 @@ def main():
                 rows.append({
                     "Date": r.get("match_date", ""),
                     "Match": "{} vs {}".format(r.get('home_team', ''), r.get('away_team', '')),
-                    "Class": r.get("classification", ""),
+                    "Class": classification,
                     "Primary Bet": primary_pred if pred != 'SKIP' else "SKIP",
                     "Score": score_display,
-                    "Result": badge,
+                    "Result": result_text,
                 })
             
             df = pd.DataFrame(rows)
-            st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            # Display dataframe with custom formatting
+            st.dataframe(
+                df,
+                column_config={
+                    "Result": st.column_config.TextColumn(
+                        "Result",
+                        help="WIN/LOSS/SKIP status"
+                    )
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # ========================================================================
+            # SUMMARY INSIGHTS
+            # ========================================================================
+            st.markdown("---")
+            st.markdown("### 💡 Performance Insights")
+            
+            # Find best and worst categories
+            valid_categories = [(cat, stats) for cat, stats in category_stats.items() 
+                               if cat != "SKIP" and stats["total"] >= 2]
+            
+            if valid_categories:
+                best_cat = max(valid_categories, key=lambda x: x[1]["wins"] / x[1]["total"] if x[1]["total"] > 0 else 0)
+                worst_cat = min(valid_categories, key=lambda x: x[1]["wins"] / x[1]["total"] if x[1]["total"] > 0 else 1)
+                
+                best_rate = round(best_cat[1]["wins"] / best_cat[1]["total"] * 100)
+                worst_rate = round(worst_cat[1]["wins"] / worst_cat[1]["total"] * 100)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"""
+                    <div style="background: #10b98120; border-radius: 10px; padding: 1rem;">
+                        <div style="font-size: 0.8rem; color: #10b981;">🏆 BEST PERFORMING</div>
+                        <div style="font-size: 1.2rem; font-weight: 800;">{best_cat[0]}</div>
+                        <div>{best_cat[1]['wins']}-{best_cat[1]['losses']} ({best_rate}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                    <div style="background: #ef444420; border-radius: 10px; padding: 1rem;">
+                        <div style="font-size: 0.8rem; color: #ef4444;">⚠️ WORST PERFORMING</div>
+                        <div style="font-size: 1.2rem; font-weight: 800;">{worst_cat[0]}</div>
+                        <div>{worst_cat[1]['wins']}-{worst_cat[1]['losses']} ({worst_rate}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # Recommendation based on data
+            st.markdown("---")
+            st.markdown("### 📌 Recommendations")
+            
+            # Find categories that need attention
+            poor_categories = [(cat, stats) for cat, stats in category_stats.items() 
+                              if cat != "SKIP" and stats["total"] >= 3 and (stats["wins"] / stats["total"] < 0.5)]
+            
+            if poor_categories:
+                st.warning("⚠️ **Categories requiring review:**")
+                for cat, stats in poor_categories:
+                    win_rate = round(stats["wins"] / stats["total"] * 100)
+                    st.write(f"- **{cat}**: {stats['wins']}-{stats['losses']} ({win_rate}%) — below 50% win rate")
+            else:
+                st.info("✅ No categories with <50% win rate (minimum 3 bets)")
+            
+            strong_categories = [(cat, stats) for cat, stats in category_stats.items() 
+                                if cat != "SKIP" and stats["total"] >= 3 and (stats["wins"] / stats["total"] >= 0.7)]
+            
+            if strong_categories:
+                st.success("✅ **Strong performing categories:**")
+                for cat, stats in strong_categories:
+                    win_rate = round(stats["wins"] / stats["total"] * 100)
+                    st.write(f"- **{cat}**: {stats['wins']}-{stats['losses']} ({win_rate}%) — above 70% win rate")
 
 
 if __name__ == "__main__":
