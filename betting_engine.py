@@ -1,10 +1,10 @@
 """
-MATCH ANALYZER V3.2 — Structural Framework Engine
-Score Matrix is King | Separation Power | Draw Cluster | Double Chance
-FIX: Score matrix drives classification | Single primary bet | Secondary clearly labeled
-FIX: Truth-based evaluation engine (no reliance on corrupted derived fields)
-FIX: Category performance breakdown in Records tab
-Supabase table: match_analyses
+MATCH ANALYZER V4.0 — PROFIT-DRIVEN ENGINE
+Based on performance analysis: LOW-SCORING (75%), HIGH-SCORING (100%), AWAY THREAT (100%)
+Removed: DRAW PRESSURE, COMPRESSION (50% win rate = random)
+Tightened: BTTS (65%+ thresholds)
+Prioritized: Low-scoring patterns first
+Skip rate target: 40-50% (only clear edges)
 """
 
 import streamlit as st
@@ -28,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V3.2", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V4.0", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -60,7 +60,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# TOP LEAGUES
+# TOP LEAGUES (same as before)
 # ============================================================================
 TOP_LEAGUES = [
     "Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1",
@@ -69,130 +69,14 @@ TOP_LEAGUES = [
 ]
 
 # ============================================================================
-# TEAM ABBREVIATIONS
+# TEAM ABBREVIATIONS (same as before - truncated for brevity)
 # ============================================================================
 TEAM_ABBREVIATIONS = {
     "Nottingham Forest": ["nott'm forest", "nottm forest", "notts forest"],
     "Manchester United": ["man utd", "manchester utd", "man united"],
     "Manchester City": ["man city", "manchester city"],
-    "Wolverhampton Wanderers": ["wolves", "wolverhampton"],
-    "Newcastle United": ["newcastle", "newcastle utd"],
-    "Tottenham Hotspur": ["spurs", "tottenham"],
-    "West Ham United": ["west ham", "west ham utd"],
-    "Crystal Palace": ["crystal palace", "palace"],
-    "Leeds United": ["leeds", "leeds utd"],
-    "Brighton & Hove Albion": ["brighton"],
-    "Brentford": ["brentford"],
-    "Everton": ["everton"],
-    "Chelsea": ["chelsea"],
-    "Arsenal": ["arsenal"],
-    "Liverpool": ["liverpool"],
-    "Aston Villa": ["aston villa", "villa"],
-    "Fulham": ["fulham"],
-    "Bournemouth": ["bournemouth"],
-    "Southampton": ["southampton"],
-    "Burnley": ["burnley"],
-    "Sunderland": ["sunderland"],
-    "Bayern Munich": ["bayern", "fc bayern", "bayern munich"],
-    "FC Koln": ["koln", "fc koln", "köln", "cologne"],
-    "Porto": ["porto", "fc porto"],
-    "Santa Clara": ["santa clara"],
-    "Famalicao": ["famalicao", "famalicão"],
-    "Alverca": ["alverca"],
-    "Cordoba": ["cordoba", "córdoba"],
-    "Albacete": ["albacete"],
-    "Castellon": ["castellon", "castellón"],
-    "Cadiz": ["cadiz", "cádiz"],
-    "Vukovar": ["vukovar"],
-    "NK Varazdin": ["varazdin", "varaždin"],
-    "Neman": ["neman", "fc neman"],
-    "Isloch": ["isloch", "fc isloch"],
-    "FC Minsk": ["fc minsk", "minsk"],
-    "Belshina": ["belshina"],
-    "Caykur Rizespor": ["rizespor", "çaykur rizespor"],
-    "Besiktas": ["besiktas", "beşiktaş"],
-    "Zaglebie Lubin": ["zaglebie", "zagłębie"],
-    "Pogon Szczecin": ["pogon", "szczecin", "pogoń"],
-    "Nyiregyhaza Spartacus": ["nyiregyhaza", "nyíregyháza"],
-    "Kazincbarcika": ["kazincbarcika"],
-    "Arges": ["arges", "argeș"],
-    "Rapid Bucuresti": ["rapid", "rapid bucuresti"],
-    "Hapoel Tel Aviv": ["hapoel tel aviv", "h. tel aviv"],
-    "Hapoel Be'er Sheva": ["hapoel be'er sheva", "h. be'er sheva"],
-    "Damac": ["damac"],
-    "Al Fayha": ["al fayha", "fayha"],
-    "Adelaide United": ["adelaide", "adelaide united"],
-    "Auckland FC": ["auckland", "auckland fc"],
-    "Shanghai Port": ["shanghai port", "shanghai sipg"],
-    "Zhejiang Professional": ["zhejiang"],
-    "Henan": ["henan"],
-    "Sichuan Jiuniu": ["sichuan", "sichuan jiuniu"],
-    "Tianjin Jinmen Tiger": ["tianjin", "jinmen tiger"],
-    "Chengdu Rongcheng": ["chengdu", "chengdu rongcheng"],
-    "Beijing Guoan": ["beijing", "beijing guoan"],
-    "Qingdao Hainiu": ["qingdao hainiu", "hainiu"],
-    "Partick Thistle": ["partick", "partick thistle"],
-    "Dunfermline Athletic": ["dunfermline"],
-    "Salford City": ["salford", "salford city"],
-    "Grimsby Town": ["grimsby", "grimsby town"],
-    "St Louis City": ["st louis", "st. louis"],
-    "Los Angeles FC": ["los angeles", "lafc"],
-    "Los Angeles Galaxy": ["la galaxy"],
-    "Sporting Kansas City": ["sporting kc", "kansas city"],
-    "San Jose Earthquakes": ["san jose", "earthquakes"],
-    "Seattle Sounders": ["seattle", "sounders"],
-    "Austin FC": ["austin"],
-    "San Diego": ["san diego"],
-    "Real Salt Lake": ["real salt lake", "salt lake", "rsl"],
-    "Houston Dynamo": ["houston", "dynamo"],
-    "Minnesota United": ["minnesota", "minnesota utd"],
-    "Colorado Rapids": ["colorado", "rapids"],
-    "Dallas": ["dallas", "fc dallas"],
-    "Vancouver Whitecaps": ["vancouver", "whitecaps"],
-    "CD Guadalajara": ["guadalajara", "chivas"],
-    "Cruz Azul": ["cruz azul"],
-    "River Plate": ["river plate", "river"],
-    "Gimnasia": ["gimnasia"],
-    "Thun": ["thun", "fc thun"],
-    "Young Boys": ["young boys", "yb", "bern"],
-    "Basel": ["basel", "fc basel"],
-    "St Gallen": ["st gallen", "st. gallen"],
-    "Sion": ["sion", "fc sion"],
-    "Lugano": ["lugano", "fc lugano"],
-    "Al Fateh": ["al fateh", "fateh"],
-    "Al Najma": ["al najma", "najma"],
-    "Al Ettifaq": ["al ettifaq", "ettifaq"],
-    "Al Ittihad": ["al ittihad", "ittihad"],
-    "Al Quadisiya": ["al quadisiya", "quadisiya"],
-    "Al Hazem": ["al hazem", "hazem"],
-    "Gomel": ["gomel"],
-    "Baranovichi": ["baranovichi"],
-    "Kudrivka": ["kudrivka"],
-    "Rukh Lviv": ["rukh lviv", "rukh"],
-    "Bradford City": ["bradford"],
-    "Bolton Wanderers": ["bolton"],
-    "Girona": ["girona"],
-    "Real Sociedad": ["real sociedad", "sociedad"],
-    "Valencia": ["valencia"],
-    "Rayo Vallecano": ["rayo", "rayo vallecano"],
-    "Hamilton Academical": ["hamilton", "hamilton academical"],
-    "Clyde": ["clyde"],
-    "Leuven": ["leuven", "oh leuven"],
-    "Royal Antwerp": ["antwerp", "royal antwerp"],
-    "Korona Kielce": ["korona", "korona kielce"],
-    "Widzew Lodz": ["widzew", "widzew lodz", "widzew łódź"],
-    "Bohemians": ["bohemians", "bohemian"],
-    "Drogheda United": ["drogheda", "drogheda united"],
-    "Waterford United": ["waterford", "waterford united"],
-    "Derry City": ["derry", "derry city"],
-    "Puskas Academy": ["puskas", "puskas academy"],
-    "MTK": ["mtk", "mtk budapest"],
-    "St Patrick's Athletic": ["st patrick's", "st pat's", "st patricks"],
-    "Shelbourne": ["shelbourne", "shels"],
-    "Dundalk": ["dundalk"],
-    "Shamrock Rovers": ["shamrock", "shamrock rovers"],
-    "Notts County": ["notts county", "notts co"],
-    "Chesterfield": ["chesterfield"],
+    # ... (keep all your existing abbreviations)
+    # For brevity, I'm showing truncated version. Use your full dict.
 }
 
 def fuzzy_team_match(team_name, text):
@@ -207,327 +91,18 @@ def fuzzy_team_match(team_name, text):
             return True
     return False
 
-
 # ============================================================================
-# PARSER
+# PARSER (same as before - keep your existing parse_match_data function)
 # ============================================================================
 def parse_match_data(raw_text: str) -> dict:
-    lines = raw_text.strip().split('\n')
-    
-    data = {
-        "home_team": None, "away_team": None, "league": None,
-        "home_win": None, "draw": None, "away_win": None,
-        "btts": None,
-        "over_15": None, "over_25": None, "under_25": None, "over_35": None,
-        "home_over_05_goals": None, "home_over_15_goals": None,
-        "away_over_05_goals": None, "away_over_15_goals": None,
-        "home_win_trend": None, "draw_trend": None, "away_win_trend": None,
-        "btts_trend": None, "over_25_trend": None,
-        "home_form_all": [], "away_form_all": [],
-        "h2h_scores": [], "h2h_btts_count": 0, "h2h_total": 0,
-        "score_matrix": [],
-    }
-    
-    # Team names
-    team_names = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == 'All competitions' and i > 0:
-            name = lines[i-1].strip()
-            if name and not name.startswith('Last game') and not name.startswith('Goals scored') and not name.startswith('Top scorer') and name not in team_names:
-                team_names.append(name)
-    
-    if len(team_names) >= 2:
-        data["home_team"] = team_names[0]
-        data["away_team"] = team_names[1]
-    
-    # League
-    leagues_found = []
-    in_form_data = False
-    for line in lines:
-        if 'Form Data' in line:
-            in_form_data = True
-        if in_form_data:
-            continue
-        m = re.search(r'(Premier League|La Liga|Bundesliga|Serie A|Serie B|Ligue 1|Championship|'
-                      r'Süper Lig|Pro League|Primeira Liga|EFL Cup|Swiss Super League|'
-                      r'Saudi Pro League|Ukrainian Premier League|Belarusian Premier League|'
-                      r'Liga MX|League One|League Two|Argentine Primera Division|'
-                      r'Major League Soccer|Segunda Division|Segunda División|'
-                      r'Croatian 1\. HNL|HNL|Prva HNL|Scottish Premiership|Scottish Premiership Playoffs|'
-                      r'Eredivisie|A-League|Ekstraklasa|Polish Ekstraklasa|'
-                      r'Turkish Super Lig|Süper Lig|Israeli Premier League|Ligat HaAl|'
-                      r'Hungarian NB I|OTP Bank Liga|Romanian SuperLiga|SuperLiga|'
-                      r'Chinese Super League|CSL|Australian A-League|'
-                      r'Scottish Championship|League Two|League of Ireland Premier Division|'
-                      r'Belgian Pro League|Jupiler Pro League)', 
-                      line, re.IGNORECASE)
-        if m and 'Gameweek' not in line and 'Head to Head' not in line:
-            league_name = m.group(1)
-            if league_name not in leagues_found:
-                leagues_found.append(league_name)
-    
-    if leagues_found:
-        data["league"] = leagues_found[0]
-    
-    def find_pct(start_idx, max_lookahead=3):
-        for j in range(start_idx, min(start_idx + max_lookahead, len(lines))):
-            sub = lines[j].strip()
-            m = re.search(r'(\d+\.?\d*)\s*%', sub)
-            if m:
-                prob = float(m.group(1))
-                trend_m = re.search(r'([+-]\d+\.?\d*)', sub)
-                trend = float(trend_m.group(1)) if trend_m else 0
-                return prob, trend
-        return None, 0
-
-    def has_arrow(start_idx, max_lookahead=3):
-        for j in range(start_idx, min(start_idx + max_lookahead, len(lines))):
-            sub = lines[j].strip()
-            if '▲' in sub or '▼' in sub:
-                return True
-        return False
-    
-    current_section = None
-    current_subsection = None
-    
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if stripped in ['Result', 'Goals', 'First Half Winner', 'Team To Score First', 
-                        'Corners', 'Score analysis']:
-            current_section = stripped.lower().replace(' ', '_')
-            current_subsection = None
-            continue
-        if stripped == 'Head to Head':
-            current_section = 'h2h'
-            current_subsection = None
-            continue
-        if stripped == 'Form Data':
-            current_section = 'form'
-            current_subsection = None
-            continue
-        
-        if current_section == 'result':
-            if data["home_team"] and data["home_team"] in stripped:
-                prob, trend = find_pct(i)
-                if prob: 
-                    data["home_win"] = prob
-                    data["home_win_trend"] = trend if has_arrow(i) else None
-            elif stripped.startswith('Draw'):
-                prob, trend = find_pct(i)
-                if prob: 
-                    data["draw"] = prob
-                    data["draw_trend"] = trend if has_arrow(i) else None
-            elif data["away_team"] and data["away_team"] in stripped:
-                prob, trend = find_pct(i)
-                if prob: 
-                    data["away_win"] = prob
-                    data["away_win_trend"] = trend if has_arrow(i) else None
-            elif 'Both Teams to Score' in stripped:
-                prob, trend = find_pct(i)
-                if prob: 
-                    data["btts"] = prob
-                    data["btts_trend"] = trend if has_arrow(i) else None
-        
-        if current_section == 'goals':
-            if 'Over 1.5' in stripped and 'Goals' not in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["over_15"] = prob
-            elif 'Over 2.5' in stripped and 'Goals' not in stripped:
-                prob, trend = find_pct(i)
-                if prob: 
-                    data["over_25"] = prob
-                    data["over_25_trend"] = trend if has_arrow(i) else None
-            elif 'Under 2.5' in stripped and 'Goals' not in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["under_25"] = prob
-            elif 'Over 3.5' in stripped and 'Goals' not in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["over_35"] = prob
-        
-        if data["home_team"] and f'{data["home_team"]} Goals' in stripped:
-            current_subsection = 'home_goals'
-        if data["away_team"] and f'{data["away_team"]} Goals' in stripped:
-            current_subsection = 'away_goals'
-        
-        if current_subsection == 'home_goals':
-            if 'Over 0.5' in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["home_over_05_goals"] = prob
-            elif 'Over 1.5' in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["home_over_15_goals"] = prob
-        
-        if current_subsection == 'away_goals':
-            if 'Over 0.5' in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["away_over_05_goals"] = prob
-            elif 'Over 1.5' in stripped:
-                prob, _ = find_pct(i)
-                if prob: data["away_over_15_goals"] = prob
-    
-    # SCORE MATRIX
-    in_score_analysis = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if stripped == 'Score analysis':
-            in_score_analysis = True
-            continue
-        if in_score_analysis and stripped == 'Head to Head':
-            break
-        if in_score_analysis and 'Form Data' in stripped:
-            break
-        
-        if in_score_analysis:
-            m = re.match(r'(\d+)-(\d+)\s*@\s*(\d+\.?\d*)\s*%', stripped)
-            if m:
-                home = int(m.group(1))
-                away = int(m.group(2))
-                prob = float(m.group(3))
-                data["score_matrix"].append({
-                    "score": "{}-{}".format(home, away),
-                    "home_goals": home,
-                    "away_goals": away,
-                    "probability": prob
-                })
-    
-    data["score_matrix"].sort(key=lambda x: x["probability"], reverse=True)
-    data["score_matrix"] = data["score_matrix"][:10]
-    
-    # Form strings
-    form_blocks = []
-    current_block = []
-    collecting = False
-    
-    league_headers = [
-        'All competitions', 'Premier League', 'La Liga', 'Bundesliga', 'Serie A', 'Serie B',
-        'Ligue 1', 'Championship', 'Süper Lig', 'Pro League', 'Primeira Liga',
-        'Swiss Super League', 'Saudi Pro League', 'Ukrainian Premier League',
-        'Belarusian Premier League', 'Liga MX', 'League One', 'League Two',
-        'Argentine Primera Division', 'Major League Soccer', 'Segunda Division',
-        'Segunda División', 'Scottish Premiership', 'Scottish Premiership Playoffs',
-        'Eredivisie', 'A-League', 'Croatian 1. HNL', 'HNL', 'Prva HNL', 'Ekstraklasa',
-        'Turkish Super Lig', 'Israeli Premier League', 'Hungarian NB I',
-        'Romanian SuperLiga', 'Chinese Super League', 'Australian A-League',
-        'Scottish Championship', 'League of Ireland Premier Division',
-        'Belgian Pro League', 'Jupiler Pro League'
-    ]
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        if stripped in league_headers:
-            if current_block and len(current_block) >= 4:
-                form_blocks.append(current_block)
-            current_block = []
-            collecting = True
-            continue
-        
-        if stripped.startswith('Last game') or stripped.startswith('Goals scored') or stripped.startswith('Top scorer'):
-            if current_block and len(current_block) >= 4:
-                form_blocks.append(current_block)
-            current_block = []
-            collecting = False
-            continue
-        
-        if stripped == 'Data analysis':
-            if current_block and len(current_block) >= 4:
-                form_blocks.append(current_block)
-            current_block = []
-            collecting = False
-            continue
-        
-        if collecting and stripped in ['W', 'D', 'L']:
-            current_block.append(stripped)
-    
-    if current_block and len(current_block) >= 4:
-        form_blocks.append(current_block)
-    
-    if len(form_blocks) >= 1:
-        data["home_form_all"] = form_blocks[0][:6]
-    if len(form_blocks) >= 3:
-        data["away_form_all"] = form_blocks[2][:6]
-    if not data["away_form_all"] and len(form_blocks) >= 2:
-        data["away_form_all"] = form_blocks[1][:6]
-    
-    # Form Data fallback
-    form_data_started = False
-    current_team_form = None
-    team_forms = {}
-    
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if 'Form Data' in stripped:
-            form_data_started = True
-            continue
-        if not form_data_started:
-            continue
-        
-        is_team = False
-        for team in team_names:
-            if team and fuzzy_team_match(team, stripped):
-                is_team = True
-                current_team_form = team
-                if team not in team_forms:
-                    team_forms[team] = []
-                break
-        
-        if is_team:
-            continue
-        
-        if stripped in ['W', 'D', 'L'] and current_team_form:
-            team_forms[current_team_form].append(stripped)
-    
-    if not data["home_form_all"] and data["home_team"] in team_forms:
-        data["home_form_all"] = team_forms[data["home_team"]][:6]
-    if not data["away_form_all"] and data["away_team"] in team_forms:
-        data["away_form_all"] = team_forms[data["away_team"]][:6]
-    
-    # H2H
-    h2h_section = False
-    h2h_scores = []
-    
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if stripped == 'Head to Head':
-            h2h_section = True
-            continue
-        if h2h_section and 'Form Data' in stripped:
-            break
-        
-        if h2h_section and stripped == 'FT':
-            numbers_found = []
-            for j in range(i-1, max(i-15, 0), -1):
-                prev_line = lines[j].strip()
-                m = re.match(r'^(\d+)$', prev_line)
-                if m:
-                    num = int(m.group(1))
-                    if num < 20:
-                        numbers_found.append(num)
-                        if len(numbers_found) == 2:
-                            break
-                if prev_line in ['FT', 'HT'] or re.match(r'\d{1,2}:\d{2}', prev_line):
-                    break
-            
-            if len(numbers_found) == 2:
-                away_score = numbers_found[0]
-                home_score = numbers_found[1]
-                h2h_scores.append((home_score, away_score))
-    
-    data["h2h_scores"] = h2h_scores
-    data["h2h_total"] = len(h2h_scores)
-    data["h2h_btts_count"] = sum(1 for h, a in h2h_scores if h > 0 and a > 0)
-    
-    return data
-
+    # ... (keep your existing parser exactly as before)
+    # For brevity, I'm not duplicating the entire parser here.
+    # Use the parser from your previous code.
+    pass
 
 # ============================================================================
-# STRUCTURAL FRAMEWORK ENGINE V3.2
-# Score Matrix drives classification. Single primary bet. Secondary clearly labeled.
+# OVERHAULED STRUCTURAL ENGINE V4.0
+# Profit-driven, high thresholds, eliminate garbage categories
 # ============================================================================
 def analyze_match(data: dict) -> dict:
     result = {
@@ -554,6 +129,7 @@ def analyze_match(data: dict) -> dict:
     home_o05 = data.get("home_over_05_goals")
     away_o05 = data.get("away_over_05_goals")
     
+    # Fill missing with btts as proxy
     if home_o05 is None and btts:
         home_o05 = btts
     if away_o05 is None and btts:
@@ -565,13 +141,8 @@ def analyze_match(data: dict) -> dict:
     
     home_form = data.get("home_form_all") or []
     away_form = data.get("away_form_all") or []
-    
-    home_wins = sum(1 for r in home_form[:6] if r == 'W')
     home_losses = sum(1 for r in home_form[:6] if r == 'L')
-    away_wins = sum(1 for r in away_form[:6] if r == 'W')
-    
-    h2h_total = data.get("h2h_total", 0)
-    h2h_btts = data.get("h2h_btts_count", 0)
+    away_losses = sum(1 for r in away_form[:6] if r == 'L')
     
     score_matrix = data.get("score_matrix", [])
     
@@ -580,7 +151,7 @@ def analyze_match(data: dict) -> dict:
     is_saudi = league == "Saudi Pro League" if league else False
     
     # ========================================================================
-    # SCORE MATRIX STRUCTURE ANALYSIS (KING — do this FIRST)
+    # SCORE MATRIX STRUCTURE ANALYSIS
     # ========================================================================
     tight_cluster = False
     btts_dominant = False
@@ -597,13 +168,13 @@ def analyze_match(data: dict) -> dict:
         tight_cluster = top5_spread < 5.0
         
         btts_count = sum(1 for s in score_matrix[:5] if s["home_goals"] > 0 and s["away_goals"] > 0)
-        btts_dominant = btts_count >= 3
+        btts_dominant = btts_count >= 4  # 👈 Increased from 3 to 4 (stricter)
         
         low_count = sum(1 for s in score_matrix[:5] if s["home_goals"] + s["away_goals"] <= 2)
         low_scoring_cluster = low_count >= 4
         
         goals_count = sum(1 for s in score_matrix[:5] if s["home_goals"] + s["away_goals"] >= 3)
-        goals_expected = goals_count >= 3
+        goals_expected = goals_count >= 4  # 👈 Increased from 3 to 4
         
         modal_outcome = score_matrix[0]["score"]
         modal_is_draw = score_matrix[0]["home_goals"] == score_matrix[0]["away_goals"]
@@ -616,276 +187,221 @@ def analyze_match(data: dict) -> dict:
             else:
                 draw_cluster += s["probability"]
     
-    # Under 3.5
     under_35_pct = (100 - over_35) if over_35 else 0
     
     # ========================================================================
-    # CLASSIFICATION — Score Matrix First, Percentages Confirm
+    # TREND REVERSAL (keep, but high threshold)
     # ========================================================================
-    
-    # Trend reversal
     trend_reversal = False
     if home_win_trend is not None and away_win_trend is not None:
-        if home_win_trend <= -1.0 and away_win_trend >= 1.0:
+        if home_win_trend <= -2.0 and away_win_trend >= 2.0:  # Stricter
             trend_reversal = True
     
-    # Strong favorite
-    is_true_strong = (home_win >= 60 and home_o15 >= 55 and not tight_cluster)
-    is_true_strong_away = (away_win >= 60 and away_o15 >= 55 and not tight_cluster)
-    
-    # Fragile favorite
-    is_fragile = (home_win >= 60 and home_o15 < 60)
-    is_fragile_away = (away_win >= 60 and away_o15 < 60)
-    
-    # BTTS
-    btts_contradiction = (btts >= 55 and (home_o15 < 35 or away_o15 < 25))
-    is_btts_play = (btts >= 55 and not btts_contradiction and 
-                    (away_o05 is None or away_o05 >= 60 or home_o05 is None or home_o05 >= 60) and
-                    btts_dominant)
-    
-    # High-scoring
-    is_high_scoring = (goals_expected and over_25 >= 55 and btts >= 55)
-    
-    # Low-scoring / Under
-    is_low_scoring = (low_scoring_cluster and under_25 >= 50 and btts < 52 and
-                      not (home_losses >= 4 and sum(1 for r in away_form[:6] if r == 'L') >= 4))
-    
-    # Draw pressure → Double Chance
-    is_draw_pressure = (modal_is_draw and draw_pct >= 20 and 
-                        abs(home_win - away_win) <= 15)
-    
-    # Away threat
-    is_away_threat = (home_o15 < 35 and away_win >= 30)
-    
-    # Compression
-    is_compression = (tight_cluster and low_scoring_cluster and 
-                      draw_pct >= 20 and under_35_pct >= 65 and
-                      home_o15 < 45 and away_o15 < 45)
+    # ========================================================================
+    # TRUE STRONG FAVORITE (Home) - increased thresholds
+    # ========================================================================
+    is_true_strong = (home_win >= 65 and home_o15 >= 60 and not tight_cluster and home_losses <= 2)
+    is_true_strong_away = (away_win >= 65 and away_o15 >= 60 and not tight_cluster and away_losses <= 2)
     
     # ========================================================================
-    # BETTING DECISIONS — Single Primary Bet
+    # LOW-SCORING (PRIORITY #1 - 75% win rate historically)
+    # ========================================================================
+    is_low_scoring = (
+        low_scoring_cluster and 
+        under_25 >= 55 and 
+        btts < 50 and
+        not (home_losses >= 4 and away_losses >= 4)  # Avoid both teams terrible
+    )
+    
+    # ========================================================================
+    # HIGH-SCORING (PRIORITY #2 - 100% win rate historically)
+    # ========================================================================
+    is_high_scoring = (
+        goals_expected and 
+        over_25 >= 60 and 
+        btts >= 55 and
+        home_o15 >= 50 and 
+        away_o15 >= 50
+    )
+    
+    # ========================================================================
+    # AWAY THREAT (PRIORITY #3 - 100% win rate historically)
+    # ========================================================================
+    is_away_threat = (home_o15 < 35 and away_win >= 35 and away_o15 >= 30)
+    
+    # ========================================================================
+    # BTTS (DEMOTED, STRICT THRESHOLDS - target 65%+ win rate)
+    # ========================================================================
+    btts_contradiction = (btts >= 60 and (home_o15 < 40 or away_o15 < 40))
+    is_btts_play = (
+        btts >= 65 and  # 👈 Increased from 55 to 65
+        btts_dominant and
+        home_o05 is not None and home_o05 >= 65 and  # 👈 Both must be strong
+        away_o05 is not None and away_o05 >= 65 and
+        home_o15 >= 40 and  # 👈 Both can score at least 1+
+        away_o15 >= 40 and
+        not btts_contradiction and
+        btts_trend is not None and btts_trend >= 0  # Non-negative trend
+    )
+    
+    # ========================================================================
+    # FRAGILE FAVORITE (keep but higher bar)
+    # ========================================================================
+    is_fragile = (home_win >= 60 and home_o15 < 55 and home_o15 >= 30)
+    is_fragile_away = (away_win >= 60 and away_o15 < 55 and away_o15 >= 30)
+    
+    # ========================================================================
+    # SAUDI LEAGUE OVERRIDE (keep)
+    # ========================================================================
+    is_saudi_dominant = (is_saudi and home_win >= 65)
+    
+    # ========================================================================
+    # BETTING DECISIONS - REORDERED AND STRICT
     # ========================================================================
     
-    # RULE 1: Trend Reversal
+    # RULE 1: Trend Reversal (high confidence)
     if trend_reversal:
         result["classification"] = "TREND REVERSAL"
-        result["badges"].append("Trend Reversal: Home {:.1f} / Away {:.1f}".format(home_win_trend, away_win_trend))
+        result["badges"].append(f"Trend Reversal: Home {home_win_trend:.1f} / Away {away_win_trend:.1f}")
         result["primary_bet"] = {
             "market": "Away Win or Draw",
-            "confidence": 8.0 if home_win_trend <= -3.0 else 6.5,
+            "confidence": 8.0,
             "probability": away_win + draw_pct,
-            "reason": "Market reversal — FADE home team. Home trend {:.1f}, Away trend {:.1f}".format(home_win_trend, away_win_trend)
+            "reason": f"Market reversal. Home trend {home_win_trend:.1f}, Away trend {away_win_trend:.1f}"
         }
     
     # RULE 2: TRUE Strong Favorite (Home)
     elif is_true_strong:
         result["classification"] = "TRUE STRONG FAVORITE"
-        if away_o05 is not None and away_o05 < 52:
+        if away_o05 is not None and away_o05 < 55:
             result["primary_bet"] = {
                 "market": "Home Win to Nil",
                 "confidence": 8.5,
                 "probability": home_win,
-                "reason": "Dominant favorite ({:.0f}% win, O1.5 {:.0f}%) + underdog unlikely to score ({:.0f}%)".format(home_win, home_o15, away_o05)
+                "reason": f"Dominant favorite ({home_win:.0f}% win, O1.5 {home_o15:.0f}%) + underdog unlikely to score ({away_o05:.0f}%)"
             }
         else:
             result["primary_bet"] = {
                 "market": "Home Win",
                 "confidence": 7.5,
                 "probability": home_win,
-                "reason": "Dominant favorite ({:.0f}% win, O1.5 {:.0f}%) but underdog can score".format(home_win, home_o15)
+                "reason": f"Dominant favorite ({home_win:.0f}% win, O1.5 {home_o15:.0f}%)"
             }
     
     # RULE 3: TRUE Strong Favorite (Away)
     elif is_true_strong_away:
         result["classification"] = "TRUE STRONG FAVORITE (AWAY)"
-        if home_o05 is not None and home_o05 < 52:
+        if home_o05 is not None and home_o05 < 55:
             result["primary_bet"] = {
                 "market": "Away Win to Nil",
                 "confidence": 8.5,
                 "probability": away_win,
-                "reason": "Dominant away favorite ({:.0f}% win, O1.5 {:.0f}%) + home unlikely to score".format(away_win, away_o15)
+                "reason": f"Dominant away favorite ({away_win:.0f}% win, O1.5 {away_o15:.0f}%) + home unlikely to score"
             }
         else:
             result["primary_bet"] = {
                 "market": "Away Win",
                 "confidence": 7.5,
                 "probability": away_win,
-                "reason": "Dominant away favorite ({:.0f}% win, O1.5 {:.0f}%) but home can score".format(away_win, away_o15)
+                "reason": f"Dominant away favorite ({away_win:.0f}% win, O1.5 {away_o15:.0f}%)"
             }
     
-    # RULE 4: High-Scoring
-    elif is_high_scoring:
-        result["classification"] = "HIGH-SCORING"
-        result["primary_bet"] = {
-            "market": "Over 2.5 Goals",
-            "confidence": 7.0,
-            "probability": over_25,
-            "reason": "Score matrix shows goals expected. Over 2.5 at {:.1f}%.".format(over_25)
-        }
-        if btts >= 55:
-            result["secondary_bet"] = {
-                "market": "BTTS",
-                "confidence": 6.5,
-                "probability": btts,
-                "reason": "Both teams scoring in high-scoring setup"
-            }
-    
-    # RULE 5: BTTS
-    elif is_btts_play:
-        result["classification"] = "BTTS"
-        result["primary_bet"] = {
-            "market": "BTTS",
-            "confidence": 7.0 if btts_trend and btts_trend >= 0.30 else 6.5,
-            "probability": btts,
-            "reason": "BTTS-dominant score matrix. BTTS at {:.1f}%. Both teams expected to score.".format(btts)
-        }
-        # Add secondary if applicable
-        if is_away_threat:
-            result["secondary_bet"] = {
-                "market": "Away Win or Draw (Double Chance)",
-                "confidence": 5.5,
-                "probability": away_win + draw_pct,
-                "reason": "Home O1.5 only {:.1f}% — away side won't lose".format(home_o15)
-            }
-    
-    # RULE 6: Low-Scoring / Under
+    # RULE 4: LOW-SCORING (Primary profit driver)
     elif is_low_scoring:
         result["classification"] = "LOW-SCORING"
-        if under_25 >= 55:
+        if under_25 >= 60:
             result["primary_bet"] = {
                 "market": "Under 2.5 Goals",
-                "confidence": 7.0,
+                "confidence": 7.5,
                 "probability": under_25,
-                "reason": "Low-scoring score cluster. Under 2.5 at {:.1f}%. BTTS only {:.1f}%.".format(under_25, btts)
+                "reason": f"Low-scoring cluster. Under 2.5 at {under_25:.1f}%. BTTS only {btts:.1f}%."
             }
         else:
             result["primary_bet"] = {
                 "market": "Under 3.5 Goals",
-                "confidence": 6.5,
+                "confidence": 7.0,
                 "probability": under_35_pct,
-                "reason": "Low-scoring profile. Under 3.5 at {:.0f}%.".format(under_35_pct)
+                "reason": f"Low-scoring profile. Under 3.5 at {under_35_pct:.0f}%."
             }
     
-    # RULE 7: Compression
-    elif is_compression:
-        result["classification"] = "COMPRESSION"
-        result["badges"].append("Tight score cluster — low variance match")
+    # RULE 5: HIGH-SCORING
+    elif is_high_scoring:
+        result["classification"] = "HIGH-SCORING"
         result["primary_bet"] = {
-            "market": "Under 3.5 Goals",
+            "market": "Over 2.5 Goals",
             "confidence": 7.5,
-            "probability": under_35_pct,
-            "reason": "Compression match — tight score cluster, Under 3.5 at {:.0f}%".format(under_35_pct)
+            "probability": over_25,
+            "reason": f"High-scoring matrix. Over 2.5 at {over_25:.1f}%. Both teams can score."
         }
-        # Secondary: Double Chance based on score matrix
-        if home_cluster > away_cluster:
+        if btts >= 60:
             result["secondary_bet"] = {
-                "market": "Home Win or Draw (Double Chance)",
-                "confidence": 6.0,
-                "probability": home_win + draw_pct,
-                "reason": "Score matrix favors home side ({:.1f}% vs {:.1f}%)".format(home_cluster, away_cluster)
-            }
-        else:
-            result["secondary_bet"] = {
-                "market": "Away Win or Draw (Double Chance)",
-                "confidence": 6.0,
-                "probability": away_win + draw_pct,
-                "reason": "Score matrix favors away side ({:.1f}% vs {:.1f}%)".format(away_cluster, home_cluster)
+                "market": "BTTS",
+                "confidence": 6.5,
+                "probability": btts,
+                "reason": "Secondary: BTTS in high-scoring setup"
             }
     
-    # RULE 8: Fragile Favorite
+    # RULE 6: Away Threat
+    elif is_away_threat:
+        result["classification"] = "AWAY THREAT"
+        result["primary_bet"] = {
+            "market": "Away Win or Draw (Double Chance)",
+            "confidence": 7.0,
+            "probability": away_win + draw_pct,
+            "reason": f"Home O1.5 only {home_o15:.1f}% — home can't score. Away won't lose."
+        }
+    
+    # RULE 7: BTTS (Strict, demoted)
+    elif is_btts_play:
+        result["classification"] = "BTTS"
+        confidence = 7.0 if btts_trend and btts_trend >= 0.5 else 6.5
+        result["primary_bet"] = {
+            "market": "BTTS",
+            "confidence": confidence,
+            "probability": btts,
+            "reason": f"Strong BTTS setup: {btts:.1f}% probability, both teams reliable scorers."
+        }
+    
+    # RULE 8: Fragile Favorite (Home)
     elif is_fragile:
         result["classification"] = "FRAGILE FAVORITE"
-        result["badges"].append("Fragile favorite — O1.5 only {:.0f}%".format(home_o15))
+        result["badges"].append(f"Fragile favorite — O1.5 only {home_o15:.0f}%")
         if is_away_threat:
             result["primary_bet"] = {
                 "market": "Away Win or Draw (Double Chance)",
                 "confidence": 7.0,
                 "probability": away_win + draw_pct,
-                "reason": "Fragile favorite ({:.0f}% win, O1.5 {:.0f}%) + away scoring threat. Home vulnerable.".format(home_win, home_o15)
+                "reason": f"Fragile favorite ({home_win:.0f}% win) + away threat"
             }
         else:
             result["primary_bet"] = {
                 "market": "Home Win or Draw (Double Chance)",
                 "confidence": 6.5,
                 "probability": home_win + draw_pct,
-                "reason": "Fragile favorite ({:.0f}% win, O1.5 {:.0f}%) but underdog can't score. Draw protection.".format(home_win, home_o15)
+                "reason": f"Fragile favorite but underdog can't score"
             }
     
     # RULE 9: Fragile Favorite (Away)
     elif is_fragile_away:
         result["classification"] = "FRAGILE FAVORITE (AWAY)"
-        result["badges"].append("Fragile away favorite — O1.5 only {:.0f}%".format(away_o15))
-        if home_o15 >= 30:
+        result["badges"].append(f"Fragile away favorite — O1.5 only {away_o15:.0f}%")
+        if home_o15 >= 35:
             result["primary_bet"] = {
                 "market": "Home Win or Draw (Double Chance)",
                 "confidence": 7.0,
                 "probability": home_win + draw_pct,
-                "reason": "Fragile away favorite ({:.0f}% win) + home scoring threat. Away vulnerable.".format(away_win)
+                "reason": f"Fragile away favorite + home scoring threat"
             }
         else:
             result["primary_bet"] = {
                 "market": "Away Win or Draw (Double Chance)",
                 "confidence": 6.5,
                 "probability": away_win + draw_pct,
-                "reason": "Fragile away favorite but home can't score. Away won't lose.".format(away_win)
+                "reason": f"Fragile away favorite, home can't score"
             }
     
-    # RULE 10: Draw Pressure → Double Chance
-    elif is_draw_pressure:
-        result["classification"] = "DRAW PRESSURE"
-        if home_cluster > away_cluster:
-            result["primary_bet"] = {
-                "market": "Home Win or Draw (Double Chance)",
-                "confidence": 6.5,
-                "probability": home_win + draw_pct,
-                "reason": "Modal outcome is {}. Draw at {:.1f}%. Home side slightly favored.".format(modal_outcome, draw_pct)
-            }
-        else:
-            result["primary_bet"] = {
-                "market": "Away Win or Draw (Double Chance)",
-                "confidence": 6.5,
-                "probability": away_win + draw_pct,
-                "reason": "Modal outcome is {}. Draw at {:.1f}%. Away side slightly favored.".format(modal_outcome, draw_pct)
-            }
-    
-    # RULE 11: Away Threat (standalone)
-    elif is_away_threat:
-        result["classification"] = "AWAY THREAT"
-        result["primary_bet"] = {
-            "market": "Away Win or Draw (Double Chance)",
-            "confidence": 6.5,
-            "probability": away_win + draw_pct,
-            "reason": "Home O1.5 only {:.1f}% — home can't score. Away won't lose.".format(home_o15)
-        }
-    
-    # ========================================================================
-    # UNBEATEN COLLISION — only if nothing else classified
-    # ========================================================================
-    home_unbeaten_5 = sum(1 for r in home_form[:5] if r in ['W', 'D'])
-    away_unbeaten_5 = sum(1 for r in away_form[:5] if r in ['W', 'D'])
-    
-    if result["primary_bet"] is None and home_unbeaten_5 >= 4 and away_unbeaten_5 >= 4 and draw_pct >= 20:
-        result["classification"] = "UNBEATEN COLLISION"
-        result["badges"].append("Both unbeaten: Home {}/5, Away {}/5".format(home_unbeaten_5, away_unbeaten_5))
-        if home_cluster > away_cluster:
-            result["primary_bet"] = {
-                "market": "Home Win or Draw (Double Chance)",
-                "confidence": 6.0,
-                "probability": home_win + draw_pct,
-                "reason": "Both teams unbeaten. Score matrix favors home side."
-            }
-        else:
-            result["primary_bet"] = {
-                "market": "Away Win or Draw (Double Chance)",
-                "confidence": 6.0,
-                "probability": away_win + draw_pct,
-                "reason": "Both teams unbeaten. Score matrix favors away side."
-            }
-    
-    # ========================================================================
-    # SAUDI LEAGUE OVERRIDE
-    # ========================================================================
-    if is_saudi and home_win >= 60 and result["primary_bet"] is None:
+    # RULE 10: Saudi League Dominant
+    elif is_saudi_dominant:
         result["classification"] = "SAUDI DOMINANT"
         result["primary_bet"] = {
             "market": "Home Win to Nil",
@@ -895,51 +411,41 @@ def analyze_match(data: dict) -> dict:
         }
     
     # ========================================================================
-    # FINALIZE
+    # FINALIZE - SKIP if no bet or confidence too low
     # ========================================================================
     if result["primary_bet"]:
-        result["verdict"] = "RECOMMENDED"
+        # Additional confidence filter: skip if confidence < 7.0 except for LOW-SCORING
+        if result["primary_bet"]["confidence"] < 7.0 and result["classification"] != "LOW-SCORING":
+            result["verdict"] = "SKIP"
+            result["skip_reasons"].append(f"Confidence too low ({result['primary_bet']['confidence']}/10) - skipping marginal edge")
+            result["primary_bet"] = None
+            result["classification"] = "SKIP"
+        else:
+            result["verdict"] = "RECOMMENDED"
     else:
         result["verdict"] = "SKIP"
-        result["skip_reasons"].append("No structural pattern matched with sufficient confidence")
+        if not result.get("skip_reasons"):
+            result["skip_reasons"].append("No structural pattern matched with sufficient confidence")
         result["classification"] = "SKIP"
     
-    # Warnings
-    if draw_pct >= 25:
-        result["warnings"].append("High draw probability ({:.1f}%) — avoid straight match result bets".format(draw_pct))
+    # Warnings (keep useful ones)
+    if draw_pct >= 28:
+        result["warnings"].append(f"High draw probability ({draw_pct:.1f}%) — avoid straight match result bets")
     if not is_top_league and league:
-        result["warnings"].append("'{}' is not a top league — lower reliability".format(league))
-    if btts_contradiction and result["primary_bet"] and result["primary_bet"]["market"] == "BTTS":
-        result["warnings"].append("BTTS contradiction — one team may not contribute")
+        result["warnings"].append(f"'{league}' is not a top league — lower reliability")
     
     return result
 
 
 # ============================================================================
-# TRUTH-BASED EVALUATION ENGINE (FIXED)
+# TRUTH-BASED EVALUATION ENGINE (same as before, with Under 2.5 fix)
 # ============================================================================
 def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
-    """
-    Evaluate any bet from raw scores only.
-    No reliance on corrupted derived fields (actual_winner, actual_btts, actual_over25).
-    
-    Returns:
-        {
-            "is_correct": bool,
-            "actual": str,
-            "message": str
-        }
-    """
-    # Normalize inputs to integers
     try:
         home = int(home_goals) if home_goals is not None else 0
         away = int(away_goals) if away_goals is not None else 0
     except (ValueError, TypeError):
-        return {
-            "is_correct": False, 
-            "actual": "INVALID DATA", 
-            "message": f"Non-numeric score: home={home_goals}, away={away_goals}"
-        }
+        return {"is_correct": False, "actual": "INVALID DATA", "message": "Non-numeric score"}
     
     total = home + away
     btts = home > 0 and away > 0
@@ -953,23 +459,19 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     else:
         winner = "DRAW"
     
-    # Evaluate against prediction
     pred = primary_pred.strip()
     is_correct = False
     
-    # Goal line markets
     if pred == "BTTS":
         is_correct = btts
     elif pred == "Over 2.5 Goals":
         is_correct = over25
     elif pred == "Under 2.5 Goals":
-        is_correct = not over25  # Fixed: removed total > 0 requirement
+        is_correct = not over25  # Fixed: 0-0 is a win
     elif pred == "Over 3.5 Goals":
         is_correct = over35
     elif pred == "Under 3.5 Goals":
         is_correct = total <= 3
-    
-    # Match result markets
     elif pred == "Home Win":
         is_correct = winner == "HOME"
     elif pred == "Away Win":
@@ -978,30 +480,16 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
         is_correct = (winner == "HOME" and away == 0)
     elif pred == "Away Win to Nil":
         is_correct = (winner == "AWAY" and home == 0)
-    
-    # Double chance markets
     elif "Away Win or Draw" in pred:
         is_correct = winner in ["AWAY", "DRAW"]
     elif "Home Win or Draw" in pred:
         is_correct = winner in ["HOME", "DRAW"]
-    
-    # Team goal markets
     elif pred == "Home Over 1.5 Goals":
         is_correct = home >= 2
     elif pred == "Away Over 1.5 Goals":
         is_correct = away >= 2
-    elif pred == "Home Over 0.5 Goals":
-        is_correct = home >= 1
-    elif pred == "Away Over 0.5 Goals":
-        is_correct = away >= 1
-    
-    # Fallback (unknown market)
     else:
-        return {
-            "is_correct": False,
-            "actual": f"{home}-{away}",
-            "message": f"Unknown market: {pred}"
-        }
+        return {"is_correct": False, "actual": f"{home}-{away}", "message": f"Unknown market: {pred}"}
     
     return {
         "is_correct": is_correct,
@@ -1011,621 +499,34 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 
 
 # ============================================================================
-# SUPABASE OPERATIONS
+# SUPABASE OPERATIONS (keep existing)
 # ============================================================================
 def save_to_db(data: dict, analysis: dict):
-    try:
-        primary = analysis.get("primary_bet")
-        secondary = analysis.get("secondary_bet")
-        
-        if primary:
-            bets_str = primary["market"]
-            if secondary:
-                bets_str += " | " + secondary["market"]
-        else:
-            bets_str = "SKIP"
-        
-        top = primary if primary else secondary
-        
-        home_form_str = '-'.join(data.get("home_form_all", [])) if data.get("home_form_all") else ""
-        away_form_str = '-'.join(data.get("away_form_all", [])) if data.get("away_form_all") else ""
-        
-        over_35 = data.get("over_35") or 0
-        under_35 = (100 - over_35) if over_35 else 0
-        
-        record = {
-            "home_team": data.get("home_team", "Unknown"),
-            "away_team": data.get("away_team", "Unknown"),
-            "match_date": str(date.today()),
-            "home_data": {
-                "league": data.get("league"),
-                "home_win_pct": data.get("home_win"),
-                "draw_pct": data.get("draw"),
-                "away_win_pct": data.get("away_win"),
-                "btts_pct": data.get("btts"),
-                "over15_pct": data.get("over_15"),
-                "over25_pct": data.get("over_25"),
-                "under25_pct": data.get("under_25"),
-                "over35_pct": data.get("over_35"),
-                "under35_pct": under_35,
-                "home_over05_pct": data.get("home_over_05_goals"),
-                "home_over15_pct": data.get("home_over_15_goals"),
-                "away_over05_pct": data.get("away_over_05_goals"),
-                "away_over15_pct": data.get("away_over_15_goals"),
-                "home_win_trend": data.get("home_win_trend"),
-                "draw_trend": data.get("draw_trend"),
-                "away_win_trend": data.get("away_win_trend"),
-                "btts_trend": data.get("btts_trend"),
-                "over25_trend": data.get("over_25_trend"),
-                "home_form": home_form_str,
-                "away_form": away_form_str,
-                "h2h_scores": json.dumps(data.get("h2h_scores", [])),
-                "h2h_total": data.get("h2h_total"),
-                "h2h_btts_count": data.get("h2h_btts_count"),
-            },
-            "score_matrix": json.dumps(data.get("score_matrix", [])),
-            "prediction": bets_str,
-            "confidence_score": round(top["confidence"] / 10, 2) if top else 0,
-            "winner": top["market"] if top else "SKIP",
-            "winner_confidence": f"{top['confidence']}/10" if top else "0",
-            "classification": analysis.get("classification"),
-            "btts": "BTTS YES" if primary and "BTTS" in primary["market"] else "",
-            "btts_confidence": round(primary["confidence"] / 10, 2) if primary and "BTTS" in primary["market"] else 0,
-            "pattern": "PRIMARY" if primary else "SKIP",
-            "result_entered": False,
-        }
-        response = supabase.table("match_analyses").insert(record).execute()
-        return response.data[0]["id"] if response.data else None
-    except Exception as e:
-        st.error(f"Failed to save: {e}")
-        return None
+    # ... (keep your existing save_to_db function)
+    pass
 
 def get_pending():
-    try:
-        response = supabase.table("match_analyses").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
-        return response.data if response.data else []
-    except: 
-        return []
+    # ... (keep existing)
+    pass
 
 def submit_result(analysis_id, home_goals, away_goals):
-    try:
-        total = home_goals + away_goals
-        over25 = total > 2
-        actual_winner = "HOME" if home_goals > away_goals else "AWAY" if away_goals > home_goals else "DRAW"
-        btts_yes = home_goals > 0 and away_goals > 0
-        
-        supabase.table("match_analyses").update({
-            "actual_home_goals": home_goals, 
-            "actual_away_goals": away_goals,
-            "actual_total_goals": total, 
-            "actual_over25": over25,
-            "actual_winner": actual_winner, 
-            "actual_btts": btts_yes,
-            "result_entered": True,
-        }).eq("id", analysis_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"Failed to submit: {e}")
-        return False
+    # ... (keep existing)
+    pass
 
 def get_results():
-    try:
-        response = supabase.table("match_analyses").select("*").eq("result_entered", True).order("match_date", desc=True).execute()
-        return response.data if response.data else []
-    except: 
-        return []
+    # ... (keep existing)
+    pass
 
 
 # ============================================================================
-# MAIN APP
+# MAIN APP (keep structure, update version to 4.0)
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V3.2")
-    st.caption("Structural Framework Engine | Score Matrix is King | Single Primary Bet | Secondary Clearly Labeled")
+    st.title("📊 Match Analyzer V4.0")
+    st.caption("Profit-Driven Engine | LOW-SCORING Priority | High Thresholds | No Garbage Categories")
     
-    tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
-    
-    with tab1:
-        st.markdown("### 📋 Paste Match Data")
-        st.markdown("*Paste the full match data block from 'Form, Standings, Stats' through 'Form Data'*")
-        raw_text = st.text_area("Match Data", height=400, key="raw_input")
-        
-        if st.button("🔮 ANALYZE", type="primary"):
-            if not raw_text.strip():
-                st.error("Please paste the match data.")
-            else:
-                with st.spinner("Running structural analysis..."):
-                    data = parse_match_data(raw_text)
-                
-                if not data.get("home_team") or not data.get("away_team"):
-                    st.error("Could not detect team names.")
-                else:
-                    analysis = analyze_match(data)
-                    save_to_db(data, analysis)
-                    
-                    league_display = data.get('league') or 'Club Match'
-                    
-                    if analysis["verdict"] == "SKIP":
-                        st.warning("{} vs {} — {}".format(data['home_team'], data['away_team'], league_display))
-                    else:
-                        st.success("{} vs {} — {}".format(data['home_team'], data['away_team'], league_display))
-                    
-                    if analysis.get("classification"):
-                        st.markdown("**Classification: {}**".format(analysis["classification"]))
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        home_o05_str = "{:.1f}%".format(data['home_over_05_goals']) if data.get('home_over_05_goals') is not None else "N/A"
-                        home_o15_str = "{:.1f}%".format(data['home_over_15_goals']) if data.get('home_over_15_goals') is not None else "N/A"
-                        away_o05_str = "{:.1f}%".format(data['away_over_05_goals']) if data.get('away_over_05_goals') is not None else "N/A"
-                        away_o15_str = "{:.1f}%".format(data['away_over_15_goals']) if data.get('away_over_15_goals') is not None else "N/A"
-                        
-                        st.markdown("""
-                        <div class="edge-box">
-                            <strong>📊 Probabilities</strong><br>
-                            Home: {:.1f}% | Draw: {:.1f}% | Away: {:.1f}%<br>
-                            BTTS: {:.1f}% | O2.5: {:.1f}% | U2.5: {:.1f}%<br>
-                            Home O0.5: {} | Home O1.5: {}<br>
-                            Away O0.5: {} | Away O1.5: {}
-                        </div>
-                        """.format(
-                            data.get('home_win', 0), data.get('draw', 0), data.get('away_win', 0),
-                            data.get('btts', 0), data.get('over_25', 0), data.get('under_25', 0),
-                            home_o05_str, home_o15_str, away_o05_str, away_o15_str
-                        ), unsafe_allow_html=True)
-                    
-                    with col2:
-                        home_form_str = '-'.join(data.get('home_form_all', [])[:6]) if data.get('home_form_all') else 'N/A'
-                        away_form_str = '-'.join(data.get('away_form_all', [])[:6]) if data.get('away_form_all') else 'N/A'
-                        
-                        st.markdown("""
-                        <div class="edge-box">
-                            <strong>📈 Form & H2H</strong><br>
-                            Home: {}<br>Away: {}<br>H2H BTTS: {}/{}
-                        </div>
-                        """.format(home_form_str, away_form_str, data.get('h2h_btts_count', 0), data.get('h2h_total', 0)),
-                        unsafe_allow_html=True)
-                    
-                    # Score Matrix
-                    if data.get("score_matrix"):
-                        st.markdown("### 🎯 Score Matrix (Top 6)")
-                        score_cols = st.columns(6)
-                        for idx, s in enumerate(data["score_matrix"][:6]):
-                            with score_cols[idx]:
-                                is_draw = s["home_goals"] == s["away_goals"]
-                                bg = "#1e293b" if not is_draw else "#2a1a00"
-                                st.markdown("""
-                                <div style="background:{}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;">
-                                    <div style="font-size:1.2rem; font-weight:800;">{}</div>
-                                    <div style="font-size:0.7rem; color:#94a3b8;">{:.1f}%{}</div>
-                                </div>
-                                """.format(bg, s["score"], s["probability"], " 👑" if idx == 0 else ""), unsafe_allow_html=True)
-                    
-                    # PRIMARY BET
-                    if analysis.get("primary_bet"):
-                        primary = analysis["primary_bet"]
-                        emoji_map = {
-                            "BTTS": "⚽⚽", "Over 2.5 Goals": "🔥", "Under 2.5 Goals": "🛡️", 
-                            "Under 3.5 Goals": "🛡️",
-                            "Home Over 1.5 Goals": "🏠⚽", "Away Over 1.5 Goals": "✈️⚽",
-                            "Home Win to Nil": "🏠🧤", "Away Win to Nil": "✈️🧤",
-                            "Home Win": "🏠", "Away Win": "✈️",
-                            "Away Win or Draw": "✈️🤝",
-                            "Away Win or Draw (Double Chance)": "✈️🤝",
-                            "Home Win or Draw (Double Chance)": "🏠🤝"
-                        }
-                        emoji = emoji_map.get(primary["market"], "📊")
-                        
-                        st.markdown('<div class="section-label">🎯 PRIMARY BET</div>', unsafe_allow_html=True)
-                        st.markdown("""
-                        <div class="output-card primary-card">
-                            <div style="display:flex;align-items:center;gap:1rem;">
-                                <div style="font-size:2.5rem;">{}</div>
-                                <div style="flex:1;">
-                                    <div style="font-size:1.3rem;font-weight:800;">{}</div>
-                                    <div style="font-size:0.9rem;color:#94a3b8;">Confidence: {}/10 | Probability: {:.1f}%</div>
-                                    <div style="font-size:0.8rem;color:#64748b;margin-top:0.3rem;">{}</div>
-                                </div>
-                            </div>
-                        </div>
-                        """.format(emoji, primary['market'], primary['confidence'], primary['probability'], primary['reason']),
-                        unsafe_allow_html=True)
-                    
-                    # SECONDARY BET
-                    if analysis.get("secondary_bet"):
-                        secondary = analysis["secondary_bet"]
-                        emoji2 = emoji_map.get(secondary["market"], "📊")
-                        
-                        st.markdown('<div class="section-label-secondary">📌 SECONDARY BET</div>', unsafe_allow_html=True)
-                        st.markdown("""
-                        <div class="output-card secondary-card">
-                            <div style="display:flex;align-items:center;gap:1rem;">
-                                <div style="font-size:1.8rem;">{}</div>
-                                <div style="flex:1;">
-                                    <div style="font-size:1.1rem;font-weight:800;">{}</div>
-                                    <div style="font-size:0.85rem;color:#94a3b8;">Confidence: {}/10 | Probability: {:.1f}%</div>
-                                    <div style="font-size:0.8rem;color:#64748b;margin-top:0.3rem;">{}</div>
-                                </div>
-                            </div>
-                        </div>
-                        """.format(emoji2, secondary['market'], secondary['confidence'], secondary['probability'], secondary['reason']),
-                        unsafe_allow_html=True)
-                    
-                    # SKIP
-                    if analysis["verdict"] == "SKIP":
-                        skip_text = "<br>".join(analysis.get("skip_reasons", ["No structural pattern matched"]))
-                        st.markdown("""
-                        <div class="output-card skip-card">
-                            <div class="verdict-skip">
-                                <div class="big-text">⚠️ SKIP — NO BET</div>
-                                <p style="color:#94a3b8;margin-top:0.5rem;">{}</p>
-                            </div>
-                        </div>
-                        """.format(skip_text), unsafe_allow_html=True)
-                    
-                    if analysis["badges"]:
-                        st.markdown(" ")
-                        badges_html = " ".join(['<span class="badge-upgrade">{}</span>'.format(b) for b in analysis["badges"]])
-                        st.markdown(badges_html, unsafe_allow_html=True)
-                    
-                    if analysis["warnings"]:
-                        st.markdown(" ")
-                        for w in analysis["warnings"]:
-                            st.markdown('<span class="badge-caution">⚠️ {}</span>'.format(w), unsafe_allow_html=True)
-    
-    with tab2:
-        st.subheader("📝 Enter Match Results")
-        pending = get_pending()
-        if pending:
-            st.write("**{} pending result(s)**".format(len(pending)))
-            for analysis in pending:
-                ht = analysis.get('home_team', 'Home')
-                at = analysis.get('away_team', 'Away')
-                pred = analysis.get('prediction', 'No prediction')
-                
-                with st.expander("{} vs {} — Predicted: {}".format(ht, at, pred)):
-                    c1, c2, c3 = st.columns(3)
-                    with c1: 
-                        hg = st.number_input("{} Goals".format(ht), 0, 15, 0, key="hg_{}".format(analysis['id']))
-                    with c2: 
-                        ag = st.number_input("{} Goals".format(at), 0, 15, 0, key="ag_{}".format(analysis['id']))
-                    with c3:
-                        total = hg + ag
-                        st.markdown("""
-                        <div class="score-box">
-                            <div class="score-number">{} - {}</div>
-                            <div class="score-label">Total: {} | {}</div>
-                        </div>
-                        """.format(hg, ag, total, 'Over 2.5' if total > 2 else 'Under 2.5'), unsafe_allow_html=True)
-                    
-                    if st.button("✅ Submit Result", key="sub_{}".format(analysis['id'])):
-                        if submit_result(analysis['id'], hg, ag):
-                            st.success("Result submitted!")
-                            st.rerun()
-        else:
-            st.info("No pending analyses.")
-    
-    with tab3:
-        st.subheader("📊 Performance Records")
-        results = get_results()
-        if not results:
-            st.info("No results recorded yet.")
-        else:
-            # ========================================================================
-            # TRUTH-BASED EVALUATION (FIXED)
-            # ========================================================================
-            total = len(results)
-            skip_count = sum(1 for r in results if r.get('prediction') == 'SKIP')
-            bet_count = total - skip_count
-            
-            # Track overall stats
-            correct = 0
-            incorrect = 0
-            
-            # Track stats by classification
-            category_stats = {}
-            
-            for r in results:
-                pred = r.get('prediction', '')
-                classification = r.get('classification', 'Unclassified')
-                
-                # Initialize category stats if not exists
-                if classification not in category_stats:
-                    category_stats[classification] = {
-                        "wins": 0,
-                        "losses": 0,
-                        "total": 0,
-                        "bets": []
-                    }
-                
-                if pred == 'SKIP':
-                    category_stats[classification]["total"] += 1
-                    continue
-                
-                # Primary bet is the first one before " | "
-                primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-                
-                # Use the truth-based evaluator
-                evaluation = evaluate_bet(
-                    primary_pred, 
-                    r.get('actual_home_goals'), 
-                    r.get('actual_away_goals')
-                )
-                
-                # Store bet result
-                bet_result = {
-                    "match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
-                    "date": r.get('match_date', ''),
-                    "bet": primary_pred,
-                    "score": f"{r.get('actual_home_goals', '-')}-{r.get('actual_away_goals', '-')}",
-                    "result": "WIN" if evaluation["is_correct"] else "LOSS"
-                }
-                
-                if evaluation["is_correct"]:
-                    correct += 1
-                    category_stats[classification]["wins"] += 1
-                else:
-                    incorrect += 1
-                    category_stats[classification]["losses"] += 1
-                
-                category_stats[classification]["total"] += 1
-                category_stats[classification]["bets"].append(bet_result)
-            
-            # Display overall stats
-            st.markdown("### 📈 Overall Performance")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Total Tracked</div></div>'.format(total), unsafe_allow_html=True)
-            with col2:
-                st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Bets Placed</div></div>'.format(bet_count), unsafe_allow_html=True)
-            with col3:
-                win_rate = round(correct / bet_count * 100) if bet_count > 0 else 0
-                st.markdown('<div class="stat-box"><div class="stat-number">{}%</div><div class="stat-label">Win Rate (Primary)</div></div>'.format(win_rate), unsafe_allow_html=True)
-            with col4:
-                st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Skipped</div></div>'.format(skip_count), unsafe_allow_html=True)
-            
-            st.write(f"**Primary Bet: Correct: {correct} | Incorrect: {incorrect}**")
-            
-            # ========================================================================
-            # CATEGORY PERFORMANCE BREAKDOWN
-            # ========================================================================
-            st.markdown("---")
-            st.markdown("### 🏷️ Performance by Classification")
-            
-            # Prepare category data for display
-            category_data = []
-            for cat, stats in category_stats.items():
-                if cat == "SKIP":
-                    continue
-                
-                total_bets = stats["total"]
-                wins = stats["wins"]
-                losses = stats["losses"]
-                win_rate = round(wins / total_bets * 100) if total_bets > 0 else 0
-                
-                # Determine performance rating
-                if win_rate >= 70:
-                    rating = "🔥 Excellent"
-                    rating_color = "#10b981"
-                elif win_rate >= 60:
-                    rating = "✅ Good"
-                    rating_color = "#3b82f6"
-                elif win_rate >= 50:
-                    rating = "⚠️ Marginal"
-                    rating_color = "#f59e0b"
-                else:
-                    rating = "❌ Poor"
-                    rating_color = "#ef4444"
-                
-                category_data.append({
-                    "Classification": cat,
-                    "Wins": wins,
-                    "Losses": losses,
-                    "Total": total_bets,
-                    "Win Rate": f"{win_rate}%",
-                    "Rating": rating,
-                    "Rating Color": rating_color
-                })
-            
-            # Sort by win rate (highest first)
-            category_data.sort(key=lambda x: int(x["Win Rate"].replace("%", "")), reverse=True)
-            
-            # Display as styled table using columns
-            st.markdown("""
-            <style>
-            .cat-header { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.5fr; gap: 10px; padding: 10px; background: #1e293b; border-radius: 8px; margin-bottom: 5px; font-weight: 700; }
-            .cat-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.5fr; gap: 10px; padding: 8px 10px; background: #0f172a; border-radius: 8px; margin-bottom: 3px; }
-            </style>
-            """, unsafe_allow_html=True)
-            
-            st.markdown('<div class="cat-header"><div>Classification</div><div>Wins</div><div>Losses</div><div>Total</div><div>Rating</div></div>', unsafe_allow_html=True)
-            
-            for cat in category_data:
-                st.markdown(f'''
-                <div class="cat-row">
-                    <div><strong>{cat["Classification"]}</strong></div>
-                    <div style="color:#10b981;">{cat["Wins"]}</div>
-                    <div style="color:#ef4444;">{cat["Losses"]}</div>
-                    <div>{cat["Total"]}</div>
-                    <div style="color:{cat["Rating Color"]}; font-weight:700;">{cat["Rating"]} ({cat["Win Rate"]})</div>
-                </div>
-                ''', unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # ========================================================================
-            # DETAILED BREAKDOWN WITH EXPANDERS
-            # ========================================================================
-            st.markdown("### 🔍 Detailed Category Breakdown")
-            
-            for cat, stats in sorted(category_stats.items(), key=lambda x: x[1]["total"], reverse=True):
-                if stats["total"] == 0:
-                    continue
-                
-                wins = stats["wins"]
-                losses = stats["losses"]
-                total_bets = stats["total"]
-                win_rate = round(wins / total_bets * 100) if total_bets > 0 else 0
-                
-                # Determine emoji and color for header
-                if win_rate >= 70:
-                    emoji = "🟢"
-                    color = "#10b981"
-                elif win_rate >= 60:
-                    emoji = "🔵"
-                    color = "#3b82f6"
-                elif win_rate >= 50:
-                    emoji = "🟡"
-                    color = "#f59e0b"
-                else:
-                    emoji = "🔴"
-                    color = "#ef4444"
-                
-                with st.expander(f"{emoji} {cat} — {wins}-{losses} ({win_rate}%)"):
-                    if cat == "SKIP":
-                        st.write(f"📋 **{stats['total']} matches skipped** (no bet recommended)")
-                        continue
-                    
-                    # Show summary stats
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Wins", wins)
-                    with col2:
-                        st.metric("Losses", losses)
-                    with col3:
-                        st.metric("Win Rate", f"{win_rate}%")
-                    
-                    # Show individual bets in this category
-                    if stats["bets"]:
-                        st.write("**Individual Bets:**")
-                        for bet in stats["bets"]:
-                            if bet["result"] == "WIN":
-                                st.markdown(f"- ✅ **{bet['match']}** ({bet['date']}) — {bet['bet']} — {bet['score']}")
-                            else:
-                                st.markdown(f"- ❌ **{bet['match']}** ({bet['date']}) — {bet['bet']} — {bet['score']}")
-            
-            st.markdown("---")
-            
-            # ========================================================================
-            # FULL RESULTS TABLE
-            # ========================================================================
-            st.markdown("### 📋 Complete Match Records")
-            
-            # Build results table
-            rows = []
-            for r in results:
-                pred = r.get('prediction', '')
-                classification = r.get('classification', 'Unclassified')
-                actual_home = r.get('actual_home_goals')
-                actual_away = r.get('actual_away_goals')
-                
-                primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-                
-                if pred == 'SKIP':
-                    badge = '<span class="skip-badge">SKIP</span>'
-                    score_display = "—"
-                    result_text = "SKIP"
-                else:
-                    # Use evaluator to determine result
-                    evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-                    if evaluation["is_correct"]:
-                        badge = '<span class="correct-badge">WIN</span>'
-                        result_text = "WIN"
-                    else:
-                        badge = '<span class="incorrect-badge">LOSS</span>'
-                        result_text = "LOSS"
-                    
-                    # Handle None values gracefully
-                    if actual_home is not None and actual_away is not None:
-                        score_display = f"{actual_home}-{actual_away}"
-                    else:
-                        score_display = "—"
-                
-                rows.append({
-                    "Date": r.get("match_date", ""),
-                    "Match": "{} vs {}".format(r.get('home_team', ''), r.get('away_team', '')),
-                    "Class": classification,
-                    "Primary Bet": primary_pred if pred != 'SKIP' else "SKIP",
-                    "Score": score_display,
-                    "Result": result_text,
-                })
-            
-            df = pd.DataFrame(rows)
-            
-            # Display dataframe with custom formatting
-            st.dataframe(
-                df,
-                column_config={
-                    "Result": st.column_config.TextColumn(
-                        "Result",
-                        help="WIN/LOSS/SKIP status"
-                    )
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # ========================================================================
-            # SUMMARY INSIGHTS
-            # ========================================================================
-            st.markdown("---")
-            st.markdown("### 💡 Performance Insights")
-            
-            # Find best and worst categories
-            valid_categories = [(cat, stats) for cat, stats in category_stats.items() 
-                               if cat != "SKIP" and stats["total"] >= 2]
-            
-            if valid_categories:
-                best_cat = max(valid_categories, key=lambda x: x[1]["wins"] / x[1]["total"] if x[1]["total"] > 0 else 0)
-                worst_cat = min(valid_categories, key=lambda x: x[1]["wins"] / x[1]["total"] if x[1]["total"] > 0 else 1)
-                
-                best_rate = round(best_cat[1]["wins"] / best_cat[1]["total"] * 100)
-                worst_rate = round(worst_cat[1]["wins"] / worst_cat[1]["total"] * 100)
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"""
-                    <div style="background: #10b98120; border-radius: 10px; padding: 1rem;">
-                        <div style="font-size: 0.8rem; color: #10b981;">🏆 BEST PERFORMING</div>
-                        <div style="font-size: 1.2rem; font-weight: 800;">{best_cat[0]}</div>
-                        <div>{best_cat[1]['wins']}-{best_cat[1]['losses']} ({best_rate}%)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col2:
-                    st.markdown(f"""
-                    <div style="background: #ef444420; border-radius: 10px; padding: 1rem;">
-                        <div style="font-size: 0.8rem; color: #ef4444;">⚠️ WORST PERFORMING</div>
-                        <div style="font-size: 1.2rem; font-weight: 800;">{worst_cat[0]}</div>
-                        <div>{worst_cat[1]['wins']}-{worst_cat[1]['losses']} ({worst_rate}%)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            # Recommendation based on data
-            st.markdown("---")
-            st.markdown("### 📌 Recommendations")
-            
-            # Find categories that need attention
-            poor_categories = [(cat, stats) for cat, stats in category_stats.items() 
-                              if cat != "SKIP" and stats["total"] >= 3 and (stats["wins"] / stats["total"] < 0.5)]
-            
-            if poor_categories:
-                st.warning("⚠️ **Categories requiring review:**")
-                for cat, stats in poor_categories:
-                    win_rate = round(stats["wins"] / stats["total"] * 100)
-                    st.write(f"- **{cat}**: {stats['wins']}-{stats['losses']} ({win_rate}%) — below 50% win rate")
-            else:
-                st.info("✅ No categories with <50% win rate (minimum 3 bets)")
-            
-            strong_categories = [(cat, stats) for cat, stats in category_stats.items() 
-                                if cat != "SKIP" and stats["total"] >= 3 and (stats["wins"] / stats["total"] >= 0.7)]
-            
-            if strong_categories:
-                st.success("✅ **Strong performing categories:**")
-                for cat, stats in strong_categories:
-                    win_rate = round(stats["wins"] / stats["total"] * 100)
-                    st.write(f"- **{cat}**: {stats['wins']}-{stats['losses']} ({win_rate}%) — above 70% win rate")
-
+    # ... (rest of your tabs and UI - same structure as before)
+    # For brevity, I'm showing only the key changes. Use your existing UI code.
 
 if __name__ == "__main__":
     main()
