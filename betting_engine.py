@@ -971,7 +971,7 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     elif pred == "Over 2.5 Goals":
         is_correct = over25
     elif pred == "Under 2.5 Goals":
-        is_correct = not over25 and total > 0
+        is_correct = not over25 and total > 2
     elif pred == "Over 3.5 Goals":
         is_correct = over35
     elif pred == "Under 3.5 Goals":
