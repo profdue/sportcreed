@@ -2,6 +2,7 @@
 MATCH ANALYZER V3.2 — Structural Framework Engine
 Score Matrix is King | Separation Power | Draw Cluster | Double Chance
 FIX: Score matrix drives classification | Single primary bet | Secondary clearly labeled
+FIX: Truth-based evaluation engine (no reliance on corrupted derived fields)
 Supabase table: match_analyses
 """
 
@@ -913,6 +914,111 @@ def analyze_match(data: dict) -> dict:
 
 
 # ============================================================================
+# TRUTH-BASED EVALUATION ENGINE (FIXED)
+# ============================================================================
+def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
+    """
+    Evaluate any bet from raw scores only.
+    No reliance on corrupted derived fields (actual_winner, actual_btts, actual_over25).
+    
+    Returns:
+        {
+            "is_correct": bool,
+            "actual": str,
+            "message": str
+        }
+    """
+    # Normalize inputs to integers
+    try:
+        home = int(home_goals) if home_goals is not None else 0
+        away = int(away_goals) if away_goals is not None else 0
+    except (ValueError, TypeError):
+        return {
+            "is_correct": False, 
+            "actual": "INVALID DATA", 
+            "message": f"Non-numeric score: home={home_goals}, away={away_goals}"
+        }
+    
+    total = home + away
+    btts = home > 0 and away > 0
+    over25 = total > 2
+    over35 = total > 3
+    
+    if home > away:
+        winner = "HOME"
+    elif away > home:
+        winner = "AWAY"
+    else:
+        winner = "DRAW"
+    
+    # Actual outcomes (human readable)
+    actual_outcome = {
+        "score": f"{home}-{away}",
+        "btts": "BTTS YES" if btts else "BTTS NO",
+        "over25": "Over 2.5 YES" if over25 else "Over 2.5 NO",
+        "over35": "Over 3.5 YES" if over35 else "Over 3.5 NO",
+        "winner": winner,
+        "total": total
+    }
+    
+    # Evaluate against prediction
+    pred = primary_pred.strip()
+    is_correct = False
+    
+    # Goal line markets
+    if pred == "BTTS":
+        is_correct = btts
+    elif pred == "Over 2.5 Goals":
+        is_correct = over25
+    elif pred == "Under 2.5 Goals":
+        is_correct = not over25 and total > 0
+    elif pred == "Over 3.5 Goals":
+        is_correct = over35
+    elif pred == "Under 3.5 Goals":
+        is_correct = total <= 3
+    
+    # Match result markets
+    elif pred == "Home Win":
+        is_correct = winner == "HOME"
+    elif pred == "Away Win":
+        is_correct = winner == "AWAY"
+    elif pred == "Home Win to Nil":
+        is_correct = (winner == "HOME" and away == 0)
+    elif pred == "Away Win to Nil":
+        is_correct = (winner == "AWAY" and home == 0)
+    
+    # Double chance markets
+    elif "Away Win or Draw" in pred:
+        is_correct = winner in ["AWAY", "DRAW"]
+    elif "Home Win or Draw" in pred:
+        is_correct = winner in ["HOME", "DRAW"]
+    
+    # Team goal markets
+    elif pred == "Home Over 1.5 Goals":
+        is_correct = home >= 2
+    elif pred == "Away Over 1.5 Goals":
+        is_correct = away >= 2
+    elif pred == "Home Over 0.5 Goals":
+        is_correct = home >= 1
+    elif pred == "Away Over 0.5 Goals":
+        is_correct = away >= 1
+    
+    # Fallback (unknown market)
+    else:
+        return {
+            "is_correct": False,
+            "actual": f"{home}-{away}",
+            "message": f"Unknown market: {pred}"
+        }
+    
+    return {
+        "is_correct": is_correct,
+        "actual": f"{home}-{away} | {actual_outcome['btts']} | {actual_outcome['over25']}",
+        "message": f"{'✅ CORRECT' if is_correct else '❌ INCORRECT'}: {pred} vs {home}-{away}"
+    }
+
+
+# ============================================================================
 # SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(data: dict, analysis: dict):
@@ -1213,6 +1319,9 @@ def main():
         if not results:
             st.info("No results recorded yet.")
         else:
+            # ========================================================================
+            # TRUTH-BASED EVALUATION (FIXED)
+            # ========================================================================
             total = len(results)
             skip_count = sum(1 for r in results if r.get('prediction') == 'SKIP')
             bet_count = total - skip_count
@@ -1225,47 +1334,22 @@ def main():
                 if pred == 'SKIP':
                     continue
                 
-                actual_btts = r.get('actual_btts')
-                actual_over25 = r.get('actual_over25')
-                actual_winner = r.get('actual_winner')
-                actual_home = r.get('actual_home_goals', 0) or 0
-                actual_away = r.get('actual_away_goals', 0) or 0
-                actual_total = actual_home + actual_away
-                
-                # Only check the PRIMARY bet (first in prediction string)
+                # Primary bet is the first one before " | "
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
                 
-                is_correct = False
-                if primary_pred == 'BTTS' and actual_btts:
-                    is_correct = True
-                elif primary_pred == 'Over 2.5 Goals' and actual_over25:
-                    is_correct = True
-                elif primary_pred == 'Under 2.5 Goals' and not actual_over25 and actual_total > 0:
-                    is_correct = True
-                elif primary_pred == 'Under 3.5 Goals' and actual_total <= 3:
-                    is_correct = True
-                elif primary_pred == 'Home Win' and actual_winner == 'HOME':
-                    is_correct = True
-                elif primary_pred == 'Away Win' and actual_winner == 'AWAY':
-                    is_correct = True
-                elif primary_pred == 'Home Win to Nil' and actual_winner == 'HOME' and actual_away == 0:
-                    is_correct = True
-                elif primary_pred == 'Away Win to Nil' and actual_winner == 'AWAY' and actual_home == 0:
-                    is_correct = True
-                elif 'Away Win or Draw' in primary_pred and actual_winner in ['AWAY', 'DRAW']:
-                    is_correct = True
-                elif 'Home Win or Draw' in primary_pred and actual_winner in ['HOME', 'DRAW']:
-                    is_correct = True
-                elif primary_pred == 'Home Over 1.5 Goals' and actual_home >= 2:
-                    is_correct = True
-                elif primary_pred == 'Away Over 1.5 Goals' and actual_away >= 2:
-                    is_correct = True
+                # Use the truth-based evaluator
+                evaluation = evaluate_bet(
+                    primary_pred, 
+                    r.get('actual_home_goals'), 
+                    r.get('actual_away_goals')
+                )
                 
-                if is_correct:
+                if evaluation["is_correct"]:
                     correct += 1
                 else:
                     incorrect += 1
             
+            # Display stats
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 st.markdown('<div class="stat-box"><div class="stat-number">{}</div><div class="stat-label">Total Tracked</div></div>'.format(total), unsafe_allow_html=True)
@@ -1279,57 +1363,38 @@ def main():
             
             st.write("**Primary Bet: Correct: {} | Incorrect: {}**".format(correct, incorrect))
             
+            # Build results table
             rows = []
             for r in results:
                 pred = r.get('prediction', '')
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
-                actual_total = (actual_home or 0) + (actual_away or 0)
+                
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
                 
-                row_correct = None
                 if pred == 'SKIP':
-                    row_correct = 'skip'
-                else:
-                    if primary_pred == 'BTTS' and r.get('actual_btts'):
-                        row_correct = 'correct'
-                    elif primary_pred == 'Over 2.5 Goals' and r.get('actual_over25'):
-                        row_correct = 'correct'
-                    elif primary_pred == 'Under 2.5 Goals' and not r.get('actual_over25') and actual_total > 0:
-                        row_correct = 'correct'
-                    elif primary_pred == 'Under 3.5 Goals' and actual_total <= 3:
-                        row_correct = 'correct'
-                    elif primary_pred == 'Home Win' and r.get('actual_winner') == 'HOME':
-                        row_correct = 'correct'
-                    elif primary_pred == 'Away Win' and r.get('actual_winner') == 'AWAY':
-                        row_correct = 'correct'
-                    elif primary_pred == 'Home Win to Nil' and r.get('actual_winner') == 'HOME' and actual_away == 0:
-                        row_correct = 'correct'
-                    elif 'Away Win or Draw' in primary_pred and r.get('actual_winner') in ['AWAY', 'DRAW']:
-                        row_correct = 'correct'
-                    elif 'Home Win or Draw' in primary_pred and r.get('actual_winner') in ['HOME', 'DRAW']:
-                        row_correct = 'correct'
-                    elif primary_pred == 'Home Over 1.5 Goals' and (actual_home or 0) >= 2:
-                        row_correct = 'correct'
-                    elif primary_pred == 'Away Over 1.5 Goals' and (actual_away or 0) >= 2:
-                        row_correct = 'correct'
-                    
-                    if row_correct is None:
-                        row_correct = 'incorrect'
-                
-                if row_correct == 'correct':
-                    badge = '<span class="correct-badge">WIN</span>'
-                elif row_correct == 'incorrect':
-                    badge = '<span class="incorrect-badge">LOSS</span>'
-                else:
                     badge = '<span class="skip-badge">SKIP</span>'
+                    score_display = "—"
+                else:
+                    # Use evaluator to determine result
+                    evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
+                    if evaluation["is_correct"]:
+                        badge = '<span class="correct-badge">WIN</span>'
+                    else:
+                        badge = '<span class="incorrect-badge">LOSS</span>'
+                    
+                    # Handle None values gracefully
+                    if actual_home is not None and actual_away is not None:
+                        score_display = f"{actual_home}-{actual_away}"
+                    else:
+                        score_display = "—"
                 
                 rows.append({
                     "Date": r.get("match_date", ""),
                     "Match": "{} vs {}".format(r.get('home_team', ''), r.get('away_team', '')),
                     "Class": r.get("classification", ""),
-                    "Primary Bet": primary_pred,
-                    "Score": "{}-{}".format(actual_home if actual_home is not None else '-', actual_away if actual_away is not None else '-'),
+                    "Primary Bet": primary_pred if pred != 'SKIP' else "SKIP",
+                    "Score": score_display,
                     "Result": badge,
                 })
             
