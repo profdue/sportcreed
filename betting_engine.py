@@ -95,15 +95,62 @@ def parse_match_data_v7(raw_text: str) -> dict:
     # STEP 1: Extract Team Names
     # ================================================================
     team_names = []
+    
+    # Method 1: Look for "Predicted Lineups" header and grab lines above it
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped == 'Predicted Lineups' and i > 0:
-            for j in range(i-1, max(i-3, -1), -1):
-                potential_team = lines[j].strip()
-                if potential_team and not any(x in potential_team for x in ['Predicted', 'Lineups', 'Form', 'Standings']):
-                    if potential_team not in team_names:
-                        team_names.append(potential_team)
+        if stripped == 'Predicted Lineups':
+            for j in range(i-1, max(i-5, -1), -1):
+                potential = lines[j].strip()
+                if potential and len(potential) > 1 and not any(x in potential.lower() for x in [
+                    'predicted', 'lineups', 'formation', 'statistical', 'comparison',
+                    'missing', 'players', 'team news', 'head to head', 'standings',
+                    'offers', 'prediction', '©', 'whoscored', 'preview'
+                ]):
+                    if potential not in team_names:
+                        team_names.append(potential)
+                    if len(team_names) == 2:
                         break
+            break
+    
+    # Method 2: Look for formation patterns like "4-2-3-1" 
+    if len(team_names) < 2:
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if re.match(r'\d-\d-\d-\d', stripped) or re.match(r'\d-\d-\d', stripped):
+                if i > 0:
+                    potential = lines[i-1].strip()
+                    if potential and len(potential) > 2 and potential not in team_names:
+                        if not any(x in potential.lower() for x in ['predicted', 'lineups', 'formation']):
+                            team_names.append(potential)
+                if i+1 < len(lines):
+                    potential = lines[i+1].strip()
+                    if potential and len(potential) > 2 and potential not in team_names:
+                        if not any(x in potential.lower() for x in ['predicted', 'lineups', 'formation']):
+                            team_names.append(potential)
+    
+    # Method 3: Look for team name in the Statistical Comparison section
+    if len(team_names) < 2:
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if 'Statistical Comparison' in stripped:
+                for j in range(i+1, min(i+20, len(lines))):
+                    comp_line = lines[j].strip()
+                    if 'logo' in comp_line.lower():
+                        name = comp_line.replace('logo', '').strip()
+                        if name and name not in team_names and len(name) > 2:
+                            team_names.append(name)
+    
+    # Method 4: Check the very first few lines of the input
+    if len(team_names) < 2:
+        for line in lines[:5]:
+            stripped = line.strip()
+            if stripped and len(stripped) > 2 and not any(x in stripped.lower() for x in [
+                'predicted', 'lineups', 'preview', 'head to head', 'match',
+                'premier league', 'laliga', 'serie a', 'bundesliga'
+            ]):
+                if stripped not in team_names:
+                    team_names.append(stripped)
     
     if len(team_names) >= 2:
         data["home_team"] = team_names[0]
@@ -657,6 +704,7 @@ def main():
                 
                 if not data.get("home_team") or not data.get("away_team"):
                     st.error("Could not detect team names. Check the format.")
+                    st.info("Debug: Try pasting the data starting from 'Predicted Lineups' and ensure the team names are on the lines directly above it.")
                 else:
                     analysis = analyze_match_v7(data)
                     save_to_db(data, analysis)
