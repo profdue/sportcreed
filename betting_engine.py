@@ -4,7 +4,7 @@ Refined formula based on 28-match backtest (85.7% accuracy, 24/28)
 - Over 2.5: Combined Goals ≥ 50 AND (Combined Shots ≥ 1.8 OR Combined Tackles < 2.0)
 - Under 2.5: Combined Goals < 50
 - Tackles < 2.0 signal: 6/6 on Overs (lock signal)
-- Dead rubbers: Conditional detection, still fire if signal is strong
+- Dead rubbers: Only when BOTH teams have nothing at stake
 """
 
 import streamlit as st
@@ -159,29 +159,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
         data["away_team"] = team_names[1]
     
     # ================================================================
-    # STEP 2: Extract Total Goals from Season Stats
-    # ================================================================
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if data["home_team"] and data["home_team"] in stripped:
-            for j in range(i, min(i+10, len(lines))):
-                goal_line = lines[j].strip()
-                match = re.search(r'\(?\d+\)?(\d+)\s*Goals', goal_line)
-                if match:
-                    data["home_goals_total"] = int(match.group(1))
-                    break
-        
-        if data["away_team"] and data["away_team"] in stripped:
-            for j in range(i, min(i+10, len(lines))):
-                goal_line = lines[j].strip()
-                match = re.search(r'\(?\d+\)?(\d+)\s*Goals', goal_line)
-                if match:
-                    data["away_goals_total"] = int(match.group(1))
-                    break
-    
-    # ================================================================
-    # STEP 3: Extract Shots, Tackles from Statistical Comparison
+    # STEP 2: Extract all stats from Statistical Comparison section
     # ================================================================
     in_stat_comp = False
     current_team = None
@@ -194,48 +172,66 @@ def parse_match_data_v7(raw_text: str) -> dict:
             continue
         
         if in_stat_comp:
-            if data["home_team"] and data["home_team"] in stripped:
+            if data["home_team"] and data["home_team"] in stripped and 'logo' not in stripped.lower():
                 current_team = "home"
-            elif data["away_team"] and data["away_team"] in stripped:
+            elif data["away_team"] and data["away_team"] in stripped and 'logo' not in stripped.lower():
                 current_team = "away"
             
-            if 'Shots pg' in stripped:
+            # Goals: format "(93)44 Goals" -> extract 44
+            if 'Goals' in stripped and current_team:
+                match = re.search(r'\(\d+\)(\d+)\s*Goals', stripped)
+                if match:
+                    goals = int(match.group(1))
+                    if current_team == "home" and data["home_goals_total"] is None:
+                        data["home_goals_total"] = goals
+                    elif current_team == "away" and data["away_goals_total"] is None:
+                        data["away_goals_total"] = goals
+            
+            # Shots pg
+            if 'Shots pg' in stripped and current_team:
                 match = re.search(r'(\d+\.?\d*)\s*Shots pg', stripped)
-                if match and current_team:
-                    if current_team == "home":
-                        data["home_shots_pg"] = float(match.group(1))
-                    else:
-                        data["away_shots_pg"] = float(match.group(1))
+                if match:
+                    val = float(match.group(1))
+                    if current_team == "home" and data["home_shots_pg"] is None:
+                        data["home_shots_pg"] = val
+                    elif current_team == "away" and data["away_shots_pg"] is None:
+                        data["away_shots_pg"] = val
             
-            if 'Tackles pg' in stripped:
+            # Tackles pg
+            if 'Tackles pg' in stripped and current_team:
                 match = re.search(r'(\d+\.?\d*)\s*Tackles pg', stripped)
-                if match and current_team:
-                    if current_team == "home":
-                        data["home_tackles_pg"] = float(match.group(1))
-                    else:
-                        data["away_tackles_pg"] = float(match.group(1))
+                if match:
+                    val = float(match.group(1))
+                    if current_team == "home" and data["home_tackles_pg"] is None:
+                        data["home_tackles_pg"] = val
+                    elif current_team == "away" and data["away_tackles_pg"] is None:
+                        data["away_tackles_pg"] = val
             
-            if 'Aerial Duel Success' in stripped:
+            # Aerial Duel Success
+            if 'Aerial Duel Success' in stripped and current_team:
                 match = re.search(r'(\d+)%', stripped)
-                if match and current_team:
-                    if current_team == "home":
-                        data["home_aerial_pct"] = int(match.group(1))
-                    else:
-                        data["away_aerial_pct"] = int(match.group(1))
+                if match:
+                    val = int(match.group(1))
+                    if current_team == "home" and data["home_aerial_pct"] is None:
+                        data["home_aerial_pct"] = val
+                    elif current_team == "away" and data["away_aerial_pct"] is None:
+                        data["away_aerial_pct"] = val
             
-            if 'Dribbles pg' in stripped:
+            # Dribbles pg
+            if 'Dribbles pg' in stripped and current_team:
                 match = re.search(r'(\d+\.?\d*)\s*Dribbles pg', stripped)
-                if match and current_team:
-                    if current_team == "home":
-                        data["home_dribbles_pg"] = float(match.group(1))
-                    else:
-                        data["away_dribbles_pg"] = float(match.group(1))
+                if match:
+                    val = float(match.group(1))
+                    if current_team == "home" and data["home_dribbles_pg"] is None:
+                        data["home_dribbles_pg"] = val
+                    elif current_team == "away" and data["away_dribbles_pg"] is None:
+                        data["away_dribbles_pg"] = val
             
             if 'Head to Head' in stripped or 'Form Data' in stripped:
                 break
     
     # ================================================================
-    # STEP 4: Extract Standings
+    # STEP 3: Extract Standings
     # ================================================================
     in_standings = False
     for i, line in enumerate(lines):
@@ -277,18 +273,12 @@ def parse_match_data_v7(raw_text: str) -> dict:
             break
     
     # ================================================================
-    # STEP 5: Detect Dead Rubber (Conditional Logic)
+    # STEP 4: Detect Dead Rubber (Per-team logic)
     # ================================================================
-    
-    # Strong indicators: ALWAYS dead rubber
-    dead_rubber_certain = [
+    dead_rubber_indicators = [
         "nothing at stake",
         "nothing to play for",
         "cannot move",
-    ]
-    
-    # Conditional indicators: Only dead rubber if no "except" in the same line
-    dead_rubber_conditional = [
         "means very little",
         "already secured",
         "guaranteed to finish",
@@ -297,35 +287,36 @@ def parse_match_data_v7(raw_text: str) -> dict:
         "already relegated",
     ]
     
-    for line in lines:
+    home_dead = False
+    away_dead = False
+    
+    for i, line in enumerate(lines):
         line_lower = line.lower()
         
-        # Check certain indicators first
-        for indicator in dead_rubber_certain:
+        talks_about_home = data["home_team"] and data["home_team"].lower() in line_lower
+        talks_about_away = data["away_team"] and data["away_team"].lower() in line_lower
+        
+        for indicator in dead_rubber_indicators:
             if indicator in line_lower:
-                data["is_dead_rubber"] = True
-                data["dead_rubber_reason"] = f"Certain: '{indicator}' found"
-                break
-        
-        if data["is_dead_rubber"]:
-            break
-        
-        # Check conditional indicators - skip if "except" is in the same line
-        for indicator in dead_rubber_conditional:
-            if indicator in line_lower:
-                if "except" not in line_lower:
-                    data["is_dead_rubber"] = True
-                    data["dead_rubber_reason"] = f"Conditional: '{indicator}' found without 'except'"
-                    break
-                else:
-                    # Has "except" - team still has something to play for
-                    data["dead_rubber_reason"] = f"Skipped: '{indicator}' found but 'except' clause present"
-        
-        if data["is_dead_rubber"]:
-            break
+                has_except = "except" in line_lower
+                
+                if talks_about_home and not talks_about_away:
+                    if not has_except:
+                        home_dead = True
+                elif talks_about_away and not talks_about_home:
+                    if not has_except:
+                        away_dead = True
+    
+    if home_dead and away_dead:
+        data["is_dead_rubber"] = True
+        data["dead_rubber_reason"] = "Both teams have nothing at stake"
+    elif home_dead:
+        data["dead_rubber_reason"] = f"Only {data['home_team']} has nothing at stake - match still live"
+    elif away_dead:
+        data["dead_rubber_reason"] = f"Only {data['away_team']} has nothing at stake - match still live"
     
     # ================================================================
-    # STEP 6: Extract Score Matrix
+    # STEP 5: Extract Score Matrix
     # ================================================================
     in_score_analysis = False
     for i, line in enumerate(lines):
@@ -356,7 +347,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
     data["score_matrix"] = data["score_matrix"][:10]
     
     # ================================================================
-    # STEP 7: Extract Probabilities
+    # STEP 6: Extract Probabilities
     # ================================================================
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -412,7 +403,7 @@ def analyze_match_v7(data: dict) -> dict:
     Over 2.5: Combined Goals >= 50 AND (Combined Shots >= 1.8 OR Combined Tackles < 2.0)
     Under 2.5: Combined Goals < 50
     Tackles < 2.0 on Over = LOCK signal (6/6 in backtest)
-    Dead rubbers: Show warning but still analyze if signal is strong
+    Dead rubbers: Only when BOTH teams have nothing at stake
     """
     result = {
         "primary_bet": None,
@@ -754,6 +745,8 @@ def main():
                     if data.get("is_dead_rubber"):
                         reason = data.get("dead_rubber_reason", "Dead rubber detected")
                         st.markdown(f'<div class="dead-rubber-warning">⚠️ {reason}</div>', unsafe_allow_html=True)
+                    elif data.get("dead_rubber_reason"):
+                        st.info(f"ℹ️ {data['dead_rubber_reason']}")
                     
                     # Verdict header
                     if analysis["verdict"] == "LOCK":
