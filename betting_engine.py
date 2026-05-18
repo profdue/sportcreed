@@ -50,6 +50,9 @@ st.markdown("""
     .accuracy-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .lock-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .dead-rubber-warning { background: #7c2d12; color: #fed7aa; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.8rem; margin: 0.5rem 0; }
+    .win-badge { background: #10b981; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
+    .loss-badge { background: #ef4444; color: #fff; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
+    .skip-badge { background: #fbbf24; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,14 +84,11 @@ def parse_match_data_v7(raw_text: str) -> dict:
     team_names = []
     
     # Method 1: Find "Predicted Lineups" and check the line right after it
-    # Format: "Osasuna4-2-3-1Espanyol 4-2-3-1"
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == 'Predicted Lineups':
-            # Check the line right after "Predicted Lineups"
             if i + 1 < len(lines):
                 next_line = lines[i + 1].strip()
-                # Split on formation patterns (4-2-3-1, 4-3-3, 3-4-2-1, etc.)
                 parts = re.split(r'\d-\d-\d-\d|\d-\d-\d', next_line)
                 for part in parts:
                     part = part.strip()
@@ -97,7 +97,6 @@ def parse_match_data_v7(raw_text: str) -> dict:
                             team_names.append(part)
                 if len(team_names) >= 2:
                     break
-            # Fallback: check lines above
             for j in range(i-1, max(i-3, -1), -1):
                 potential = lines[j].strip()
                 if potential and len(potential) > 1 and potential != 'Predicted Lineups':
@@ -116,7 +115,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
                 if name and len(name) > 1 and name not in team_names:
                     team_names.append(name)
     
-    # Method 3: First meaningful lines as last resort
+    # Method 3: First meaningful lines
     if len(team_names) < 2:
         for line in lines[:5]:
             stripped = line.strip()
@@ -143,7 +142,6 @@ def parse_match_data_v7(raw_text: str) -> dict:
             continue
         
         if in_stat_comp:
-            # Detect which team we're on
             if data["home_team"] and data["home_team"] in stripped and 'logo' not in stripped.lower():
                 current_team = "home"
             elif data["away_team"] and data["away_team"] in stripped and 'logo' not in stripped.lower():
@@ -155,7 +153,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
             if not current_team:
                 continue
             
-            # Goals: "(42)26 Goals 29(41)" -> current = 26, other = 29
+            # Goals
             if 'Goals' in stripped:
                 match_before = re.search(r'(\d+)\s*Goals', stripped)
                 match_after = re.search(r'Goals\s+(\d+)', stripped)
@@ -172,7 +170,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
                         if match_after and data["home_goals_total"] is None:
                             data["home_goals_total"] = int(match_after.group(1))
             
-            # Shots pg: "0.8 Shots pg 0.9" -> current = 0.8, other = 0.9
+            # Shots pg
             if 'Shots pg' in stripped:
                 match_before = re.search(r'(\d+\.?\d*)\s*Shots pg', stripped)
                 match_after = re.search(r'Shots pg\s+(\d+\.?\d*)', stripped)
@@ -189,7 +187,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
                         if match_after and data["home_shots_pg"] is None:
                             data["home_shots_pg"] = float(match_after.group(1))
             
-            # Tackles pg: "0.9 Tackles pg 0.9" -> current = 0.9, other = 0.9
+            # Tackles pg
             if 'Tackles pg' in stripped:
                 match_before = re.search(r'(\d+\.?\d*)\s*Tackles pg', stripped)
                 match_after = re.search(r'Tackles pg\s+(\d+\.?\d*)', stripped)
@@ -251,7 +249,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
             except: pass
     
     # ================================================================
-    # STEP 4: Dead Rubber Detection (Both teams must be dead)
+    # STEP 4: Dead Rubber Detection
     # ================================================================
     dead_rubber_indicators = [
         "nothing at stake", "nothing to play for", "cannot move",
@@ -524,6 +522,9 @@ def main():
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
     
+    # ========================================================================
+    # TAB 1: ANALYZE
+    # ========================================================================
     with tab1:
         st.markdown("### 📋 Paste Match Data")
         raw_text = st.text_area("Match Data", height=400, key="raw_input")
@@ -569,6 +570,14 @@ def main():
                         with c3:
                             st.markdown(f'<div class="metric-card"><div class="metric-value">{m["combined_tackles"]:.1f}</div><div class="metric-label">Combined Tackles pg</div><div style="font-size:0.6rem;color:#64748b;">{m["home_tackles"]:.1f} + {m["away_tackles"]:.1f}</div></div>', unsafe_allow_html=True)
                     
+                    if data.get("score_matrix"):
+                        st.markdown("### 🎯 Score Matrix (Top 5)")
+                        score_cols = st.columns(5)
+                        for idx, s in enumerate(data["score_matrix"][:5]):
+                            with score_cols[idx]:
+                                bg = "#1e293b" if s["home_goals"] != s["away_goals"] else "#2a1a00"
+                                st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s["score"]}</div><div style="font-size:0.7rem; color:#94a3b8;">{s["probability"]:.1f}%</div></div>', unsafe_allow_html=True)
+                    
                     if analysis.get("primary_bet"):
                         p = analysis["primary_bet"]
                         is_lock = analysis.get("is_lock", False)
@@ -580,33 +589,147 @@ def main():
                     if analysis["verdict"] == "SKIP":
                         st.markdown(f'<div class="output-card skip-card"><div class="verdict-skip"><div class="big-text">⚠️ SKIP — NO BET</div><p style="color:#94a3b8;">{"<br>".join(analysis.get("skip_reasons", []))}</p></div></div>', unsafe_allow_html=True)
     
+    # ========================================================================
+    # TAB 2: POST-MATCH
+    # ========================================================================
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending()
         if pending:
+            st.write(f"**{len(pending)} pending result(s)**")
             for a in pending:
-                ht, at, pred, pat = a.get('home_team',''), a.get('away_team',''), a.get('prediction',''), a.get('pattern','')
-                badge = "🔒 LOCK" if pat=="LOCK" else ("📊 PRIMARY" if pat=="PRIMARY" else "⚠️ SKIP")
-                with st.expander(f"{badge} | {ht} vs {at} — {pred}"):
+                ht = a.get('home_team', 'Home')
+                at = a.get('away_team', 'Away')
+                pred = a.get('prediction', 'No prediction')
+                pat = a.get('pattern', '')
+                is_dead = a.get('is_dead_rubber', False)
+                
+                if pat == "LOCK":
+                    badge = "🔒 LOCK"
+                elif pat == "PRIMARY" and is_dead:
+                    badge = "⚠️ PRIMARY (Dead Rubber)"
+                elif pat == "PRIMARY":
+                    badge = "📊 PRIMARY"
+                else:
+                    badge = "⚠️ SKIP"
+                
+                with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
-                    if st.button("✅ Submit", key=f"sub_{a['id']}"):
+                    if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
                         if submit_result(a['id'], hg, ag):
-                            st.success("Submitted!")
+                            st.success("Result submitted!")
                             st.rerun()
         else:
-            st.info("No pending analyses.")
+            st.info("No pending analyses. Go to the Analyze tab to process matches.")
     
+    # ========================================================================
+    # TAB 3: RECORDS
+    # ========================================================================
     with tab3:
-        st.subheader("📊 Records")
+        st.subheader("📊 Performance Records")
         results = get_results()
         if not results:
-            st.info("No results yet.")
+            st.info("No results recorded yet. Submit results in the Post-Match tab.")
         else:
-            correct = sum(1 for r in results if r.get('prediction')!='SKIP' and evaluate_bet(r['prediction'], r.get('actual_home_goals'), r.get('actual_away_goals'))['is_correct'])
-            bets = sum(1 for r in results if r.get('prediction')!='SKIP')
-            st.markdown(f"**{correct}/{bets} correct ({round(correct/bets*100) if bets else 0}%)**")
+            total = len(results)
+            skip_count = sum(1 for r in results if r.get('prediction') == 'SKIP')
+            bet_count = total - skip_count
+            
+            correct = 0
+            incorrect = 0
+            lock_correct = 0
+            lock_total = 0
+            dead_rubber_correct = 0
+            dead_rubber_total = 0
+            
+            for r in results:
+                pred = r.get('prediction', '')
+                pattern = r.get('pattern', '')
+                is_dead = r.get('is_dead_rubber', False)
+                
+                if pred == 'SKIP':
+                    continue
+                
+                primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+                evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+                
+                if evaluation["is_correct"]:
+                    correct += 1
+                    if pattern == "LOCK":
+                        lock_correct += 1
+                    if is_dead:
+                        dead_rubber_correct += 1
+                else:
+                    incorrect += 1
+                
+                if pattern == "LOCK":
+                    lock_total += 1
+                if is_dead:
+                    dead_rubber_total += 1
+            
+            # Summary stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Tracked</div></div>', unsafe_allow_html=True)
+            with col2:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{bet_count}</div><div class="stat-label">Bets Placed</div></div>', unsafe_allow_html=True)
+            with col3:
+                win_rate = round(correct / bet_count * 100) if bet_count > 0 else 0
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
+            with col4:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{skip_count}</div><div class="stat-label">Skipped</div></div>', unsafe_allow_html=True)
+            
+            # Lock signal stats
+            if lock_total > 0:
+                lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
+                st.markdown(f"🔒 **Lock Signals (Tackles < 2.0):** {lock_correct}/{lock_total} correct ({lock_rate}%)")
+            
+            # Dead rubber stats
+            if dead_rubber_total > 0:
+                dead_rate = round(dead_rubber_correct / dead_rubber_total * 100) if dead_rubber_total > 0 else 0
+                st.markdown(f"⚠️ **Dead Rubber Bets:** {dead_rubber_correct}/{dead_rubber_total} correct ({dead_rate}%)")
+            
+            st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
+            
+            # Results table
+            rows = []
+            for r in results:
+                pred = r.get('prediction', '')
+                classification = r.get('classification', 'Unclassified')
+                pattern = r.get('pattern', '')
+                is_dead = r.get('is_dead_rubber', False)
+                actual_home = r.get('actual_home_goals')
+                actual_away = r.get('actual_away_goals')
+                primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+                
+                if pred == 'SKIP':
+                    badge = '<span class="skip-badge">⚪ SKIP</span>'
+                    score_display = "—"
+                else:
+                    evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
+                    badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
+                    score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
+                
+                if pattern == "LOCK":
+                    match_display = f"🔒 {r.get('home_team', '')} vs {r.get('away_team', '')}"
+                elif is_dead:
+                    match_display = f"⚠️ {r.get('home_team', '')} vs {r.get('away_team', '')}"
+                else:
+                    match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
+                
+                rows.append({
+                    "Date": r.get("match_date", ""),
+                    "Match": match_display,
+                    "Class": classification,
+                    "Bet": primary_pred if pred != 'SKIP' else "SKIP",
+                    "Score": score_display,
+                    "Result": badge,
+                })
+            
+            df = pd.DataFrame(rows)
+            st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
