@@ -535,37 +535,59 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 def save_to_db(data: dict, analysis: dict):
     try:
         primary = analysis.get("primary_bet")
-        bets_str = primary["market"] if primary else "SKIP"
+        metrics = analysis.get("metrics", {})
         
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": str(date.today()),
-            "home_data": {
-                "league": data.get("league"),
-                "home_goals_total": data.get("home_goals_total"),
-                "away_goals_total": data.get("away_goals_total"),
-                "home_shots_pg": data.get("home_shots_pg"),
-                "away_shots_pg": data.get("away_shots_pg"),
-                "home_tackles_pg": data.get("home_tackles_pg"),
-                "away_tackles_pg": data.get("away_tackles_pg"),
-                "is_dead_rubber": data.get("is_dead_rubber"),
-                "home_win_pct": data.get("home_win"),
-                "draw_pct": data.get("draw"),
-                "away_win_pct": data.get("away_win"),
-                "btts_pct": data.get("btts"),
-                "over25_pct": data.get("over_25"),
-                "under25_pct": data.get("under_25"),
-                "over35_pct": data.get("over_35"),
-            },
-            "score_matrix": json.dumps(data.get("score_matrix", [])),
-            "prediction": bets_str,
-            "classification": analysis.get("classification"),
+            "league": data.get("league"),
+            
+            # Goals
+            "home_goals_total": data.get("home_goals_total"),
+            "away_goals_total": data.get("away_goals_total"),
+            "combined_goals": metrics.get("combined_goals", 0),
+            
+            # Shots
+            "home_shots_pg": data.get("home_shots_pg"),
+            "away_shots_pg": data.get("away_shots_pg"),
+            "combined_shots": metrics.get("combined_shots", 0),
+            
+            # Tackles
+            "home_tackles_pg": data.get("home_tackles_pg"),
+            "away_tackles_pg": data.get("away_tackles_pg"),
+            "combined_tackles": metrics.get("combined_tackles", 0),
+            
+            # Flags
+            "is_dead_rubber": data.get("is_dead_rubber", False),
+            "is_lock": analysis.get("is_lock", False),
+            
+            # Prediction enums
+            "prediction": primary["market"] if primary else "SKIP",
+            "classification": analysis.get("classification", "SKIP"),
             "pattern": "LOCK" if analysis.get("is_lock") else ("PRIMARY" if primary else "SKIP"),
+            "verdict": analysis.get("verdict", "SKIP"),
+            
+            # Debug (text)
+            "signal_breakdown": json.dumps(analysis.get("signal_breakdown", [])),
+            "score_matrix": json.dumps(data.get("score_matrix", [])),
+            
+            # Probabilities
+            "home_win_pct": data.get("home_win"),
+            "draw_pct": data.get("draw"),
+            "away_win_pct": data.get("away_win"),
+            "btts_pct": data.get("btts"),
+            "over25_pct": data.get("over_25"),
+            "under25_pct": data.get("under_25"),
+            "over35_pct": data.get("over_35"),
+            
+            # Tracking
             "result_entered": False,
         }
+        
         response = supabase.table("match_analyses").insert(record).execute()
         return response.data[0]["id"] if response.data else None
+    
     except Exception as e:
         st.error(f"Failed to save: {e}")
         return None
