@@ -75,35 +75,63 @@ def parse_match_data_v7(raw_text: str) -> dict:
         "btts": None, "over_25": None, "under_25": None, "over_35": None,
     }
     
+    # ================================================================
     # STEP 1: Extract Team Names
+    # ================================================================
     team_names = []
+    
+    # Method 1: Find "Predicted Lineups" and check the line right after it
+    # Format: "Osasuna4-2-3-1Espanyol 4-2-3-1"
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == 'Predicted Lineups':
-            for j in range(i-1, max(i-5, -1), -1):
+            # Check the line right after "Predicted Lineups"
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                # Split on formation patterns (4-2-3-1, 4-3-3, 3-4-2-1, etc.)
+                parts = re.split(r'\d-\d-\d-\d|\d-\d-\d', next_line)
+                for part in parts:
+                    part = part.strip()
+                    if part and len(part) > 1 and not any(x in part.lower() for x in ['formation', 'predicted', 'lineups']):
+                        if part not in team_names:
+                            team_names.append(part)
+                if len(team_names) >= 2:
+                    break
+            # Fallback: check lines above
+            for j in range(i-1, max(i-3, -1), -1):
                 potential = lines[j].strip()
-                if potential and len(potential) > 1 and not any(x in potential.lower() for x in [
-                    'predicted', 'lineups', 'formation', 'statistical', 'comparison',
-                    'missing', 'players', 'team news', 'head to head', 'standings',
-                    'offers', 'prediction', '©', 'whoscored', 'preview'
-                ]):
+                if potential and len(potential) > 1 and potential != 'Predicted Lineups':
                     if potential not in team_names:
                         team_names.append(potential)
-                    if len(team_names) == 2:
+                    if len(team_names) >= 2:
                         break
             break
     
+    # Method 2: Look for team names in Statistical Comparison logos
+    if len(team_names) < 2:
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if 'logo' in stripped.lower():
+                name = stripped.replace('logo', '').strip()
+                if name and len(name) > 1 and name not in team_names:
+                    team_names.append(name)
+    
+    # Method 3: First meaningful lines as last resort
     if len(team_names) < 2:
         for line in lines[:5]:
             stripped = line.strip()
-            if stripped and len(stripped) > 2 and stripped not in team_names:
-                team_names.append(stripped)
+            if stripped and len(stripped) > 2 and stripped != 'Predicted Lineups':
+                if not any(x in stripped.lower() for x in ['predicted', 'lineups', 'formation']):
+                    if stripped not in team_names:
+                        team_names.append(stripped)
     
     if len(team_names) >= 2:
         data["home_team"] = team_names[0]
         data["away_team"] = team_names[1]
     
+    # ================================================================
     # STEP 2: Extract stats from Statistical Comparison
+    # ================================================================
     in_stat_comp = False
     current_team = None
     
@@ -121,15 +149,13 @@ def parse_match_data_v7(raw_text: str) -> dict:
             elif data["away_team"] and data["away_team"] in stripped and 'logo' not in stripped.lower():
                 current_team = "away"
             
-            if current_team and 'Head to Head' in stripped:
-                break
-            if current_team and 'Form Data' in stripped:
+            if current_team and ('Head to Head' in stripped or 'Form Data' in stripped):
                 break
             
             if not current_team:
                 continue
             
-            # Goals: "(93)44 Goals 11(56)" -> current team = 44, other = 11
+            # Goals: "(42)26 Goals 29(41)" -> current = 26, other = 29
             if 'Goals' in stripped:
                 match_before = re.search(r'(\d+)\s*Goals', stripped)
                 match_after = re.search(r'Goals\s+(\d+)', stripped)
@@ -146,7 +172,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
                         if match_after and data["home_goals_total"] is None:
                             data["home_goals_total"] = int(match_after.group(1))
             
-            # Shots pg: "1.1 Shots pg 0.5" -> current = 1.1, other = 0.5
+            # Shots pg: "0.8 Shots pg 0.9" -> current = 0.8, other = 0.9
             if 'Shots pg' in stripped:
                 match_before = re.search(r'(\d+\.?\d*)\s*Shots pg', stripped)
                 match_after = re.search(r'Shots pg\s+(\d+\.?\d*)', stripped)
@@ -163,7 +189,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
                         if match_after and data["home_shots_pg"] is None:
                             data["home_shots_pg"] = float(match_after.group(1))
             
-            # Tackles pg
+            # Tackles pg: "0.9 Tackles pg 0.9" -> current = 0.9, other = 0.9
             if 'Tackles pg' in stripped:
                 match_before = re.search(r'(\d+\.?\d*)\s*Tackles pg', stripped)
                 match_after = re.search(r'Tackles pg\s+(\d+\.?\d*)', stripped)
@@ -200,7 +226,9 @@ def parse_match_data_v7(raw_text: str) -> dict:
                     elif current_team == "away" and data["away_dribbles_pg"] is None:
                         data["away_dribbles_pg"] = val
     
+    # ================================================================
     # STEP 3: Extract Standings
+    # ================================================================
     in_standings = False
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -222,7 +250,9 @@ def parse_match_data_v7(raw_text: str) -> dict:
                 data["away_standings_points"] = int(parts[-1])
             except: pass
     
+    # ================================================================
     # STEP 4: Dead Rubber Detection (Both teams must be dead)
+    # ================================================================
     dead_rubber_indicators = [
         "nothing at stake", "nothing to play for", "cannot move",
         "means very little", "already secured", "guaranteed to finish",
@@ -249,7 +279,9 @@ def parse_match_data_v7(raw_text: str) -> dict:
     elif away_dead:
         data["dead_rubber_reason"] = f"Only {data['away_team']} has nothing at stake - match still live"
     
+    # ================================================================
     # STEP 5: Score Matrix
+    # ================================================================
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == 'Score analysis':
@@ -266,7 +298,9 @@ def parse_match_data_v7(raw_text: str) -> dict:
     data["score_matrix"].sort(key=lambda x: x["probability"], reverse=True)
     data["score_matrix"] = data["score_matrix"][:10]
     
+    # ================================================================
     # STEP 6: Probabilities
+    # ================================================================
     for i, line in enumerate(lines):
         stripped = line.strip()
         if 'Result' in stripped:
@@ -450,11 +484,13 @@ def save_to_db(data: dict, analysis: dict):
         st.error(f"Failed to save: {e}")
         return None
 
+
 def get_pending():
     try:
         response = supabase.table("match_analyses").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
         return response.data if response.data else []
     except: return []
+
 
 def submit_result(analysis_id, home_goals, away_goals):
     try:
@@ -470,6 +506,7 @@ def submit_result(analysis_id, home_goals, away_goals):
     except Exception as e:
         st.error(f"Failed: {e}")
         return False
+
 
 def get_results():
     try:
