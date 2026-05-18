@@ -4,7 +4,7 @@ Refined formula based on 28-match backtest (85.7% accuracy, 24/28)
 - Over 2.5: Combined Goals ≥ 50 AND (Combined Shots ≥ 1.8 OR Combined Tackles < 2.0)
 - Under 2.5: Combined Goals < 50
 - Tackles < 2.0 signal: 6/6 on Overs (lock signal)
-- Dead rubbers: Skip
+- Dead rubbers: Conditional detection, still fire if signal is strong
 """
 
 import streamlit as st
@@ -49,6 +49,7 @@ st.markdown("""
     .metric-label { font-size: 0.7rem; color: #94a3b8; }
     .accuracy-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .lock-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
+    .dead-rubber-warning { background: #7c2d12; color: #fed7aa; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.8rem; margin: 0.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,6 +82,7 @@ def parse_match_data_v7(raw_text: str) -> dict:
         "home_standings_points": None,
         "away_standings_points": None,
         "is_dead_rubber": False,
+        "dead_rubber_reason": None,
         "score_matrix": [],
         "home_win": None,
         "draw": None,
@@ -275,24 +277,51 @@ def parse_match_data_v7(raw_text: str) -> dict:
             break
     
     # ================================================================
-    # STEP 5: Detect Dead Rubber
+    # STEP 5: Detect Dead Rubber (Conditional Logic)
     # ================================================================
-    dead_rubber_indicators = [
+    
+    # Strong indicators: ALWAYS dead rubber
+    dead_rubber_certain = [
         "nothing at stake",
+        "nothing to play for",
+        "cannot move",
+    ]
+    
+    # Conditional indicators: Only dead rubber if no "except" in the same line
+    dead_rubber_conditional = [
         "means very little",
         "already secured",
         "guaranteed to finish",
-        "cannot move",
         "mathematically safe",
-        "nothing to play for",
         "already won the title",
         "already relegated",
     ]
     
     for line in lines:
         line_lower = line.lower()
-        if any(indicator in line_lower for indicator in dead_rubber_indicators):
-            data["is_dead_rubber"] = True
+        
+        # Check certain indicators first
+        for indicator in dead_rubber_certain:
+            if indicator in line_lower:
+                data["is_dead_rubber"] = True
+                data["dead_rubber_reason"] = f"Certain: '{indicator}' found"
+                break
+        
+        if data["is_dead_rubber"]:
+            break
+        
+        # Check conditional indicators - skip if "except" is in the same line
+        for indicator in dead_rubber_conditional:
+            if indicator in line_lower:
+                if "except" not in line_lower:
+                    data["is_dead_rubber"] = True
+                    data["dead_rubber_reason"] = f"Conditional: '{indicator}' found without 'except'"
+                    break
+                else:
+                    # Has "except" - team still has something to play for
+                    data["dead_rubber_reason"] = f"Skipped: '{indicator}' found but 'except' clause present"
+        
+        if data["is_dead_rubber"]:
             break
     
     # ================================================================
@@ -383,7 +412,7 @@ def analyze_match_v7(data: dict) -> dict:
     Over 2.5: Combined Goals >= 50 AND (Combined Shots >= 1.8 OR Combined Tackles < 2.0)
     Under 2.5: Combined Goals < 50
     Tackles < 2.0 on Over = LOCK signal (6/6 in backtest)
-    Dead rubbers = SKIP
+    Dead rubbers: Show warning but still analyze if signal is strong
     """
     result = {
         "primary_bet": None,
@@ -391,18 +420,12 @@ def analyze_match_v7(data: dict) -> dict:
         "verdict": "SKIP",
         "skip_reasons": [],
         "is_lock": False,
+        "is_dead_rubber": data.get("is_dead_rubber", False),
+        "dead_rubber_reason": data.get("dead_rubber_reason"),
     }
     
     # ================================================================
-    # STEP 1: Check for dead rubber
-    # ================================================================
-    if data.get("is_dead_rubber"):
-        result["skip_reasons"].append("Dead rubber - nothing at stake for either team")
-        result["classification"] = "DEAD RUBBER"
-        return result
-    
-    # ================================================================
-    # STEP 2: Get required metrics
+    # STEP 1: Get required metrics
     # ================================================================
     home_goals = data.get("home_goals_total", 0) or 0
     away_goals = data.get("away_goals_total", 0) or 0
@@ -428,7 +451,7 @@ def analyze_match_v7(data: dict) -> dict:
     }
     
     # ================================================================
-    # STEP 3: Check minimum required data
+    # STEP 2: Check minimum required data
     # ================================================================
     missing = []
     if combined_goals == 0:
@@ -444,7 +467,7 @@ def analyze_match_v7(data: dict) -> dict:
         return result
     
     # ================================================================
-    # STEP 4: Apply the refined formula
+    # STEP 3: Apply the refined formula
     # ================================================================
     
     # Build signal breakdown for display
@@ -473,8 +496,7 @@ def analyze_match_v7(data: dict) -> dict:
     
     # OVER 2.5 RULE
     if goals_signal and (shots_signal or tackles_signal):
-        # Determine if this is a lock signal
-        is_lock = tackles_signal  # Tackles < 2.0 on Over = 6/6 lock
+        is_lock = tackles_signal
         
         reason_parts = []
         reason_parts.append(f"Combined goals {combined_goals} ≥ 50")
@@ -486,6 +508,11 @@ def analyze_match_v7(data: dict) -> dict:
         elif tackles_signal:
             reason_parts.append(f"tackles {combined_tackles:.1f} < 2.0 (lock signal)")
         
+        # Dead rubber downgrades lock to recommended
+        if data.get("is_dead_rubber") and is_lock:
+            is_lock = False
+            reason_parts.append("(dead rubber: lock downgraded to recommended)")
+        
         result["primary_bet"] = {
             "market": "Over 2.5 Goals",
             "reason": "; ".join(reason_parts),
@@ -494,6 +521,10 @@ def analyze_match_v7(data: dict) -> dict:
         result["classification"] = "OVER 2.5"
         result["verdict"] = "LOCK" if is_lock else "RECOMMENDED"
         result["is_lock"] = is_lock
+        
+        if data.get("is_dead_rubber"):
+            result["skip_reasons"].append("Dead rubber detected but formula signal is strong enough to fire")
+        
         return result
     
     # UNDER 2.5 RULE
@@ -505,13 +536,20 @@ def analyze_match_v7(data: dict) -> dict:
         }
         result["classification"] = "UNDER 2.5"
         result["verdict"] = "RECOMMENDED"
+        
+        if data.get("is_dead_rubber"):
+            result["skip_reasons"].append("Dead rubber detected but formula signal is strong enough to fire")
+        
         return result
     
     # NO CLEAR SIGNAL
-    result["skip_reasons"].append(
-        f"No clear signal: goals={combined_goals} (≥50), but shots={combined_shots:.1f} (<1.8) and tackles={combined_tackles:.1f} (≥2.0)"
-    )
-    result["classification"] = "SKIP"
+    if data.get("is_dead_rubber"):
+        result["skip_reasons"].append("Dead rubber with no clear signal - skip")
+    else:
+        result["skip_reasons"].append(
+            f"No clear signal: goals={combined_goals} (≥50), but shots={combined_shots:.1f} (<1.8) and tackles={combined_tackles:.1f} (≥2.0)"
+        )
+    result["classification"] = "DEAD RUBBER" if data.get("is_dead_rubber") else "SKIP"
     
     return result
 
@@ -618,6 +656,7 @@ def save_to_db(data: dict, analysis: dict):
             # Debug (text)
             "signal_breakdown": json.dumps(analysis.get("signal_breakdown", [])),
             "score_matrix": json.dumps(data.get("score_matrix", [])),
+            "dead_rubber_reason": data.get("dead_rubber_reason"),
             
             # Probabilities
             "home_win_pct": data.get("home_win"),
@@ -711,6 +750,11 @@ def main():
                     
                     league_display = data.get('league') or 'Club Match'
                     
+                    # Dead rubber warning (show before verdict if applicable)
+                    if data.get("is_dead_rubber"):
+                        reason = data.get("dead_rubber_reason", "Dead rubber detected")
+                        st.markdown(f'<div class="dead-rubber-warning">⚠️ {reason}</div>', unsafe_allow_html=True)
+                    
                     # Verdict header
                     if analysis["verdict"] == "LOCK":
                         st.success(f"🔒 LOCK: {data['home_team']} vs {data['away_team']} — {league_display}")
@@ -777,11 +821,16 @@ def main():
                     if analysis.get("primary_bet"):
                         primary = analysis["primary_bet"]
                         is_lock = analysis.get("is_lock", False)
+                        is_dead = data.get("is_dead_rubber", False)
                         
                         if is_lock:
                             emoji = "🔒"
                             card_class = "lock-card"
                             badge_html = '<span class="lock-badge">🔒 LOCK SIGNAL — Tackles < 2.0 (6/6)</span>'
+                        elif is_dead:
+                            emoji = "⚠️"
+                            card_class = "primary-card"
+                            badge_html = '<span class="accuracy-badge">📊 Historical: 85.7% (24/28) — Dead rubber warning applies</span>'
                         else:
                             emoji = "🔥"
                             card_class = "primary-card"
@@ -813,10 +862,6 @@ def main():
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
-                    
-                    # Dead rubber warning
-                    if data.get("is_dead_rubber"):
-                        st.warning("⚠️ Dead rubber detected — both teams have nothing meaningful at stake. The formula cannot predict motivation-less matches reliably.")
     
     # ========================================================================
     # TAB 2: POST-MATCH
@@ -831,8 +876,16 @@ def main():
                 at = analysis.get('away_team', 'Away')
                 pred = analysis.get('prediction', 'No prediction')
                 pattern = analysis.get('pattern', '')
+                is_dead = analysis.get('is_dead_rubber', False)
                 
-                pattern_badge = "🔒 LOCK" if pattern == "LOCK" else ("📊 PRIMARY" if pattern == "PRIMARY" else "⚠️ SKIP")
+                if pattern == "LOCK":
+                    pattern_badge = "🔒 LOCK"
+                elif pattern == "PRIMARY" and is_dead:
+                    pattern_badge = "⚠️ PRIMARY (Dead Rubber)"
+                elif pattern == "PRIMARY":
+                    pattern_badge = "📊 PRIMARY"
+                else:
+                    pattern_badge = "⚠️ SKIP"
                 
                 with st.expander(f"{pattern_badge} | {ht} vs {at} — Predicted: {pred}"):
                     c1, c2 = st.columns(2)
@@ -865,10 +918,13 @@ def main():
             incorrect = 0
             lock_correct = 0
             lock_total = 0
+            dead_rubber_correct = 0
+            dead_rubber_total = 0
             
             for r in results:
                 pred = r.get('prediction', '')
                 pattern = r.get('pattern', '')
+                is_dead = r.get('is_dead_rubber', False)
                 
                 if pred == 'SKIP':
                     continue
@@ -880,11 +936,15 @@ def main():
                     correct += 1
                     if pattern == "LOCK":
                         lock_correct += 1
+                    if is_dead:
+                        dead_rubber_correct += 1
                 else:
                     incorrect += 1
                 
                 if pattern == "LOCK":
                     lock_total += 1
+                if is_dead:
+                    dead_rubber_total += 1
             
             # Summary stats
             col1, col2, col3, col4 = st.columns(4)
@@ -903,6 +963,11 @@ def main():
                 lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
                 st.markdown(f"🔒 **Lock Signals (Tackles < 2.0):** {lock_correct}/{lock_total} correct ({lock_rate}%)")
             
+            # Dead rubber stats
+            if dead_rubber_total > 0:
+                dead_rate = round(dead_rubber_correct / dead_rubber_total * 100) if dead_rubber_total > 0 else 0
+                st.markdown(f"⚠️ **Dead Rubber Bets:** {dead_rubber_correct}/{dead_rubber_total} correct ({dead_rate}%)")
+            
             st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
             
             # Results table
@@ -911,6 +976,7 @@ def main():
                 pred = r.get('prediction', '')
                 classification = r.get('classification', 'Unclassified')
                 pattern = r.get('pattern', '')
+                is_dead = r.get('is_dead_rubber', False)
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
@@ -925,6 +991,8 @@ def main():
                 
                 if pattern == "LOCK":
                     match_display = f"🔒 {r.get('home_team', '')} vs {r.get('away_team', '')}"
+                elif is_dead:
+                    match_display = f"⚠️ {r.get('home_team', '')} vs {r.get('away_team', '')}"
                 else:
                     match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
                 
