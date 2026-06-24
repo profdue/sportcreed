@@ -1,10 +1,12 @@
 """
-MATCH ANALYZER V8.0 — UNIVERSAL LOGIC ENGINE
+MATCH ANALYZER V8.0 — UNIVERSAL LOGIC ENGINE (FULL IMPLEMENTATION)
 Based on analysis of 81 matches across 7 leagues
 - Draw predictions are wrong 83% of the time
 - Form difference > 2 points → someone wins
 - Goals sweet spot: 2.00-2.40 for draws
 - Desperation kills draws
+- Home team wins 65% of non-draws
+- Home desperation = 100% accuracy lock
 """
 
 import streamlit as st
@@ -36,6 +38,7 @@ st.markdown("""
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
     .primary-card { border: 3px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .lock-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
+    .dead-rubber-card { border: 3px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
     .skip-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
     .stButton button { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .stat-box { background: #1e293b; border-radius: 10px; padding: 0.8rem; text-align: center; color: #fff; }
@@ -49,13 +52,14 @@ st.markdown("""
     .metric-label { font-size: 0.7rem; color: #94a3b8; }
     .accuracy-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .lock-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .dead-rubber-warning { background: #7c2d12; color: #fed7aa; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.8rem; margin: 0.5rem 0; }
+    .dead-rubber-warning { background: #7c2d12; color: #fed7aa; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.8rem; margin: 0.5rem 0; border: 2px solid #ef4444; }
     .win-badge { background: #10b981; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .loss-badge { background: #ef4444; color: #fff; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .skip-badge { background: #fbbf24; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .condition-true { color: #10b981; font-weight: 700; }
     .condition-false { color: #ef4444; font-weight: 700; }
     .condition-box { background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; }
+    .priority-rule { background: #1a2a1a; border-left: 4px solid #f59e0b; padding: 0.75rem; margin: 0.5rem 0; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -144,7 +148,6 @@ def parse_match_data_v8(raw_text: str) -> dict:
             
             # Form points (last 5 matches: W=3, D=1, L=0)
             if 'Form' in stripped or 'Last 5' in stripped:
-                # Look for W/D/L pattern
                 wdl_pattern = r'[WDL]{5}'
                 matches = re.findall(wdl_pattern, stripped.upper())
                 if matches:
@@ -180,7 +183,6 @@ def parse_match_data_v8(raw_text: str) -> dict:
             parts = stripped.split()
             try:
                 data["home_standings_position"] = int(parts[0])
-                # Points are usually at the end
                 for part in reversed(parts):
                     try:
                         data["home_standings_points"] = int(part)
@@ -203,15 +205,14 @@ def parse_match_data_v8(raw_text: str) -> dict:
     # ================================================================
     # STEP 4: Competitive Blocks
     # ================================================================
-    # Determine block based on position (assuming typical league size)
     def get_block(position):
         if position is None:
             return None
-        if position <= 4:  # Top 4 = Europe
+        if position <= 4:
             return "europe"
-        elif position >= 15:  # Bottom 5-6 = Relegation
+        elif position >= 15:
             return "relegation"
-        else:  # Mid-table
+        else:
             return "mid"
     
     data["competitive_block_home"] = get_block(data["home_standings_position"])
@@ -269,7 +270,7 @@ def parse_match_data_v8(raw_text: str) -> dict:
 
 
 # ============================================================================
-# V8.0 ANALYSIS ENGINE — UNIVERSAL LOGIC
+# V8.0 ANALYSIS ENGINE — UNIVERSAL LOGIC (FULL IMPLEMENTATION)
 # ============================================================================
 def analyze_match_v8(data: dict) -> dict:
     result = {
@@ -278,9 +279,15 @@ def analyze_match_v8(data: dict) -> dict:
         "verdict": "SKIP",
         "skip_reasons": [],
         "is_lock": False,
+        "lock_reason": None,
         "draw_conditions": {},
         "winner_selection": None,
+        "winner_reason": None,
         "goal_bet": None,
+        "goal_reason": None,
+        "goal_accuracy": None,
+        "warning": None,
+        "warning_type": None,
     }
     
     # Extract all needed values
@@ -293,13 +300,14 @@ def analyze_match_v8(data: dict) -> dict:
     home_block = data.get("competitive_block_home")
     away_block = data.get("competitive_block_away")
     draw_prediction = data.get("draw", 0) or 0
+    is_relegation_fight = data.get("is_relegation_fight", False)
     
     combined_goals = home_goals + away_goals
-    avg_goals = combined_goals  # Using combined as proxy for avg (assuming 1 match)
+    avg_goals = combined_goals
     form_diff = abs(home_form - away_form)
     
     # ================================================================
-    # TRUTH #1: Check if draw is predicted
+    # TRUTH #1: Draw predictions are wrong 83% of the time
     # ================================================================
     is_draw_predicted = draw_prediction > 0
     
@@ -311,8 +319,8 @@ def analyze_match_v8(data: dict) -> dict:
     # ================================================================
     # TRUTH #6: Desperation kills draws
     # ================================================================
-    is_home_desperate = home_losing_streak >= 3 or data.get("is_relegation_fight", False)
-    is_away_desperate = away_losing_streak >= 3 or data.get("is_relegation_fight", False)
+    is_home_desperate = home_losing_streak >= 3 or is_relegation_fight
+    is_away_desperate = away_losing_streak >= 3 or is_relegation_fight
     is_any_desperate = is_home_desperate or is_away_desperate
     
     # ================================================================
@@ -326,6 +334,17 @@ def analyze_match_v8(data: dict) -> dict:
     goals_in_sweet_spot = 2.00 <= avg_goals <= 2.40
     
     # ================================================================
+    # DEAD RUBBER DETECTION (FIX #1)
+    # ================================================================
+    is_dead_rubber = False
+    if (home_block == "mid" and away_block == "mid" and 
+        not is_relegation_fight and
+        not data.get("is_title_race", False)):
+        is_dead_rubber = True
+        result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
+        result["warning_type"] = "dead_rubber"
+    
+    # ================================================================
     # DRAW CONDITIONS — ALL 4 must be TRUE
     # ================================================================
     draw_conditions = {
@@ -335,78 +354,98 @@ def analyze_match_v8(data: dict) -> dict:
         "no_desperation": not is_any_desperate,
     }
     result["draw_conditions"] = draw_conditions
-    
     all_draw_conditions_met = all(draw_conditions.values())
     
     # ================================================================
-    # Determine Winner Selection
+    # TRUTH #2: 65% Home Win Rule (PRIMARY CHECK - FIX #2)
     # ================================================================
-    winner_selection = "HOME"
+    if is_draw_predicted and not all_draw_conditions_met:
+        winner_selection = "HOME"
+        result["winner_reason"] = "65% RULE: When draw fails, home wins 65% of the time"
     
-    # STEP 2: Determine WHICH side wins
-    # └── Is Home Team in better form? (≥3 points difference)
-    if home_form - away_form >= 3:
+    # ================================================================
+    # PRIORITY CHECK: HOME DESPERATION LOCK (FIX #3)
+    # ================================================================
+    if is_home_desperate and not is_away_desperate:
         winner_selection = "HOME"
-        result["winner_reason"] = f"Home team better form: {home_form} vs {away_form} points"
-    # └── Is Home Team desperate?
-    elif is_home_desperate and not is_away_desperate:
-        winner_selection = "HOME"
-        result["winner_reason"] = "Home team desperate"
-    # └── Is Away Team in better form AND desperate?
-    elif away_form - home_form >= 3 and is_away_desperate:
-        winner_selection = "AWAY"
-        result["winner_reason"] = f"Away team better form ({away_form} vs {home_form}) and desperate"
-    # └── Default (when nothing is clear) → BET HOME WIN (65% of non-draws)
-    else:
-        winner_selection = "HOME"
-        result["winner_reason"] = "Default - home team wins 65% of non-draws"
+        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy (7/7 in dataset)"
+        result["is_lock"] = True
+        result["lock_reason"] = "Home team desperate (losing streak 3+ or relegation fight)"
+    
+    # ================================================================
+    # STEP 2: Determine WHICH side wins (if not already decided)
+    # ================================================================
+    if "winner_selection" not in result or result["winner_selection"] is None:
+        # └── Is Home Team in better form? (≥3 points difference)
+        if home_form - away_form >= 3:
+            winner_selection = "HOME"
+            result["winner_reason"] = f"Home team better form: {home_form} vs {away_form} points → 89% accuracy"
+        # └── Is Away Team in better form AND desperate?
+        elif away_form - home_form >= 3 and is_away_desperate:
+            winner_selection = "AWAY"
+            result["winner_reason"] = f"Away team better form ({away_form} vs {home_form}) and desperate → 83% accuracy"
+        # └── Default (when nothing is clear) → BET HOME WIN (65% of non-draws)
+        else:
+            winner_selection = "HOME"
+            result["winner_reason"] = "Default: Home team wins 65% of non-draws"
     
     result["winner_selection"] = winner_selection
     
     # ================================================================
-    # TRUTH #2: When Draw Prediction Fails — Home Wins 65% of the Time
-    # ================================================================
-    non_draw_winner = "HOME"  # 65% of non-draws are home wins
-    
-    # ================================================================
-    # GOAL BETS (TRUTH #7)
+    # TRUTH #7: Goal Locks (FIX #4 - HIERARCHY)
     # ================================================================
     goal_bet = None
     goal_accuracy = None
+    goal_reason = None
     
-    # STEP 1: Check Avg Goals
+    # LOCK #1: Avg Goals < 2.00 → UNDER 2.5 (95%)
     if avg_goals < 2.00:
         goal_bet = "UNDER 2.5"
-        goal_accuracy = "95%"
-        result["goal_reason"] = f"Avg goals {avg_goals:.2f} < 2.00 → BET UNDER 2.5"
-    elif avg_goals > 3.00:
-        if draw_prediction > 0:
-            goal_bet = "OVER 2.5"
-            goal_accuracy = "100%"
-            result["goal_reason"] = f"Avg goals {avg_goals:.2f} > 3.00 + Draw Prediction → BET OVER 2.5"
-        elif winner_selection == "AWAY":
-            goal_bet = "OVER 2.5"
-            goal_accuracy = "80%"
-            result["goal_reason"] = f"Avg goals {avg_goals:.2f} > 3.00 + Away Win → BET OVER 2.5"
-        else:
-            goal_bet = "OVER 2.5"
-            goal_accuracy = "62%"
-            result["goal_reason"] = f"Avg goals {avg_goals:.2f} > 3.00 + Home Win → BET OVER 2.5 (62%)"
+        goal_accuracy = "95% (20/21 in dataset)"
+        goal_reason = f"Avg goals {avg_goals:.2f} < 2.00 → UNDER 2.5 is a LOCK"
+        result["is_lock"] = True
+        result["lock_reason"] = "Avg goals < 2.00 → UNDER 2.5 (95% accuracy)"
+    
+    # LOCK #2: Avg Goals > 3.00 + Draw Prediction → OVER 2.5 (100%)
+    elif avg_goals > 3.00 and is_draw_predicted:
+        goal_bet = "OVER 2.5"
+        goal_accuracy = "100% (2/2 in dataset)"
+        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Draw Prediction → OVER 2.5 is a LOCK"
+        result["is_lock"] = True
+        result["lock_reason"] = "Avg goals > 3.00 + Draw → OVER 2.5 (100% accuracy)"
+    
+    # LOCK #3: Avg Goals > 3.00 + Away Win → OVER 2.5 (80%)
+    elif avg_goals > 3.00 and winner_selection == "AWAY":
+        goal_bet = "OVER 2.5"
+        goal_accuracy = "80% (4/5 in dataset)"
+        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Away Win → OVER 2.5"
+        result["is_lock"] = True
+        result["lock_reason"] = "Avg goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)"
+    
+    # LOCK #4: Avg Goals > 3.00 + Home Win → OVER 2.5 (62%)
+    elif avg_goals > 3.00 and winner_selection == "HOME":
+        goal_bet = "OVER 2.5"
+        goal_accuracy = "62% (in dataset)"
+        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Home Win → OVER 2.5 (62%)"
+    
+    # SWEET SPOT: Avg Goals 2.00-2.40
     elif 2.00 <= avg_goals <= 2.40:
-        if draw_prediction > 0:
+        if is_draw_predicted:
             goal_bet = "UNDER 2.5"
-            goal_accuracy = "80%"
-            result["goal_reason"] = f"Avg goals {avg_goals:.2f} in sweet spot + Draw → BET UNDER 2.5"
+            goal_accuracy = "80% (in dataset)"
+            goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Draw → UNDER 2.5"
         elif winner_selection == "HOME":
             goal_bet = "UNDER 2.5"
-            goal_accuracy = "80%"
-            result["goal_reason"] = f"Avg goals {avg_goals:.2f} in sweet spot + Home Win → BET UNDER 2.5"
+            goal_accuracy = "80% (in dataset)"
+            goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Home Win → UNDER 2.5"
         else:
             goal_bet = "SKIP"
             goal_accuracy = "50%"
-            result["goal_reason"] = f"Avg goals {avg_goals:.2f} in sweet spot + Away Win → SKIP (50%)"
+            goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Away Win → SKIP (50%)"
     
     result["goal_bet"] = goal_bet
+    result["goal_reason"] = goal_reason
+    result["goal_accuracy"] = goal_accuracy
     
     # ================================================================
     # FINAL DECISION
@@ -414,65 +453,44 @@ def analyze_match_v8(data: dict) -> dict:
     if is_draw_predicted and all_draw_conditions_met:
         # BET THE DRAW
         result["primary_bet"] = {
-            "market": "DRAW",
-            "reason": "All 4 draw conditions met: Form similar, goals in sweet spot, same block, no desperation",
-            "historical_accuracy": "57%",
+            "market": "DRAW" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
+            "reason": "ALL 4 draw conditions met: Form similar, goals in sweet spot, same block, no desperation",
+            "historical_accuracy": "57% (4/7 in dataset)",
+            "secondary_goal": goal_bet if goal_bet and goal_bet != "SKIP" else None,
+            "goal_accuracy": goal_accuracy,
         }
-        result["classification"] = "DRAW"
-        result["verdict"] = "RECOMMENDED"
+        result["classification"] = "DRAW" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
+        result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
     
     elif is_draw_predicted and not all_draw_conditions_met:
-        # DOUBLE CHANCE (Form diff > 2, or different blocks, or desperation)
-        if form_diff > 2:
-            result["primary_bet"] = {
-                "market": f"DOUBLE CHANCE: {winner_selection} or Draw",
-                "reason": f"Form difference {form_diff} > 2 → Double Chance wins 83% when draw predicted",
-                "historical_accuracy": "83%",
-            }
-        elif not same_block:
-            result["primary_bet"] = {
-                "market": f"DOUBLE CHANCE: {winner_selection} or Draw",
-                "reason": f"Different competitive blocks ({home_block} vs {away_block}) → Double Chance",
-                "historical_accuracy": "83%",
-            }
-        elif is_any_desperate:
-            result["primary_bet"] = {
-                "market": f"DOUBLE CHANCE: {winner_selection} or Draw",
-                "reason": "Desperation present → Double Chance",
-                "historical_accuracy": "83%",
-            }
-        else:
-            result["primary_bet"] = {
-                "market": f"DOUBLE CHANCE: {winner_selection} or Draw",
-                "reason": "Draw conditions not fully met → Double Chance",
-                "historical_accuracy": "83%",
-            }
-        result["classification"] = "DOUBLE CHANCE"
-        result["verdict"] = "RECOMMENDED"
+        # DOUBLE CHANCE
+        if is_dead_rubber:
+            result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for - proceed with caution"
+        
+        result["primary_bet"] = {
+            "market": f"DOUBLE CHANCE: {winner_selection} or Draw" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
+            "reason": f"Draw conditions not fully met → Double Chance wins 83% when draw predicted. {result.get('winner_reason', '')}",
+            "historical_accuracy": "83% (24/29 in dataset)",
+            "secondary_goal": goal_bet if goal_bet and goal_bet != "SKIP" else None,
+            "goal_accuracy": goal_accuracy,
+        }
+        result["classification"] = f"DOUBLE CHANCE: {winner_selection}" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
+        result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
     
     elif not is_draw_predicted:
-        # Exact winner based on form and desperation
+        # EXACT WINNER
+        if is_dead_rubber:
+            result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for - results may be unpredictable"
+        
         result["primary_bet"] = {
-            "market": f"{winner_selection} WIN",
+            "market": f"{winner_selection} WIN" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
             "reason": result.get("winner_reason", "Default selection"),
-            "historical_accuracy": "89%" if "better form" in result.get("winner_reason", "") else "65%",
+            "historical_accuracy": "89%" if "better form" in result.get("winner_reason", "") else "100%" if "DESPERATE" in result.get("winner_reason", "") else "65%",
+            "secondary_goal": goal_bet if goal_bet and goal_bet != "SKIP" else None,
+            "goal_accuracy": goal_accuracy,
         }
-        result["classification"] = f"{winner_selection} WIN"
-        result["verdict"] = "RECOMMENDED"
-    
-    # Add goal bet if available
-    if goal_bet and goal_bet != "SKIP":
-        if result["primary_bet"]:
-            result["primary_bet"]["market"] += f" | {goal_bet}"
-            result["primary_bet"]["reason"] += f"; {result.get('goal_reason', '')}"
-        else:
-            result["primary_bet"] = {
-                "market": goal_bet,
-                "reason": result.get("goal_reason", ""),
-                "historical_accuracy": goal_accuracy,
-            }
-        result["classification"] += f" | {goal_bet}"
-        result["verdict"] = "RECOMMENDED"
+        result["classification"] = f"{winner_selection} WIN" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
+        result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
     
     if not result.get("primary_bet"):
         result["skip_reasons"].append("No clear betting signal from universal logic")
@@ -493,7 +511,6 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     
     total = home + away
     pred = primary_pred.strip().upper()
-    is_correct = False
     
     # Parse prediction for multiple bets
     if ' | ' in pred:
@@ -507,7 +524,7 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     for bet in bets:
         bet = bet.strip()
         total_bets += 1
-        if 'DRAW' in bet:
+        if 'DRAW' in bet and not 'DOUBLE' in bet:
             if home == away:
                 correct_count += 1
         elif 'DOUBLE CHANCE' in bet or 'DOUBLE CHANCE:' in bet:
@@ -532,10 +549,10 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
         elif 'BTTS' in bet:
             if home > 0 and away > 0:
                 correct_count += 1
-        elif 'HOME WIN' in bet or 'HOME' in bet:
+        elif 'HOME WIN' in bet or ('HOME' in bet and not 'DOUBLE' in bet):
             if home > away:
                 correct_count += 1
-        elif 'AWAY WIN' in bet or 'AWAY' in bet:
+        elif 'AWAY WIN' in bet or ('AWAY' in bet and not 'DOUBLE' in bet):
             if away > home:
                 correct_count += 1
     
@@ -572,13 +589,18 @@ def save_to_db(data: dict, analysis: dict):
             "home_losing_streak": data.get("home_losing_streak", 0),
             "away_losing_streak": data.get("away_losing_streak", 0),
             "is_lock": analysis.get("is_lock", False),
+            "lock_reason": analysis.get("lock_reason"),
             "prediction": primary["market"] if primary else "SKIP",
             "classification": analysis.get("classification", "SKIP"),
             "pattern": "DRAW" if "DRAW" in analysis.get("classification", "") else "DOUBLE_CHANCE" if "DOUBLE" in analysis.get("classification", "") else "WIN" if "WIN" in analysis.get("classification", "") else "SKIP",
             "verdict": analysis.get("verdict", "SKIP"),
             "draw_conditions": json.dumps(analysis.get("draw_conditions", {})),
             "winner_selection": analysis.get("winner_selection"),
+            "winner_reason": analysis.get("winner_reason"),
             "goal_bet": analysis.get("goal_bet"),
+            "goal_accuracy": analysis.get("goal_accuracy"),
+            "warning": analysis.get("warning"),
+            "warning_type": analysis.get("warning_type"),
             "score_matrix": json.dumps(data.get("score_matrix", [])),
             "home_win_pct": data.get("home_win"),
             "draw_pct": data.get("draw"),
@@ -631,7 +653,7 @@ def get_results():
 # ============================================================================
 def main():
     st.title("📊 Match Analyzer V8.0")
-    st.caption("Universal Logic Engine | Based on 81 matches across 7 leagues | Draw predictions wrong 83% of the time")
+    st.caption("Universal Logic Engine (FULL IMPLEMENTATION) | Based on 81 matches across 7 leagues | Draw predictions wrong 83% of the time")
     
     # Show the universal truths
     with st.expander("📖 The Universal Truths", expanded=False):
@@ -654,7 +676,12 @@ def main():
         Desperate teams don't play for draws.
         
         **TRUTH #7: The Goal Locks**  
-        Avg Goals < 2.00 → UNDER 2.5 (95% accuracy)
+        • Avg Goals < 2.00 → UNDER 2.5 (95% accuracy)  
+        • Avg Goals > 3.00 + Draw → OVER 2.5 (100% accuracy)  
+        • Avg Goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)
+        
+        **PRIORITY RULE: Home Desperation = 100% Accuracy**  
+        When the home team is desperate (losing streak 3+ or relegation fight), BET HOME WIN.
         """)
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -679,6 +706,14 @@ def main():
                     analysis = analyze_match_v8(data)
                     save_to_db(data, analysis)
                     
+                    # Display warnings first
+                    if analysis.get("warning"):
+                        st.markdown(f'<div class="dead-rubber-warning">{analysis["warning"]}</div>', unsafe_allow_html=True)
+                    
+                    # Display Lock status
+                    if analysis.get("is_lock"):
+                        st.success(f"🔒 LOCK SIGNAL: {analysis.get('lock_reason', '')}")
+                    
                     # Display Draw Conditions if draw was predicted
                     if data.get("draw", 0) > 0:
                         st.markdown("### 🎯 Draw Conditions Check")
@@ -701,12 +736,15 @@ def main():
                         if all_met:
                             st.success("✅ ALL 4 conditions met → BET THE DRAW (57% accuracy)")
                         else:
-                            st.info("⚠️ Not all conditions met → Consider Double Chance or Exact Winner")
+                            st.info("⚠️ Not all conditions met → Double Chance or Exact Winner recommended")
                     
                     v = analysis["verdict"]
-                    if v == "LOCK": st.success(f"🔒 LOCK: {data['home_team']} vs {data['away_team']}")
-                    elif v == "RECOMMENDED": st.success(f"✅ RECOMMENDED: {data['home_team']} vs {data['away_team']}")
-                    else: st.warning(f"⚠️ SKIP: {data['home_team']} vs {data['away_team']}")
+                    if v == "LOCK": 
+                        st.success(f"🔒 LOCK: {data['home_team']} vs {data['away_team']}")
+                    elif v == "RECOMMENDED": 
+                        st.success(f"✅ RECOMMENDED: {data['home_team']} vs {data['away_team']}")
+                    else: 
+                        st.warning(f"⚠️ SKIP: {data['home_team']} vs {data['away_team']}")
                     
                     st.markdown(f"**Classification: {analysis['classification']}**")
                     
@@ -715,7 +753,7 @@ def main():
                     
                     # Key Metrics
                     st.markdown("### 📊 Key Metrics")
-                    m1, m2, m3, m4 = st.columns(4)
+                    m1, m2, m3, m4, m5 = st.columns(5)
                     with m1:
                         st.markdown(f'<div class="metric-card"><div class="metric-value">{data.get("home_form_points", "?")} vs {data.get("away_form_points", "?")}</div><div class="metric-label">Form Points</div></div>', unsafe_allow_html=True)
                     with m2:
@@ -728,6 +766,12 @@ def main():
                     with m4:
                         desperate = "Yes" if (data.get("home_losing_streak", 0) >= 3 or data.get("away_losing_streak", 0) >= 3 or data.get("is_relegation_fight", False)) else "No"
                         st.markdown(f'<div class="metric-card"><div class="metric-value">{desperate}</div><div class="metric-label">Desperation</div></div>', unsafe_allow_html=True)
+                    with m5:
+                        home_desperate = "🔒" if data.get("home_losing_streak", 0) >= 3 or data.get("is_relegation_fight", False) else "No"
+                        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_desperate}</div><div class="metric-label">Home Desperate</div></div>', unsafe_allow_html=True)
+                    
+                    if analysis.get("goal_reason"):
+                        st.info(f"⚽ Goal Bet: {analysis.get('goal_bet')} — {analysis.get('goal_reason')} (Accuracy: {analysis.get('goal_accuracy', 'N/A')})")
                     
                     if data.get("score_matrix"):
                         st.markdown("### 🎯 Score Matrix (Top 5)")
@@ -739,12 +783,24 @@ def main():
                     
                     if analysis.get("primary_bet"):
                         p = analysis["primary_bet"]
-                        card_class = "primary-card"
-                        badge = f'<span class="accuracy-badge">📊 {p.get("historical_accuracy", "N/A")}</span>'
-                        st.markdown(f'<div class="section-label">🎯 PRIMARY BET</div><div class="output-card {card_class}"><div style="display:flex;align-items:center;gap:1rem;"><div style="font-size:2.5rem;">🔥</div><div style="flex:1;"><div style="font-size:1.3rem;font-weight:800;">{p["market"]}</div><div style="font-size:0.8rem;color:#64748b;">{p["reason"]}</div><div style="margin-top:0.5rem;">{badge}</div></div></div></div>', unsafe_allow_html=True)
+                        if analysis.get("is_lock"):
+                            card_class = "lock-card"
+                            badge = f'<span class="lock-badge">🔒 LOCK — {analysis.get("lock_reason", "")}</span>'
+                        elif analysis.get("warning_type") == "dead_rubber":
+                            card_class = "dead-rubber-card"
+                            badge = f'<span class="accuracy-badge">⚠️ DEAD RUBBER — {p.get("historical_accuracy", "")}</span>'
+                        else:
+                            card_class = "primary-card"
+                            badge = f'<span class="accuracy-badge">📊 {p.get("historical_accuracy", "")}</span>'
+                        
+                        st.markdown(f'<div class="section-label">🎯 PRIMARY BET</div><div class="output-card {card_class}"><div style="display:flex;align-items:center;gap:1rem;"><div style="font-size:2.5rem;">{"🔒" if analysis.get("is_lock") else "🔥"}</div><div style="flex:1;"><div style="font-size:1.3rem;font-weight:800;">{p["market"]}</div><div style="font-size:0.8rem;color:#64748b;">{p["reason"]}</div><div style="margin-top:0.5rem;">{badge}</div></div></div></div>', unsafe_allow_html=True)
                     
                     if analysis["verdict"] == "SKIP":
                         st.markdown(f'<div class="output-card skip-card"><div class="verdict-skip"><div class="big-text">⚠️ SKIP — NO BET</div><p style="color:#94a3b8;">{"<br>".join(analysis.get("skip_reasons", []))}</p></div></div>', unsafe_allow_html=True)
+                    
+                    # Show priority rules
+                    if data.get("home_losing_streak", 0) >= 3:
+                        st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE: {data["home_team"]} has {data["home_losing_streak"]} game losing streak → BET HOME WIN (100% accuracy)</div>', unsafe_allow_html=True)
     
     # ========================================================================
     # TAB 2: POST-MATCH
@@ -759,8 +815,12 @@ def main():
                 at = a.get('away_team', 'Away')
                 pred = a.get('prediction', 'No prediction')
                 pat = a.get('pattern', '')
+                is_lock = a.get('is_lock', False)
+                warning = a.get('warning')
                 
-                if pat == "DRAW":
+                if is_lock:
+                    badge = "🔒 LOCK"
+                elif pat == "DRAW":
                     badge = "🎯 DRAW"
                 elif pat == "DOUBLE_CHANCE":
                     badge = "🔄 DOUBLE CHANCE"
@@ -770,6 +830,8 @@ def main():
                     badge = "⚠️ SKIP"
                 
                 with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
+                    if warning:
+                        st.warning(warning)
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
@@ -795,23 +857,35 @@ def main():
             
             correct = 0
             incorrect = 0
+            lock_correct = 0
+            lock_total = 0
+            dead_rubber_correct = 0
+            dead_rubber_total = 0
             
             for r in results:
                 pred = r.get('prediction', '')
                 if pred == 'SKIP':
                     continue
                 
-                # Parse prediction for evaluation
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
                 evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
                 
                 if evaluation["is_correct"]:
                     correct += 1
+                    if r.get('is_lock', False):
+                        lock_correct += 1
+                    if r.get('warning_type') == 'dead_rubber':
+                        dead_rubber_correct += 1
                 else:
                     incorrect += 1
+                
+                if r.get('is_lock', False):
+                    lock_total += 1
+                if r.get('warning_type') == 'dead_rubber':
+                    dead_rubber_total += 1
             
             # Summary stats
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Tracked</div></div>', unsafe_allow_html=True)
             with col2:
@@ -821,6 +895,20 @@ def main():
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
             with col4:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{skip_count}</div><div class="stat-label">Skipped</div></div>', unsafe_allow_html=True)
+            with col5:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct Bets</div></div>', unsafe_allow_html=True)
+            
+            # Lock signal stats
+            if lock_total > 0:
+                lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
+                st.markdown(f"🔒 **Lock Signals:** {lock_correct}/{lock_total} correct ({lock_rate}%)")
+                if lock_rate >= 95:
+                    st.success("✅ Lock signals are performing at or above expected accuracy!")
+            
+            # Dead rubber stats
+            if dead_rubber_total > 0:
+                dead_rate = round(dead_rubber_correct / dead_rubber_total * 100) if dead_rubber_total > 0 else 0
+                st.markdown(f"⚠️ **Dead Rubber Bets:** {dead_rubber_correct}/{dead_rubber_total} correct ({dead_rate}%)")
             
             st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
             
@@ -832,6 +920,8 @@ def main():
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+                is_lock = r.get('is_lock', False)
+                warning = r.get('warning')
                 
                 if pred == 'SKIP':
                     badge = '<span class="skip-badge">⚪ SKIP</span>'
@@ -841,7 +931,11 @@ def main():
                     badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
                     score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
                 
-                if pattern == "DRAW":
+                if is_lock:
+                    match_display = f"🔒 {r.get('home_team', '')} vs {r.get('away_team', '')}"
+                elif warning:
+                    match_display = f"⚠️ {r.get('home_team', '')} vs {r.get('away_team', '')}"
+                elif pattern == "DRAW":
                     match_display = f"🎯 {r.get('home_team', '')} vs {r.get('away_team', '')}"
                 elif pattern == "DOUBLE_CHANCE":
                     match_display = f"🔄 {r.get('home_team', '')} vs {r.get('away_team', '')}"
