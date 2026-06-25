@@ -324,7 +324,7 @@ def split_into_sections(text: str, debug=None) -> dict:
 def parse_predictions_simple(text: str, debug=None) -> list:
     """
     SIMPLE PARSER — Finds data lines and extracts team names by looking backwards.
-    FIXED: Pattern handles anything after the degree symbol.
+    FIXED: Handles both 8-digit and 9-character formats.
     """
     matches = []
     lines = text.split('\n')
@@ -335,89 +335,119 @@ def parse_predictions_simple(text: str, debug=None) -> list:
     
     log(f"Processing {len(lines)} lines in Predictions section", "info")
     
-    # Pattern: 2 digits (home) + 2 digits (draw) + 2 digits (away) + 1 char (pred) + 2 digits (score)
-    # Then optional spaces, dash, avg_goals, temp, degree symbol
-    # The .*? at the end handles anything after the degree symbol (-, odds, etc.)
-    data_pattern = re.compile(r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°.*?')
-    
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
         
-        # Check if this line matches the data pattern
-        match = data_pattern.search(line)
-        if match:
-            data_line_count = 0
-            # Count matches (we'll increment properly)
-            
-            # Extract all values
-            home_win_pct = int(match.group(1))
-            draw_pct = int(match.group(2))
-            away_win_pct = int(match.group(3))
-            prediction = match.group(4)
-            score_code = match.group(5)
-            avg_goals = float(match.group(6))
-            temperature = int(match.group(7))
-            
-            correct_score_home = int(score_code[0])
-            correct_score_away = int(score_code[1])
-            
-            # Count this as a found data line
-            data_line_count = len(matches) + 1
-            log(f"✅ Found data line {data_line_count} at line {i+1}: {line[:60]}...", "success")
-            log(f"    📊 Probabilities: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}", "info")
-            log(f"    ⚽ Score: {correct_score_home}-{correct_score_away}, Avg goals: {avg_goals}, Temp: {temperature}°", "info")
-            
-            # Now find the teams by looking backwards
-            home_team = None
-            away_team = None
-            date_line = None
-            
-            # Look for the date first (the line before the data line)
-            for j in range(i-1, max(0, i-10), -1):
-                prev_line = lines[j].strip()
-                if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
-                    date_line = prev_line
-                    # The two lines before the date should be the teams
-                    if j - 2 >= 0:
-                        home_team = lines[j-2].strip()
-                        away_team = lines[j-1].strip()
-                    break
-            
-            if not home_team or not away_team or not date_line:
-                log(f"    ⚠️ Could not find teams or date", "warning")
-                log(f"       Home: {home_team}, Away: {away_team}, Date: {date_line}", "warning")
+        # Check if this is a data line (contains 6+ digits and a degree symbol)
+        if not re.search(r'\d{6,}.*°', line):
+            continue
+        
+        # Remove all spaces
+        cleaned = line.replace(' ', '')
+        
+        # Extract percentages (first 6 digits)
+        pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})', cleaned)
+        if not pct_match:
+            continue
+        
+        home_win_pct = int(pct_match.group(1))
+        draw_pct = int(pct_match.group(2))
+        away_win_pct = int(pct_match.group(3))
+        
+        # Find where the percentages end
+        remaining = cleaned[6:]
+        
+        # Extract prediction and score
+        prediction = '1'  # Default
+        score_code = '12'  # Default
+        
+        # Check if remaining starts with 'X'
+        if remaining.startswith('X'):
+            prediction = 'X'
+            remaining = remaining[1:]
+        else:
+            # Try to extract prediction as first digit (1 or 2)
+            pred_match = re.search(r'^([12])', remaining)
+            if pred_match:
+                prediction = pred_match.group(1)
+                remaining = remaining[1:]
+        
+        # Now extract score code (2 digits)
+        score_match = re.search(r'^(\d{2})', remaining)
+        if score_match:
+            score_code = score_match.group(1)
+        else:
+            # If no score code found, try to find it in the original line
+            fallback_match = re.search(r'\b(\d{2})\s*-', line)
+            if fallback_match:
+                score_code = fallback_match.group(1)
+            else:
                 continue
-            
-            log(f"    🏠 Home: {home_team}, Away: {away_team}, Date: {date_line}", "info")
-            
-            # Skip if home or away is "PRE" or "VIEW"
-            if home_team in ["PRE", "VIEW"] or away_team in ["PRE", "VIEW"]:
-                log(f"    ⚠️ Skipping preview lines", "warning")
+        
+        correct_score_home = int(score_code[0])
+        correct_score_away = int(score_code[1])
+        
+        # Extract avg goals and temperature
+        avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', line)
+        if not avg_temp_match:
+            avg_temp_match = re.search(r'(\d+\.\d+)°', line)
+            if avg_temp_match:
+                avg_goals = float(avg_temp_match.group(1))
+                # Try to find temperature after avg_goals
+                temp_match = re.search(r'(\d+)°', line.replace(str(avg_goals), ''))
+                temperature = int(temp_match.group(1)) if temp_match else 0
+            else:
                 continue
-            
-            matches.append({
-                "home_team": home_team,
-                "away_team": away_team,
-                "date": date_line,
-                "home_win_pct": home_win_pct,
-                "draw_pct": draw_pct,
-                "away_win_pct": away_win_pct,
-                "prediction": prediction,
-                "correct_score_home": correct_score_home,
-                "correct_score_away": correct_score_away,
-                "avg_goals": avg_goals,
-                "temperature": temperature
-            })
-            
-            log(f"    ✅ Match added: {home_team} vs {away_team}", "success")
+        else:
+            avg_goals = float(avg_temp_match.group(1))
+            temperature = int(avg_temp_match.group(2))
+        
+        log(f"✅ Found data line: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}, Score: {correct_score_home}-{correct_score_away}, Avg: {avg_goals}", "success")
+        
+        # Find teams by looking backwards
+        home_team = None
+        away_team = None
+        date_line = None
+        
+        for j in range(i-1, max(0, i-10), -1):
+            prev_line = lines[j].strip()
+            if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
+                date_line = prev_line
+                if j - 2 >= 0:
+                    home_team = lines[j-2].strip()
+                    away_team = lines[j-1].strip()
+                break
+        
+        if not home_team or not away_team or not date_line:
+            log(f"  ⚠️ Could not find teams or date", "warning")
+            continue
+        
+        log(f"  🏠 Home: {home_team}, Away: {away_team}, Date: {date_line}", "info")
+        
+        # Skip if home or away is "PRE" or "VIEW"
+        if home_team in ["PRE", "VIEW"] or away_team in ["PRE", "VIEW"]:
+            log(f"  ⚠️ Skipping preview lines", "warning")
+            continue
+        
+        matches.append({
+            "home_team": home_team,
+            "away_team": away_team,
+            "date": date_line,
+            "home_win_pct": home_win_pct,
+            "draw_pct": draw_pct,
+            "away_win_pct": away_win_pct,
+            "prediction": prediction,
+            "correct_score_home": correct_score_home,
+            "correct_score_away": correct_score_away,
+            "avg_goals": avg_goals,
+            "temperature": temperature
+        })
+        
+        log(f"  ✅ Match added: {home_team} vs {away_team}", "success")
     
-    # Count total data lines found
-    data_line_count = len(matches)
-    log(f"Total data lines found: {data_line_count}", "info")
     log(f"Total matches extracted: {len(matches)}", "info")
-    
     return matches
 
 
