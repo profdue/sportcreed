@@ -67,7 +67,7 @@ st.markdown("""
     .league-badge.it { background: #8b5cf6; color: #fff; }
     .league-badge.de { background: #ec4899; color: #fff; }
     .league-badge.unknown { background: #64748b; color: #fff; }
-    .debug-box { background: #1a1a2e; border: 1px solid #3b82f6; border-radius: 8px; padding: 0.75rem; margin: 0.5rem 0; font-family: monospace; font-size: 0.8rem; max-height: 400px; overflow-y: auto; }
+    .debug-box { background: #1a1a2e; border: 1px solid #3b82f6; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; font-family: monospace; font-size: 0.8rem; max-height: 400px; overflow-y: auto; }
     .debug-box .success { color: #10b981; }
     .debug-box .error { color: #ef4444; }
     .debug-box .info { color: #3b82f6; }
@@ -269,6 +269,7 @@ def split_into_sections(text: str) -> dict:
 def parse_predictions_simple(text: str, debug=None) -> list:
     """
     SIMPLE PARSER — Finds data lines and extracts team names by looking backwards.
+    FIXED: Correctly matches the 8-9 character data pattern.
     """
     matches = []
     lines = text.split('\n')
@@ -282,67 +283,45 @@ def parse_predictions_simple(text: str, debug=None) -> list:
     # Count how many lines match the data pattern
     data_line_count = 0
     
+    # Pattern: 2 digits (home) + 2 digits (draw) + 2 digits (away) + 1 char (pred) + 2 digits (score)
+    # Then optional spaces, dash, avg_goals, temp, degree symbol
+    # This pattern handles both 8-digit (pred is digit) and 9-character (pred is X) formats
+    data_pattern = re.compile(r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°')
+    
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
         
-        # Check if this line contains a data pattern
-        # Pattern: 10+ digits, a dash, and a degree symbol
-        if re.search(r'\d{10}.*-.*°', line):
+        # Check if this line matches the data pattern
+        match = data_pattern.search(line)
+        if match:
             data_line_count += 1
             log(f"Found data line {data_line_count}: {line[:60]}...", "info")
             
-            # Extract avg goals and temperature
-            avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', line)
-            if not avg_temp_match:
-                log(f"  ⚠️ Could not extract avg_goals from: {line}", "warning")
-                continue
+            # Extract all values
+            home_win_pct = int(match.group(1))
+            draw_pct = int(match.group(2))
+            away_win_pct = int(match.group(3))
+            prediction = match.group(4)
+            score_code = match.group(5)
+            avg_goals = float(match.group(6))
+            temperature = int(match.group(7))
             
-            avg_goals = float(avg_temp_match.group(1))
-            temperature = int(avg_temp_match.group(2))
-            log(f"  📊 Avg goals: {avg_goals}, Temperature: {temperature}°", "info")
+            correct_score_home = int(score_code[0])
+            correct_score_away = int(score_code[1])
             
-            # Extract numbers from the line
-            numbers = re.findall(r'\b(\d{2})\b', line)
-            log(f"  🔢 Found numbers: {numbers}", "info")
-            
-            if len(numbers) < 4:
-                log(f"  ⚠️ Not enough numbers: {len(numbers)}", "warning")
-                continue
-            
-            home_win_pct = int(numbers[0])
-            draw_pct = int(numbers[1])
-            away_win_pct = int(numbers[2])
-            
-            # Find the prediction (1, X, or 2)
-            pred_match = re.search(r'\d{2}\d{2}\d{2}([1X2])', line)
-            if pred_match:
-                prediction = pred_match.group(1)
-            else:
-                log(f"  ⚠️ Could not find prediction in: {line}", "warning")
-                continue
-            
-            log(f"  🎯 Probabilities: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}", "info")
-            
-            # Score code is the last 2 digits before the dash
-            score_match = re.search(r'(\d{2})\s*-\s*', line)
-            if score_match:
-                score_code = score_match.group(1)
-                correct_score_home = int(score_code[0])
-                correct_score_away = int(score_code[1])
-                log(f"  ⚽ Score: {correct_score_home}-{correct_score_away}", "info")
-            else:
-                log(f"  ⚠️ Could not find score code in: {line}", "warning")
-                continue
+            log(f"  📊 Probabilities: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}", "info")
+            log(f"  ⚽ Score: {correct_score_home}-{correct_score_away}, Avg goals: {avg_goals}, Temp: {temperature}°", "info")
             
             # Now find the teams by looking backwards
             home_team = None
             away_team = None
             date_line = None
             
-            # Look for the date first
-            for j in range(i-1, max(0, i-15), -1):
+            # Look for the date first (the line before the data line)
+            # The date is usually 3-4 lines before the data line
+            for j in range(i-1, max(0, i-10), -1):
                 prev_line = lines[j].strip()
                 if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
                     date_line = prev_line
@@ -404,6 +383,7 @@ def parse_form(text: str, debug=None) -> dict:
         
         line = line.replace('\t', ' ')
         
+        # Pattern: "1.  Palmeiras    D W W W L W..."
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL\s]+)', line)
         if match:
             team_name = match.group(2).strip()
