@@ -82,10 +82,10 @@ st.markdown("""
 def get_league_config(league: str) -> dict:
     """Get league-specific configuration"""
     config = {
-        "relegation_threshold": 15,  # Default
-        "league_size": 20,           # Default
-        "europe_threshold": 4,       # Default
-        "goals_fallback": 2.50       # Default
+        "relegation_threshold": 15,
+        "league_size": 20,
+        "europe_threshold": 4,
+        "goals_fallback": 2.50
     }
     
     if "Norway" in league or "Eliteserien" in league:
@@ -142,6 +142,11 @@ def extract_all_data_universal(raw_text: str) -> dict:
     UNIVERSAL PARSER — Extracts from ANY league HTML
     Works with Norway, Brazil, Premier League, etc.
     """
+    # ================================================================
+    # FIX: Normalize quotes to handle both single and double quotes
+    # ================================================================
+    raw_text = raw_text.replace("'", '"')
+    
     league = detect_league(raw_text)
     league_config = get_league_config(league)
     
@@ -157,8 +162,18 @@ def extract_all_data_universal(raw_text: str) -> dict:
     # ================================================================
     # SECTION 1: Extract MATCH DATA (UNIVERSAL)
     # ================================================================
-    match_pattern = r'<div class="rcnt tr_[01]">(.*?)</div>'
-    match_blocks = re.findall(match_pattern, raw_text, re.DOTALL)
+    # Try multiple patterns to be safe
+    match_patterns = [
+        r'<div class="rcnt tr_[01]">(.*?)</div>',
+        r'<div class="rcnt tr_0">(.*?)</div>',
+        r'<div class="rcnt tr_1">(.*?)</div>',
+    ]
+    
+    match_blocks = []
+    for pattern in match_patterns:
+        match_blocks = re.findall(pattern, raw_text, re.DOTALL)
+        if match_blocks:
+            break
     
     for block in match_blocks:
         match = {}
@@ -262,7 +277,7 @@ def extract_all_data_universal(raw_text: str) -> dict:
             }
     
     # ================================================================
-    # SECTION 3: Extract FORM DATA (UNIVERSAL) — USES ALL GAMES
+    # SECTION 3: Extract FORM DATA (UNIVERSAL)
     # ================================================================
     form_pattern = r'<tr class="tr_[01]">.*?<td width="10".*?>\d+\.</td>.*?<td width="110".*?><a href="[^"]+">([^<]+)</a></td>.*?<ul class="form">(.*?)</ul>'
     form_rows = re.findall(form_pattern, raw_text, re.DOTALL)
@@ -288,17 +303,13 @@ def extract_all_data_universal(raw_text: str) -> dict:
         # Calculate form points from ALL games
         total_points = (win_count * 3) + draw_count
         
-        # Normalize form points to "per 5 games" for consistency
-        form_points_normalized = (total_points / total_games * 5) if total_games > 0 else 0
-        
         # Also calculate last 5 games form points
         last_5 = items[-5:] if len(items) >= 5 else items
         form_points_last_5 = sum(3 if x == 'win' else 1 if x == 'draw' else 0 for x in last_5)
         
         result["form_data"][team_name] = {
             "points": total_points,
-            "form_points": form_points_last_5,  # For compatibility with existing logic
-            "form_points_normalized": form_points_normalized,
+            "form_points": form_points_last_5,
             "losing_streak": losing_streak,
             "wins": win_count,
             "draws": draw_count,
@@ -392,9 +403,9 @@ def convert_match_to_data(match: dict, standings: dict, form_data: dict, league:
             league_size = league_config["league_size"]
             relegation_threshold = league_config["relegation_threshold"]
             
-            if pos <= 4:  # Top 4 = Europe
+            if pos <= 4:
                 return "europe"
-            elif pos >= relegation_threshold:  # Relegation zone
+            elif pos >= relegation_threshold:
                 return "relegation"
             else:
                 return "mid"
@@ -905,7 +916,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     if data.get("score_matrix"):
         st.markdown("### 🎯 Score Matrix (Top 5)")
-        # Show top 5 by probability (highest first)
         sorted_scores = sorted(data["score_matrix"], key=lambda x: x.get("probability", 0), reverse=True)[:5]
         score_cols = st.columns(min(5, len(sorted_scores)))
         for idx, s in enumerate(sorted_scores):
@@ -980,7 +990,6 @@ def main():
     with tab1:
         st.markdown("### 📂 Upload Match Data File")
         
-        # File upload section
         st.markdown("""
         <div class="upload-container">
             <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;">📄 Upload HTML File</p>
@@ -990,16 +999,13 @@ def main():
         
         uploaded_file = st.file_uploader("Choose a file", type=['txt', 'html', 'htm'], label_visibility="collapsed")
         
-        # Also keep text input for manual paste
         st.markdown("### ✏️ Or Paste Data Manually")
         raw_text = st.text_area("Match Data", height=200, key="raw_input", 
                                placeholder="Paste HTML data here, or upload a file above...")
         
-        # Process uploaded file or text input
         data_to_process = None
         
         if uploaded_file is not None:
-            # Read the uploaded file
             stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
             data_to_process = stringio.read()
             st.success(f"✅ File loaded: {uploaded_file.name} ({len(data_to_process):,} characters)")
@@ -1027,7 +1033,6 @@ def main():
                 if matches:
                     st.success(f"✅ Found {len(matches)} matches in {league}")
                     
-                    # Show statistics summary
                     if stats:
                         st.markdown("### 📊 League Statistics")
                         stat_cols = st.columns(4)
@@ -1044,7 +1049,6 @@ def main():
                             if "goals_per_game" in stats:
                                 st.metric("Goals/Game", f"{stats['goals_per_game']:.2f}")
                     
-                    # Show standings summary
                     if standings:
                         st.markdown("### 🏆 Standings (Top 5)")
                         standings_df = pd.DataFrame([
@@ -1053,11 +1057,9 @@ def main():
                         ])
                         st.dataframe(standings_df, use_container_width=True, hide_index=True)
                     
-                    # Process each match
                     for idx, match in enumerate(matches):
                         st.markdown(f"### Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
                         
-                        # Show form data if available
                         home = match.get('home_team')
                         away = match.get('away_team')
                         if home in form_data and away in form_data:
@@ -1073,7 +1075,6 @@ def main():
                                 st.metric("Form Difference", diff, 
                                          "Similar" if diff <= 2 else "Significant")
                         
-                        # Convert and analyze
                         data = convert_match_to_data(match, standings, form_data, league)
                         analysis = analyze_match_v8(data)
                         save_to_db(data, analysis, league)
@@ -1161,7 +1162,6 @@ def main():
                 if r.get('is_lock', False):
                     lock_total += 1
             
-            # Summary stats
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Tracked</div></div>', unsafe_allow_html=True)
@@ -1181,7 +1181,6 @@ def main():
             
             st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
             
-            # Results table
             rows = []
             for r in results:
                 pred = r.get('prediction', '')
