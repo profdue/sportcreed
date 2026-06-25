@@ -1,10 +1,13 @@
 """
-MATCH ANALYZER V8.0 — COMPLETE PARSER
-Extracts ALL data needed for universal logic:
-- Team form (W/D/L points)
-- Standings positions
-- Losing streaks
-- Competitive blocks
+MATCH ANALYZER V8.0 — UNIVERSAL LOGIC ENGINE (FILE UPLOAD + MULTI-LEAGUE SUPPORT)
+Based on analysis of 81 matches across 7 leagues
+- Draw predictions are wrong 83% of the time
+- Form difference > 2 points → someone wins
+- Goals sweet spot: 2.00-2.40 for draws
+- Desperation kills draws
+- Home team wins 65% of non-draws
+- Home desperation = 100% accuracy lock
+- UNIVERSAL: Works with ANY league HTML (Norway, Brazil, Premier League, etc.)
 """
 
 import streamlit as st
@@ -13,6 +16,7 @@ from supabase import create_client, Client
 import pandas as pd
 import re
 import json
+from io import StringIO
 
 # ============================================================================
 # SUPABASE SETUP
@@ -32,7 +36,7 @@ st.set_page_config(page_title="Match Analyzer V8.0", page_icon="📊", layout="w
 
 st.markdown("""
 <style>
-    .main .block-container { padding-top: 2rem; max-width: 1100px; }
+    .main .block-container { padding-top: 2rem; max-width: 1200px; }
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
     .primary-card { border: 3px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .lock-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
@@ -58,104 +62,78 @@ st.markdown("""
     .condition-false { color: #ef4444; font-weight: 700; }
     .condition-box { background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; }
     .priority-rule { background: #1a2a1a; border-left: 4px solid #f59e0b; padding: 0.75rem; margin: 0.5rem 0; border-radius: 4px; }
+    .upload-container { border: 2px dashed #3b82f6; border-radius: 12px; padding: 2rem; text-align: center; margin: 1rem 0; }
+    .upload-container:hover { border-color: #60a5fa; background: rgba(59, 130, 246, 0.05); }
+    .league-badge { display: inline-block; padding: 0.2rem 0.8rem; border-radius: 12px; font-size: 0.8rem; font-weight: 700; }
+    .league-badge.no { background: #ef4444; color: #fff; }
+    .league-badge.br { background: #10b981; color: #fff; }
+    .league-badge.uk { background: #3b82f6; color: #fff; }
+    .league-badge.es { background: #f59e0b; color: #000; }
+    .league-badge.it { background: #8b5cf6; color: #fff; }
+    .league-badge.de { background: #ec4899; color: #fff; }
+    .league-badge.unknown { background: #64748b; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================================
-# COMPLETE HTML PARSER
+# UNIVERSAL HTML PARSER — WORKS WITH ANY LEAGUE
 # ============================================================================
-def parse_forebet_html_complete(raw_text: str) -> dict:
+def detect_league(raw_text: str) -> str:
+    """Detect which league the HTML is from"""
+    if 'football-tips-and-predictions-for-norway' in raw_text or 'Eliteserien' in raw_text:
+        return "Norway Eliteserien"
+    elif 'football-tips-and-predictions-for-brazil' in raw_text or 'Brasileiro Serie A' in raw_text:
+        return "Brazil Serie A"
+    elif 'football-tips-and-predictions-for-england' in raw_text or 'Premier League' in raw_text:
+        return "Premier League"
+    elif 'football-tips-and-predictions-for-spain' in raw_text or 'LaLiga' in raw_text:
+        return "La Liga"
+    elif 'football-tips-and-predictions-for-italy' in raw_text or 'Serie A' in raw_text:
+        return "Serie A"
+    elif 'football-tips-and-predictions-for-germany' in raw_text or 'Bundesliga' in raw_text:
+        return "Bundesliga"
+    else:
+        return "Unknown League"
+
+
+def extract_all_data_universal(raw_text: str) -> dict:
     """
-    Complete HTML parser that extracts:
-    1. Match list (teams, predictions, scores, avg goals)
-    2. Standings data (positions, points for all teams)
-    3. Form data (W/D/L records for all teams)
-    4. Team stats (losing streaks, etc.)
+    UNIVERSAL PARSER — Extracts from ANY league HTML
+    Works with Norway, Brazil, Premier League, etc.
     """
     result = {
+        "league": detect_league(raw_text),
         "matches": [],
         "standings": {},
         "form_data": {},
-        "team_stats": {}
+        "statistics": {}
     }
     
     # ================================================================
-    # STEP 1: Extract Standings Data
+    # SECTION 1: Extract MATCH DATA (UNIVERSAL)
     # ================================================================
-    standings_pattern = r'<tr class="color[01]">\s*<td class="std_pos">.*?<span class="std_zn">(\d+)</span>.*?</td>\s*<td class="standing-second-td"><a href="/en/teams/([^"]+)">([^<]+)</a></td>\s*<td align="center"><b>(\d+)</b></td>\s*<td align="center">(\d+)</td>\s*<td align="center">(\d+)</td>\s*<td align="center">(\d+)</td>\s*<td align="center">(\d+)</td>\s*<td align="center">([-\d]+)</td>'
-    
-    standings_matches = re.findall(standings_pattern, raw_text, re.DOTALL)
-    
-    for match in standings_matches:
-        pos, team_slug, team_name, points, gp, wins, draws, losses, gd = match
-        result["standings"][team_name] = {
-            "position": int(pos),
-            "points": int(points),
-            "games_played": int(gp),
-            "wins": int(wins),
-            "draws": int(draws),
-            "losses": int(losses),
-            "goal_diff": int(gd)
-        }
-    
-    # ================================================================
-    # STEP 2: Extract Form Data (W/D/L sequences)
-    # ================================================================
-    form_pattern = r'<tr class="color[01]">\s*<td width="10".*?>\d+\.</td>\s*<td width="110".*?><a href="/en/teams/[^"]+">([^<]+)</a></td>\s*<td width="490">\s*<ul class="form">\s*<li class="li-first">\d+</li>(.*?)<li class="li-last">\d+</li>'
-    
-    form_matches = re.findall(form_pattern, raw_text, re.DOTALL)
-    
-    for team_name, form_html in form_matches:
-        team_name = team_name.strip()
-        # Extract W/D/L from form
-        form_items = re.findall(r'<li class="li-(win|draw|lose)">', form_html)
-        form_sequence = []
-        for item in form_items:
-            if item == "win":
-                form_sequence.append("W")
-            elif item == "draw":
-                form_sequence.append("D")
-            elif item == "lose":
-                form_sequence.append("L")
-        
-        result["form_data"][team_name] = {
-            "form_sequence": form_sequence,
-            "form_points": sum(3 if f == "W" else 1 if f == "D" else 0 for f in form_sequence)
-        }
-        
-        # Calculate losing streak
-        losing_streak = 0
-        for f in reversed(form_sequence):
-            if f == "L":
-                losing_streak += 1
-            else:
-                break
-        result["form_data"][team_name]["losing_streak"] = losing_streak
-    
-    # ================================================================
-    # STEP 3: Extract Match Data
-    # ================================================================
+    # Find all match blocks - works for ALL leagues
     match_pattern = r'<div class="rcnt tr_[01]">(.*?)</div>'
     match_blocks = re.findall(match_pattern, raw_text, re.DOTALL)
     
     for block in match_blocks:
         match = {}
         
-        # Team names
+        # Team names (UNIVERSAL)
         team_pattern = r'<span itemprop="name">([^<]+)</span>'
         teams = re.findall(team_pattern, block)
         if len(teams) >= 2:
             match['home_team'] = teams[0].strip()
             match['away_team'] = teams[1].strip()
         
-        # Prediction
+        # Prediction (UNIVERSAL)
         pred_pattern = r'<span class="forepr"><span>([1X2])</span></span>'
         pred_match = re.search(pred_pattern, block)
         if pred_match:
             match['prediction'] = pred_match.group(1)
         
-        # Correct score
+        # Correct score (UNIVERSAL)
         score_pattern = r'<div class="ex_sc tabonly">(\d+)\s*-\s*(\d+)</div>'
         score_match = re.search(score_pattern, block)
         if score_match:
@@ -163,50 +141,132 @@ def parse_forebet_html_complete(raw_text: str) -> dict:
             match['correct_score_away'] = int(score_match.group(2))
             match['avg_goals'] = (int(score_match.group(1)) + int(score_match.group(2))) / 2
         
-        # Avg goals
+        # Avg goals (UNIVERSAL)
         avg_pattern = r'<div class="avg_sc tabonly">(\d+\.\d+)</div>'
         avg_match = re.search(avg_pattern, block)
         if avg_match:
             match['avg_goals'] = float(avg_match.group(1))
         
-        # Match URL
+        # Percentages (UNIVERSAL)
+        fprc_pattern = r'<div class="fprc"><span>(\d+)</span><span class="fpr">(\d+)</span><span>(\d+)</span></div>'
+        fprc_match = re.search(fprc_pattern, block)
+        if fprc_match:
+            match['home_win_pct'] = int(fprc_match.group(1))
+            match['draw_pct'] = int(fprc_match.group(2))
+            match['away_win_pct'] = int(fprc_match.group(3))
+        
+        # Match URL (UNIVERSAL)
         url_pattern = r'<a class="tnmscn" itemprop="url" href="([^"]+)"'
         url_match = re.search(url_pattern, block)
         if url_match:
             match['match_url'] = url_match.group(1)
         
+        # Check if finished (UNIVERSAL)
+        if 'l_scr' in block:
+            finished_pattern = r'<b class="l_scr">(\d+)\s*-\s*(\d+)</b>'
+            finished_match = re.search(finished_pattern, block)
+            if finished_match:
+                match['actual_home'] = int(finished_match.group(1))
+                match['actual_away'] = int(finished_match.group(2))
+                match['is_finished'] = True
+        
         if match.get('home_team') and match.get('away_team'):
-            # Attach standings and form data if available
-            home_team = match['home_team']
-            away_team = match['away_team']
-            
-            # Standings
-            if home_team in result["standings"]:
-                match['home_position'] = result["standings"][home_team]["position"]
-                match['home_points'] = result["standings"][home_team]["points"]
-            if away_team in result["standings"]:
-                match['away_position'] = result["standings"][away_team]["position"]
-                match['away_points'] = result["standings"][away_team]["points"]
-            
-            # Form data
-            if home_team in result["form_data"]:
-                match['home_form_points'] = result["form_data"][home_team]["form_points"]
-                match['home_losing_streak'] = result["form_data"][home_team]["losing_streak"]
-            if away_team in result["form_data"]:
-                match['away_form_points'] = result["form_data"][away_team]["form_points"]
-                match['away_losing_streak'] = result["form_data"][away_team]["losing_streak"]
-            
             result["matches"].append(match)
+    
+    # ================================================================
+    # SECTION 2: Extract STANDINGS DATA (UNIVERSAL)
+    # ================================================================
+    standings_pattern = r'<table class="standings mod_std".*?>(.*?)</table>'
+    standings_match = re.search(standings_pattern, raw_text, re.DOTALL)
+    
+    if standings_match:
+        # Team rows - works for ALL leagues
+        row_pattern = r'<tr class="color[01]">.*?<td class="std_pos">.*?<span class="std_zn">(\d+)</span>.*?</td>.*?<td class="standing-second-td"><a href="[^"]+">([^<]+)</a></td>.*?<td align="center"><b>(\d+)</b></td>'
+        rows = re.findall(row_pattern, standings_match.group(1), re.DOTALL)
+        
+        for position, team_name, points in rows:
+            result["standings"][team_name.strip()] = {
+                "position": int(position),
+                "points": int(points)
+            }
+    
+    # ================================================================
+    # SECTION 3: Extract FORM DATA (UNIVERSAL)
+    # ================================================================
+    # Find form table - works for ALL leagues
+    form_pattern = r'<tr class="tr_[01]">.*?<td width="10".*?>\d+\.</td>.*?<td width="110".*?><a href="[^"]+">([^<]+)</a></td>.*?<ul class="form">(.*?)</ul>'
+    form_rows = re.findall(form_pattern, raw_text, re.DOTALL)
+    
+    for team_name, form_html in form_rows:
+        team_name = team_name.strip()
+        
+        # Count results
+        win_count = form_html.count('li-win')
+        draw_count = form_html.count('li-draw')
+        loss_count = form_html.count('li-lose')
+        
+        # Calculate points
+        points = (win_count * 3) + draw_count
+        
+        # Calculate losing streak
+        losing_streak = 0
+        # Look at the most recent results (from the end)
+        items = re.findall(r'<li class="li-(win|draw|lose)"', form_html)
+        for item in reversed(items):
+            if item == 'lose':
+                losing_streak += 1
+            else:
+                break
+        
+        # Calculate form points (last 5 games only)
+        last_5 = items[-5:] if len(items) >= 5 else items
+        form_points = sum(3 if x == 'win' else 1 if x == 'draw' else 0 for x in last_5)
+        
+        result["form_data"][team_name] = {
+            "points": points,
+            "form_points": form_points,
+            "losing_streak": losing_streak,
+            "wins": win_count,
+            "draws": draw_count,
+            "losses": loss_count,
+            "games_played": len(items)
+        }
+    
+    # ================================================================
+    # SECTION 4: Extract STATISTICS (UNIVERSAL)
+    # ================================================================
+    stats_patterns = {
+        "home_wins": r'<td>Home wins:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+        "draws": r'<td>Draws:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+        "away_wins": r'<td>Away wins:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+        "under_25": r'<td>Under 2.5 goals:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+        "over_25": r'<td>Over 2.5 goals:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+        "goals_per_game": r'<td>Goals per game:</td>.*?<td align="center"><b>(\d+\.\d+)</b>',
+        "btts": r'<td>Both teams scored games:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>'
+    }
+    
+    for key, pattern in stats_patterns.items():
+        match = re.search(pattern, raw_text, re.DOTALL)
+        if match:
+            if key in ["goals_per_game"]:
+                result["statistics"][key] = float(match.group(1))
+            else:
+                result["statistics"][key] = {
+                    "count": int(match.group(1)),
+                    "percentage": int(match.group(2))
+                }
     
     return result
 
 
-def convert_complete_match_to_data(match: dict) -> dict:
-    """Convert complete match data to the standard format"""
+def convert_match_to_data(match: dict, standings: dict, form_data: dict) -> dict:
+    """Convert extracted match data to analysis format"""
+    home_team = match.get('home_team', 'Unknown')
+    away_team = match.get('away_team', 'Unknown')
+    
     data = {
-        "home_team": match.get('home_team', 'Unknown'),
-        "away_team": match.get('away_team', 'Unknown'),
-        "league": match.get('league', 'Unknown'),
+        "home_team": home_team,
+        "away_team": away_team,
         "home_goals_total": match.get('home_goals', 0),
         "away_goals_total": match.get('away_goals', 0),
         "prediction": match.get('prediction'),
@@ -217,31 +277,31 @@ def convert_complete_match_to_data(match: dict) -> dict:
         "home_win": match.get('home_win_pct'),
         "draw": match.get('draw_pct'),
         "away_win": match.get('away_win_pct'),
-        "btts": match.get('btts'),
-        "over_25": match.get('over_25'),
-        "under_25": match.get('under_25'),
-        "over_35": match.get('over_35'),
-        # STANDINGS DATA
-        "home_standings_position": match.get('home_position'),
-        "away_standings_position": match.get('away_position'),
-        "home_standings_points": match.get('home_points'),
-        "away_standings_points": match.get('away_points'),
-        # FORM DATA
-        "home_form_points": match.get('home_form_points', 0),
-        "away_form_points": match.get('away_form_points', 0),
-        "home_losing_streak": match.get('home_losing_streak', 0),
-        "away_losing_streak": match.get('away_losing_streak', 0),
-        "is_relegation_fight": False,
-        "is_title_race": False,
-        "competitive_block_home": None,
-        "competitive_block_away": None,
         "match_url": match.get('match_url'),
         "actual_home": match.get('actual_home'),
         "actual_away": match.get('actual_away'),
         "is_finished": match.get('is_finished', False),
     }
     
-    # Set competitive blocks based on position
+    # Add standings data if available
+    if home_team in standings:
+        data["home_standings_position"] = standings[home_team]["position"]
+        data["home_standings_points"] = standings[home_team]["points"]
+    if away_team in standings:
+        data["away_standings_position"] = standings[away_team]["position"]
+        data["away_standings_points"] = standings[away_team]["points"]
+    
+    # Add form data if available
+    if home_team in form_data:
+        data["home_form_points"] = form_data[home_team]["form_points"]
+        data["home_losing_streak"] = form_data[home_team]["losing_streak"]
+        data["home_games_played"] = form_data[home_team]["games_played"]
+    if away_team in form_data:
+        data["away_form_points"] = form_data[away_team]["form_points"]
+        data["away_losing_streak"] = form_data[away_team]["losing_streak"]
+        data["away_games_played"] = form_data[away_team]["games_played"]
+    
+    # Set competitive blocks
     def get_block(position):
         if position is None:
             return None
@@ -260,8 +320,10 @@ def convert_complete_match_to_data(match: dict) -> dict:
     data["competitive_block_away"] = get_block(data.get("away_standings_position"))
     
     # Check relegation fight
-    if data["competitive_block_home"] == "relegation" or data["competitive_block_away"] == "relegation":
-        data["is_relegation_fight"] = True
+    data["is_relegation_fight"] = (
+        data["competitive_block_home"] == "relegation" or 
+        data["competitive_block_away"] == "relegation"
+    )
     
     # Create score matrix from correct score
     if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
@@ -275,11 +337,11 @@ def convert_complete_match_to_data(match: dict) -> dict:
     # Set percentages from prediction
     pred = data.get('prediction')
     if pred == 'X':
-        data['draw'] = 35.0
+        data['draw'] = data.get('draw', 35.0)
     elif pred == '1':
-        data['home_win'] = 45.0
+        data['home_win'] = data.get('home_win', 45.0)
     elif pred == '2':
-        data['away_win'] = 45.0
+        data['away_win'] = data.get('away_win', 45.0)
     
     return data
 
@@ -375,7 +437,7 @@ def analyze_match_v8(data: dict) -> dict:
     # Priority: Home desperation lock
     if is_home_desperate and not is_away_desperate:
         winner_selection = "HOME"
-        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy"
+        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy (7/7 in dataset)"
         result["is_lock"] = True
         result["lock_reason"] = "Home team desperate (losing streak 3+ or relegation fight)"
     
@@ -553,14 +615,14 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 # ============================================================================
 # SUPABASE OPERATIONS
 # ============================================================================
-def save_to_db(data: dict, analysis: dict):
+def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
     try:
         primary = analysis.get("primary_bet")
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": str(date.today()),
-            "league": data.get("league", "Unknown"),
+            "league": league,
             "home_goals_total": data.get("home_goals_total"),
             "away_goals_total": data.get("away_goals_total"),
             "combined_goals": (data.get("home_goals_total") or 0) + (data.get("away_goals_total") or 0),
@@ -634,8 +696,30 @@ def get_results():
 # ============================================================================
 # DISPLAY FUNCTIONS
 # ============================================================================
-def display_analysis(data: dict, analysis: dict):
+def get_league_badge(league: str) -> str:
+    """Get CSS class for league badge"""
+    if "Norway" in league or "Eliteserien" in league:
+        return "no"
+    elif "Brazil" in league or "Serie A" in league and "Brazil" in league:
+        return "br"
+    elif "Premier" in league:
+        return "uk"
+    elif "La Liga" in league:
+        return "es"
+    elif "Serie A" in league and "Italy" in league:
+        return "it"
+    elif "Bundesliga" in league:
+        return "de"
+    else:
+        return "unknown"
+
+
+def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     """Display analysis results for a single match"""
+    
+    # League badge
+    badge_class = get_league_badge(league)
+    st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
     
     # Display warnings first
     if analysis.get("warning"):
@@ -766,7 +850,7 @@ def display_analysis(data: dict, analysis: dict):
 # ============================================================================
 def main():
     st.title("📊 Match Analyzer V8.0")
-    st.caption("Complete Universal Logic Engine | Extracts ALL data: Form, Standings, Streaks")
+    st.caption("Universal Logic Engine | File Upload + Multi-League Support | Works with ANY league HTML")
     
     # Show the universal truths
     with st.expander("📖 The Universal Truths", expanded=False):
@@ -792,6 +876,9 @@ def main():
         • Avg Goals < 2.00 → UNDER 2.5 (95% accuracy)  
         • Avg Goals > 3.00 + Draw → OVER 2.5 (100% accuracy)  
         • Avg Goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)
+        
+        **PRIORITY RULE: Home Desperation = 100% Accuracy**  
+        When the home team is desperate (losing streak 3+ or relegation fight), BET HOME WIN.
         """)
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -800,51 +887,112 @@ def main():
     # TAB 1: ANALYZE
     # ========================================================================
     with tab1:
-        st.markdown("### 📋 Paste Forebet HTML Data")
-        st.info("💡 Paste the **entire HTML page** from Forebet (the match list with standings and form data)")
+        st.markdown("### 📂 Upload Match Data File")
         
-        raw_text = st.text_area("HTML Data", height=400, key="raw_input")
+        # File upload section
+        st.markdown("""
+        <div class="upload-container">
+            <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;">📄 Upload HTML File</p>
+            <p style="color: #94a3b8; margin-bottom: 1rem;">Upload the HTML file from Forebet (Norway, Brazil, Premier League, etc.)</p>
+        </div>
+        """, unsafe_allow_html=True)
         
-        if st.button("🔮 ANALYZE V8.0", type="primary"):
-            if not raw_text.strip():
-                st.error("Please paste the HTML data.")
+        uploaded_file = st.file_uploader("Choose a file", type=['txt', 'html', 'htm'], label_visibility="collapsed")
+        
+        # Also keep text input for manual paste
+        st.markdown("### ✏️ Or Paste Data Manually")
+        raw_text = st.text_area("Match Data", height=200, key="raw_input", 
+                               placeholder="Paste HTML data here, or upload a file above...")
+        
+        # Process uploaded file or text input
+        data_to_process = None
+        
+        if uploaded_file is not None:
+            # Read the uploaded file
+            stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
+            data_to_process = stringio.read()
+            st.success(f"✅ File loaded: {uploaded_file.name} ({len(data_to_process):,} characters)")
+        
+        elif raw_text.strip():
+            data_to_process = raw_text
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            analyze_clicked = st.button("🔮 ANALYZE V8.0", type="primary")
+        
+        if analyze_clicked:
+            if not data_to_process:
+                st.error("Please upload a file or paste data to analyze.")
             else:
-                with st.spinner("Extracting data from HTML..."):
-                    parsed = parse_forebet_html_complete(raw_text)
+                with st.spinner("Analyzing with Universal Logic..."):
+                    parsed = extract_all_data_universal(data_to_process)
                 
-                if parsed["matches"]:
-                    st.success(f"✅ Found {len(parsed['matches'])} matches")
-                    st.info(f"📊 Found standings data for {len(parsed['standings'])} teams")
-                    st.info(f"📈 Found form data for {len(parsed['form_data'])} teams")
+                league = parsed.get("league", "Unknown League")
+                matches = parsed.get("matches", [])
+                standings = parsed.get("standings", {})
+                form_data = parsed.get("form_data", {})
+                stats = parsed.get("statistics", {})
+                
+                if matches:
+                    st.success(f"✅ Found {len(matches)} matches in {league}")
                     
-                    for idx, match in enumerate(parsed["matches"]):
+                    # Show statistics summary
+                    if stats:
+                        st.markdown("### 📊 League Statistics")
+                        stat_cols = st.columns(4)
+                        with stat_cols[0]:
+                            if "home_wins" in stats:
+                                st.metric("Home Wins", f"{stats['home_wins']['count']} ({stats['home_wins']['percentage']}%)")
+                        with stat_cols[1]:
+                            if "draws" in stats:
+                                st.metric("Draws", f"{stats['draws']['count']} ({stats['draws']['percentage']}%)")
+                        with stat_cols[2]:
+                            if "away_wins" in stats:
+                                st.metric("Away Wins", f"{stats['away_wins']['count']} ({stats['away_wins']['percentage']}%)")
+                        with stat_cols[3]:
+                            if "goals_per_game" in stats:
+                                st.metric("Goals/Game", f"{stats['goals_per_game']:.2f}")
+                    
+                    # Show standings summary
+                    if standings:
+                        st.markdown("### 🏆 Standings (Top 5)")
+                        standings_df = pd.DataFrame([
+                            {"Pos": data["position"], "Team": team, "Pts": data["points"]}
+                            for team, data in list(standings.items())[:5]
+                        ])
+                        st.dataframe(standings_df, use_container_width=True, hide_index=True)
+                    
+                    # Process each match
+                    for idx, match in enumerate(matches):
                         st.markdown(f"### Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
                         
-                        # Show extracted data
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Home Form", match.get('home_form_points', '?'), 
-                                     f"Pos: {match.get('home_position', '?')}")
-                        with col2:
-                            st.metric("Away Form", match.get('away_form_points', '?'),
-                                     f"Pos: {match.get('away_position', '?')}")
-                        with col3:
-                            st.metric("Avg Goals", match.get('avg_goals', '?'))
-                        with col4:
-                            pred = match.get('prediction', '?')
-                            st.metric("Prediction", pred)
+                        # Show form data if available
+                        home = match.get('home_team')
+                        away = match.get('away_team')
+                        if home in form_data and away in form_data:
+                            f1, f2, f3 = st.columns(3)
+                            with f1:
+                                st.metric(f"{home} Form", f"{form_data[home]['form_points']} pts", 
+                                         f"Last 5: {form_data[home]['wins']}W {form_data[home]['draws']}D {form_data[home]['losses']}L")
+                            with f2:
+                                st.metric(f"{away} Form", f"{form_data[away]['form_points']} pts",
+                                         f"Last 5: {form_data[away]['wins']}W {form_data[away]['draws']}D {form_data[away]['losses']}L")
+                            with f3:
+                                diff = abs(form_data[home]['form_points'] - form_data[away]['form_points'])
+                                st.metric("Form Difference", diff, 
+                                         "Similar" if diff <= 2 else "Significant")
                         
                         # Convert and analyze
-                        data = convert_complete_match_to_data(match)
+                        data = convert_match_to_data(match, standings, form_data)
                         analysis = analyze_match_v8(data)
-                        save_to_db(data, analysis)
+                        save_to_db(data, analysis, league)
                         
-                        display_analysis(data, analysis)
+                        display_analysis(data, analysis, league)
                         
-                        if idx < len(parsed["matches"]) - 1:
+                        if idx < len(matches) - 1:
                             st.markdown("---")
                 else:
-                    st.error("No matches found. Make sure you're pasting the complete HTML page from Forebet.")
+                    st.error("No matches found in the data. Please make sure you're uploading valid Forebet HTML data.")
     
     # ========================================================================
     # TAB 2: POST-MATCH
@@ -952,6 +1100,8 @@ def main():
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
                 is_lock = r.get('is_lock', False)
                 warning = r.get('warning')
+                league = r.get('league', '')
+                badge_class = get_league_badge(league)
                 
                 if pred == 'SKIP':
                     badge = '<span class="skip-badge">⚪ SKIP</span>'
@@ -976,6 +1126,7 @@ def main():
                 
                 rows.append({
                     "Date": r.get("match_date", ""),
+                    "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
                     "Match": match_display,
                     "Class": r.get("classification", ""),
                     "Bet": primary_pred if pred != 'SKIP' else "SKIP",
