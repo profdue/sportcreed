@@ -17,6 +17,7 @@ import pandas as pd
 import re
 import json
 import time
+import traceback
 from io import StringIO
 
 # ============================================================================
@@ -73,6 +74,10 @@ st.markdown("""
     .league-badge.it { background: #8b5cf6; color: #fff; }
     .league-badge.de { background: #ec4899; color: #fff; }
     .league-badge.unknown { background: #64748b; color: #fff; }
+    .debug-box { background: #1a1a2e; border: 1px solid #3b82f6; border-radius: 8px; padding: 1rem; margin: 0.5rem 0; font-family: monospace; font-size: 0.85rem; }
+    .debug-box .success { color: #10b981; }
+    .debug-box .error { color: #ef4444; }
+    .debug-box .info { color: #3b82f6; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -136,270 +141,321 @@ def detect_league(raw_text: str) -> str:
 
 
 # ============================================================================
-# FAST HTML PARSER — Uses string operations instead of heavy regex
+# FAST HTML PARSER WITH DEBUGGING
 # ============================================================================
-def extract_all_data_universal(raw_text: str) -> dict:
+def extract_all_data_universal(raw_text: str, debug_container=None) -> dict:
     """
     FAST PARSER — Uses string operations instead of heavy regex
-    Completes in < 1 second even on large files
+    Includes extensive debugging to show what's happening
     """
     start_time = time.time()
+    debug_log = []
     
-    # Normalize quotes
-    raw_text = raw_text.replace("'", '"')
+    def debug(msg, type="info"):
+        debug_log.append({"msg": msg, "type": type})
+        if debug_container is not None:
+            debug_container.write(f"<div class='debug-box'><span class='{type}'>{msg}</span></div>", unsafe_allow_html=True)
     
-    league = detect_league(raw_text)
-    league_config = get_league_config(league)
-    
-    result = {
-        "league": league,
-        "league_config": league_config,
-        "matches": [],
-        "standings": {},
-        "form_data": {},
-        "statistics": {}
-    }
-    
-    # ================================================================
-    # FAST MATCH EXTRACTION — Split on rcnt divs
-    # ================================================================
-    match_blocks = []
-    
-    # Find all rcnt divs
-    search_pos = 0
-    while True:
-        start = raw_text.find('<div class="rcnt tr_', search_pos)
-        if start == -1:
-            break
+    try:
+        debug(f"📊 File size: {len(raw_text):,} characters", "info")
         
-        # Find the end of this div by counting nested divs
-        depth = 1
-        pos = start + len('<div class="rcnt tr_')
-        end = len(raw_text)
+        # Normalize quotes
+        raw_text = raw_text.replace("'", '"')
+        debug(f"✅ Normalized quotes", "success")
         
-        while depth > 0 and pos < len(raw_text):
-            next_open = raw_text.find('<div', pos)
-            next_close = raw_text.find('</div>', pos)
-            
-            if next_close == -1:
-                break
-            
-            if next_open != -1 and next_open < next_close:
-                depth += 1
-                pos = next_open + 4
-            else:
-                depth -= 1
-                if depth == 0:
-                    end = next_close + 6
-                pos = next_close + 6
+        league = detect_league(raw_text)
+        debug(f"🏆 Detected league: {league}", "info")
         
-        if depth == 0:
-            block = raw_text[start:end]
-            match_blocks.append(block)
-            search_pos = end
-        else:
-            break
+        league_config = get_league_config(league)
         
-        # Safety
-        if len(match_blocks) > 200:
-            break
-    
-    # ================================================================
-    # Process matches
-    # ================================================================
-    for block in match_blocks:
-        match = {}
+        result = {
+            "league": league,
+            "league_config": league_config,
+            "matches": [],
+            "standings": {},
+            "form_data": {},
+            "statistics": {}
+        }
         
-        # Extract team names
-        team_start = 0
-        teams = []
+        # ================================================================
+        # Check for key indicators
+        # ================================================================
+        has_rcnt = 'rcnt' in raw_text
+        has_tnms = 'tnms' in raw_text
+        has_forepr = 'forepr' in raw_text
+        has_fprc = 'fprc' in raw_text
+        
+        debug(f"🔍 Key indicators: rcnt={has_rcnt}, tnms={has_tnms}, forepr={has_forepr}, fprc={has_fprc}", "info")
+        
+        if not has_rcnt:
+            debug(f"❌ No 'rcnt' found in file! Looking for matches...", "error")
+            # Try to find any match-like content
+            if 'rcnt' not in raw_text:
+                # Show first 1000 chars
+                debug(f"📄 First 1000 characters of file:", "info")
+                debug(f"<pre>{raw_text[:1000]}</pre>", "info")
+                return result
+        
+        # ================================================================
+        # FAST MATCH EXTRACTION — Split on rcnt divs
+        # ================================================================
+        match_blocks = []
+        found_count = raw_text.count('rcnt tr_')
+        debug(f"📊 Found 'rcnt tr_' {found_count} times", "info")
+        
+        search_pos = 0
+        block_count = 0
         while True:
-            start = block.find('<span itemprop="name">', team_start)
+            start = raw_text.find('<div class="rcnt tr_', search_pos)
             if start == -1:
                 break
-            end = block.find('</span>', start)
-            if end == -1:
+            
+            block_count += 1
+            if block_count % 10 == 0:
+                debug(f"⏳ Found {block_count} match blocks so far...", "info")
+            
+            # Find the end of this div by counting nested divs
+            depth = 1
+            pos = start + len('<div class="rcnt tr_')
+            end = len(raw_text)
+            
+            while depth > 0 and pos < len(raw_text):
+                next_open = raw_text.find('<div', pos)
+                next_close = raw_text.find('</div>', pos)
+                
+                if next_close == -1:
+                    break
+                
+                if next_open != -1 and next_open < next_close:
+                    depth += 1
+                    pos = next_open + 4
+                else:
+                    depth -= 1
+                    if depth == 0:
+                        end = next_close + 6
+                    pos = next_close + 6
+            
+            if depth == 0:
+                block = raw_text[start:end]
+                match_blocks.append(block)
+                search_pos = end
+            else:
+                debug(f"⚠️ Couldn't find closing div for block starting at {start}", "error")
                 break
-            team_name = block[start + 21:end]
-            teams.append(team_name.strip())
-            team_start = end + 7
-            if len(teams) == 2:
+            
+            # Safety
+            if len(match_blocks) > 200:
+                debug(f"⚠️ Reached 200 block limit", "warning")
                 break
         
-        if len(teams) < 2:
-            continue
+        debug(f"✅ Found {len(match_blocks)} match blocks", "success")
         
-        match['home_team'] = teams[0]
-        match['away_team'] = teams[1]
-        
-        # Extract prediction
-        pred_start = block.find('<span class="forepr"><span>')
-        if pred_start != -1:
-            pred_end = block.find('</span>', pred_start + 25)
-            if pred_end != -1:
-                match['prediction'] = block[pred_start + 25:pred_end]
-        
-        # Extract correct score
-        score_start = block.find('<div class="ex_sc tabonly">')
-        if score_start != -1:
-            score_end = block.find('</div>', score_start)
-            if score_end != -1:
-                score_text = block[score_start + 26:score_end]
-                parts = score_text.split('-')
-                if len(parts) == 2:
+        # ================================================================
+        # Process matches
+        # ================================================================
+        for idx, block in enumerate(match_blocks):
+            match = {}
+            
+            # Extract team names
+            team_start = 0
+            teams = []
+            while True:
+                start = block.find('<span itemprop="name">', team_start)
+                if start == -1:
+                    break
+                end = block.find('</span>', start)
+                if end == -1:
+                    break
+                team_name = block[start + 21:end]
+                teams.append(team_name.strip())
+                team_start = end + 7
+                if len(teams) == 2:
+                    break
+            
+            if len(teams) < 2:
+                continue
+            
+            match['home_team'] = teams[0]
+            match['away_team'] = teams[1]
+            
+            # Extract prediction
+            pred_start = block.find('<span class="forepr"><span>')
+            if pred_start != -1:
+                pred_end = block.find('</span>', pred_start + 25)
+                if pred_end != -1:
+                    match['prediction'] = block[pred_start + 25:pred_end]
+            
+            # Extract correct score
+            score_start = block.find('<div class="ex_sc tabonly">')
+            if score_start != -1:
+                score_end = block.find('</div>', score_start)
+                if score_end != -1:
+                    score_text = block[score_start + 26:score_end]
+                    parts = score_text.split('-')
+                    if len(parts) == 2:
+                        try:
+                            match['correct_score_home'] = int(parts[0].strip())
+                            match['correct_score_away'] = int(parts[1].strip())
+                        except:
+                            pass
+            
+            # Extract avg goals
+            avg_start = block.find('<div class="avg_sc tabonly">')
+            if avg_start != -1:
+                avg_end = block.find('</div>', avg_start)
+                if avg_end != -1:
                     try:
-                        match['correct_score_home'] = int(parts[0].strip())
-                        match['correct_score_away'] = int(parts[1].strip())
+                        match['avg_goals'] = float(block[avg_start + 26:avg_end])
                     except:
                         pass
+            
+            # Extract percentages
+            fprc_start = block.find('<div class="fprc">')
+            if fprc_start != -1:
+                fprc_end = block.find('</div>', fprc_start)
+                if fprc_end != -1:
+                    fprc_text = block[fprc_start:fprc_end]
+                    numbers = re.findall(r'>(\d+)<', fprc_text)
+                    if len(numbers) >= 3:
+                        match['home_win_pct'] = int(numbers[0])
+                        match['draw_pct'] = int(numbers[1])
+                        match['away_win_pct'] = int(numbers[2])
+            
+            # Extract match URL
+            url_start = block.find('<a class="tnmscn" itemprop="url" href="')
+            if url_start != -1:
+                url_end = block.find('"', url_start + 44)
+                if url_end != -1:
+                    match['match_url'] = block[url_start + 44:url_end]
+            
+            # Check if finished
+            score_start = block.find('<b class="l_scr">')
+            if score_start != -1:
+                score_end = block.find('</b>', score_start)
+                if score_end != -1:
+                    score_text = block[score_start + 17:score_end]
+                    parts = score_text.split('-')
+                    if len(parts) == 2:
+                        try:
+                            match['actual_home'] = int(parts[0].strip())
+                            match['actual_away'] = int(parts[1].strip())
+                            match['is_finished'] = True
+                        except:
+                            pass
+            
+            if 'is_finished' not in match:
+                match['is_finished'] = False
+            
+            # Fallbacks
+            if match.get('avg_goals') is None or match['avg_goals'] == 0:
+                match['avg_goals'] = league_config["goals_fallback"]
+            
+            if not match.get('prediction'):
+                if match.get('home_win_pct') and match.get('draw_pct') and match.get('away_win_pct'):
+                    pcts = {
+                        '1': match['home_win_pct'], 
+                        'X': match['draw_pct'], 
+                        '2': match['away_win_pct']
+                    }
+                    match['prediction'] = max(pcts, key=pcts.get)
+            
+            result["matches"].append(match)
         
-        # Extract avg goals
-        avg_start = block.find('<div class="avg_sc tabonly">')
-        if avg_start != -1:
-            avg_end = block.find('</div>', avg_start)
-            if avg_end != -1:
-                try:
-                    match['avg_goals'] = float(block[avg_start + 26:avg_end])
-                except:
-                    pass
+        # ================================================================
+        # Extract STANDINGS
+        # ================================================================
+        standings_pattern = r'<table class="standings mod_std".*?>(.*?)</table>'
+        standings_match = re.search(standings_pattern, raw_text, re.DOTALL)
         
-        # Extract percentages
-        fprc_start = block.find('<div class="fprc">')
-        if fprc_start != -1:
-            fprc_end = block.find('</div>', fprc_start)
-            if fprc_end != -1:
-                fprc_text = block[fprc_start:fprc_end]
-                numbers = re.findall(r'>(\d+)<', fprc_text)
-                if len(numbers) >= 3:
-                    match['home_win_pct'] = int(numbers[0])
-                    match['draw_pct'] = int(numbers[1])
-                    match['away_win_pct'] = int(numbers[2])
-        
-        # Extract match URL
-        url_start = block.find('<a class="tnmscn" itemprop="url" href="')
-        if url_start != -1:
-            url_end = block.find('"', url_start + 44)
-            if url_end != -1:
-                match['match_url'] = block[url_start + 44:url_end]
-        
-        # Check if finished
-        score_start = block.find('<b class="l_scr">')
-        if score_start != -1:
-            score_end = block.find('</b>', score_start)
-            if score_end != -1:
-                score_text = block[score_start + 17:score_end]
-                parts = score_text.split('-')
-                if len(parts) == 2:
-                    try:
-                        match['actual_home'] = int(parts[0].strip())
-                        match['actual_away'] = int(parts[1].strip())
-                        match['is_finished'] = True
-                    except:
-                        pass
-        
-        if 'is_finished' not in match:
-            match['is_finished'] = False
-        
-        # Fallbacks
-        if match.get('avg_goals') is None or match['avg_goals'] == 0:
-            match['avg_goals'] = league_config["goals_fallback"]
-        
-        if not match.get('prediction'):
-            if match.get('home_win_pct') and match.get('draw_pct') and match.get('away_win_pct'):
-                pcts = {
-                    '1': match['home_win_pct'], 
-                    'X': match['draw_pct'], 
-                    '2': match['away_win_pct']
+        if standings_match:
+            row_pattern = r'<tr class="color[01]">.*?<td class="std_pos">.*?<span class="std_zn">(\d+)</span>.*?</td>.*?<td class="standing-second-td"><a href="[^"]+">([^<]+)</a></td>.*?<td align="center"><b>(\d+)</b></td>'
+            rows = re.findall(row_pattern, standings_match.group(1), re.DOTALL)
+            
+            for position, team_name, points in rows:
+                result["standings"][team_name.strip()] = {
+                    "position": int(position),
+                    "points": int(points)
                 }
-                match['prediction'] = max(pcts, key=pcts.get)
+            debug(f"📊 Found {len(result['standings'])} teams in standings", "success")
         
-        result["matches"].append(match)
-    
-    # ================================================================
-    # Extract STANDINGS
-    # ================================================================
-    standings_pattern = r'<table class="standings mod_std".*?>(.*?)</table>'
-    standings_match = re.search(standings_pattern, raw_text, re.DOTALL)
-    
-    if standings_match:
-        row_pattern = r'<tr class="color[01]">.*?<td class="std_pos">.*?<span class="std_zn">(\d+)</span>.*?</td>.*?<td class="standing-second-td"><a href="[^"]+">([^<]+)</a></td>.*?<td align="center"><b>(\d+)</b></td>'
-        rows = re.findall(row_pattern, standings_match.group(1), re.DOTALL)
+        # ================================================================
+        # Extract FORM DATA
+        # ================================================================
+        form_pattern = r'<tr class="tr_[01]">.*?<td width="10".*?>\d+\.</td>.*?<td width="110".*?><a href="[^"]+">([^<]+)</a></td>.*?<ul class="form">(.*?)</ul>'
+        form_rows = re.findall(form_pattern, raw_text, re.DOTALL)
         
-        for position, team_name, points in rows:
-            result["standings"][team_name.strip()] = {
-                "position": int(position),
-                "points": int(points)
+        for team_name, form_html in form_rows:
+            team_name = team_name.strip()
+            
+            win_count = form_html.count('li-win')
+            draw_count = form_html.count('li-draw')
+            loss_count = form_html.count('li-lose')
+            total_games = win_count + draw_count + loss_count
+            
+            losing_streak = 0
+            items = re.findall(r'<li class="li-(win|draw|lose)"', form_html)
+            for item in reversed(items):
+                if item == 'lose':
+                    losing_streak += 1
+                else:
+                    break
+            
+            total_points = (win_count * 3) + draw_count
+            last_5 = items[-5:] if len(items) >= 5 else items
+            form_points_last_5 = sum(3 if x == 'win' else 1 if x == 'draw' else 0 for x in last_5)
+            
+            result["form_data"][team_name] = {
+                "points": total_points,
+                "form_points": form_points_last_5,
+                "losing_streak": losing_streak,
+                "wins": win_count,
+                "draws": draw_count,
+                "losses": loss_count,
+                "games_played": total_games
             }
-    
-    # ================================================================
-    # Extract FORM DATA
-    # ================================================================
-    form_pattern = r'<tr class="tr_[01]">.*?<td width="10".*?>\d+\.</td>.*?<td width="110".*?><a href="[^"]+">([^<]+)</a></td>.*?<ul class="form">(.*?)</ul>'
-    form_rows = re.findall(form_pattern, raw_text, re.DOTALL)
-    
-    for team_name, form_html in form_rows:
-        team_name = team_name.strip()
+        debug(f"📈 Found {len(result['form_data'])} teams with form data", "success")
         
-        win_count = form_html.count('li-win')
-        draw_count = form_html.count('li-draw')
-        loss_count = form_html.count('li-lose')
-        total_games = win_count + draw_count + loss_count
-        
-        losing_streak = 0
-        items = re.findall(r'<li class="li-(win|draw|lose)"', form_html)
-        for item in reversed(items):
-            if item == 'lose':
-                losing_streak += 1
-            else:
-                break
-        
-        total_points = (win_count * 3) + draw_count
-        last_5 = items[-5:] if len(items) >= 5 else items
-        form_points_last_5 = sum(3 if x == 'win' else 1 if x == 'draw' else 0 for x in last_5)
-        
-        result["form_data"][team_name] = {
-            "points": total_points,
-            "form_points": form_points_last_5,
-            "losing_streak": losing_streak,
-            "wins": win_count,
-            "draws": draw_count,
-            "losses": loss_count,
-            "games_played": total_games
+        # ================================================================
+        # Extract STATISTICS
+        # ================================================================
+        stats_patterns = {
+            "home_wins": r'<td>Home wins:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+            "draws": r'<td>Draws:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+            "away_wins": r'<td>Away wins:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+            "under_25": r'<td>Under 2.5 goals:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+            "over_25": r'<td>Over 2.5 goals:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
+            "goals_per_game": r'<td>Goals per game:</td>.*?<td align="center"><b>(\d+\.\d+)</b>',
+            "btts": r'<td>Both teams scored games:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>'
         }
-    
-    # ================================================================
-    # Extract STATISTICS
-    # ================================================================
-    stats_patterns = {
-        "home_wins": r'<td>Home wins:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
-        "draws": r'<td>Draws:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
-        "away_wins": r'<td>Away wins:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
-        "under_25": r'<td>Under 2.5 goals:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
-        "over_25": r'<td>Over 2.5 goals:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>',
-        "goals_per_game": r'<td>Goals per game:</td>.*?<td align="center"><b>(\d+\.\d+)</b>',
-        "btts": r'<td>Both teams scored games:</td>.*?<td align="center"><b>(\d+)</b>.*?<td align="center"><b>(\d+)%</b>'
-    }
-    
-    for key, pattern in stats_patterns.items():
-        match = re.search(pattern, raw_text, re.DOTALL)
-        if match:
-            if key in ["goals_per_game"]:
-                result["statistics"][key] = float(match.group(1))
-            else:
-                result["statistics"][key] = {
-                    "count": int(match.group(1)),
-                    "percentage": int(match.group(2))
-                }
-    
-    elapsed = time.time() - start_time
-    
-    # Show debug info in the app
-    st.write(f"⏱️ Parser completed in {elapsed:.2f} seconds")
-    st.write(f"✅ Found {len(result['matches'])} matches")
-    st.write(f"📊 Found {len(result['standings'])} teams in standings")
-    st.write(f"📈 Found {len(result['form_data'])} teams with form data")
-    
-    return result
+        
+        for key, pattern in stats_patterns.items():
+            match = re.search(pattern, raw_text, re.DOTALL)
+            if match:
+                if key in ["goals_per_game"]:
+                    result["statistics"][key] = float(match.group(1))
+                else:
+                    result["statistics"][key] = {
+                        "count": int(match.group(1)),
+                        "percentage": int(match.group(2))
+                    }
+        
+        elapsed = time.time() - start_time
+        debug(f"⏱️ Parser completed in {elapsed:.2f} seconds", "success")
+        debug(f"✅ Found {len(result['matches'])} matches total", "success")
+        
+        if len(result['matches']) == 0:
+            debug(f"❌ No matches were extracted!", "error")
+            # Show what the first match block looked like if any were found
+            if match_blocks:
+                debug(f"📄 First match block preview:", "info")
+                debug(f"<pre>{match_blocks[0][:500]}...</pre>", "info")
+        
+        return result
+        
+    except Exception as e:
+        debug(f"❌ ERROR in parser: {str(e)}", "error")
+        debug(f"📄 Traceback: {traceback.format_exc()}", "error")
+        return result
 
 
 def convert_match_to_data(match: dict, standings: dict, form_data: dict, league: str = "Unknown") -> dict:
@@ -1047,9 +1103,12 @@ def main():
         data_to_process = None
         
         if uploaded_file is not None:
-            stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
-            data_to_process = stringio.read()
-            st.success(f"✅ File loaded: {uploaded_file.name} ({len(data_to_process):,} characters)")
+            try:
+                stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
+                data_to_process = stringio.read()
+                st.success(f"✅ File loaded: {uploaded_file.name} ({len(data_to_process):,} characters)")
+            except Exception as e:
+                st.error(f"❌ Error reading file: {e}")
         
         elif raw_text.strip():
             data_to_process = raw_text
@@ -1062,70 +1121,79 @@ def main():
             if not data_to_process:
                 st.error("Please upload a file or paste data to analyze.")
             else:
-                with st.spinner("Analyzing with Universal Logic..."):
-                    parsed = extract_all_data_universal(data_to_process)
+                # Create a debug container
+                debug_container = st.empty()
                 
-                league = parsed.get("league", "Unknown League")
-                matches = parsed.get("matches", [])
-                standings = parsed.get("standings", {})
-                form_data = parsed.get("form_data", {})
-                stats = parsed.get("statistics", {})
-                
-                if matches:
-                    st.success(f"✅ Found {len(matches)} matches in {league}")
+                try:
+                    with st.spinner("Analyzing with Universal Logic..."):
+                        parsed = extract_all_data_universal(data_to_process, debug_container)
                     
-                    if stats:
-                        st.markdown("### 📊 League Statistics")
-                        stat_cols = st.columns(4)
-                        with stat_cols[0]:
-                            if "home_wins" in stats:
-                                st.metric("Home Wins", f"{stats['home_wins']['count']} ({stats['home_wins']['percentage']}%)")
-                        with stat_cols[1]:
-                            if "draws" in stats:
-                                st.metric("Draws", f"{stats['draws']['count']} ({stats['draws']['percentage']}%)")
-                        with stat_cols[2]:
-                            if "away_wins" in stats:
-                                st.metric("Away Wins", f"{stats['away_wins']['count']} ({stats['away_wins']['percentage']}%)")
-                        with stat_cols[3]:
-                            if "goals_per_game" in stats:
-                                st.metric("Goals/Game", f"{stats['goals_per_game']:.2f}")
+                    league = parsed.get("league", "Unknown League")
+                    matches = parsed.get("matches", [])
+                    standings = parsed.get("standings", {})
+                    form_data = parsed.get("form_data", {})
+                    stats = parsed.get("statistics", {})
                     
-                    if standings:
-                        st.markdown("### 🏆 Standings (Top 5)")
-                        standings_df = pd.DataFrame([
-                            {"Pos": data["position"], "Team": team, "Pts": data["points"]}
-                            for team, data in list(standings.items())[:5]
-                        ])
-                        st.dataframe(standings_df, use_container_width=True, hide_index=True)
-                    
-                    for idx, match in enumerate(matches):
-                        st.markdown(f"### Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
+                    if matches:
+                        st.success(f"✅ Found {len(matches)} matches in {league}")
                         
-                        home = match.get('home_team')
-                        away = match.get('away_team')
-                        if home in form_data and away in form_data:
-                            f1, f2, f3 = st.columns(3)
-                            with f1:
-                                st.metric(f"{home} Form", f"{form_data[home]['form_points']} pts", 
-                                         f"Last 5: {form_data[home]['wins']}W {form_data[home]['draws']}D {form_data[home]['losses']}L")
-                            with f2:
-                                st.metric(f"{away} Form", f"{form_data[away]['form_points']} pts",
-                                         f"Last 5: {form_data[away]['wins']}W {form_data[away]['draws']}D {form_data[away]['losses']}L")
-                            with f3:
-                                diff = abs(form_data[home]['form_points'] - form_data[away]['form_points'])
-                                st.metric("Form Difference", diff, 
-                                         "Similar" if diff <= 2 else "Significant")
+                        if stats:
+                            st.markdown("### 📊 League Statistics")
+                            stat_cols = st.columns(4)
+                            with stat_cols[0]:
+                                if "home_wins" in stats:
+                                    st.metric("Home Wins", f"{stats['home_wins']['count']} ({stats['home_wins']['percentage']}%)")
+                            with stat_cols[1]:
+                                if "draws" in stats:
+                                    st.metric("Draws", f"{stats['draws']['count']} ({stats['draws']['percentage']}%)")
+                            with stat_cols[2]:
+                                if "away_wins" in stats:
+                                    st.metric("Away Wins", f"{stats['away_wins']['count']} ({stats['away_wins']['percentage']}%)")
+                            with stat_cols[3]:
+                                if "goals_per_game" in stats:
+                                    st.metric("Goals/Game", f"{stats['goals_per_game']:.2f}")
                         
-                        data = convert_match_to_data(match, standings, form_data, league)
-                        analysis = analyze_match_v8(data)
-                        save_to_db(data, analysis, league)
+                        if standings:
+                            st.markdown("### 🏆 Standings (Top 5)")
+                            standings_df = pd.DataFrame([
+                                {"Pos": data["position"], "Team": team, "Pts": data["points"]}
+                                for team, data in list(standings.items())[:5]
+                            ])
+                            st.dataframe(standings_df, use_container_width=True, hide_index=True)
                         
-                        display_analysis(data, analysis, league)
+                        for idx, match in enumerate(matches):
+                            st.markdown(f"### Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
+                            
+                            home = match.get('home_team')
+                            away = match.get('away_team')
+                            if home in form_data and away in form_data:
+                                f1, f2, f3 = st.columns(3)
+                                with f1:
+                                    st.metric(f"{home} Form", f"{form_data[home]['form_points']} pts", 
+                                             f"Last 5: {form_data[home]['wins']}W {form_data[home]['draws']}D {form_data[home]['losses']}L")
+                                with f2:
+                                    st.metric(f"{away} Form", f"{form_data[away]['form_points']} pts",
+                                             f"Last 5: {form_data[away]['wins']}W {form_data[away]['draws']}D {form_data[away]['losses']}L")
+                                with f3:
+                                    diff = abs(form_data[home]['form_points'] - form_data[away]['form_points'])
+                                    st.metric("Form Difference", diff, 
+                                             "Similar" if diff <= 2 else "Significant")
+                            
+                            data = convert_match_to_data(match, standings, form_data, league)
+                            analysis = analyze_match_v8(data)
+                            save_to_db(data, analysis, league)
+                            
+                            display_analysis(data, analysis, league)
+                            
+                            if idx < len(matches) - 1:
+                                st.markdown("---")
+                    else:
+                        st.error("No matches found in the data. Please make sure you're uploading valid Forebet HTML data.")
+                        st.info("💡 Check the debug output above to see what was found.")
                         
-                        if idx < len(matches) - 1:
-                            st.markdown("---")
-                else:
-                    st.error("No matches found in the data. Please make sure you're uploading valid Forebet HTML data.")
+                except Exception as e:
+                    st.error(f"❌ Error during analysis: {str(e)}")
+                    st.code(traceback.format_exc())
     
     # ========================================================================
     # TAB 2: POST-MATCH
