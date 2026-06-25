@@ -197,8 +197,8 @@ def split_into_sections(text: str) -> dict:
         if re.match(r'^Round\s*\d+', line.strip()) and predictions_start is None:
             predictions_start = i
         
-        # Form starts with "1.\tPalmeiras" or "1.  Palmeiras"
-        if re.match(r'^\d+\.\s*\S+', line.strip()) and form_start is None and predictions_start is not None and i > predictions_start + 10:
+        # Form starts with "1.  Palmeiras" or "1.	Palmeiras" (with tab)
+        if re.match(r'^\d+\.\s*\S+', line.strip()) and form_start is None and predictions_start is not None and i > predictions_start + 5:
             form_start = i
         
         # Statistics starts with "Home wins / Draws / Away wins"
@@ -236,9 +236,8 @@ def parse_predictions(text: str) -> list:
     while i < len(lines):
         line = lines[i].strip()
         
-        # Check for league code (Br1, EPL, etc.)
-        if re.match(r'^[A-Za-z]{2,3}\d*$', line):
-            league_code = line
+        # Skip empty lines
+        if not line:
             i += 1
             continue
         
@@ -247,68 +246,80 @@ def parse_predictions(text: str) -> list:
             i += 1
             continue
         
-        # Check for team names (two lines in a row)
-        if i + 1 < len(lines):
-            team1 = line
-            team2 = lines[i + 1].strip()
-            
-            # Skip if team2 is a league code or date or empty
-            if team2 and not re.match(r'^[A-Za-z]{2,3}\d*$', team2) and not re.match(r'^\d{2}/\d{2}/\d{4}', team2) and team2 != "PRE" and team2 != "VIEW":
-                # Check if next line is a date
-                date_line = lines[i + 2].strip() if i + 2 < len(lines) else ""
-                if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', date_line):
-                    match = {}
-                    match['home_team'] = team1
-                    match['away_team'] = team2
-                    match['date'] = date_line
-                    
-                    # Look for probability line
-                    if i + 3 < len(lines):
-                        prob_line = lines[i + 3].strip()
-                        # Pattern: 51311912 - 13.23
-                        prob_match = re.search(r'(\d{2})(\d{2})(\d{2})([1X2])\s*-\s*(\d+\.\d+)', prob_line)
-                        if prob_match:
-                            match['home_win_pct'] = int(prob_match.group(1))
-                            match['draw_pct'] = int(prob_match.group(2))
-                            match['away_win_pct'] = int(prob_match.group(3))
-                            match['prediction'] = prob_match.group(4)
-                            match['avg_goals'] = float(prob_match.group(5))
+        # Check for league code (Br1, EPL, etc.) — skip these
+        if re.match(r'^[A-Za-z]{2,3}\d*$', line):
+            i += 1
+            continue
+        
+        # Check if this line looks like a team name (not a date, not a number, not empty)
+        # Team names are usually 2+ characters, contain letters, not just numbers
+        if len(line) >= 2 and re.search(r'[A-Za-z]', line) and not re.match(r'^\d+\.', line):
+            # Check if next line is also a team name (away team)
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                # If next line looks like a team name too
+                if len(next_line) >= 2 and re.search(r'[A-Za-z]', next_line) and not re.match(r'^\d+\.', next_line):
+                    # Check if the line after that is a date
+                    if i + 2 < len(lines):
+                        date_line = lines[i + 2].strip()
+                        if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', date_line):
+                            match = {}
+                            match['home_team'] = line
+                            match['away_team'] = next_line
+                            match['date'] = date_line
                             
-                            # Extract correct score from the line
-                            # Look for pattern like "12" or "21" at the end of the first part
-                            score_match = re.search(r'(\d{2})\s*-\s*(\d+\.\d+)', prob_line)
-                            if score_match:
-                                score_code = score_match.group(1)
-                                if len(score_code) == 2:
-                                    match['correct_score_home'] = int(score_code[0])
-                                    match['correct_score_away'] = int(score_code[1])
+                            # Look for probability line (skip the date line)
+                            if i + 3 < len(lines):
+                                prob_line = lines[i + 3].strip()
+                                # Pattern: 51311912 - 13.23
+                                # FIXED: Extract avg goals correctly
+                                prob_match = re.search(r'(\d{2})(\d{2})(\d{2})([1X2])\s*-\s*', prob_line)
+                                if prob_match:
+                                    match['home_win_pct'] = int(prob_match.group(1))
+                                    match['draw_pct'] = int(prob_match.group(2))
+                                    match['away_win_pct'] = int(prob_match.group(3))
+                                    match['prediction'] = prob_match.group(4)
+                                    
+                                    # Extract avg goals — look for number before °
+                                    avg_match = re.search(r'(\d+\.\d+)°', prob_line)
+                                    if avg_match:
+                                        match['avg_goals'] = float(avg_match.group(1))
+                                    else:
+                                        # Fallback: look for number after -
+                                        fallback_match = re.search(r'-\s*(\d+\.\d+)', prob_line)
+                                        if fallback_match:
+                                            match['avg_goals'] = float(fallback_match.group(1))
+                                        else:
+                                            match['avg_goals'] = 2.5
+                                    
+                                    # Extract correct score from the score code
+                                    # The score code is the last 2 digits before the dash
+                                    score_code_match = re.search(r'(\d{2})\s*-\s*', prob_line)
+                                    if score_code_match:
+                                        score_code = score_code_match.group(1)
+                                        if len(score_code) == 2:
+                                            match['correct_score_home'] = int(score_code[0])
+                                            match['correct_score_away'] = int(score_code[1])
                             
-                            # Also try to find score from the code
-                            if 'correct_score_home' not in match:
-                                # Look for score pattern in the line
-                                score_match2 = re.search(r'(\d)\s*-\s*(\d)', prob_line)
-                                if score_match2:
-                                    match['correct_score_home'] = int(score_match2.group(1))
-                                    match['correct_score_away'] = int(score_match2.group(2))
-                        
-                        # Look for weather
-                        weather_line = lines[i + 4].strip() if i + 4 < len(lines) else ""
-                        if '°' in weather_line:
-                            match['weather'] = weather_line
-                        else:
-                            # Try one line further
-                            if i + 5 < len(lines):
-                                weather_line = lines[i + 5].strip()
+                            # Look for weather (line with °)
+                            if i + 4 < len(lines):
+                                weather_line = lines[i + 4].strip()
                                 if '°' in weather_line:
                                     match['weather'] = weather_line
-                    
-                    # Add match if it has required fields
-                    if match.get('home_team') and match.get('away_team'):
-                        matches.append(match)
-                    
-                    # Skip to next match
-                    i += 6
-                    continue
+                                else:
+                                    # Try one line further
+                                    if i + 5 < len(lines):
+                                        weather_line = lines[i + 5].strip()
+                                        if '°' in weather_line:
+                                            match['weather'] = weather_line
+                            
+                            # Add match if it has required fields
+                            if match.get('home_team') and match.get('away_team') and match.get('avg_goals'):
+                                matches.append(match)
+                            
+                            # Skip ahead
+                            i += 6
+                            continue
         
         i += 1
     
@@ -323,11 +334,18 @@ def parse_form(text: str) -> dict:
     for line in lines:
         line = line.strip()
         
+        # Replace tabs with spaces for consistent parsing
+        line = line.replace('\t', ' ')
+        
         # Pattern: "1.  Palmeiras    D W W W L W..."
+        # Handle multiple spaces between parts
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL\s]+)', line)
         if match:
             team_name = match.group(2).strip()
             form_sequence = match.group(3).strip()
+            
+            # Clean up form sequence
+            form_sequence = ' '.join(form_sequence.split())
             
             # Count results
             results = form_sequence.split()
@@ -335,6 +353,9 @@ def parse_form(text: str) -> dict:
             draws = results.count('D')
             losses = results.count('L')
             total = wins + draws + losses
+            
+            if total == 0:
+                continue
             
             # Calculate points
             total_points = (wins * 3) + draws
@@ -444,6 +465,7 @@ def parse_standings(text: str) -> dict:
     # Look for the form data section which has standings
     for line in lines:
         line = line.strip()
+        line = line.replace('\t', ' ')
         
         # Pattern: "1.  Palmeiras   ..."
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)', line)
