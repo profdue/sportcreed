@@ -120,7 +120,7 @@ def detect_league(text: str) -> str:
 
 
 # ============================================================================
-# TEXT PARSER — Extracts data from the pasted text format
+# TEXT PARSER — NEW SIMPLIFIED VERSION
 # ============================================================================
 def parse_text_data(text: str) -> dict:
     """Parse the clean text format containing Predictions, Form, and Statistics."""
@@ -144,10 +144,10 @@ def parse_text_data(text: str) -> dict:
     sections = split_into_sections(text)
     
     # ============================================================
-    # SECTION 2: Parse Predictions
+    # SECTION 2: Parse Predictions — SIMPLIFIED
     # ============================================================
     predictions_text = sections.get("predictions", "")
-    matches = parse_predictions(predictions_text)
+    matches = parse_predictions_simple(predictions_text)
     result["matches"] = matches
     st.write(f"✅ Found {len(matches)} matches")
     
@@ -201,7 +201,6 @@ def split_into_sections(text: str) -> dict:
         
         # Form starts with "1.  Palmeiras" or similar
         if re.match(r'^\d+\.\s*[A-Za-z]', line) and form_start is None:
-            # Make sure we're not in the predictions section
             if predictions_start is not None and i > predictions_start + 10:
                 form_start = i
         
@@ -232,158 +231,79 @@ def split_into_sections(text: str) -> dict:
     return result
 
 
-def parse_predictions(text: str) -> list:
-    """Parse the Predictions section."""
+def parse_predictions_simple(text: str) -> list:
+    """
+    SIMPLE PARSER — Finds data lines and extracts team names by looking backwards.
+    This is more robust than trying to detect match boundaries forward.
+    """
     matches = []
     lines = text.split('\n')
     
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip() if i < len(lines) else ""
+    # First, find ALL lines that match the data pattern
+    # Pattern: [home_pct][draw_pct][away_pct][pred][score_code] - [avg_goals][temp]°
+    data_pattern = r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°'
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
         
         # Skip empty lines
         if not line:
-            i += 1
             continue
         
-        # Skip headers and round headings
-        if "Home team" in line or "Away team" in line or "Prob. %" in line:
-            i += 1
-            continue
-        
-        if re.match(r'^Round\s*\d+', line):
-            i += 1
-            continue
-        
-        # Skip the "PRE" and "VIEW" lines
-        if line == "PRE" or line == "VIEW":
-            i += 1
-            continue
-        
-        # Check if this is a league code (Br1, EPL, etc.)
-        if re.match(r'^[A-Za-z]{2,3}\d*$', line):
-            league_code = line
-            i += 1
-            continue
-        
-        # At this point, line should be a team name
-        # Check if next line is a date (meaning this is the home team)
-        if i + 1 < len(lines):
-            next_line = lines[i + 1].strip()
+        # Check if this line matches the data pattern
+        match = re.search(data_pattern, line)
+        if match:
+            # Found a data line! Now find the teams and date by looking backwards
+            match_data = {}
             
-            # If next line is a date, then current line is home team
-            if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', next_line):
-                # We need to find the away team (which is the line before this)
-                if i > 0:
-                    home_team = lines[i - 1].strip()
-                    away_team = line
-                    date_line = next_line
-                    
-                    # Look for data line
-                    if i + 2 < len(lines):
-                        data_line = lines[i + 2].strip()
-                        
-                        # Parse data line
-                        match = parse_data_line(data_line)
-                        if match:
-                            match['home_team'] = home_team
-                            match['away_team'] = away_team
-                            match['date'] = date_line
-                            matches.append(match)
-                            
-                            # Skip ahead (past data line and preview lines)
-                            i += 5
-                            continue
-                i += 1
-                continue
-            else:
-                # This might be the home team, next line is away team
-                if i + 2 < len(lines):
-                    date_line = lines[i + 2].strip()
-                    if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', date_line):
-                        home_team = line
-                        away_team = next_line
-                        
-                        # Look for data line
-                        if i + 3 < len(lines):
-                            data_line = lines[i + 3].strip()
-                            
-                            match = parse_data_line(data_line)
-                            if match:
-                                match['home_team'] = home_team
-                                match['away_team'] = away_team
-                                match['date'] = date_line
-                                matches.append(match)
-                                
-                                # Skip ahead (past data line and preview lines)
-                                i += 6
-                                continue
-                    else:
-                        # If next line is not a date, skip
-                        i += 1
-                        continue
-                i += 1
-                continue
-        
-        i += 1
+            # Extract data from the line
+            match_data['home_win_pct'] = int(match.group(1))
+            match_data['draw_pct'] = int(match.group(2))
+            match_data['away_win_pct'] = int(match.group(3))
+            match_data['prediction'] = match.group(4)
+            
+            # Correct score from the two digits
+            score_code = match.group(5)
+            match_data['correct_score_home'] = int(score_code[0])
+            match_data['correct_score_away'] = int(score_code[1])
+            
+            # Avg goals (the number before the degree symbol)
+            match_data['avg_goals'] = float(match.group(6))
+            
+            # Temperature (the number after the degree symbol)
+            match_data['temperature'] = int(match.group(7))
+            
+            # Check for odds (if present after the degree symbol)
+            odds_match = re.search(r'°\s*([\d.]+)', line)
+            if odds_match:
+                match_data['odds'] = float(odds_match.group(1))
+            
+            # Now look backwards for team names and date
+            # Go back up to 10 lines
+            home_team = None
+            away_team = None
+            date_line = None
+            
+            for j in range(i-1, max(0, i-10), -1):
+                prev_line = lines[j].strip()
+                
+                # Check if this is a date
+                if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
+                    date_line = prev_line
+                    # The two lines before the date should be the teams
+                    if j - 2 >= 0:
+                        home_team = lines[j-2].strip()
+                        away_team = lines[j-1].strip()
+                    break
+            
+            # If we found all the data, add the match
+            if home_team and away_team and date_line and home_team != "PRE" and away_team != "VIEW":
+                match_data['home_team'] = home_team
+                match_data['away_team'] = away_team
+                match_data['date'] = date_line
+                matches.append(match_data)
     
     return matches
-
-
-def parse_data_line(data_line: str) -> dict:
-    """Parse the data line containing probabilities, prediction, score, avg goals."""
-    match = {}
-    
-    # Pattern: 51311912 - 13.2325°-
-    # Or: 60261412 - 02.1528°3.90
-    # The avg goals is the number BEFORE the ° symbol
-    # The temperature is the number AFTER the ° symbol
-    
-    # Extract the main parts
-    # Look for: [home_pct][draw_pct][away_pct][pred][score_code] - [avg_goals][temp]°
-    pattern = r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°'
-    parts = re.search(pattern, data_line)
-    
-    if parts:
-        match['home_win_pct'] = int(parts.group(1))
-        match['draw_pct'] = int(parts.group(2))
-        match['away_win_pct'] = int(parts.group(3))
-        match['prediction'] = parts.group(4)
-        
-        # Correct score from the two digits
-        score_code = parts.group(5)
-        match['correct_score_home'] = int(score_code[0])
-        match['correct_score_away'] = int(score_code[1])
-        
-        # Avg goals (the number before the degree symbol)
-        match['avg_goals'] = float(parts.group(6))
-        
-        # Temperature (the number after the degree symbol)
-        match['temperature'] = int(parts.group(7))
-        
-        # Check for odds (if present after the degree symbol)
-        # Sometimes there's a number after the degree symbol and a space
-        odds_match = re.search(r'°\s*([\d.]+)', data_line)
-        if odds_match:
-            match['odds'] = float(odds_match.group(1))
-    
-    # Also handle the case where there's a space between avg_goals and temp
-    # For example: "3.23 25°"
-    if not parts:
-        pattern2 = r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)\s+(\d+)°'
-        parts2 = re.search(pattern2, data_line)
-        if parts2:
-            match['home_win_pct'] = int(parts2.group(1))
-            match['draw_pct'] = int(parts2.group(2))
-            match['away_win_pct'] = int(parts2.group(3))
-            match['prediction'] = parts2.group(4)
-            score_code = parts2.group(5)
-            match['correct_score_home'] = int(score_code[0])
-            match['correct_score_away'] = int(score_code[1])
-            match['avg_goals'] = float(parts2.group(6))
-            match['temperature'] = int(parts2.group(7))
-    
-    return match
 
 
 def parse_form(text: str) -> dict:
@@ -394,24 +314,18 @@ def parse_form(text: str) -> dict:
     for line in lines:
         line = line.strip()
         
-        # Skip empty lines
         if not line:
             continue
         
-        # Replace tabs with spaces for consistent parsing
         line = line.replace('\t', ' ')
         
         # Pattern: "1.  Palmeiras    D W W W L W..."
-        # The form sequence contains D, W, L
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL\s]+)', line)
         if match:
             team_name = match.group(2).strip()
             form_sequence = match.group(3).strip()
-            
-            # Clean up form sequence
             form_sequence = ' '.join(form_sequence.split())
             
-            # Count results
             results = form_sequence.split()
             wins = results.count('W')
             draws = results.count('D')
@@ -421,10 +335,8 @@ def parse_form(text: str) -> dict:
             if total == 0:
                 continue
             
-            # Calculate points
             total_points = (wins * 3) + draws
             
-            # Calculate losing streak
             losing_streak = 0
             for r in reversed(results):
                 if r == 'L':
@@ -432,7 +344,6 @@ def parse_form(text: str) -> dict:
                 else:
                     break
             
-            # Last 5 form points
             last_5 = results[-5:] if len(results) >= 5 else results
             form_points = sum(3 if x == 'W' else 1 if x == 'D' else 0 for x in last_5)
             
@@ -457,51 +368,42 @@ def parse_statistics(text: str) -> dict:
     for i, line in enumerate(lines):
         line = line.strip()
         
-        # Home wins
         if "Home wins:" in line:
             match = re.search(r'Home wins:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["home_wins"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
         
-        # Draws
         if "Draws:" in line and "Home wins" not in line:
             match = re.search(r'Draws:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["draws"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
         
-        # Away wins
         if "Away wins:" in line:
             match = re.search(r'Away wins:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["away_wins"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
         
-        # Under 2.5
         if "Under 2.5 goals:" in line:
             match = re.search(r'Under 2.5 goals:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["under_25"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
         
-        # Over 2.5
         if "Over 2.5 goals:" in line:
             match = re.search(r'Over 2.5 goals:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["over_25"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
         
-        # Goals per game
         if "Goals per game:" in line:
             match = re.search(r'Goals per game:\s*(\d+\.\d+)', line)
             if match:
                 stats["goals_per_game"] = float(match.group(1))
         
-        # Both teams scored
         if "Both teams scored games:" in line:
             match = re.search(r'Both teams scored games:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["btts"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
         
-        # Half Time stats
         if "Half Time: Home wins / Draws / Away wins" in line:
-            # Look for Home wins:
             if i + 1 < len(lines):
                 home_line = lines[i + 1].strip()
                 match = re.search(r'Home wins:\s*(\d+).*?(\d+)%', home_line)
@@ -530,13 +432,11 @@ def parse_standings(text: str) -> dict:
         line = line.strip()
         line = line.replace('\t', ' ')
         
-        # Pattern: "1.  Palmeiras   ..."
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)', line)
         if match:
             position = int(match.group(1))
             team_name = match.group(2).strip()
             
-            # Try to extract points from the line (look for a number at the end)
             points_match = re.search(r'(\d+)$', line)
             if points_match:
                 points = int(points_match.group(1))
