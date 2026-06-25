@@ -324,6 +324,7 @@ def split_into_sections(text: str, debug=None) -> dict:
 def parse_predictions_simple(text: str, debug=None) -> list:
     """
     SIMPLE PARSER — Finds data lines and extracts team names by looking backwards.
+    FIXED: Pattern handles anything after the degree symbol.
     """
     matches = []
     lines = text.split('\n')
@@ -334,18 +335,10 @@ def parse_predictions_simple(text: str, debug=None) -> list:
     
     log(f"Processing {len(lines)} lines in Predictions section", "info")
     
-    # Show all non-empty lines
-    log(f"All non-empty lines in Predictions section:", "info")
-    for i, line in enumerate(lines):
-        if line.strip():
-            log(f"  {i+1}: '{line[:80]}'", "info")
-    
-    # Count how many lines match the data pattern
-    data_line_count = 0
-    
     # Pattern: 2 digits (home) + 2 digits (draw) + 2 digits (away) + 1 char (pred) + 2 digits (score)
     # Then optional spaces, dash, avg_goals, temp, degree symbol
-    data_pattern = re.compile(r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°')
+    # The .*? at the end handles anything after the degree symbol (-, odds, etc.)
+    data_pattern = re.compile(r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°.*?')
     
     for i, line in enumerate(lines):
         line = line.strip()
@@ -355,8 +348,8 @@ def parse_predictions_simple(text: str, debug=None) -> list:
         # Check if this line matches the data pattern
         match = data_pattern.search(line)
         if match:
-            data_line_count += 1
-            log(f"✅ Found data line {data_line_count} at line {i+1}: {line[:60]}...", "success")
+            data_line_count = 0
+            # Count matches (we'll increment properly)
             
             # Extract all values
             home_win_pct = int(match.group(1))
@@ -370,6 +363,9 @@ def parse_predictions_simple(text: str, debug=None) -> list:
             correct_score_home = int(score_code[0])
             correct_score_away = int(score_code[1])
             
+            # Count this as a found data line
+            data_line_count = len(matches) + 1
+            log(f"✅ Found data line {data_line_count} at line {i+1}: {line[:60]}...", "success")
             log(f"    📊 Probabilities: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}", "info")
             log(f"    ⚽ Score: {correct_score_home}-{correct_score_away}, Avg goals: {avg_goals}, Temp: {temperature}°", "info")
             
@@ -379,7 +375,6 @@ def parse_predictions_simple(text: str, debug=None) -> list:
             date_line = None
             
             # Look for the date first (the line before the data line)
-            # The date is usually 3-4 lines before the data line
             for j in range(i-1, max(0, i-10), -1):
                 prev_line = lines[j].strip()
                 if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
@@ -391,7 +386,7 @@ def parse_predictions_simple(text: str, debug=None) -> list:
                     break
             
             if not home_team or not away_team or not date_line:
-                log(f"    ⚠️ Could not find teams or date for match {data_line_count}", "warning")
+                log(f"    ⚠️ Could not find teams or date", "warning")
                 log(f"       Home: {home_team}, Away: {away_team}, Date: {date_line}", "warning")
                 continue
             
@@ -417,11 +412,9 @@ def parse_predictions_simple(text: str, debug=None) -> list:
             })
             
             log(f"    ✅ Match added: {home_team} vs {away_team}", "success")
-        else:
-            # Log lines that almost match but don't
-            if re.search(r'\d{2}\d{2}\d{2}', line):
-                log(f"  ⚠️ Line {i+1} has digits but doesn't match pattern: '{line[:60]}'", "warning")
     
+    # Count total data lines found
+    data_line_count = len(matches)
     log(f"Total data lines found: {data_line_count}", "info")
     log(f"Total matches extracted: {len(matches)}", "info")
     
