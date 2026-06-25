@@ -1,12 +1,10 @@
 """
-MATCH ANALYZER V8.0 — UNIVERSAL LOGIC ENGINE (HTML PARSER VERSION)
-Based on analysis of 81 matches across 7 leagues
-- Draw predictions are wrong 83% of the time
-- Form difference > 2 points → someone wins
-- Goals sweet spot: 2.00-2.40 for draws
-- Desperation kills draws
-- Home team wins 65% of non-draws
-- Home desperation = 100% accuracy lock
+MATCH ANALYZER V8.0 — COMPLETE PARSER
+Extracts ALL data needed for universal logic:
+- Team form (W/D/L points)
+- Standings positions
+- Losing streaks
+- Competitive blocks
 """
 
 import streamlit as st
@@ -15,13 +13,6 @@ from supabase import create_client, Client
 import pandas as pd
 import re
 import json
-
-# Try to import BeautifulSoup, fallback to regex if not available
-try:
-    from bs4 import BeautifulSoup
-    HAS_BS4 = True
-except ImportError:
-    HAS_BS4 = False
 
 # ============================================================================
 # SUPABASE SETUP
@@ -67,57 +58,104 @@ st.markdown("""
     .condition-false { color: #ef4444; font-weight: 700; }
     .condition-box { background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; }
     .priority-rule { background: #1a2a1a; border-left: 4px solid #f59e0b; padding: 0.75rem; margin: 0.5rem 0; border-radius: 4px; }
-    .match-card { background: #0f172a; border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border: 1px solid #1e293b; }
-    .match-card:hover { border-color: #3b82f6; }
-    .match-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
-    .match-teams { font-size: 1.1rem; font-weight: 700; }
-    .match-prediction { font-size: 1.5rem; font-weight: 800; padding: 0.2rem 1rem; border-radius: 8px; }
-    .pred-1 { background: #10b981; color: #000; }
-    .pred-x { background: #f59e0b; color: #000; }
-    .pred-2 { background: #ef4444; color: #fff; }
-    .match-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.9rem; color: #94a3b8; }
-    .match-stats span { display: flex; align-items: center; gap: 0.3rem; }
-    .batch-analyze-btn { background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================================
-# HTML PARSER — FOREBET MATCH DATA (Regex-based, no BeautifulSoup required)
+# COMPLETE HTML PARSER
 # ============================================================================
-def parse_forebet_html_regex(raw_text: str) -> list:
-    """Regex-based HTML parser - works without BeautifulSoup"""
-    matches = []
+def parse_forebet_html_complete(raw_text: str) -> dict:
+    """
+    Complete HTML parser that extracts:
+    1. Match list (teams, predictions, scores, avg goals)
+    2. Standings data (positions, points for all teams)
+    3. Form data (W/D/L records for all teams)
+    4. Team stats (losing streaks, etc.)
+    """
+    result = {
+        "matches": [],
+        "standings": {},
+        "form_data": {},
+        "team_stats": {}
+    }
     
-    # Find all match blocks
-    block_pattern = r'<div class="rcnt tr_[01]">(.*?)</div>'
-    blocks = re.findall(block_pattern, raw_text, re.DOTALL)
+    # ================================================================
+    # STEP 1: Extract Standings Data
+    # ================================================================
+    standings_pattern = r'<tr class="color[01]">\s*<td class="std_pos">.*?<span class="std_zn">(\d+)</span>.*?</td>\s*<td class="standing-second-td"><a href="/en/teams/([^"]+)">([^<]+)</a></td>\s*<td align="center"><b>(\d+)</b></td>\s*<td align="center">(\d+)</td>\s*<td align="center">(\d+)</td>\s*<td align="center">(\d+)</td>\s*<td align="center">(\d+)</td>\s*<td align="center">([-\d]+)</td>'
     
-    # If no matches found with rcnt, try alternative patterns
-    if not blocks:
-        # Try to find matches in the schema div
-        schema_pattern = r'<div class="schema">(.*?)</div>'
-        schema_match = re.search(schema_pattern, raw_text, re.DOTALL)
-        if schema_match:
-            blocks = re.findall(r'<div class="rcnt tr_[01]">(.*?)</div>', schema_match.group(1), re.DOTALL)
+    standings_matches = re.findall(standings_pattern, raw_text, re.DOTALL)
     
-    for block in blocks:
+    for match in standings_matches:
+        pos, team_slug, team_name, points, gp, wins, draws, losses, gd = match
+        result["standings"][team_name] = {
+            "position": int(pos),
+            "points": int(points),
+            "games_played": int(gp),
+            "wins": int(wins),
+            "draws": int(draws),
+            "losses": int(losses),
+            "goal_diff": int(gd)
+        }
+    
+    # ================================================================
+    # STEP 2: Extract Form Data (W/D/L sequences)
+    # ================================================================
+    form_pattern = r'<tr class="color[01]">\s*<td width="10".*?>\d+\.</td>\s*<td width="110".*?><a href="/en/teams/[^"]+">([^<]+)</a></td>\s*<td width="490">\s*<ul class="form">\s*<li class="li-first">\d+</li>(.*?)<li class="li-last">\d+</li>'
+    
+    form_matches = re.findall(form_pattern, raw_text, re.DOTALL)
+    
+    for team_name, form_html in form_matches:
+        team_name = team_name.strip()
+        # Extract W/D/L from form
+        form_items = re.findall(r'<li class="li-(win|draw|lose)">', form_html)
+        form_sequence = []
+        for item in form_items:
+            if item == "win":
+                form_sequence.append("W")
+            elif item == "draw":
+                form_sequence.append("D")
+            elif item == "lose":
+                form_sequence.append("L")
+        
+        result["form_data"][team_name] = {
+            "form_sequence": form_sequence,
+            "form_points": sum(3 if f == "W" else 1 if f == "D" else 0 for f in form_sequence)
+        }
+        
+        # Calculate losing streak
+        losing_streak = 0
+        for f in reversed(form_sequence):
+            if f == "L":
+                losing_streak += 1
+            else:
+                break
+        result["form_data"][team_name]["losing_streak"] = losing_streak
+    
+    # ================================================================
+    # STEP 3: Extract Match Data
+    # ================================================================
+    match_pattern = r'<div class="rcnt tr_[01]">(.*?)</div>'
+    match_blocks = re.findall(match_pattern, raw_text, re.DOTALL)
+    
+    for block in match_blocks:
         match = {}
         
-        # Extract team names
+        # Team names
         team_pattern = r'<span itemprop="name">([^<]+)</span>'
         teams = re.findall(team_pattern, block)
         if len(teams) >= 2:
             match['home_team'] = teams[0].strip()
             match['away_team'] = teams[1].strip()
         
-        # Extract prediction (1, X, or 2)
+        # Prediction
         pred_pattern = r'<span class="forepr"><span>([1X2])</span></span>'
         pred_match = re.search(pred_pattern, block)
         if pred_match:
             match['prediction'] = pred_match.group(1)
         
-        # Extract correct score
+        # Correct score
         score_pattern = r'<div class="ex_sc tabonly">(\d+)\s*-\s*(\d+)</div>'
         score_match = re.search(score_pattern, block)
         if score_match:
@@ -125,197 +163,107 @@ def parse_forebet_html_regex(raw_text: str) -> list:
             match['correct_score_away'] = int(score_match.group(2))
             match['avg_goals'] = (int(score_match.group(1)) + int(score_match.group(2))) / 2
         
-        # Extract avg goals
+        # Avg goals
         avg_pattern = r'<div class="avg_sc tabonly">(\d+\.\d+)</div>'
         avg_match = re.search(avg_pattern, block)
         if avg_match:
             match['avg_goals'] = float(avg_match.group(1))
         
-        # Extract league
-        league_pattern = r'/football-tips-and-predictions-for/[^"]+">([^<]+)</a>'
-        league_match = re.search(league_pattern, block)
-        if league_match:
-            match['league'] = league_match.group(1).strip()
-        
-        # Check if match is finished
-        if 'l_scr' in block:
-            finished_pattern = r'<b class="l_scr">(\d+)\s*-\s*(\d+)</b>'
-            finished_match = re.search(finished_pattern, block)
-            if finished_match:
-                match['actual_home'] = int(finished_match.group(1))
-                match['actual_away'] = int(finished_match.group(2))
-                match['is_finished'] = True
-        
-        # Extract home/away win percentages from fprc
-        fprc_pattern = r'<div class=\'fprc\'><span>(\d+)</span><span class="fpr">(\d+)</span><span>(\d+)</span></div>'
-        fprc_match = re.search(fprc_pattern, block)
-        if fprc_match:
-            match['home_win_pct'] = int(fprc_match.group(1))
-            match['draw_pct'] = int(fprc_match.group(2))
-            match['away_win_pct'] = int(fprc_match.group(3))
+        # Match URL
+        url_pattern = r'<a class="tnmscn" itemprop="url" href="([^"]+)"'
+        url_match = re.search(url_pattern, block)
+        if url_match:
+            match['match_url'] = url_match.group(1)
         
         if match.get('home_team') and match.get('away_team'):
-            matches.append(match)
+            # Attach standings and form data if available
+            home_team = match['home_team']
+            away_team = match['away_team']
+            
+            # Standings
+            if home_team in result["standings"]:
+                match['home_position'] = result["standings"][home_team]["position"]
+                match['home_points'] = result["standings"][home_team]["points"]
+            if away_team in result["standings"]:
+                match['away_position'] = result["standings"][away_team]["position"]
+                match['away_points'] = result["standings"][away_team]["points"]
+            
+            # Form data
+            if home_team in result["form_data"]:
+                match['home_form_points'] = result["form_data"][home_team]["form_points"]
+                match['home_losing_streak'] = result["form_data"][home_team]["losing_streak"]
+            if away_team in result["form_data"]:
+                match['away_form_points'] = result["form_data"][away_team]["form_points"]
+                match['away_losing_streak'] = result["form_data"][away_team]["losing_streak"]
+            
+            result["matches"].append(match)
     
-    return matches
+    return result
 
 
-def parse_forebet_html_bs4(raw_text: str) -> list:
-    """BeautifulSoup-based HTML parser (fallback)"""
-    matches = []
-    
-    try:
-        soup = BeautifulSoup(raw_text, 'html.parser')
-    except:
-        return parse_forebet_html_regex(raw_text)
-    
-    # Find all match blocks
-    match_blocks = soup.find_all('div', class_=re.compile(r'rcnt tr_[01]'))
-    
-    for block in match_blocks:
-        match = {}
-        
-        # Extract team names
-        team_spans = block.find_all('span', itemprop='name')
-        if len(team_spans) >= 2:
-            match['home_team'] = team_spans[0].text.strip()
-            match['away_team'] = team_spans[1].text.strip()
-        
-        # Extract prediction
-        pred_span = block.find('span', class_='forepr')
-        if pred_span:
-            pred = pred_span.find('span')
-            if pred:
-                match['prediction'] = pred.text.strip()
-        
-        # Extract correct score
-        score_div = block.find('div', class_='ex_sc')
-        if score_div:
-            score_text = score_div.text.strip()
-            score_match = re.search(r'(\d+)\s*-\s*(\d+)', score_text)
-            if score_match:
-                match['correct_score_home'] = int(score_match.group(1))
-                match['correct_score_away'] = int(score_match.group(2))
-                match['avg_goals'] = (int(score_match.group(1)) + int(score_match.group(2))) / 2
-        
-        # Extract avg goals
-        avg_div = block.find('div', class_='avg_sc')
-        if avg_div:
-            try:
-                match['avg_goals'] = float(avg_div.text.strip())
-            except:
-                pass
-        
-        # Extract league
-        league_links = block.find_all('a', href=re.compile(r'/football-tips-and-predictions-for/'))
-        for link in league_links:
-            if link.text.strip():
-                match['league'] = link.text.strip()
-                break
-        
-        # Check if finished
-        score_span = block.find('span', class_='l_scr')
-        if score_span:
-            score_text = score_span.text.strip()
-            if '-' in score_text:
-                parts = score_text.split('-')
-                if len(parts) == 2:
-                    try:
-                        match['actual_home'] = int(parts[0].strip())
-                        match['actual_away'] = int(parts[1].strip())
-                        match['is_finished'] = True
-                    except:
-                        pass
-        
-        # Extract percentages
-        fprc_div = block.find('div', class_='fprc')
-        if fprc_div:
-            spans = fprc_div.find_all('span')
-            if len(spans) >= 3:
-                try:
-                    match['home_win_pct'] = int(spans[0].text.strip())
-                    match['draw_pct'] = int(spans[1].text.strip())
-                    match['away_win_pct'] = int(spans[2].text.strip())
-                except:
-                    pass
-        
-        if match.get('home_team') and match.get('away_team'):
-            matches.append(match)
-    
-    return matches
-
-
-# ============================================================================
-# V8.0 PARSER — UNIVERSAL LOGIC
-# ============================================================================
-def parse_match_data_v8(raw_text: str):
-    """Enhanced parser that handles both raw text and HTML"""
-    
-    # First, try to parse as HTML
-    if HAS_BS4:
-        html_matches = parse_forebet_html_bs4(raw_text)
-    else:
-        html_matches = parse_forebet_html_regex(raw_text)
-    
-    if html_matches:
-        # Return all matches found
-        return {"matches": html_matches}
-    
-    # If not HTML, try the original text parser
-    return parse_match_data_v8_text(raw_text)
-
-
-def convert_html_match_to_data(html_match: dict) -> dict:
-    """Convert HTML parsed match data to the standard format"""
+def convert_complete_match_to_data(match: dict) -> dict:
+    """Convert complete match data to the standard format"""
     data = {
-        "home_team": html_match.get('home_team', 'Unknown'),
-        "away_team": html_match.get('away_team', 'Unknown'),
-        "league": html_match.get('league', 'Unknown'),
-        "home_goals_total": html_match.get('home_goals', 0),
-        "away_goals_total": html_match.get('away_goals', 0),
-        "home_shots_pg": html_match.get('home_shots', 0),
-        "away_shots_pg": html_match.get('away_shots', 0),
-        "home_tackles_pg": html_match.get('home_tackles', 0),
-        "away_tackles_pg": html_match.get('away_tackles', 0),
-        "prediction": html_match.get('prediction'),
-        "correct_score_home": html_match.get('correct_score_home'),
-        "correct_score_away": html_match.get('correct_score_away'),
-        "avg_goals": html_match.get('avg_goals', 2.0),
-        "actual_home": html_match.get('actual_home'),
-        "actual_away": html_match.get('actual_away'),
-        "is_finished": html_match.get('is_finished', False),
-        "match_url": html_match.get('match_url'),
-        "form": html_match.get('form', ''),
-        "position": html_match.get('position'),
-        "points": html_match.get('points'),
-        "games_played": html_match.get('games_played'),
+        "home_team": match.get('home_team', 'Unknown'),
+        "away_team": match.get('away_team', 'Unknown'),
+        "league": match.get('league', 'Unknown'),
+        "home_goals_total": match.get('home_goals', 0),
+        "away_goals_total": match.get('away_goals', 0),
+        "prediction": match.get('prediction'),
+        "correct_score_home": match.get('correct_score_home'),
+        "correct_score_away": match.get('correct_score_away'),
+        "avg_goals": match.get('avg_goals', 2.0),
         "score_matrix": [],
-        "home_win": html_match.get('home_win_pct'),
-        "draw": html_match.get('draw_pct'),
-        "away_win": html_match.get('away_win_pct'),
-        "btts": html_match.get('btts'),
-        "over_25": html_match.get('over_25'),
-        "under_25": html_match.get('under_25'),
-        "over_35": html_match.get('over_35'),
-        "home_form_points": html_match.get('home_form_points', 0),
-        "away_form_points": html_match.get('away_form_points', 0),
-        "home_standings_position": html_match.get('home_standings_position'),
-        "away_standings_position": html_match.get('away_standings_position'),
-        "home_standings_points": html_match.get('home_standings_points'),
-        "away_standings_points": html_match.get('away_standings_points'),
-        "home_losing_streak": html_match.get('home_losing_streak', 0),
-        "away_losing_streak": html_match.get('away_losing_streak', 0),
-        "is_relegation_fight": html_match.get('is_relegation_fight', False),
-        "is_title_race": html_match.get('is_title_race', False),
-        "competitive_block_home": html_match.get('competitive_block_home'),
-        "competitive_block_away": html_match.get('competitive_block_away'),
+        "home_win": match.get('home_win_pct'),
+        "draw": match.get('draw_pct'),
+        "away_win": match.get('away_win_pct'),
+        "btts": match.get('btts'),
+        "over_25": match.get('over_25'),
+        "under_25": match.get('under_25'),
+        "over_35": match.get('over_35'),
+        # STANDINGS DATA
+        "home_standings_position": match.get('home_position'),
+        "away_standings_position": match.get('away_position'),
+        "home_standings_points": match.get('home_points'),
+        "away_standings_points": match.get('away_points'),
+        # FORM DATA
+        "home_form_points": match.get('home_form_points', 0),
+        "away_form_points": match.get('away_form_points', 0),
+        "home_losing_streak": match.get('home_losing_streak', 0),
+        "away_losing_streak": match.get('away_losing_streak', 0),
+        "is_relegation_fight": False,
+        "is_title_race": False,
+        "competitive_block_home": None,
+        "competitive_block_away": None,
+        "match_url": match.get('match_url'),
+        "actual_home": match.get('actual_home'),
+        "actual_away": match.get('actual_away'),
+        "is_finished": match.get('is_finished', False),
     }
     
-    # If we have a correct score, use it for avg goals
-    if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
-        data['avg_goals'] = (data['correct_score_home'] + data['correct_score_away']) / 2
+    # Set competitive blocks based on position
+    def get_block(position):
+        if position is None:
+            return None
+        try:
+            pos = int(position)
+            if pos <= 4:
+                return "europe"
+            elif pos >= 15:
+                return "relegation"
+            else:
+                return "mid"
+        except:
+            return None
     
-    # Create a score matrix from the correct score
+    data["competitive_block_home"] = get_block(data.get("home_standings_position"))
+    data["competitive_block_away"] = get_block(data.get("away_standings_position"))
+    
+    # Check relegation fight
+    if data["competitive_block_home"] == "relegation" or data["competitive_block_away"] == "relegation":
+        data["is_relegation_fight"] = True
+    
+    # Create score matrix from correct score
     if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
         data['score_matrix'].append({
             "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
@@ -324,146 +272,14 @@ def convert_html_match_to_data(html_match: dict) -> dict:
             "probability": 100.0
         })
     
-    # If we have percentages from fprc, use them
-    if data.get('home_win') is None and html_match.get('home_win_pct'):
-        data['home_win'] = html_match.get('home_win_pct')
-    if data.get('draw') is None and html_match.get('draw_pct'):
-        data['draw'] = html_match.get('draw_pct')
-    if data.get('away_win') is None and html_match.get('away_win_pct'):
-        data['away_win'] = html_match.get('away_win_pct')
-    
-    # Determine draw prediction from the prediction field
+    # Set percentages from prediction
     pred = data.get('prediction')
-    if pred == 'X' and data.get('draw') is None:
+    if pred == 'X':
         data['draw'] = 35.0
-    elif pred == '1' and data.get('home_win') is None:
+    elif pred == '1':
         data['home_win'] = 45.0
-    elif pred == '2' and data.get('away_win') is None:
+    elif pred == '2':
         data['away_win'] = 45.0
-    
-    return data
-
-
-def parse_match_data_v8_text(raw_text: str) -> dict:
-    """Original text parser for non-HTML data"""
-    lines = raw_text.strip().split('\n')
-    
-    data = {
-        "home_team": None, "away_team": None, "league": None,
-        "home_goals_total": None, "away_goals_total": None,
-        "home_shots_pg": None, "away_shots_pg": None,
-        "home_tackles_pg": None, "away_tackles_pg": None,
-        "home_form_points": None, "away_form_points": None,
-        "home_standings_position": None, "away_standings_position": None,
-        "home_standings_points": None, "away_standings_points": None,
-        "home_losing_streak": 0, "away_losing_streak": 0,
-        "is_relegation_fight": False,
-        "is_title_race": False,
-        "competitive_block_home": None,
-        "competitive_block_away": None,
-        "score_matrix": [],
-        "home_win": None, "draw": None, "away_win": None,
-        "btts": None, "over_25": None, "under_25": None, "over_35": None,
-    }
-    
-    # Extract team names
-    team_names = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == 'Predicted Lineups':
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                parts = re.split(r'\d-\d-\d-\d|\d-\d-\d', next_line)
-                for part in parts:
-                    part = part.strip()
-                    if part and len(part) > 1 and not any(x in part.lower() for x in ['formation', 'predicted', 'lineups']):
-                        if part not in team_names:
-                            team_names.append(part)
-                if len(team_names) >= 2:
-                    break
-            break
-    
-    if len(team_names) < 2:
-        for line in lines[:10]:
-            stripped = line.strip()
-            if stripped and len(stripped) > 2:
-                if not any(x in stripped.lower() for x in ['predicted', 'lineups', 'formation', 'statistical', 'comparison']):
-                    if stripped not in team_names:
-                        team_names.append(stripped)
-    
-    if len(team_names) >= 2:
-        data["home_team"] = team_names[0]
-        data["away_team"] = team_names[1]
-    
-    # Extract stats
-    in_stat_comp = False
-    current_team = None
-    
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        if 'Statistical Comparison' in stripped:
-            in_stat_comp = True
-            continue
-        
-        if in_stat_comp:
-            if data["home_team"] and data["home_team"] in stripped and 'logo' not in stripped.lower():
-                current_team = "home"
-            elif data["away_team"] and data["away_team"] in stripped and 'logo' not in stripped.lower():
-                current_team = "away"
-            
-            if current_team and ('Head to Head' in stripped or 'Form Data' in stripped):
-                break
-            
-            if not current_team:
-                continue
-            
-            # Goals
-            if 'Goals' in stripped:
-                match_before = re.search(r'(\d+\.?\d*)\s*Goals', stripped)
-                match_after = re.search(r'Goals\s+(\d+\.?\d*)', stripped)
-                if match_before:
-                    val = float(match_before.group(1))
-                    if current_team == "home" and data["home_goals_total"] is None:
-                        data["home_goals_total"] = val
-                    elif current_team == "away" and data["away_goals_total"] is None:
-                        data["away_goals_total"] = val
-            
-            # Shots pg
-            if 'Shots pg' in stripped:
-                match_before = re.search(r'(\d+\.?\d*)\s*Shots pg', stripped)
-                if match_before:
-                    val = float(match_before.group(1))
-                    if current_team == "home" and data["home_shots_pg"] is None:
-                        data["home_shots_pg"] = val
-                    elif current_team == "away" and data["away_shots_pg"] is None:
-                        data["away_shots_pg"] = val
-            
-            # Tackles pg
-            if 'Tackles pg' in stripped:
-                match_before = re.search(r'(\d+\.?\d*)\s*Tackles pg', stripped)
-                if match_before:
-                    val = float(match_before.group(1))
-                    if current_team == "home" and data["home_tackles_pg"] is None:
-                        data["home_tackles_pg"] = val
-                    elif current_team == "away" and data["away_tackles_pg"] is None:
-                        data["away_tackles_pg"] = val
-    
-    # Extract probabilities
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if 'Result' in stripped:
-            for j in range(i+1, min(i+15, len(lines))):
-                pl = lines[j].strip()
-                if data["home_team"] and data["home_team"] in pl:
-                    m = re.search(r'(\d+\.?\d*)%', pl)
-                    if m: data["home_win"] = float(m.group(1))
-                if 'Draw' in pl and not data["home_team"] in pl:
-                    m = re.search(r'(\d+\.?\d*)%', pl)
-                    if m: data["draw"] = float(m.group(1))
-                if data["away_team"] and data["away_team"] in pl:
-                    m = re.search(r'(\d+\.?\d*)%', pl)
-                    if m: data["away_win"] = float(m.group(1))
     
     return data
 
@@ -506,38 +322,16 @@ def analyze_match_v8(data: dict) -> dict:
     if draw_prediction is None:
         draw_prediction = 0
     
-    # If we have HTML data with avg_goals from correct score
-    if data.get("avg_goals"):
-        avg_goals = data["avg_goals"]
-    else:
-        combined_goals = home_goals + away_goals
-        avg_goals = combined_goals if combined_goals > 0 else 2.0
+    # Get avg goals
+    avg_goals = data.get("avg_goals", 2.0)
+    if avg_goals is None or avg_goals == 0:
+        avg_goals = 2.0
     
     form_diff = abs(home_form - away_form)
     
     # Check if draw is predicted safely
     pred = data.get("prediction")
     is_draw_predicted = (draw_prediction is not None and draw_prediction > 0) or pred == 'X'
-    
-    # Competitive blocks
-    def get_block(position):
-        if position is None:
-            return None
-        try:
-            position = int(position)
-            if position <= 4:
-                return "europe"
-            elif position >= 15:
-                return "relegation"
-            else:
-                return "mid"
-        except:
-            return None
-    
-    if data.get("home_standings_position"):
-        home_block = get_block(data["home_standings_position"])
-    if data.get("away_standings_position"):
-        away_block = get_block(data["away_standings_position"])
     
     same_block = home_block is not None and away_block is not None and home_block == away_block
     
@@ -581,7 +375,7 @@ def analyze_match_v8(data: dict) -> dict:
     # Priority: Home desperation lock
     if is_home_desperate and not is_away_desperate:
         winner_selection = "HOME"
-        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy (7/7 in dataset)"
+        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy"
         result["is_lock"] = True
         result["lock_reason"] = "Home team desperate (losing streak 3+ or relegation fight)"
     
@@ -902,10 +696,15 @@ def display_analysis(data: dict, analysis: dict):
     avg_goals = data.get("avg_goals", home_goals + away_goals)
     if avg_goals == 0:
         avg_goals = 2.0
+    
     home_form = data.get("home_form_points", "?")
     away_form = data.get("away_form_points", "?")
+    home_pos = data.get("home_standings_position", "?")
+    away_pos = data.get("away_standings_position", "?")
+    home_streak = data.get("home_losing_streak", 0)
+    away_streak = data.get("away_losing_streak", 0)
     
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_form} vs {away_form}</div><div class="metric-label">Form Points</div></div>', unsafe_allow_html=True)
     with m2:
@@ -915,8 +714,19 @@ def display_analysis(data: dict, analysis: dict):
         block_away = data.get("competitive_block_away", "?")
         st.markdown(f'<div class="metric-card"><div class="metric-value">{block_home} vs {block_away}</div><div class="metric-label">Competitive Block</div></div>', unsafe_allow_html=True)
     with m4:
-        desperate = "Yes" if (data.get("home_losing_streak", 0) >= 3 or data.get("away_losing_streak", 0) >= 3 or data.get("is_relegation_fight", False)) else "No"
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_pos} vs {away_pos}</div><div class="metric-label">Standings</div></div>', unsafe_allow_html=True)
+    with m5:
+        desperate = "Yes" if (home_streak >= 3 or away_streak >= 3 or data.get("is_relegation_fight", False)) else "No"
         st.markdown(f'<div class="metric-card"><div class="metric-value">{desperate}</div><div class="metric-label">Desperation</div></div>', unsafe_allow_html=True)
+    
+    # Show streaks if present
+    if home_streak >= 3 or away_streak >= 3:
+        streak_msg = []
+        if home_streak >= 3:
+            streak_msg.append(f"🔴 {data.get('home_team', 'Home')}: {home_streak} game losing streak")
+        if away_streak >= 3:
+            streak_msg.append(f"🔴 {data.get('away_team', 'Away')}: {away_streak} game losing streak")
+        st.warning(" | ".join(streak_msg))
     
     if analysis.get("goal_reason"):
         st.info(f"⚽ Goal Bet: {analysis.get('goal_bet')} — {analysis.get('goal_reason')} (Accuracy: {analysis.get('goal_accuracy', 'N/A')})")
@@ -956,7 +766,7 @@ def display_analysis(data: dict, analysis: dict):
 # ============================================================================
 def main():
     st.title("📊 Match Analyzer V8.0")
-    st.caption("Universal Logic Engine (HTML Parser Version) | Based on 81 matches across 7 leagues | Draw predictions wrong 83% of the time")
+    st.caption("Complete Universal Logic Engine | Extracts ALL data: Form, Standings, Streaks")
     
     # Show the universal truths
     with st.expander("📖 The Universal Truths", expanded=False):
@@ -982,9 +792,6 @@ def main():
         • Avg Goals < 2.00 → UNDER 2.5 (95% accuracy)  
         • Avg Goals > 3.00 + Draw → OVER 2.5 (100% accuracy)  
         • Avg Goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)
-        
-        **PRIORITY RULE: Home Desperation = 100% Accuracy**  
-        When the home team is desperate (losing streak 3+ or relegation fight), BET HOME WIN.
         """)
     
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -993,49 +800,51 @@ def main():
     # TAB 1: ANALYZE
     # ========================================================================
     with tab1:
-        st.markdown("### 📋 Paste Match Data")
-        st.info("💡 You can paste either:\n- A match detail page (with 'Statistical Comparison' section)\n- A match list page (with match cards)\n- Raw text data")
+        st.markdown("### 📋 Paste Forebet HTML Data")
+        st.info("💡 Paste the **entire HTML page** from Forebet (the match list with standings and form data)")
         
-        raw_text = st.text_area("Match Data", height=400, key="raw_input")
+        raw_text = st.text_area("HTML Data", height=400, key="raw_input")
         
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            analyze_clicked = st.button("🔮 ANALYZE V8.0", type="primary")
-        
-        if analyze_clicked:
+        if st.button("🔮 ANALYZE V8.0", type="primary"):
             if not raw_text.strip():
-                st.error("Please paste the match data.")
+                st.error("Please paste the HTML data.")
             else:
-                with st.spinner("Analyzing with Universal Logic..."):
-                    parsed_data = parse_match_data_v8(raw_text)
+                with st.spinner("Extracting data from HTML..."):
+                    parsed = parse_forebet_html_complete(raw_text)
                 
-                # Check if we have multiple matches
-                if isinstance(parsed_data, dict) and "matches" in parsed_data:
-                    matches = parsed_data["matches"]
-                    st.success(f"✅ Found {len(matches)} matches in the data")
+                if parsed["matches"]:
+                    st.success(f"✅ Found {len(parsed['matches'])} matches")
+                    st.info(f"📊 Found standings data for {len(parsed['standings'])} teams")
+                    st.info(f"📈 Found form data for {len(parsed['form_data'])} teams")
                     
-                    for idx, match in enumerate(matches):
+                    for idx, match in enumerate(parsed["matches"]):
                         st.markdown(f"### Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
                         
-                        # Convert to standard format and analyze
-                        data = convert_html_match_to_data(match)
+                        # Show extracted data
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Home Form", match.get('home_form_points', '?'), 
+                                     f"Pos: {match.get('home_position', '?')}")
+                        with col2:
+                            st.metric("Away Form", match.get('away_form_points', '?'),
+                                     f"Pos: {match.get('away_position', '?')}")
+                        with col3:
+                            st.metric("Avg Goals", match.get('avg_goals', '?'))
+                        with col4:
+                            pred = match.get('prediction', '?')
+                            st.metric("Prediction", pred)
+                        
+                        # Convert and analyze
+                        data = convert_complete_match_to_data(match)
                         analysis = analyze_match_v8(data)
                         save_to_db(data, analysis)
                         
                         display_analysis(data, analysis)
                         
-                        if idx < len(matches) - 1:
+                        if idx < len(parsed["matches"]) - 1:
                             st.markdown("---")
-                
-                elif isinstance(parsed_data, dict) and parsed_data.get("home_team"):
-                    # Single match
-                    data = parsed_data
-                    analysis = analyze_match_v8(data)
-                    save_to_db(data, analysis)
-                    display_analysis(data, analysis)
-                
                 else:
-                    st.error("Could not parse any matches from the data. Please make sure you're pasting valid Forebet HTML or text data.")
+                    st.error("No matches found. Make sure you're pasting the complete HTML page from Forebet.")
     
     # ========================================================================
     # TAB 2: POST-MATCH
@@ -1127,12 +936,9 @@ def main():
             with col5:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct Bets</div></div>', unsafe_allow_html=True)
             
-            # Lock signal stats
             if lock_total > 0:
                 lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
                 st.markdown(f"🔒 **Lock Signals:** {lock_correct}/{lock_total} correct ({lock_rate}%)")
-                if lock_rate >= 95:
-                    st.success("✅ Lock signals are performing at or above expected accuracy!")
             
             st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
             
