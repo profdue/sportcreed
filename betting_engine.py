@@ -1,5 +1,5 @@
 """
-MATCH ANALYZER V8.0 — TEXT PARSER VERSION
+MATCH ANALYZER V8.0 — TEXT PARSER VERSION WITH DEBUG
 Accepts plain text paste containing Predictions + Form + Statistics
 """
 
@@ -67,6 +67,11 @@ st.markdown("""
     .league-badge.it { background: #8b5cf6; color: #fff; }
     .league-badge.de { background: #ec4899; color: #fff; }
     .league-badge.unknown { background: #64748b; color: #fff; }
+    .debug-box { background: #1a1a2e; border: 1px solid #3b82f6; border-radius: 8px; padding: 0.75rem; margin: 0.5rem 0; font-family: monospace; font-size: 0.8rem; max-height: 400px; overflow-y: auto; }
+    .debug-box .success { color: #10b981; }
+    .debug-box .error { color: #ef4444; }
+    .debug-box .info { color: #3b82f6; }
+    .debug-box .warning { color: #f59e0b; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -120,14 +125,25 @@ def detect_league(text: str) -> str:
 
 
 # ============================================================================
-# TEXT PARSER — NEW SIMPLIFIED VERSION
+# TEXT PARSER WITH DEBUG
 # ============================================================================
 def parse_text_data(text: str) -> dict:
     """Parse the clean text format containing Predictions, Form, and Statistics."""
     start_time = time.time()
     
+    # Create debug log
+    debug_log = []
+    
+    def debug(msg, type="info"):
+        debug_log.append({"msg": msg, "type": type})
+    
+    debug(f"📊 Starting parser...", "info")
+    debug(f"📄 Text length: {len(text):,} characters", "info")
+    debug(f"📄 Text has {len(text.split(chr(10)))} lines", "info")
+    
     league = detect_league(text)
     league_config = get_league_config(league)
+    debug(f"🏆 Detected league: {league}", "info")
     
     result = {
         "league": league,
@@ -142,37 +158,56 @@ def parse_text_data(text: str) -> dict:
     # SECTION 1: Split text into sections
     # ============================================================
     sections = split_into_sections(text)
+    debug(f"📂 Sections found: Predictions={len(sections.get('predictions', '')):,} chars, Form={len(sections.get('form', '')):,} chars, Statistics={len(sections.get('statistics', '')):,} chars", "info")
     
     # ============================================================
-    # SECTION 2: Parse Predictions — SIMPLIFIED
+    # SECTION 2: Parse Predictions
     # ============================================================
     predictions_text = sections.get("predictions", "")
-    matches = parse_predictions_simple(predictions_text)
+    debug(f"🔮 Parsing Predictions section...", "info")
+    matches = parse_predictions_simple(predictions_text, debug)
     result["matches"] = matches
-    st.write(f"✅ Found {len(matches)} matches")
+    debug(f"✅ Found {len(matches)} matches", "success")
     
     # ============================================================
     # SECTION 3: Parse Form
     # ============================================================
     form_text = sections.get("form", "")
-    form_data = parse_form(form_text)
+    debug(f"📈 Parsing Form section...", "info")
+    form_data = parse_form(form_text, debug)
     result["form_data"] = form_data
-    st.write(f"📈 Found {len(form_data)} teams with form data")
+    debug(f"✅ Found {len(form_data)} teams with form data", "success")
     
     # ============================================================
     # SECTION 4: Parse Statistics
     # ============================================================
     stats_text = sections.get("statistics", "")
-    stats_data = parse_statistics(stats_text)
+    debug(f"📊 Parsing Statistics section...", "info")
+    stats_data = parse_statistics(stats_text, debug)
     result["statistics"] = stats_data
+    debug(f"✅ Statistics parsed", "success")
     
     # Extract standings from statistics
-    standings = parse_standings(stats_text)
+    standings = parse_standings(stats_text, debug)
     result["standings"] = standings
-    st.write(f"📊 Found {len(standings)} teams in standings")
+    debug(f"📊 Found {len(standings)} teams in standings", "success")
     
     elapsed = time.time() - start_time
-    st.write(f"⏱️ Parser completed in {elapsed:.2f} seconds")
+    debug(f"⏱️ Parser completed in {elapsed:.2f} seconds", "success")
+    
+    # Show debug output
+    st.markdown("### 🐛 Debug Output")
+    debug_html = ""
+    for entry in debug_log:
+        icon = "ℹ️"
+        if entry["type"] == "success":
+            icon = "✅"
+        elif entry["type"] == "error":
+            icon = "❌"
+        elif entry["type"] == "warning":
+            icon = "⚠️"
+        debug_html += f'<div class="debug-box"><span class="{entry["type"]}">{icon} {entry["msg"]}</span></div>'
+    st.markdown(debug_html, unsafe_allow_html=True)
     
     return result
 
@@ -231,63 +266,84 @@ def split_into_sections(text: str) -> dict:
     return result
 
 
-def parse_predictions_simple(text: str) -> list:
+def parse_predictions_simple(text: str, debug=None) -> list:
     """
     SIMPLE PARSER — Finds data lines and extracts team names by looking backwards.
-    This is more robust than trying to detect match boundaries forward.
     """
     matches = []
     lines = text.split('\n')
     
-    # First, find ALL lines that match the data pattern
-    # Pattern: [home_pct][draw_pct][away_pct][pred][score_code] - [avg_goals][temp]°
-    data_pattern = r'(\d{2})(\d{2})(\d{2})([1X2])(\d{2})\s*-\s*([\d.]+)(\d+)°'
+    def log(msg, type="info"):
+        if debug:
+            debug(f"  {msg}", type)
+    
+    log(f"Processing {len(lines)} lines in Predictions section", "info")
+    
+    # Count how many lines match the data pattern
+    data_line_count = 0
     
     for i, line in enumerate(lines):
         line = line.strip()
-        
-        # Skip empty lines
         if not line:
             continue
         
-        # Check if this line matches the data pattern
-        match = re.search(data_pattern, line)
-        if match:
-            # Found a data line! Now find the teams and date by looking backwards
-            match_data = {}
+        # Check if this line contains a data pattern
+        # Pattern: 10+ digits, a dash, and a degree symbol
+        if re.search(r'\d{10}.*-.*°', line):
+            data_line_count += 1
+            log(f"Found data line {data_line_count}: {line[:60]}...", "info")
             
-            # Extract data from the line
-            match_data['home_win_pct'] = int(match.group(1))
-            match_data['draw_pct'] = int(match.group(2))
-            match_data['away_win_pct'] = int(match.group(3))
-            match_data['prediction'] = match.group(4)
+            # Extract avg goals and temperature
+            avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', line)
+            if not avg_temp_match:
+                log(f"  ⚠️ Could not extract avg_goals from: {line}", "warning")
+                continue
             
-            # Correct score from the two digits
-            score_code = match.group(5)
-            match_data['correct_score_home'] = int(score_code[0])
-            match_data['correct_score_away'] = int(score_code[1])
+            avg_goals = float(avg_temp_match.group(1))
+            temperature = int(avg_temp_match.group(2))
+            log(f"  📊 Avg goals: {avg_goals}, Temperature: {temperature}°", "info")
             
-            # Avg goals (the number before the degree symbol)
-            match_data['avg_goals'] = float(match.group(6))
+            # Extract numbers from the line
+            numbers = re.findall(r'\b(\d{2})\b', line)
+            log(f"  🔢 Found numbers: {numbers}", "info")
             
-            # Temperature (the number after the degree symbol)
-            match_data['temperature'] = int(match.group(7))
+            if len(numbers) < 4:
+                log(f"  ⚠️ Not enough numbers: {len(numbers)}", "warning")
+                continue
             
-            # Check for odds (if present after the degree symbol)
-            odds_match = re.search(r'°\s*([\d.]+)', line)
-            if odds_match:
-                match_data['odds'] = float(odds_match.group(1))
+            home_win_pct = int(numbers[0])
+            draw_pct = int(numbers[1])
+            away_win_pct = int(numbers[2])
             
-            # Now look backwards for team names and date
-            # Go back up to 10 lines
+            # Find the prediction (1, X, or 2)
+            pred_match = re.search(r'\d{2}\d{2}\d{2}([1X2])', line)
+            if pred_match:
+                prediction = pred_match.group(1)
+            else:
+                log(f"  ⚠️ Could not find prediction in: {line}", "warning")
+                continue
+            
+            log(f"  🎯 Probabilities: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}", "info")
+            
+            # Score code is the last 2 digits before the dash
+            score_match = re.search(r'(\d{2})\s*-\s*', line)
+            if score_match:
+                score_code = score_match.group(1)
+                correct_score_home = int(score_code[0])
+                correct_score_away = int(score_code[1])
+                log(f"  ⚽ Score: {correct_score_home}-{correct_score_away}", "info")
+            else:
+                log(f"  ⚠️ Could not find score code in: {line}", "warning")
+                continue
+            
+            # Now find the teams by looking backwards
             home_team = None
             away_team = None
             date_line = None
             
-            for j in range(i-1, max(0, i-10), -1):
+            # Look for the date first
+            for j in range(i-1, max(0, i-15), -1):
                 prev_line = lines[j].strip()
-                
-                # Check if this is a date
                 if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
                     date_line = prev_line
                     # The two lines before the date should be the teams
@@ -296,30 +352,58 @@ def parse_predictions_simple(text: str) -> list:
                         away_team = lines[j-1].strip()
                     break
             
-            # If we found all the data, add the match
-            if home_team and away_team and date_line and home_team != "PRE" and away_team != "VIEW":
-                match_data['home_team'] = home_team
-                match_data['away_team'] = away_team
-                match_data['date'] = date_line
-                matches.append(match_data)
+            if not home_team or not away_team or not date_line:
+                log(f"  ⚠️ Could not find teams or date for match {data_line_count}", "warning")
+                log(f"     Home: {home_team}, Away: {away_team}, Date: {date_line}", "warning")
+                continue
+            
+            log(f"  🏠 Home: {home_team}, Away: {away_team}, Date: {date_line}", "info")
+            
+            # Skip if home or away is "PRE" or "VIEW"
+            if home_team in ["PRE", "VIEW"] or away_team in ["PRE", "VIEW"]:
+                log(f"  ⚠️ Skipping preview lines", "warning")
+                continue
+            
+            matches.append({
+                "home_team": home_team,
+                "away_team": away_team,
+                "date": date_line,
+                "home_win_pct": home_win_pct,
+                "draw_pct": draw_pct,
+                "away_win_pct": away_win_pct,
+                "prediction": prediction,
+                "correct_score_home": correct_score_home,
+                "correct_score_away": correct_score_away,
+                "avg_goals": avg_goals,
+                "temperature": temperature
+            })
+            
+            log(f"  ✅ Match added: {home_team} vs {away_team}", "success")
+    
+    log(f"Total data lines found: {data_line_count}", "info")
+    log(f"Total matches extracted: {len(matches)}", "info")
     
     return matches
 
 
-def parse_form(text: str) -> dict:
+def parse_form(text: str, debug=None) -> dict:
     """Parse the Form section."""
     form_data = {}
     lines = text.split('\n')
     
+    def log(msg, type="info"):
+        if debug:
+            debug(f"  {msg}", type)
+    
+    team_count = 0
+    
     for line in lines:
         line = line.strip()
-        
         if not line:
             continue
         
         line = line.replace('\t', ' ')
         
-        # Pattern: "1.  Palmeiras    D W W W L W..."
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL\s]+)', line)
         if match:
             team_name = match.group(2).strip()
@@ -356,16 +440,20 @@ def parse_form(text: str) -> dict:
                 "losses": losses,
                 "games_played": total
             }
+            team_count += 1
+    
+    if debug:
+        debug(f"Found {team_count} teams with form data", "info")
     
     return form_data
 
 
-def parse_statistics(text: str) -> dict:
+def parse_statistics(text: str, debug=None) -> dict:
     """Parse the Statistics section."""
     stats = {}
     lines = text.split('\n')
     
-    for i, line in enumerate(lines):
+    for line in lines:
         line = line.strip()
         
         if "Home wins:" in line:
@@ -402,28 +490,11 @@ def parse_statistics(text: str) -> dict:
             match = re.search(r'Both teams scored games:\s*(\d+).*?(\d+)%', line)
             if match:
                 stats["btts"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-        
-        if "Half Time: Home wins / Draws / Away wins" in line:
-            if i + 1 < len(lines):
-                home_line = lines[i + 1].strip()
-                match = re.search(r'Home wins:\s*(\d+).*?(\d+)%', home_line)
-                if match:
-                    stats["ht_home_wins"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-            if i + 2 < len(lines):
-                draw_line = lines[i + 2].strip()
-                match = re.search(r'Draws:\s*(\d+).*?(\d+)%', draw_line)
-                if match:
-                    stats["ht_draws"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-            if i + 3 < len(lines):
-                away_line = lines[i + 3].strip()
-                match = re.search(r'Away wins:\s*(\d+).*?(\d+)%', away_line)
-                if match:
-                    stats["ht_away_wins"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
     
     return stats
 
 
-def parse_standings(text: str) -> dict:
+def parse_standings(text: str, debug=None) -> dict:
     """Extract standings from Statistics section."""
     standings = {}
     lines = text.split('\n')
