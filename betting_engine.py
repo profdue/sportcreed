@@ -186,7 +186,7 @@ def parse_text_data(text: str) -> dict:
     # ============================================================
     predictions_text = sections.get("predictions", "")
     debug(f"🔮 Parsing Predictions section with {len(predictions_text)} chars...", "info")
-    matches = parse_predictions_simple(predictions_text, debug)
+    matches = parse_predictions(predictions_text, debug)
     result["matches"] = matches
     debug(f"✅ Found {len(matches)} matches", "success")
     
@@ -321,11 +321,8 @@ def split_into_sections(text: str, debug=None) -> dict:
     return result
 
 
-def parse_predictions_simple(text: str, debug=None) -> list:
-    """
-    SIMPLE PARSER — Finds data lines and extracts team names by looking backwards.
-    FIXED: Handles both 8-digit and 9-character formats.
-    """
+def parse_predictions(text: str, debug=None) -> list:
+    """Parse predictions from the text format."""
     matches = []
     lines = text.split('\n')
     
@@ -452,7 +449,10 @@ def parse_predictions_simple(text: str, debug=None) -> list:
 
 
 def parse_form(text: str, debug=None) -> dict:
-    """Parse the Form section."""
+    """
+    Parse form data from the text format.
+    Handles both full table format and top 5 + bottom 5 format.
+    """
     form_data = {}
     lines = text.split('\n')
     
@@ -462,6 +462,7 @@ def parse_form(text: str, debug=None) -> dict:
     
     team_count = 0
     
+    # First, try to parse the full table format
     for line in lines:
         line = line.strip()
         if not line:
@@ -507,6 +508,74 @@ def parse_form(text: str, debug=None) -> dict:
                 "games_played": total
             }
             team_count += 1
+    
+    # If no full table found, try the top 5 + bottom 5 format
+    if team_count == 0:
+        log(f"Full table format not found, trying top 5 + bottom 5 format...", "info")
+        
+        # Look for "Top 5 in form teams" section
+        in_top_section = False
+        in_bottom_section = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            if "Top 5 in form teams" in line:
+                in_top_section = True
+                in_bottom_section = False
+                continue
+            
+            if "Worst form teams" in line:
+                in_bottom_section = True
+                in_top_section = False
+                continue
+            
+            if "Team" in line and "Form" in line and "Points" in line:
+                continue
+            
+            # Parse form data line: "1.  RB Bragantino    WWWLWL    12"
+            if in_top_section or in_bottom_section:
+                line = line.replace('\t', ' ')
+                match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)', line)
+                if match:
+                    team_name = match.group(2).strip()
+                    form_sequence = match.group(3).strip()
+                    points = int(match.group(4))
+                    
+                    results = list(form_sequence)
+                    wins = results.count('W')
+                    draws = results.count('D')
+                    losses = results.count('L')
+                    total = wins + draws + losses
+                    
+                    if total == 0:
+                        continue
+                    
+                    # Calculate losing streak
+                    losing_streak = 0
+                    for r in reversed(results):
+                        if r == 'L':
+                            losing_streak += 1
+                        else:
+                            break
+                    
+                    # Last 5 form points
+                    last_5 = results[-5:] if len(results) >= 5 else results
+                    form_points = sum(3 if x == 'W' else 1 if x == 'D' else 0 for x in last_5)
+                    
+                    form_data[team_name] = {
+                        "points": points,
+                        "form_points": form_points,
+                        "losing_streak": losing_streak,
+                        "wins": wins,
+                        "draws": draws,
+                        "losses": losses,
+                        "games_played": total
+                    }
+                    team_count += 1
+                    log(f"  Found form data for {team_name}: {form_sequence}", "info")
     
     if debug:
         debug(f"Found {team_count} teams with form data", "info")
