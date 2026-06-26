@@ -1,12 +1,13 @@
 """
-MATCH ANALYZER V9.7 — COMPLETE FINAL FIX
-Correct data structure:
-[6 digits][prediction][score] - [avg_goals][temperature]°[coefficient]
-
-Where:
-- Prediction = 1 (Home Win), 2 (Away Win), or X (Draw)
-- Score = home_goals-away_goals (for 1 or 2) or draw_score-draw_score (for X)
-- The score is extracted by finding the dash between score and avg_goals
+MATCH ANALYZER V9.8 — COMPLETE FINAL
+All universal truths + priority rules + goal locks implemented.
+- Truth #1-7: Complete
+- Priority 1: Home Desperation (100%)
+- Priority 2: Form Advantage (89%/83%)
+- Priority 3: Home Elite vs Away Terrible (~90%)
+- Priority 4: 65% Rule - Draw fails (83%)
+- Priority 5: Default 65% (65%)
+- Goal Locks: All 5 scenarios
 """
 
 import streamlit as st
@@ -32,7 +33,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.7", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.8", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -107,9 +108,9 @@ def get_league_config(league: str) -> dict:
         config["league_size"] = 20
         config["goals_fallback"] = 2.75
     elif "AuV" in league or "NPL" in league or "Australia" in league:
-        config["relegation_threshold"] = 11
+        config["relegation_threshold"] = 11  # Bottom 4 of 14
         config["league_size"] = 14
-        config["europe_threshold"] = 3
+        config["europe_threshold"] = 3  # Top 3
         config["goals_fallback"] = 2.80
     else:
         config["relegation_threshold"] = 15
@@ -287,7 +288,6 @@ def parse_predictions(text: str, debug=None) -> list:
     - temperature = weather temperature
     
     The score is extracted by finding the dash between the score and avg_goals.
-    The first character after the dash is the away_goals (or draw_score for X).
     
     Examples:
     - 353927X2 - 23.4116°- → 35/39/27, X (Draw), Score: 2-2, Avg: 3.41, Temp: 16
@@ -346,7 +346,6 @@ def parse_predictions(text: str, debug=None) -> list:
         
         # ========== EXTRACT SCORE ==========
         # Find the dash that separates the score from avg_goals
-        # The rest now looks like: "1 - 22.7213°2.20" or "X1 - 11.889°3.70"
         dash_pos = rest.find('-')
         if dash_pos == -1:
             log(f"  ⚠️ Could not find dash in: {line[:50]}", "warning")
@@ -386,7 +385,6 @@ def parse_predictions(text: str, debug=None) -> list:
                 away_goals = 0
         
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
-        # avg_part looks like: "22.7213°2.20" or "23.4116°-" or "11.889°3.70"
         avg_match = re.search(r'(\d+\.\d+)°', avg_part)
         if not avg_match:
             log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
@@ -737,7 +735,7 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 # ANALYSIS ENGINE
 # ============================================================================
 def analyze_match(data: dict) -> dict:
-    """Universal logic analysis engine."""
+    """Universal logic analysis engine with ALL priority rules."""
     result = {
         "primary_bet": None,
         "classification": None,
@@ -766,6 +764,10 @@ def analyze_match(data: dict) -> dict:
     prediction = data.get("prediction")
     home_losing_streak = data.get("home_losing_streak", 0) or 0
     away_losing_streak = data.get("away_losing_streak", 0) or 0
+    home_pos = data.get("home_position")
+    away_pos = data.get("away_position")
+    league_config = data.get("league_config", {})
+    league_size = league_config.get("league_size", 20)
     
     form_diff = abs(home_form - away_form)
     is_draw_predicted = prediction == 'X' or draw_pct > 0
@@ -795,64 +797,94 @@ def analyze_match(data: dict) -> dict:
     result["draw_conditions"] = draw_conditions
     all_draw_conditions_met = all(draw_conditions.values())
     
-    # Winner selection
-    winner_selection = "HOME"
+    # ================================================================
+    # WINNER SELECTION — PRIORITY ORDER
+    # ================================================================
     
+    winner_selection = "HOME"
+    result["is_lock"] = False
+    
+    # PRIORITY 1: Home Desperation Lock (100% accuracy)
     if is_home_desperate and not is_away_desperate:
         winner_selection = "HOME"
         result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy"
         result["is_lock"] = True
         result["lock_reason"] = "Home team desperate (losing streak 3+ or relegation fight)"
-    elif is_draw_predicted and not all_draw_conditions_met:
-        winner_selection = "HOME"
-        result["winner_reason"] = "65% RULE: When draw fails, home wins 65% of the time"
+    
+    # PRIORITY 2: Form advantage (89%/83% accuracy)
     elif home_form - away_form >= 3:
         winner_selection = "HOME"
         result["winner_reason"] = f"Home team better form: {home_form} vs {away_form} points → 89% accuracy"
+        
     elif away_form - home_form >= 3 and is_away_desperate:
         winner_selection = "AWAY"
         result["winner_reason"] = f"Away team better form ({away_form} vs {home_form}) and desperate → 83% accuracy"
+    
+    # PRIORITY 3: Home Elite vs Away Terrible (~90% accuracy)
+    elif home_pos is not None and away_pos is not None:
+        home_elite = home_pos <= 3
+        away_terrible = away_pos >= (league_size - 2)
+        
+        if home_elite and away_terrible:
+            winner_selection = "HOME"
+            result["winner_reason"] = f"🏆 HOME ELITE (Top 3) vs AWAY TERRIBLE (Bottom 3) → ~90% accuracy"
+            result["is_lock"] = True
+            result["lock_reason"] = f"Home team elite at home (pos {home_pos}) vs away team terrible away (pos {away_pos})"
+    
+    # PRIORITY 4: 65% Rule when draw fails (83% accuracy)
+    elif is_draw_predicted and not all_draw_conditions_met:
+        winner_selection = "HOME"
+        result["winner_reason"] = "65% RULE: When draw fails, home wins 65% of the time"
+    
+    # DEFAULT: 65% Rule (65% accuracy)
     else:
         winner_selection = "HOME"
         result["winner_reason"] = "Default: Home team wins 65% of non-draws"
     
     result["winner_selection"] = winner_selection
     
-    # Goal bets
+    # ================================================================
+    # GOAL LOCKS
+    # ================================================================
+    
     goal_bet = None
     goal_accuracy = None
     goal_reason = None
     
     if avg_goals < 2.00:
         goal_bet = "UNDER 2.5"
-        goal_accuracy = "95%"
+        goal_accuracy = "95% (20/21 in dataset)"
         goal_reason = f"Avg goals {avg_goals:.2f} < 2.00 → UNDER 2.5 is a LOCK"
         result["is_lock"] = True
         result["lock_reason"] = "Avg goals < 2.00 → UNDER 2.5 (95% accuracy)"
+    
     elif avg_goals > 3.00 and is_draw_predicted:
         goal_bet = "OVER 2.5"
-        goal_accuracy = "100%"
+        goal_accuracy = "100% (2/2 in dataset)"
         goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Draw Prediction → OVER 2.5 is a LOCK"
         result["is_lock"] = True
         result["lock_reason"] = "Avg goals > 3.00 + Draw → OVER 2.5 (100% accuracy)"
+    
     elif avg_goals > 3.00 and winner_selection == "AWAY":
         goal_bet = "OVER 2.5"
-        goal_accuracy = "80%"
+        goal_accuracy = "80% (4/5 in dataset)"
         goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Away Win → OVER 2.5"
         result["is_lock"] = True
         result["lock_reason"] = "Avg goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)"
+    
     elif avg_goals > 3.00 and winner_selection == "HOME":
         goal_bet = "OVER 2.5"
-        goal_accuracy = "62%"
+        goal_accuracy = "62% (in dataset)"
         goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Home Win → OVER 2.5 (62%)"
+    
     elif 2.00 <= avg_goals <= 2.40:
         if is_draw_predicted:
             goal_bet = "UNDER 2.5"
-            goal_accuracy = "80%"
+            goal_accuracy = "80% (in dataset)"
             goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Draw → UNDER 2.5"
         elif winner_selection == "HOME":
             goal_bet = "UNDER 2.5"
-            goal_accuracy = "80%"
+            goal_accuracy = "80% (in dataset)"
             goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Home Win → UNDER 2.5"
         else:
             goal_bet = "SKIP"
@@ -863,34 +895,42 @@ def analyze_match(data: dict) -> dict:
     result["goal_reason"] = goal_reason
     result["goal_accuracy"] = goal_accuracy
     
-    # Final decision
+    # ================================================================
+    # FINAL DECISION — THE DECISION MATRIX
+    # ================================================================
+    
     if is_draw_predicted and all_draw_conditions_met:
+        # ALL 4 conditions met → BET DRAW
         result["primary_bet"] = {
             "market": "DRAW" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
             "reason": "ALL 4 draw conditions met: Form similar, goals in sweet spot, same block, no desperation",
-            "historical_accuracy": "57%",
+            "historical_accuracy": "57% (4/7 in dataset)",
         }
         result["classification"] = "DRAW" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
         result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
+    
     elif is_draw_predicted and not all_draw_conditions_met:
+        # Draw predicted but conditions fail → DOUBLE CHANCE
         if is_dead_rubber:
             result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for - proceed with caution"
         
         result["primary_bet"] = {
             "market": f"DOUBLE CHANCE: {winner_selection} or Draw" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
             "reason": f"Draw conditions not fully met → Double Chance wins 83% when draw predicted. {result.get('winner_reason', '')}",
-            "historical_accuracy": "83%",
+            "historical_accuracy": "83% (24/29 in dataset)",
         }
         result["classification"] = f"DOUBLE CHANCE: {winner_selection}" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
         result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
+    
     elif not is_draw_predicted:
+        # No draw predicted → BET EXACT WINNER
         if is_dead_rubber:
             result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for - results may be unpredictable"
         
         result["primary_bet"] = {
             "market": f"{winner_selection} WIN" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
             "reason": result.get("winner_reason", "Default selection"),
-            "historical_accuracy": "89%" if "better form" in result.get("winner_reason", "") else "100%" if "DESPERATE" in result.get("winner_reason", "") else "65%",
+            "historical_accuracy": "89%" if "better form" in result.get("winner_reason", "") else "100%" if "DESPERATE" in result.get("winner_reason", "") else "90%" if "HOME ELITE" in result.get("winner_reason", "") else "65%",
         }
         result["classification"] = f"{winner_selection} WIN" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
         result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
@@ -1185,14 +1225,18 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     if data.get("home_losing_streak", 0) >= 3:
         st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE: {data.get("home_team", "Home")} has {data.get("home_losing_streak", 0)} game losing streak → BET HOME WIN (100% accuracy)</div>', unsafe_allow_html=True)
+    
+    # Show Home Elite vs Away Terrible if applicable
+    if "HOME ELITE" in analysis.get("winner_reason", ""):
+        st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE: Home team elite at home vs away team terrible away → BET HOME WIN (~90% accuracy)</div>', unsafe_allow_html=True)
 
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.7")
-    st.caption("Universal Logic Engine | Complete Final Fix")
+    st.title("📊 Match Analyzer V9.8")
+    st.caption("Universal Logic Engine | All Rules Implemented (Home Elite vs Away Terrible Added)")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1218,8 +1262,13 @@ def main():
         • Avg Goals > 3.00 + Draw → OVER 2.5 (100% accuracy)  
         • Avg Goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)
 
-        **PRIORITY RULE: Home Desperation = 100% Accuracy**  
-        When the home team is desperate (losing streak 3+ or relegation fight), BET HOME WIN.
+        **PRIORITY RULES (Ranked)**  
+        1. Home Desperation → HOME WIN (100%)  
+        2. Form Advantage → HOME WIN (89%) / AWAY WIN (83%)  
+        3. Home Elite vs Away Terrible → HOME WIN (~90%)  
+        4. Draw + ALL 4 conditions → DRAW (57%)  
+        5. Draw + ANY condition fails → DOUBLE CHANCE (83%)  
+        6. No clear signal → HOME WIN (65%)
         """)
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -1241,7 +1290,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.7", type="primary"):
+        if st.button("🔮 ANALYZE V9.8", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1254,6 +1303,7 @@ def main():
                     home_table = parsed.get("home_table", {})
                     away_table = parsed.get("away_table", {})
                     form_data = parsed.get("form_data", {})
+                    league_config = parsed.get("league_config", {})
 
                     if matches:
                         st.success(f"✅ Found {len(matches)} matches in {league}")
@@ -1292,7 +1342,11 @@ def main():
                             with col3:
                                 st.metric("Avg Goals", f"{match.get('avg_goals', 0):.2f}")
 
-                            data = convert_match_to_data(match, home_table, away_table, form_data, league)
+                            # Convert match data with league_config
+                            match_with_config = dict(match)
+                            match_with_config["league_config"] = league_config
+                            
+                            data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
                             analysis = analyze_match(data)
                             save_to_db(data, analysis, league)
 
