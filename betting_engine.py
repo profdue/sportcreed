@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V8.0 — TEXT PARSER VERSION WITH DEBUG
-Accepts plain text paste containing Predictions + Form + Statistics
+MATCH ANALYZER V8.1 — FIXED AVG GOALS PARSING
+Fixed: Avg goals extraction removes score code prefix
 """
 
 import streamlit as st
@@ -11,7 +11,6 @@ import re
 import json
 import time
 import traceback
-from io import StringIO
 
 # ============================================================================
 # SUPABASE SETUP
@@ -27,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V8.0", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V8.1", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -141,16 +140,6 @@ def parse_text_data(text: str) -> dict:
     debug(f"📊 Starting parser...", "info")
     debug(f"📄 Text length: {len(text):,} characters", "info")
     
-    # Count lines
-    lines = text.split('\n')
-    debug(f"📄 Text has {len(lines)} lines", "info")
-    
-    # Show first 20 lines
-    debug(f"📄 First 20 lines of input:", "info")
-    for i, line in enumerate(lines[:20]):
-        if line.strip():
-            debug(f"     Line {i+1}: '{line[:80]}'", "info")
-    
     league = detect_league(text)
     league_config = get_league_config(league)
     debug(f"🏆 Detected league: {league}", "info")
@@ -168,48 +157,31 @@ def parse_text_data(text: str) -> dict:
     # SECTION 1: Split text into sections
     # ============================================================
     sections = split_into_sections(text, debug)
-    debug(f"📂 Sections found:", "info")
-    debug(f"     Predictions: {len(sections.get('predictions', '')):,} chars", "info")
-    debug(f"     Form: {len(sections.get('form', '')):,} chars", "info")
-    debug(f"     Statistics: {len(sections.get('statistics', '')):,} chars", "info")
-    
-    # Show first few lines of each section
-    pred_lines = sections.get('predictions', '').split('\n')
-    debug(f"📄 Predictions section has {len(pred_lines)} lines", "info")
-    debug(f"     First 5 lines of Predictions:", "info")
-    for i, line in enumerate(pred_lines[:5]):
-        if line.strip():
-            debug(f"       {i+1}: '{line[:80]}'", "info")
+    debug(f"📂 Sections found: Predictions={len(sections.get('predictions', '')):,} chars, Form={len(sections.get('form', '')):,} chars, Statistics={len(sections.get('statistics', '')):,} chars", "info")
     
     # ============================================================
     # SECTION 2: Parse Predictions
     # ============================================================
-    predictions_text = sections.get("predictions", "")
-    debug(f"🔮 Parsing Predictions section with {len(predictions_text)} chars...", "info")
-    matches = parse_predictions(predictions_text, debug)
+    matches = parse_predictions(sections.get("predictions", ""), debug)
     result["matches"] = matches
     debug(f"✅ Found {len(matches)} matches", "success")
     
     # ============================================================
     # SECTION 3: Parse Form
     # ============================================================
-    form_text = sections.get("form", "")
-    debug(f"📈 Parsing Form section...", "info")
-    form_data = parse_form(form_text, debug)
+    form_data = parse_form(sections.get("form", ""), debug)
     result["form_data"] = form_data
     debug(f"✅ Found {len(form_data)} teams with form data", "success")
     
     # ============================================================
     # SECTION 4: Parse Statistics
     # ============================================================
-    stats_text = sections.get("statistics", "")
-    debug(f"📊 Parsing Statistics section...", "info")
-    stats_data = parse_statistics(stats_text, debug)
+    stats_data = parse_statistics(sections.get("statistics", ""), debug)
     result["statistics"] = stats_data
     debug(f"✅ Statistics parsed", "success")
     
     # Extract standings from statistics
-    standings = parse_standings(stats_text, debug)
+    standings = parse_standings(sections.get("statistics", ""), debug)
     result["standings"] = standings
     debug(f"📊 Found {len(standings)} teams in standings", "success")
     
@@ -234,61 +206,36 @@ def parse_text_data(text: str) -> dict:
 
 
 def split_into_sections(text: str, debug=None) -> dict:
-    """Split the text into Predictions, Form, and Statistics sections with detailed debug."""
-    result = {
-        "predictions": "",
-        "form": "",
-        "statistics": ""
-    }
-    
+    """Split the text into Predictions, Form, and Statistics sections."""
+    result = {"predictions": "", "form": "", "statistics": ""}
     lines = text.split('\n')
     
     def log(msg, type="info"):
         if debug:
             debug(f"  {msg}", type)
     
-    # Find where each section starts
     predictions_start = None
     form_start = None
     stats_start = None
     
-    log(f"Looking for section boundaries in {len(lines)} lines...", "info")
-    
     for i, line in enumerate(lines):
         line_stripped = line.strip()
         
-        # Log every line that might be a boundary
         if re.match(r'^Round\s*\d+', line_stripped):
             if predictions_start is None:
                 predictions_start = i
-                log(f"  → Found 'Round' at line {i+1}: '{line_stripped[:30]}'", "highlight")
+                log(f"  → Found 'Round' at line {i+1}", "highlight")
         
         if re.match(r'^\d+\.\s*[A-Za-z]', line_stripped):
             if form_start is None and predictions_start is not None and i > predictions_start + 5:
                 form_start = i
-                log(f"  → Found form start at line {i+1}: '{line_stripped[:30]}'", "highlight")
+                log(f"  → Found form start at line {i+1}", "highlight")
         
-        if "Home wins / Draws / Away wins" in line_stripped:
+        if "Home wins / Draws / Away wins" in line_stripped or "Best attack" in line_stripped:
             if stats_start is None:
                 stats_start = i
-                log(f"  → Found stats start at line {i+1}: '{line_stripped[:30]}'", "highlight")
+                log(f"  → Found stats start at line {i+1}", "highlight")
     
-    # If stats_start is None, look for other indicators
-    if stats_start is None:
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
-            if "Best attack" in line_stripped or "Scores" in line_stripped or "Both teams scored" in line_stripped:
-                stats_start = i
-                log(f"  → Found stats start (fallback) at line {i+1}: '{line_stripped[:30]}'", "highlight")
-                break
-    
-    # Log the boundaries found
-    log(f"Boundaries found:", "info")
-    log(f"  Predictions start: line {predictions_start+1 if predictions_start is not None else 'NOT FOUND'}", "info")
-    log(f"  Form start: line {form_start+1 if form_start is not None else 'NOT FOUND'}", "info")
-    log(f"  Statistics start: line {stats_start+1 if stats_start is not None else 'NOT FOUND'}", "info")
-    
-    # Extract sections
     if predictions_start is not None:
         end = form_start if form_start is not None else stats_start if stats_start is not None else len(lines)
         result["predictions"] = '\n'.join(lines[predictions_start:end])
@@ -309,22 +256,13 @@ def split_into_sections(text: str, debug=None) -> dict:
     else:
         log(f"  ⚠️ Statistics section NOT FOUND!", "warning")
     
-    # Show the actual content of the Predictions section
-    if result["predictions"]:
-        pred_lines = result["predictions"].split('\n')
-        log(f"Predictions section has {len(pred_lines)} lines", "info")
-        log(f"First 10 lines of Predictions section:", "info")
-        for i, line in enumerate(pred_lines[:10]):
-            if line.strip():
-                log(f"  {i+1}: '{line[:80]}'", "info")
-    
     return result
 
 
 def parse_predictions(text: str, debug=None) -> list:
     """
     Parse predictions from the text format.
-    FIXED: Extracts score code directly from the line, doesn't remove prediction from remaining.
+    FIXED: Extracts avg goals AFTER removing the score code.
     """
     matches = []
     lines = text.split('\n')
@@ -359,53 +297,43 @@ def parse_predictions(text: str, debug=None) -> list:
         # Find where the percentages end
         remaining = cleaned[6:]
         
-        # DEBUG: Log the remaining string
-        log(f"  Remaining after percentages: '{remaining}'", "info")
-        
-        # Extract prediction and score
+        # ========== FIX: Extract score code first ==========
+        score_code = None
         prediction = '1'  # Default
-        score_code = '12'  # Default
         
-        # Check if the remaining string starts with 'X'
-        if remaining.startswith('X'):
-            prediction = 'X'
-            remaining = remaining[1:]
-            # Now extract score code (2 digits)
-            score_match = re.search(r'^(\d{2})', remaining)
-            if score_match:
-                score_code = score_match.group(1)
+        # Try to find score code at the beginning of remaining
+        score_match = re.search(r'^(\d{2})', remaining)
+        if score_match:
+            score_code = score_match.group(1)
+            # Remove the score code from remaining
+            remaining = remaining[2:]
         else:
-            # The prediction is the first digit of the score code
-            # Extract the score code directly from the original line
+            # Try to find score code from the original line
             score_match = re.search(r'(\d{2})\s*-', line)
             if score_match:
                 score_code = score_match.group(1)
-                prediction = score_code[0]
-            else:
-                # Try to find the score code at the beginning of remaining
-                score_match = re.search(r'^(\d{2})', remaining)
-                if score_match:
-                    score_code = score_match.group(1)
-                    prediction = score_code[0]
         
-        # If we still don't have a valid score code, skip
-        if len(score_code) < 2:
+        if not score_code or len(score_code) < 2:
             log(f"  ⚠️ Could not extract score code from: {line[:50]}", "warning")
             continue
         
         correct_score_home = int(score_code[0])
         correct_score_away = int(score_code[1])
+        prediction = score_code[0]
         
-        # Extract avg goals and temperature
-        avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', line)
+        # ========== FIX: Extract avg goals from remaining (score code removed) ==========
+        avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', remaining)
         if not avg_temp_match:
-            log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
-            continue
+            # Try the original line as fallback
+            avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', line)
+            if not avg_temp_match:
+                log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
+                continue
         
         avg_goals = float(avg_temp_match.group(1))
         temperature = int(avg_temp_match.group(2))
         
-        log(f"✅ Found data line: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}, Score: {correct_score_home}-{correct_score_away}, Avg: {avg_goals}", "success")
+        log(f"✅ Found data: {home_win_pct}/{draw_pct}/{away_win_pct}, Score: {correct_score_home}-{correct_score_away}, Avg: {avg_goals}, Temp: {temperature}", "success")
         
         # Find teams by looking backwards
         home_team = None
@@ -424,8 +352,6 @@ def parse_predictions(text: str, debug=None) -> list:
         if not home_team or not away_team or not date_line:
             log(f"  ⚠️ Could not find teams or date", "warning")
             continue
-        
-        log(f"  🏠 Home: {home_team}, Away: {away_team}, Date: {date_line}", "info")
         
         # Skip if home or away is "PRE" or "VIEW"
         if home_team in ["PRE", "VIEW"] or away_team in ["PRE", "VIEW"]:
@@ -463,7 +389,7 @@ def parse_form(text: str, debug=None) -> dict:
     
     team_count = 0
     
-    # First, try to parse the full table format
+    # Try the full table format
     for line in lines:
         line = line.strip()
         if not line:
@@ -1238,8 +1164,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V8.0")
-    st.caption("Universal Logic Engine | Paste Predictions + Form + Statistics")
+    st.title("📊 Match Analyzer V8.1")
+    st.caption("Universal Logic Engine | Fixed Avg Goals Parsing")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1293,7 +1219,7 @@ def main():
 
         col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
         with col_btn1:
-            analyze_clicked = st.button("🔮 ANALYZE V8.0", type="primary")
+            analyze_clicked = st.button("🔮 ANALYZE V8.1", type="primary")
 
         if analyze_clicked:
             if not text_data or len(text_data.strip()) < 100:
