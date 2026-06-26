@@ -1,7 +1,7 @@
 """
-MATCH ANALYZER V9.0 — COMPLETE REWRITE
-Fully understands Forebet data structure: Percentages + Score Code + Avg Goals + Temperature + Coefficient
-Handles X predictions (1-1 correct score), numeric score codes, and all table data
+MATCH ANALYZER V9.1 — COMPLETE FIXED
+Correctly parses: [6 digits][score_code] - [avg_goals][temperature]°[coefficient]
+Where score_code = prediction (1/2/X) + away goals (e.g., 21 = 2-1, X1 = 1-1, 13 = 1-3)
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.0", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.1", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -101,7 +101,7 @@ def get_league_config(league: str) -> dict:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["goals_fallback"] = 2.75
-    elif "AuV" in league or "NPL" in league:
+    elif "AuV" in league or "NPL" in league or "Australia" in league:
         config["relegation_threshold"] = 11  # Bottom 4 of 14
         config["league_size"] = 14
         config["europe_threshold"] = 3  # Top 3
@@ -275,7 +275,16 @@ def split_into_sections(text: str, debug=None) -> dict:
 
 
 def parse_predictions(text: str, debug=None) -> list:
-    """Parse match predictions from the text."""
+    """
+    Parse predictions from the text.
+    
+    FORMAT: [6 digits][score_code] - [avg_goals][temperature]°[coefficient]
+    
+    Examples:
+    - 18374621 - 22.7213°2.20  → 18/37/46, Score: 2-1, Avg: 2.72, Temp: 13
+    - 264331X1 - 11.889°3.70   → 26/43/31, Score: 1-1, Avg: 1.88, Temp: 9
+    - 56242013 - 03.0313°1.40  → 56/24/20, Score: 1-3, Avg: 3.03, Temp: 13
+    """
     matches = []
     lines = text.split('\n')
     
@@ -314,60 +323,49 @@ def parse_predictions(text: str, debug=None) -> list:
         rest = cleaned[6:]
         
         # ========== EXTRACT SCORE CODE ==========
-        # Score code can be: 12, 21, X1, X2, etc.
-        # X means Draw, followed by the first digit of the score
-        score_match = re.search(r'^([X\d]{2})', rest)
-        if not score_match:
-            log(f"  ⚠️ Could not extract score code from: {line[:50]}", "warning")
-            i += 1
-            continue
-        
-        score_code = score_match.group(1)
-        rest = rest[len(score_code):]  # Remove score code
+        # Score code is 2 characters: e.g., 21, X1, 13
+        # First char = prediction (1, 2, or X)
+        # Second char = away goals (for 1-X, 2-X) or part of score for X (1-1)
+        score_code = rest[:2]
+        rest = rest[2:]  # Remove score code
         
         # Determine prediction and correct score
         if score_code[0] == 'X':
-            # X means Draw, correct score is always 1-1
             prediction = 'X'
             correct_score_home = 1
             correct_score_away = 1
-            # The second char might be part of the avg goals
-            # For X1: rest starts with " - 1.889°..."
-            # For X2: rest starts with " - 3.4116°..."
-        elif score_code[0].isdigit() and score_code[1].isdigit():
+            # For X1, remove the '1' prefix from avg_goals
+            prefix_to_remove = '1'
+        else:
             prediction = score_code[0]
             correct_score_home = int(score_code[0])
             correct_score_away = int(score_code[1])
-        else:
-            log(f"  ⚠️ Unknown score code: {score_code}", "warning")
-            i += 1
-            continue
+            # Remove the first digit of the score code from avg_goals
+            prefix_to_remove = score_code[0]
         
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
-        # Pattern: "-3.2325°" or "-1.889°" or "-02.1528°"
+        # Pattern: "- X.YZZZ°" where X.Y = avg_goals, ZZZ = temperature
         avg_match = re.search(r'-?\s*(\d+\.\d+)°', rest)
         if not avg_match:
             log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
             i += 1
             continue
         
-        raw = avg_match.group(1)  # "13.2325", "1.889", "02.1528", etc.
+        raw = avg_match.group(1)  # "22.7213", "11.889", "03.0313"
         
-        # Extract avg goals and temperature
-        # Pattern: "3.2325" -> avg=3.23, temp=25
-        #          "1.889" -> avg=1.88, temp=9
-        #          "02.1528" -> avg=2.15, temp=28
+        # Remove the prefix (which is from the score code)
+        # For 21: remove '2' from "22.7213" → "2.7213"
+        # For X1: remove '1' from "11.889" → "1.889"
+        # For 13: remove '1' from "03.0313" → "3.0313"
+        if raw.startswith(prefix_to_remove):
+            raw = raw[len(prefix_to_remove):]
+        
+        # Extract avg_goals and temperature
         match = re.search(r'(\d+)\.(\d{2})(\d*)', raw)
         if match:
             int_part = int(match.group(1))
             dec_part = int(match.group(2))
             temp_str = match.group(3)
-            
-            # If int_part is > 10 and the score code is numeric, 
-            # the first digit might be from the score code
-            if int_part >= 10 and score_code[0].isdigit():
-                # Remove the first digit (which is the score code's first digit)
-                int_part = int_part % 10
             
             avg_goals = float(f"{int_part}.{dec_part:02d}")
             temperature = int(temp_str) if temp_str else 0
@@ -376,8 +374,7 @@ def parse_predictions(text: str, debug=None) -> list:
             i += 1
             continue
         
-        # ========== EXTRACT COEFFICIENT ==========
-        # Look for coefficient after the degree symbol
+        # Extract coefficient
         coeff_match = re.search(r'°(\d+\.\d+)', rest)
         coefficient = float(coeff_match.group(1)) if coeff_match else None
         
@@ -493,10 +490,10 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        # Pattern: "1 Arsenal 47 19 15 2 2 41 11 30"
+        # Pattern: "1 Avondale FC 22 9 7 1 1 38 8 30"
         match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
-            # Try simpler pattern: position, team, points, then numbers
+            # Try simpler pattern
             match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
         
         if match:
@@ -557,7 +554,7 @@ def parse_form(text: str, debug=None) -> dict:
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        # Pattern: "1 Manchester United 16 6 5 1 0 12 5 7"
+        # Pattern: "1 Hume City FC 16 6 5 1 0 19 7 12"
         match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
             match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
@@ -575,11 +572,8 @@ def parse_form(text: str, debug=None) -> dict:
             gd = int(match.group(10))
             
             # Determine losing streak from losses
-            # If losses >= 3, they might have a losing streak
             losing_streak = 0
             if losses >= 3:
-                # Approximate: if they have 3+ losses in 6 games
-                # They could be on a losing streak
                 losing_streak = min(losses, 6)
             
             form_data[team_name] = {
@@ -1206,8 +1200,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.0")
-    st.caption("Universal Logic Engine | Complete Rewrite")
+    st.title("📊 Match Analyzer V9.1")
+    st.caption("Universal Logic Engine | Corrected Data Parsing")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1256,7 +1250,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.0", type="primary"):
+        if st.button("🔮 ANALYZE V9.1", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
