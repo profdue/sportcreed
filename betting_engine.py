@@ -1,7 +1,7 @@
 """
-MATCH ANALYZER V9.2 — COMPLETE FIXED
+MATCH ANALYZER V9.3 — COMPLETE FIXED
 Properly parses: [6 digits][score_code] - [avg_goals][temperature]°[coefficient]
-Fixed: Team detection, duplicate detection, avg goals parsing
+Fixed: Team detection by finding date line first, then teams
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.2", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.3", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -381,75 +381,76 @@ def parse_predictions(text: str, debug=None) -> list:
             f"Avg: {avg_goals:.2f}, Temp: {temperature}, Coef: {coefficient}", "success")
         
         # ========== FIND TEAMS ==========
-        # Look backwards from the data line to find teams
-        # The pattern is:
-        #   Line i-4: AuV (league code, skip)
-        #   Line i-3: Home Team
-        #   Line i-2: Away Team
-        #   Line i-1: Date
-        #   Line i: Data line
+        # SIMPLE APPROACH: The date line is ALWAYS 1 line before the data line
+        # The away team is 2 lines before the data line
+        # The home team is 3 lines before the data line
+        # But we need to handle blank lines and PRE/VIEW lines
         
         home_team = None
         away_team = None
         date_line = None
         
-        # Start looking from i-1 backwards
-        for j in range(i-1, max(0, i-20), -1):
+        # First, find the date line by going backwards
+        date_index = None
+        for j in range(i-1, max(0, i-10), -1):
             prev_line = lines[j].strip()
-            
-            # Check for date line (format: DD/MM/YYYY HH:MM)
             if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
+                date_index = j
                 date_line = prev_line
-                
-                # Now find the teams
-                # The home team is usually 2 lines before the date line
-                # The away team is usually 1 line before the date line
-                home_candidate = None
-                away_candidate = None
-                
-                # Try 2 lines before date
-                if j - 2 >= 0:
-                    candidate1 = lines[j-2].strip()
-                    candidate2 = lines[j-1].strip()
-                    
-                    # Check if these are valid team names (not codes, not blank)
-                    if (candidate1 and candidate1 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""] and
-                        candidate2 and candidate2 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""]):
-                        # Check if they look like team names (contain letters)
-                        if re.search(r'[A-Za-z]', candidate1) and re.search(r'[A-Za-z]', candidate2):
-                            home_candidate = candidate1
-                            away_candidate = candidate2
-                            break
-                
-                # If that didn't work, try 4 lines before (skipping PRE/VIEW)
-                if not home_candidate and j - 4 >= 0:
-                    candidate1 = lines[j-4].strip()
-                    candidate2 = lines[j-3].strip()
-                    
-                    if (candidate1 and candidate1 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""] and
-                        candidate2 and candidate2 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""]):
-                        if re.search(r'[A-Za-z]', candidate1) and re.search(r'[A-Za-z]', candidate2):
-                            home_candidate = candidate1
-                            away_candidate = candidate2
-                            break
-                
-                if home_candidate and away_candidate:
-                    home_team = home_candidate
-                    away_team = away_candidate
+                break
+        
+        if date_index is None:
+            log(f"  ⚠️ Could not find date line", "warning")
+            i += 1
+            continue
+        
+        # Now find the teams by looking before the date line
+        # Skip blank lines and league code lines
+        home_index = None
+        away_index = None
+        
+        # Look for the away team (should be 1-2 lines before date)
+        for j in range(date_index - 1, max(0, date_index - 5), -1):
+            candidate = lines[j].strip()
+            # Skip empty lines, league codes, and PRE/VIEW
+            if candidate and candidate not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]:
+                # Check if it looks like a team name (contains letters)
+                if re.search(r'[A-Za-z]', candidate):
+                    away_index = j
+                    away_team = candidate
                     break
         
-        if not home_team or not away_team or not date_line:
-            log(f"  ⚠️ Could not find teams or date", "warning")
+        # Look for the home team (should be 1-2 lines before away team)
+        if away_index is not None:
+            for j in range(away_index - 1, max(0, away_index - 4), -1):
+                candidate = lines[j].strip()
+                if candidate and candidate not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]:
+                    if re.search(r'[A-Za-z]', candidate):
+                        home_index = j
+                        home_team = candidate
+                        break
+        
+        # If we still don't have teams, try the simpler approach
+        if not home_team or not away_team:
+            # Try: home is 3 lines before date, away is 2 lines before date
+            if date_index - 2 >= 0:
+                candidate_home = lines[date_index - 2].strip()
+                candidate_away = lines[date_index - 1].strip()
+                
+                if (candidate_home and candidate_home not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"] and
+                    candidate_away and candidate_away not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]):
+                    if re.search(r'[A-Za-z]', candidate_home) and re.search(r'[A-Za-z]', candidate_away):
+                        home_team = candidate_home
+                        away_team = candidate_away
+        
+        if not home_team or not away_team:
+            log(f"  ⚠️ Could not find teams for match at line {i+1}", "warning")
             i += 1
             continue
         
-        # Skip if home or away is "PRE" or "VIEW" or league codes
-        if home_team in ["PRE", "VIEW", "AuV", "EPL", "Br1"] or away_team in ["PRE", "VIEW", "AuV", "EPL", "Br1"]:
-            log(f"  ⚠️ Skipping preview/league lines", "warning")
-            i += 1
-            continue
+        log(f"  ✅ Found teams: {home_team} vs {away_team}, Date: {date_line}", "success")
         
-        # Check for duplicate match (same home, away, date)
+        # Check for duplicate
         is_duplicate = False
         for existing in matches:
             if (existing["home_team"] == home_team and 
@@ -1221,8 +1222,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.2")
-    st.caption("Universal Logic Engine | Complete Fixed Parser")
+    st.title("📊 Match Analyzer V9.3")
+    st.caption("Universal Logic Engine | Fixed Team Detection")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1271,7 +1272,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.2", type="primary"):
+        if st.button("🔮 ANALYZE V9.3", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
