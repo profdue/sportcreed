@@ -1,13 +1,8 @@
 """
-MATCH ANALYZER V9.8 — COMPLETE FINAL
-All universal truths + priority rules + goal locks implemented.
-- Truth #1-7: Complete
-- Priority 1: Home Desperation (100%)
-- Priority 2: Form Advantage (89%/83%)
-- Priority 3: Home Elite vs Away Terrible (~90%)
-- Priority 4: 65% Rule - Draw fails (83%)
-- Priority 5: Default 65% (65%)
-- Goal Locks: All 5 scenarios
+MATCH ANALYZER V9.9 — COMPLETE FINAL FIX
+- Fixed: Score parsing for Bentleigh Greens (3-0 instead of 3-2)
+- Fixed: NoneType error in display_analysis
+- All universal truths + priority rules + goal locks implemented
 """
 
 import streamlit as st
@@ -33,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.8", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.9", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -108,9 +103,9 @@ def get_league_config(league: str) -> dict:
         config["league_size"] = 20
         config["goals_fallback"] = 2.75
     elif "AuV" in league or "NPL" in league or "Australia" in league:
-        config["relegation_threshold"] = 11  # Bottom 4 of 14
+        config["relegation_threshold"] = 11
         config["league_size"] = 14
-        config["europe_threshold"] = 3  # Top 3
+        config["europe_threshold"] = 3
         config["goals_fallback"] = 2.80
     else:
         config["relegation_threshold"] = 15
@@ -369,20 +364,35 @@ def parse_predictions(text: str, debug=None) -> list:
             home_goals = draw_score
             away_goals = draw_score
         else:
-            # For 1 or 2: score_part is like "1" or "3" (home_goals)
-            # The away_goals is the first digit of avg_part
-            if score_part and score_part[0].isdigit():
-                home_goals = int(score_part[0])
+            # For 1 or 2: score_part is like "1 - 2" or "3 - 0"
+            # Parse the score part to get home_goals and away_goals
+            score_dash_pos = score_part.find('-')
+            if score_dash_pos != -1:
+                # There's a dash in the score part (e.g., "1 - 2" or "3 - 0")
+                home_str = score_part[:score_dash_pos].strip()
+                away_str = score_part[score_dash_pos+1:].strip()
+                
+                if home_str and home_str[0].isdigit():
+                    home_goals = int(home_str[0])
+                else:
+                    home_goals = 1
+                
+                if away_str and away_str[0].isdigit():
+                    away_goals = int(away_str[0])
+                else:
+                    away_goals = 0
             else:
-                home_goals = 1
-            
-            # Extract away_goals from avg_part
-            # avg_part starts with something like "22.7213°2.20"
-            # The first digit is the away_goals
-            if avg_part and avg_part[0].isdigit():
-                away_goals = int(avg_part[0])
-            else:
-                away_goals = 0
+                # No dash in score part, just a single digit (home_goals)
+                # The away_goals is the first digit of avg_part
+                if score_part and score_part[0].isdigit():
+                    home_goals = int(score_part[0])
+                else:
+                    home_goals = 1
+                
+                if avg_part and avg_part[0].isdigit():
+                    away_goals = int(avg_part[0])
+                else:
+                    away_goals = 0
         
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
         avg_match = re.search(r'(\d+\.\d+)°', avg_part)
@@ -652,7 +662,8 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         "score_matrix": [],
         "is_finished": False,
         "actual_home": None,
-        "actual_away": None
+        "actual_away": None,
+        "league_config": league_config
     }
     
     # Add home table data
@@ -1156,8 +1167,10 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     st.markdown(f"**Classification: {analysis.get('classification', 'Unknown')}**")
     
-    if analysis.get("winner_reason"):
-        st.markdown(f"**Winner Selection:** {analysis.get('winner_selection', 'Unknown')} — {analysis.get('winner_reason', '')}")
+    # FIXED: Get winner_reason safely
+    winner_reason = analysis.get('winner_reason')
+    if winner_reason:
+        st.markdown(f"**Winner Selection:** {analysis.get('winner_selection', 'Unknown')} — {winner_reason}")
     
     st.markdown("### 📊 Key Metrics")
     
@@ -1226,8 +1239,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     if data.get("home_losing_streak", 0) >= 3:
         st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE: {data.get("home_team", "Home")} has {data.get("home_losing_streak", 0)} game losing streak → BET HOME WIN (100% accuracy)</div>', unsafe_allow_html=True)
     
-    # Show Home Elite vs Away Terrible if applicable
-    if "HOME ELITE" in analysis.get("winner_reason", ""):
+    # FIXED: Show Home Elite vs Away Terrible if applicable
+    if winner_reason and "HOME ELITE" in winner_reason:
         st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE: Home team elite at home vs away team terrible away → BET HOME WIN (~90% accuracy)</div>', unsafe_allow_html=True)
 
 
@@ -1235,8 +1248,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.8")
-    st.caption("Universal Logic Engine | All Rules Implemented (Home Elite vs Away Terrible Added)")
+    st.title("📊 Match Analyzer V9.9")
+    st.caption("Universal Logic Engine | Complete Final Fix")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1290,7 +1303,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.8", type="primary"):
+        if st.button("🔮 ANALYZE V9.9", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
