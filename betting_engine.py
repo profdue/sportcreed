@@ -1,8 +1,16 @@
 """
-MATCH ANALYZER V9.5 — COMPLETE FIXED
+MATCH ANALYZER V9.6 — FINAL
 Correct data structure:
-[6 digits][prediction][home_goals][away_goals][avg_goals][temperature]°[coefficient]
-No rounding or calculation - just read the data as it is!
+[6 digits][prediction][score_char] - [avg_goals][temperature]°[coefficient]
+
+Where:
+- If prediction = X: score_char = draw score (1, 2, 3, etc.) → Score = score_char-score_char
+- If prediction = 1 or 2: score_char = home_goals, next char = away_goals → Score = home_goals-away_goals
+
+Examples:
+- 353927X2 - 23.4116°- → 35/39/27, X (Draw), Score: 2-2, Avg: 3.41, Temp: 16
+- 18374621 - 22.7213°2.20 → 18/37/46, 2 (Away Win), Score: 1-2, Avg: 2.72, Temp: 13
+- 36293413 - 23.3013°2.60 → 36/29/34, 1 (Home Win), Score: 3-0, Avg: 3.30, Temp: 13
 """
 
 import streamlit as st
@@ -28,7 +36,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.5", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.6", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -273,22 +281,21 @@ def parse_predictions(text: str, debug=None) -> list:
     """
     Parse predictions from the text.
     
-    FORMAT: [6 digits][prediction][home_goals][away_goals][avg_goals][temperature]°[coefficient]
+    FORMAT: [6 digits][prediction][score_char] - [avg_goals][temperature]°[coefficient]
     
     Where:
     - 6 digits = percentages (home/draw/away)
     - prediction = 1 (Home Win), 2 (Away Win), or X (Draw)
-    - home_goals = the home team's goals in the correct score
-    - away_goals = the away team's goals in the correct score
-    - avg_goals = the average goals
+    - score_char = 
+        - If prediction = X: draw score (1, 2, 3, etc.) → Score = score_char-score_char
+        - If prediction = 1 or 2: home_goals, next char = away_goals → Score = home_goals-away_goals
+    - avg_goals = the average goals (with score_char attached as prefix)
     - temperature = weather temperature
-    - coefficient = odds coefficient
     
     Examples:
-    - 18374621 - 22.7213°2.20 → 18/37/46, Pred=2, Score=1-2, Avg=2.72, Temp=13
-    - 22245321 - 43.5013°2.45 → 22/24/53, Pred=2, Score=1-4, Avg=3.50, Temp=13
-    - 36293413 - 23.3013°2.60 → 36/29/34, Pred=1, Score=3-0, Avg=3.30, Temp=13
-    - 264331X1 - 11.889°3.70 → 26/43/31, Pred=X, Score=1-1, Avg=1.88, Temp=9
+    - 353927X2 - 23.4116°- → 35/39/27, X (Draw), Score: 2-2, Avg: 3.41, Temp: 16
+    - 18374621 - 22.7213°2.20 → 18/37/46, 2 (Away Win), Score: 1-2, Avg: 2.72, Temp: 13
+    - 36293413 - 23.3013°2.60 → 36/29/34, 1 (Home Win), Score: 3-0, Avg: 3.30, Temp: 13
     """
     matches = []
     lines = text.split('\n')
@@ -328,50 +335,46 @@ def parse_predictions(text: str, debug=None) -> list:
         rest = cleaned[6:]
         
         # ========== EXTRACT PREDICTION AND SCORE ==========
-        # The data structure is:
-        # [prediction][home_goals][away_goals] - [avg_goals][temperature]°[coefficient]
-        # Example: 21 - 22.7213°2.20
-        # - prediction = 2 (Away Win)
-        # - home_goals = 1
-        # - away_goals = 2
-        
         # First character = Prediction (1, 2, or X)
         prediction_char = rest[0]
+        rest = rest[1:]  # Remove prediction
         
         if prediction_char == 'X':
             prediction = 'X'
-            # For X, the next character is the first digit of the score (1-1)
-            home_goals = 1
-            away_goals = 1
-            # Remove prediction and home_goals from rest
-            rest = rest[2:]  # Remove "X1"
+            # Next character = draw score (1, 2, 3, etc.)
+            draw_score = int(rest[0])
+            home_goals = draw_score
+            away_goals = draw_score
+            rest = rest[1:]  # Remove draw score
         elif prediction_char in ['1', '2']:
             prediction = prediction_char
-            # Next character = home_goals
-            home_goals = int(rest[1])
-            # Next character after home_goals = away_goals
-            away_goals = int(rest[2])
-            # Remove prediction + home_goals + away_goals
-            rest = rest[3:]
+            # Next character = Home Goals
+            home_goals = int(rest[0])
+            # Next character after home_goals = Away Goals
+            away_goals = int(rest[1])
+            rest = rest[2:]  # Remove both goals
         else:
             log(f"  ⚠️ Unknown prediction: {prediction_char}", "warning")
             i += 1
             continue
         
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
+        # Find the avg_goals number after the dash
         avg_match = re.search(r'-?\s*(\d+\.\d+)°', rest)
         if not avg_match:
             log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
             i += 1
             continue
         
-        raw = avg_match.group(1)  # "22.7213", "43.5013", "23.3013", "11.889"
+        raw = avg_match.group(1)  # "23.4116", "22.7213", "23.3013", "11.889"
+        
+        # Remove the first digit (which is the score_char)
+        # For X2: remove '2' from "23.4116" → "3.4116"
+        # For 21: remove '1' from "22.7213" → "2.7213"
+        # For 13: remove '3' from "23.3013" → "3.3013"
+        raw = raw[1:]
         
         # Extract avg_goals and temperature
-        # Pattern: "22.7213" → avg=2.72, temp=13
-        #          "43.5013" → avg=3.50, temp=13
-        #          "23.3013" → avg=3.30, temp=13
-        #          "11.889"  → avg=1.88, temp=9
         match = re.search(r'(\d+)\.(\d{2})(\d*)', raw)
         if match:
             int_part = int(match.group(1))
@@ -398,7 +401,6 @@ def parse_predictions(text: str, debug=None) -> list:
         date_index = None
         for j in range(i-1, max(0, i-10), -1):
             prev_line = lines[j].strip()
-            # Allow single digit hour: \d{1,2}:\d{2}
             if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}', prev_line):
                 date_index = j
                 break
@@ -422,7 +424,6 @@ def parse_predictions(text: str, debug=None) -> list:
         # Find the home team (1-3 lines before away team, skipping blanks and codes)
         home_team = None
         if away_team:
-            # Find where away_team was found
             away_index = None
             for j in range(date_index - 1, max(0, date_index - 4), -1):
                 if lines[j].strip() == away_team:
@@ -1163,8 +1164,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.5")
-    st.caption("Universal Logic Engine | Complete Data Structure")
+    st.title("📊 Match Analyzer V9.6")
+    st.caption("Universal Logic Engine | Complete Data Structure with X2, X3, etc.")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1213,7 +1214,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.5", type="primary"):
+        if st.button("🔮 ANALYZE V9.6", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
