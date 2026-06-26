@@ -1,5 +1,5 @@
 """
-MATCH ANALYZER V10.1 — DRAW-FOCUSED STRATEGY WITH SPLIT DISPLAY
+MATCH ANALYZER V10.1 — DRAW-FOCUSED STRATEGY
 ONLY analyzes matches where Forebet predicts DRAW (X).
 Skips all 1X2 predictions.
 Displays Outcome Bet and Goal Bet as SEPARATE bets.
@@ -69,12 +69,6 @@ st.markdown("""
     .league-badge.de { background: #ec4899; color: #fff; }
     .league-badge.au { background: #f59e0b; color: #000; }
     .league-badge.unknown { background: #64748b; color: #fff; }
-    .debug-box { background: #1a1a2e; border: 1px solid #3b82f6; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; font-family: monospace; font-size: 0.8rem; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-    .debug-box .success { color: #10b981; }
-    .debug-box .error { color: #ef4444; }
-    .debug-box .info { color: #3b82f6; }
-    .debug-box .warning { color: #f59e0b; }
-    .debug-box .highlight { color: #f472b6; }
     .separator-line { border: none; border-top: 1px dashed #475569; margin: 0.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -143,17 +137,8 @@ def parse_text_data(text: str) -> dict:
     """Parse the complete text data."""
     start_time = time.time()
     
-    debug_log = []
-    
-    def debug(msg, type="info"):
-        debug_log.append({"msg": msg, "type": type})
-    
-    debug(f"📊 Starting parser...", "info")
-    debug(f"📄 Text length: {len(text):,} characters", "info")
-    
     league = detect_league(text)
     league_config = get_league_config(league)
-    debug(f"🏆 Detected league: {league}", "info")
     
     result = {
         "league": league,
@@ -165,48 +150,26 @@ def parse_text_data(text: str) -> dict:
     }
     
     # Split into sections
-    sections = split_into_sections(text, debug)
-    debug(f"📂 Sections: Predictions={len(sections.get('predictions', '')):,} chars", "info")
+    sections = split_into_sections(text)
     
     # Parse predictions
-    matches = parse_predictions(sections.get("predictions", ""), debug)
+    matches = parse_predictions(sections.get("predictions", ""))
     result["matches"] = matches
-    debug(f"✅ Found {len(matches)} matches", "success")
     
     # Parse tables
-    home_table = parse_table(sections.get("home_table", ""), "HOME", debug)
+    home_table = parse_table(sections.get("home_table", ""), "HOME")
     result["home_table"] = home_table
-    debug(f"✅ Found {len(home_table)} teams in home table", "success")
     
-    away_table = parse_table(sections.get("away_table", ""), "AWAY", debug)
+    away_table = parse_table(sections.get("away_table", ""), "AWAY")
     result["away_table"] = away_table
-    debug(f"✅ Found {len(away_table)} teams in away table", "success")
     
-    form_data = parse_form(sections.get("form", ""), debug)
+    form_data = parse_form(sections.get("form", ""))
     result["form_data"] = form_data
-    debug(f"✅ Found {len(form_data)} teams in form table", "success")
-    
-    elapsed = time.time() - start_time
-    debug(f"⏱️ Parser completed in {elapsed:.2f} seconds", "success")
-    
-    # Show debug output
-    st.markdown("### 🐛 Debug Output")
-    debug_html = ""
-    for entry in debug_log:
-        icon = "ℹ️"
-        if entry["type"] == "success":
-            icon = "✅"
-        elif entry["type"] == "error":
-            icon = "❌"
-        elif entry["type"] == "warning":
-            icon = "⚠️"
-        debug_html += f'<div class="debug-box"><span class="{entry["type"]}">{icon} {entry["msg"]}</span></div>'
-    st.markdown(debug_html, unsafe_allow_html=True)
     
     return result
 
 
-def split_into_sections(text: str, debug=None) -> dict:
+def split_into_sections(text: str) -> dict:
     """Split text into sections."""
     result = {
         "predictions": "",
@@ -215,10 +178,6 @@ def split_into_sections(text: str, debug=None) -> dict:
         "form": ""
     }
     lines = text.split('\n')
-    
-    def log(msg, type="info"):
-        if debug:
-            debug(f"  {msg}", type)
     
     predictions_start = None
     home_table_start = None
@@ -231,56 +190,42 @@ def split_into_sections(text: str, debug=None) -> dict:
         if re.match(r'^Round\s*\d+', line_stripped):
             if predictions_start is None:
                 predictions_start = i
-                log(f"  → Found 'Round' at line {i+1}", "highlight")
         
         if "HOME TABLE" in line_stripped:
             if home_table_start is None:
                 home_table_start = i
-                log(f"  → Found 'HOME TABLE' at line {i+1}", "highlight")
         
         if "AWAY TABLE" in line_stripped:
             if away_table_start is None:
                 away_table_start = i
-                log(f"  → Found 'AWAY TABLE' at line {i+1}", "highlight")
         
         if "LAST 6 MATCHES TABLE" in line_stripped:
             if form_start is None:
                 form_start = i
-                log(f"  → Found 'LAST 6 MATCHES TABLE' at line {i+1}", "highlight")
     
     # Extract sections
     if predictions_start is not None:
         end = home_table_start if home_table_start is not None else len(lines)
         result["predictions"] = '\n'.join(lines[predictions_start:end])
-        log(f"  Predictions: lines {predictions_start+1} to {end}", "info")
     
     if home_table_start is not None:
         end = away_table_start if away_table_start is not None else len(lines)
         result["home_table"] = '\n'.join(lines[home_table_start:end])
-        log(f"  Home Table: lines {home_table_start+1} to {end}", "info")
     
     if away_table_start is not None:
         end = form_start if form_start is not None else len(lines)
         result["away_table"] = '\n'.join(lines[away_table_start:end])
-        log(f"  Away Table: lines {away_table_start+1} to {end}", "info")
     
     if form_start is not None:
         result["form"] = '\n'.join(lines[form_start:])
-        log(f"  Form: lines {form_start+1} to {len(lines)}", "info")
     
     return result
 
 
-def parse_predictions(text: str, debug=None) -> list:
+def parse_predictions(text: str) -> list:
     """Parse predictions from the text."""
     matches = []
     lines = text.split('\n')
-    
-    def log(msg, type="info"):
-        if debug:
-            debug(f"  {msg}", type)
-    
-    log(f"Processing {len(lines)} lines in Predictions section", "info")
     
     i = 0
     while i < len(lines):
@@ -315,14 +260,12 @@ def parse_predictions(text: str, debug=None) -> list:
         elif prediction_char in ['1', '2']:
             prediction = prediction_char
         else:
-            log(f"  ⚠️ Unknown prediction: {prediction_char}", "warning")
             i += 1
             continue
         
         # ========== EXTRACT SCORE ==========
         dash_pos = rest.find('-')
         if dash_pos == -1:
-            log(f"  ⚠️ Could not find dash in: {line[:50]}", "warning")
             i += 1
             continue
         
@@ -338,7 +281,6 @@ def parse_predictions(text: str, debug=None) -> list:
             home_goals = draw_score
             away_goals = draw_score
         else:
-            # Parse score part (e.g., "1 - 2" or "3 - 0")
             score_dash_pos = score_part.find('-')
             if score_dash_pos != -1:
                 home_str = score_part[:score_dash_pos].strip()
@@ -367,7 +309,6 @@ def parse_predictions(text: str, debug=None) -> list:
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
         avg_match = re.search(r'(\d+\.\d+)°', avg_part)
         if not avg_match:
-            log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
             i += 1
             continue
         
@@ -383,16 +324,11 @@ def parse_predictions(text: str, debug=None) -> list:
             avg_goals = float(f"{int_part}.{dec_part:02d}")
             temperature = int(temp_str) if temp_str else 0
         else:
-            log(f"  ⚠️ Could not parse avg/temp from: {raw}", "warning")
             i += 1
             continue
         
         coeff_match = re.search(r'°(\d+\.\d+)', avg_part)
         coefficient = float(coeff_match.group(1)) if coeff_match else None
-        
-        log(f"✅ Found: {home_pct}/{draw_pct}/{away_pct}, "
-            f"Pred: {prediction}, Score: {home_goals}-{away_goals}, "
-            f"Avg: {avg_goals:.2f}, Temp: {temperature}, Coef: {coefficient}", "success")
         
         # ========== FIND TEAMS ==========
         date_index = None
@@ -403,7 +339,6 @@ def parse_predictions(text: str, debug=None) -> list:
                 break
         
         if date_index is None:
-            log(f"  ⚠️ Could not find date line", "warning")
             i += 1
             continue
         
@@ -434,7 +369,6 @@ def parse_predictions(text: str, debug=None) -> list:
                             break
         
         if not home_team or not away_team:
-            log(f"  ⚠️ Could not find teams", "warning")
             i += 1
             continue
         
@@ -444,7 +378,6 @@ def parse_predictions(text: str, debug=None) -> list:
                 existing["away_team"] == away_team and 
                 existing["date"] == date_line):
                 is_duplicate = True
-                log(f"  ⚠️ Skipping duplicate: {home_team} vs {away_team}", "warning")
                 break
         
         if is_duplicate:
@@ -466,21 +399,15 @@ def parse_predictions(text: str, debug=None) -> list:
             "coefficient": coefficient
         })
         
-        log(f"  ✅ Match added: {home_team} vs {away_team}", "success")
         i += 1
     
-    log(f"Total matches extracted: {len(matches)}", "info")
     return matches
 
 
-def parse_table(text: str, table_type: str, debug=None) -> dict:
-    """Parse HOME TABLE or AWAY TABLE - FIXED for accented characters."""
+def parse_table(text: str, table_type: str) -> dict:
+    """Parse HOME TABLE or AWAY TABLE."""
     table_data = {}
     lines = text.split('\n')
-    
-    def log(msg, type="info"):
-        if debug:
-            debug(f"  {msg}", type)
     
     in_table = False
     
@@ -496,11 +423,9 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
         if not in_table:
             continue
         
-        # Replace tabs and collapse spaces
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        # FIXED: Use [^\d]+ to match team names with accents (á, é, í, ó, ú, etc.)
         match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
             match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
@@ -528,19 +453,14 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
                 "ga": ga,
                 "gd": gd
             }
-            log(f"  Found {table_type} table: {position}. {team_name} ({points} pts)", "info")
     
     return table_data
 
 
-def parse_form(text: str, debug=None) -> dict:
-    """Parse LAST 6 MATCHES TABLE - FIXED for accented characters."""
+def parse_form(text: str) -> dict:
+    """Parse LAST 6 MATCHES TABLE."""
     form_data = {}
     lines = text.split('\n')
-    
-    def log(msg, type="info"):
-        if debug:
-            debug(f"  {msg}", type)
     
     in_form = False
     
@@ -559,7 +479,6 @@ def parse_form(text: str, debug=None) -> dict:
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        # FIXED: Use [^\d]+ to match team names with accents
         match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
             match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
@@ -593,7 +512,6 @@ def parse_form(text: str, debug=None) -> dict:
                 "form_points": points,
                 "losing_streak": losing_streak
             }
-            log(f"  Found form: {position}. {team_name} ({points} pts)", "info")
     
     return form_data
 
