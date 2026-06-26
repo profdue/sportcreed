@@ -1,16 +1,12 @@
 """
-MATCH ANALYZER V9.6 — FINAL
+MATCH ANALYZER V9.7 — COMPLETE FINAL FIX
 Correct data structure:
-[6 digits][prediction][score_char] - [avg_goals][temperature]°[coefficient]
+[6 digits][prediction][score] - [avg_goals][temperature]°[coefficient]
 
 Where:
-- If prediction = X: score_char = draw score (1, 2, 3, etc.) → Score = score_char-score_char
-- If prediction = 1 or 2: score_char = home_goals, next char = away_goals → Score = home_goals-away_goals
-
-Examples:
-- 353927X2 - 23.4116°- → 35/39/27, X (Draw), Score: 2-2, Avg: 3.41, Temp: 16
-- 18374621 - 22.7213°2.20 → 18/37/46, 2 (Away Win), Score: 1-2, Avg: 2.72, Temp: 13
-- 36293413 - 23.3013°2.60 → 36/29/34, 1 (Home Win), Score: 3-0, Avg: 3.30, Temp: 13
+- Prediction = 1 (Home Win), 2 (Away Win), or X (Draw)
+- Score = home_goals-away_goals (for 1 or 2) or draw_score-draw_score (for X)
+- The score is extracted by finding the dash between score and avg_goals
 """
 
 import streamlit as st
@@ -36,7 +32,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.6", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.7", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -281,16 +277,17 @@ def parse_predictions(text: str, debug=None) -> list:
     """
     Parse predictions from the text.
     
-    FORMAT: [6 digits][prediction][score_char] - [avg_goals][temperature]°[coefficient]
+    FORMAT: [6 digits][prediction][score] - [avg_goals][temperature]°[coefficient]
     
     Where:
     - 6 digits = percentages (home/draw/away)
     - prediction = 1 (Home Win), 2 (Away Win), or X (Draw)
-    - score_char = 
-        - If prediction = X: draw score (1, 2, 3, etc.) → Score = score_char-score_char
-        - If prediction = 1 or 2: home_goals, next char = away_goals → Score = home_goals-away_goals
-    - avg_goals = the average goals (with score_char attached as prefix)
+    - score = the correct score (e.g., "1 - 2", "3 - 0", "1 - 1")
+    - avg_goals = the average goals (with the first digit being the score prefix)
     - temperature = weather temperature
+    
+    The score is extracted by finding the dash between the score and avg_goals.
+    The first character after the dash is the away_goals (or draw_score for X).
     
     Examples:
     - 353927X2 - 23.4116°- → 35/39/27, X (Draw), Score: 2-2, Avg: 3.41, Temp: 16
@@ -334,44 +331,74 @@ def parse_predictions(text: str, debug=None) -> list:
         # Get the rest after percentages
         rest = cleaned[6:]
         
-        # ========== EXTRACT PREDICTION AND SCORE ==========
-        # First character = Prediction (1, 2, or X)
+        # ========== EXTRACT PREDICTION ==========
         prediction_char = rest[0]
         rest = rest[1:]  # Remove prediction
         
         if prediction_char == 'X':
             prediction = 'X'
-            # Next character = draw score (1, 2, 3, etc.)
-            draw_score = int(rest[0])
-            home_goals = draw_score
-            away_goals = draw_score
-            rest = rest[1:]  # Remove draw score
         elif prediction_char in ['1', '2']:
             prediction = prediction_char
-            # Next character = Home Goals
-            home_goals = int(rest[0])
-            # Next character after home_goals = Away Goals
-            away_goals = int(rest[1])
-            rest = rest[2:]  # Remove both goals
         else:
             log(f"  ⚠️ Unknown prediction: {prediction_char}", "warning")
             i += 1
             continue
         
+        # ========== EXTRACT SCORE ==========
+        # Find the dash that separates the score from avg_goals
+        # The rest now looks like: "1 - 22.7213°2.20" or "X1 - 11.889°3.70"
+        dash_pos = rest.find('-')
+        if dash_pos == -1:
+            log(f"  ⚠️ Could not find dash in: {line[:50]}", "warning")
+            i += 1
+            continue
+        
+        # Extract the score part (everything before the dash)
+        score_part = rest[:dash_pos].strip()
+        
+        # Extract the avg_goals part (everything after the dash)
+        avg_part = rest[dash_pos+1:].strip()
+        
+        # Parse the score based on prediction
+        if prediction == 'X':
+            # For X: score_part is like "1" or "2" or "3"
+            # This is the draw score
+            if score_part and score_part[0].isdigit():
+                draw_score = int(score_part[0])
+            else:
+                draw_score = 1
+            home_goals = draw_score
+            away_goals = draw_score
+        else:
+            # For 1 or 2: score_part is like "1" or "3" (home_goals)
+            # The away_goals is the first digit of avg_part
+            if score_part and score_part[0].isdigit():
+                home_goals = int(score_part[0])
+            else:
+                home_goals = 1
+            
+            # Extract away_goals from avg_part
+            # avg_part starts with something like "22.7213°2.20"
+            # The first digit is the away_goals
+            if avg_part and avg_part[0].isdigit():
+                away_goals = int(avg_part[0])
+            else:
+                away_goals = 0
+        
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
-        # Find the avg_goals number after the dash
-        avg_match = re.search(r'-?\s*(\d+\.\d+)°', rest)
+        # avg_part looks like: "22.7213°2.20" or "23.4116°-" or "11.889°3.70"
+        avg_match = re.search(r'(\d+\.\d+)°', avg_part)
         if not avg_match:
             log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
             i += 1
             continue
         
-        raw = avg_match.group(1)  # "23.4116", "22.7213", "23.3013", "11.889"
+        raw = avg_match.group(1)  # "22.7213", "23.4116", "11.889"
         
-        # Remove the first digit (which is the score_char)
-        # For X2: remove '2' from "23.4116" → "3.4116"
-        # For 21: remove '1' from "22.7213" → "2.7213"
-        # For 13: remove '3' from "23.3013" → "3.3013"
+        # Remove the first digit (which is the score prefix)
+        # For "22.7213" remove first char "2" → "2.7213" → avg=2.72
+        # For "23.4116" remove first char "2" → "3.4116" → avg=3.41
+        # For "11.889" remove first char "1" → "1.889" → avg=1.88
         raw = raw[1:]
         
         # Extract avg_goals and temperature
@@ -389,7 +416,7 @@ def parse_predictions(text: str, debug=None) -> list:
             continue
         
         # Extract coefficient
-        coeff_match = re.search(r'°(\d+\.\d+)', rest)
+        coeff_match = re.search(r'°(\d+\.\d+)', avg_part)
         coefficient = float(coeff_match.group(1)) if coeff_match else None
         
         log(f"✅ Found: {home_pct}/{draw_pct}/{away_pct}, "
@@ -1164,8 +1191,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.6")
-    st.caption("Universal Logic Engine | Complete Data Structure with X2, X3, etc.")
+    st.title("📊 Match Analyzer V9.7")
+    st.caption("Universal Logic Engine | Complete Final Fix")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1214,7 +1241,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.6", type="primary"):
+        if st.button("🔮 ANALYZE V9.7", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
