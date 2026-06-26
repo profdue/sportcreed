@@ -322,7 +322,10 @@ def split_into_sections(text: str, debug=None) -> dict:
 
 
 def parse_predictions(text: str, debug=None) -> list:
-    """Parse predictions from the text format."""
+    """
+    Parse predictions from the text format.
+    FIXED: Extracts score code directly from the line, doesn't remove prediction from remaining.
+    """
     matches = []
     lines = text.split('\n')
     
@@ -356,32 +359,39 @@ def parse_predictions(text: str, debug=None) -> list:
         # Find where the percentages end
         remaining = cleaned[6:]
         
+        # DEBUG: Log the remaining string
+        log(f"  Remaining after percentages: '{remaining}'", "info")
+        
         # Extract prediction and score
         prediction = '1'  # Default
         score_code = '12'  # Default
         
-        # Check if remaining starts with 'X'
+        # Check if the remaining string starts with 'X'
         if remaining.startswith('X'):
             prediction = 'X'
             remaining = remaining[1:]
+            # Now extract score code (2 digits)
+            score_match = re.search(r'^(\d{2})', remaining)
+            if score_match:
+                score_code = score_match.group(1)
         else:
-            # Try to extract prediction as first digit (1 or 2)
-            pred_match = re.search(r'^([12])', remaining)
-            if pred_match:
-                prediction = pred_match.group(1)
-                remaining = remaining[1:]
-        
-        # Now extract score code (2 digits)
-        score_match = re.search(r'^(\d{2})', remaining)
-        if score_match:
-            score_code = score_match.group(1)
-        else:
-            # If no score code found, try to find it in the original line
-            fallback_match = re.search(r'\b(\d{2})\s*-', line)
-            if fallback_match:
-                score_code = fallback_match.group(1)
+            # The prediction is the first digit of the score code
+            # Extract the score code directly from the original line
+            score_match = re.search(r'(\d{2})\s*-', line)
+            if score_match:
+                score_code = score_match.group(1)
+                prediction = score_code[0]
             else:
-                continue
+                # Try to find the score code at the beginning of remaining
+                score_match = re.search(r'^(\d{2})', remaining)
+                if score_match:
+                    score_code = score_match.group(1)
+                    prediction = score_code[0]
+        
+        # If we still don't have a valid score code, skip
+        if len(score_code) < 2:
+            log(f"  ⚠️ Could not extract score code from: {line[:50]}", "warning")
+            continue
         
         correct_score_home = int(score_code[0])
         correct_score_away = int(score_code[1])
@@ -389,17 +399,11 @@ def parse_predictions(text: str, debug=None) -> list:
         # Extract avg goals and temperature
         avg_temp_match = re.search(r'(\d+\.\d+)(\d+)°', line)
         if not avg_temp_match:
-            avg_temp_match = re.search(r'(\d+\.\d+)°', line)
-            if avg_temp_match:
-                avg_goals = float(avg_temp_match.group(1))
-                # Try to find temperature after avg_goals
-                temp_match = re.search(r'(\d+)°', line.replace(str(avg_goals), ''))
-                temperature = int(temp_match.group(1)) if temp_match else 0
-            else:
-                continue
-        else:
-            avg_goals = float(avg_temp_match.group(1))
-            temperature = int(avg_temp_match.group(2))
+            log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
+            continue
+        
+        avg_goals = float(avg_temp_match.group(1))
+        temperature = int(avg_temp_match.group(2))
         
         log(f"✅ Found data line: {home_win_pct}/{draw_pct}/{away_win_pct}, Pred: {prediction}, Score: {correct_score_home}-{correct_score_away}, Avg: {avg_goals}", "success")
         
@@ -449,10 +453,7 @@ def parse_predictions(text: str, debug=None) -> list:
 
 
 def parse_form(text: str, debug=None) -> dict:
-    """
-    Parse form data from the text format.
-    Handles both full table format and top 5 + bottom 5 format.
-    """
+    """Parse form data from the text format."""
     form_data = {}
     lines = text.split('\n')
     
@@ -513,7 +514,6 @@ def parse_form(text: str, debug=None) -> dict:
     if team_count == 0:
         log(f"Full table format not found, trying top 5 + bottom 5 format...", "info")
         
-        # Look for "Top 5 in form teams" section
         in_top_section = False
         in_bottom_section = False
         
@@ -535,7 +535,6 @@ def parse_form(text: str, debug=None) -> dict:
             if "Team" in line and "Form" in line and "Points" in line:
                 continue
             
-            # Parse form data line: "1.  RB Bragantino    WWWLWL    12"
             if in_top_section or in_bottom_section:
                 line = line.replace('\t', ' ')
                 match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)', line)
@@ -553,7 +552,6 @@ def parse_form(text: str, debug=None) -> dict:
                     if total == 0:
                         continue
                     
-                    # Calculate losing streak
                     losing_streak = 0
                     for r in reversed(results):
                         if r == 'L':
@@ -561,7 +559,6 @@ def parse_form(text: str, debug=None) -> dict:
                         else:
                             break
                     
-                    # Last 5 form points
                     last_5 = results[-5:] if len(results) >= 5 else results
                     form_points = sum(3 if x == 'W' else 1 if x == 'D' else 0 for x in last_5)
                     
