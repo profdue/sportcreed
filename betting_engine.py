@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V8.2 — COMPLETE FIX
-Fixed: Avg goals parsing, X1/X2 score codes, Form parsing, Team detection, Duplicate matches
+MATCH ANALYZER V8.3 — FINAL COMPLETE FIX
+Fixed: Avg goals parsing, X1/X2 score codes, Form parsing, Section splitting, Team detection
 """
 
 import streamlit as st
@@ -26,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V8.2", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V8.3", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -221,21 +221,34 @@ def split_into_sections(text: str, debug=None) -> dict:
     for i, line in enumerate(lines):
         line_stripped = line.strip()
         
+        # Predictions start at "Round"
         if re.match(r'^Round\s*\d+', line_stripped):
             if predictions_start is None:
                 predictions_start = i
                 log(f"  → Found 'Round' at line {i+1}", "highlight")
         
-        if re.match(r'^\d+\.\s*[A-Za-z]', line_stripped):
-            if form_start is None and predictions_start is not None and i > predictions_start + 5:
+        # Form starts at "Top 5 in form teams" or "Worst form teams"
+        if "Top 5 in form teams" in line_stripped or "Worst form teams" in line_stripped:
+            if form_start is None:
                 form_start = i
                 log(f"  → Found form start at line {i+1}", "highlight")
         
+        # Statistics start at "Home wins / Draws / Away wins" or "Best attack"
         if "Home wins / Draws / Away wins" in line_stripped or "Best attack" in line_stripped:
             if stats_start is None:
                 stats_start = i
                 log(f"  → Found stats start at line {i+1}", "highlight")
     
+    # If stats_start is None, look for other indicators
+    if stats_start is None:
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            if "Scores" in line_stripped and "1 - 1" in line_stripped:
+                stats_start = i
+                log(f"  → Found stats start (fallback) at line {i+1}", "highlight")
+                break
+    
+    # Extract sections
     if predictions_start is not None:
         end = form_start if form_start is not None else stats_start if stats_start is not None else len(lines)
         result["predictions"] = '\n'.join(lines[predictions_start:end])
@@ -312,12 +325,12 @@ def parse_predictions(text: str, debug=None) -> list:
         # Determine prediction
         if score_code == 'X1':
             prediction = 'X'
-            correct_score_home = 1
-            correct_score_away = 0
+            correct_score_home = None
+            correct_score_away = None
         elif score_code == 'X2':
             prediction = 'X'
-            correct_score_home = 0
-            correct_score_away = 1
+            correct_score_home = None
+            correct_score_away = None
         elif score_code[0].isdigit() and score_code[1].isdigit():
             prediction = score_code[0]
             correct_score_home = int(score_code[0])
@@ -371,13 +384,10 @@ def parse_predictions(text: str, debug=None) -> list:
         
         # ========== FIND TEAMS ==========
         # Look backwards for teams
-        # Format: Home team, Away team, Date line
         home_team = None
         away_team = None
         date_line = None
         
-        # Skip the current line and look backwards
-        # We need to skip "PRE" and "VIEW" lines
         for j in range(i-1, max(0, i-15), -1):
             prev_line = lines[j].strip()
             
@@ -409,7 +419,7 @@ def parse_predictions(text: str, debug=None) -> list:
             i += 1
             continue
         
-        # Skip if home or away is "PRE" or "VIEW" (redundant check)
+        # Skip if home or away is "PRE" or "VIEW"
         if home_team in ["PRE", "VIEW"] or away_team in ["PRE", "VIEW"]:
             log(f"  ⚠️ Skipping preview lines", "warning")
             i += 1
@@ -470,12 +480,12 @@ def parse_form(text: str, debug=None) -> dict:
         if not line:
             continue
         
-        if "Top 5 in form teams" in line or "Top form teams" in line:
+        if "Top 5 in form teams" in line:
             in_top_form = True
             in_bottom_form = False
             continue
         
-        if "Worst form teams" in line or "Bottom form teams" in line:
+        if "Worst form teams" in line:
             in_bottom_form = True
             in_top_form = False
             continue
@@ -484,12 +494,15 @@ def parse_form(text: str, debug=None) -> dict:
             continue
         
         # Parse form data line
-        # Pattern: "1.  RB Bragantino   WWWLWL  12"
+        # Replace tabs with spaces and collapse multiple spaces
+        line = line.replace('\t', ' ')
+        line = ' '.join(line.split())
+        
+        # Pattern: "1. RB Bragantino WWWLWL 12"
         match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)$', line)
         if not match:
-            # Try with tabs
-            line = line.replace('\t', ' ')
-            match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)$', line)
+            # Try more flexible pattern
+            match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)', line)
         
         if match:
             position = int(match.group(1))
@@ -582,26 +595,40 @@ def parse_statistics(text: str, debug=None) -> dict:
 
 
 def parse_standings(text: str, debug=None) -> dict:
-    """Extract standings from Statistics section."""
+    """Extract standings from Statistics section - FIXED."""
     standings = {}
     lines = text.split('\n')
     
+    def log(msg, type="info"):
+        if debug:
+            debug(f"  {msg}", type)
+    
     for line in lines:
         line = line.strip()
-        line = line.replace('\t', ' ')
+        if not line:
+            continue
         
-        match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)', line)
+        # Replace tabs with spaces and collapse multiple spaces
+        line = line.replace('\t', ' ')
+        line = ' '.join(line.split())
+        
+        # Pattern: "1. Palmeiras 118" or "1.  Palmeiras   118"
+        match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)$', line)
+        if not match:
+            # Try more flexible
+            match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)', line)
+        
         if match:
             position = int(match.group(1))
             team_name = match.group(2).strip()
+            points = int(match.group(3))
             
-            points_match = re.search(r'(\d+)$', line)
-            if points_match:
-                points = int(points_match.group(1))
-                standings[team_name] = {
-                    "position": position,
-                    "points": points
-                }
+            standings[team_name] = {
+                "position": position,
+                "points": points
+            }
+            if debug:
+                debug(f"  Found standing: {position}. {team_name} ({points} pts)", "info")
     
     return standings
 
@@ -688,6 +715,14 @@ def convert_match_to_data(match: dict, standings: dict, form_data: dict, league:
             "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
             "home_goals": data['correct_score_home'],
             "away_goals": data['correct_score_away'],
+            "probability": 100.0
+        })
+    elif data.get('score_code'):
+        # For X1/X2, show the score code
+        data['score_matrix'].append({
+            "score": data['score_code'],
+            "home_goals": None,
+            "away_goals": None,
             "probability": 100.0
         })
     
@@ -1143,10 +1178,9 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
-        form_display = f"{home_form} vs {away_form}"
-        if home_seq and away_seq:
-            form_display += f"\n({home_seq} vs {away_seq})"
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_form} vs {away_form}</div><div class="metric-label">Form Points</div></div>', unsafe_allow_html=True)
+        if home_seq and away_seq:
+            st.caption(f"{home_seq} vs {away_seq}")
     with m2:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{avg_goals:.2f}</div><div class="metric-label">Avg Goals</div></div>', unsafe_allow_html=True)
     with m3:
@@ -1177,9 +1211,14 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         score_cols = st.columns(min(5, len(sorted_scores)))
         for idx, s in enumerate(sorted_scores):
             with score_cols[idx]:
-                bg = "#1e293b" if s.get("home_goals", 0) != s.get("away_goals", 0) else "#2a1a00"
-                prob = s.get("probability", 0)
-                st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?-?")}</div><div style="font-size:0.7rem; color:#94a3b8;">{prob:.1f}%</div></div>', unsafe_allow_html=True)
+                if s.get("home_goals") is not None and s.get("away_goals") is not None:
+                    bg = "#1e293b" if s.get("home_goals", 0) != s.get("away_goals", 0) else "#2a1a00"
+                    prob = s.get("probability", 0)
+                    st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?-?")}</div><div style="font-size:0.7rem; color:#94a3b8;">{prob:.1f}%</div></div>', unsafe_allow_html=True)
+                else:
+                    # For X1/X2, show the code
+                    bg = "#1a2a1a"
+                    st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?")}</div><div style="font-size:0.7rem; color:#94a3b8;">Double Chance</div></div>', unsafe_allow_html=True)
     
     if analysis.get("primary_bet"):
         p = analysis["primary_bet"]
@@ -1207,7 +1246,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V8.2")
+    st.title("📊 Match Analyzer V8.3")
     st.caption("Universal Logic Engine | Complete Fix (Avg Goals, X1/X2, Form, Teams)")
 
     with st.expander("📖 The Universal Truths", expanded=False):
@@ -1262,7 +1301,7 @@ def main():
 
         col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
         with col_btn1:
-            analyze_clicked = st.button("🔮 ANALYZE V8.2", type="primary")
+            analyze_clicked = st.button("🔮 ANALYZE V8.3", type="primary")
 
         if analyze_clicked:
             if not text_data or len(text_data.strip()) < 100:
@@ -1314,10 +1353,10 @@ def main():
                                 f1, f2, f3 = st.columns(3)
                                 with f1:
                                     st.metric(f"{home} Form", f"{form_data[home]['form_points']} pts",
-                                             f"Last 5: {form_data[home]['wins']}W {form_data[home]['draws']}D {form_data[home]['losses']}L")
+                                             f"Last 5: {form_data[home]['form_sequence'][-5:] if len(form_data[home].get('form_sequence', '')) >= 5 else form_data[home].get('form_sequence', '')}")
                                 with f2:
                                     st.metric(f"{away} Form", f"{form_data[away]['form_points']} pts",
-                                             f"Last 5: {form_data[away]['wins']}W {form_data[away]['draws']}D {form_data[away]['losses']}L")
+                                             f"Last 5: {form_data[away]['form_sequence'][-5:] if len(form_data[away].get('form_sequence', '')) >= 5 else form_data[away].get('form_sequence', '')}")
                                 with f3:
                                     diff = abs(form_data[home]['form_points'] - form_data[away]['form_points'])
                                     st.metric("Form Difference", diff,
