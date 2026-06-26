@@ -1,6 +1,7 @@
 """
-MATCH ANALYZER V8.3 — FINAL COMPLETE FIX
-Fixed: Avg goals parsing, X1/X2 score codes, Form parsing, Section splitting, Team detection
+MATCH ANALYZER V9.0 — COMPLETE REWRITE
+Fully understands Forebet data structure: Percentages + Score Code + Avg Goals + Temperature + Coefficient
+Handles X predictions (1-1 correct score), numeric score codes, and all table data
 """
 
 import streamlit as st
@@ -26,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V8.3", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.0", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -65,6 +66,7 @@ st.markdown("""
     .league-badge.es { background: #f59e0b; color: #000; }
     .league-badge.it { background: #8b5cf6; color: #fff; }
     .league-badge.de { background: #ec4899; color: #fff; }
+    .league-badge.au { background: #f59e0b; color: #000; }
     .league-badge.unknown { background: #64748b; color: #fff; }
     .debug-box { background: #1a1a2e; border: 1px solid #3b82f6; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; font-family: monospace; font-size: 0.8rem; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
     .debug-box .success { color: #10b981; }
@@ -91,14 +93,19 @@ def get_league_config(league: str) -> dict:
         config["relegation_threshold"] = 15
         config["league_size"] = 16
         config["goals_fallback"] = 2.75
-    elif "Brazil" in league or "Serie A" in league:
+    elif "Brazil" in league or "Serie A" in league or "Br1" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["goals_fallback"] = 2.66
-    elif "Premier" in league:
+    elif "Premier" in league or "EPL" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["goals_fallback"] = 2.75
+    elif "AuV" in league or "NPL" in league:
+        config["relegation_threshold"] = 11  # Bottom 4 of 14
+        config["league_size"] = 14
+        config["europe_threshold"] = 3  # Top 3
+        config["goals_fallback"] = 2.80
     else:
         config["relegation_threshold"] = 15
         config["league_size"] = 20
@@ -110,7 +117,7 @@ def get_league_config(league: str) -> dict:
 def detect_league(text: str) -> str:
     if "Brasileiro Serie A" in text or "Brazil" in text or "Br1" in text:
         return "Brazil Serie A"
-    elif "Premier League" in text or "England" in text:
+    elif "Premier League" in text or "England" in text or "EPL" in text:
         return "Premier League"
     elif "Eliteserien" in text or "Norway" in text:
         return "Norway Eliteserien"
@@ -120,18 +127,19 @@ def detect_league(text: str) -> str:
         return "Serie A"
     elif "Bundesliga" in text or "Germany" in text:
         return "Bundesliga"
+    elif "AuV" in text or "NPL Victoria" in text:
+        return "Australia NPL Victoria"
     else:
         return "Unknown League"
 
 
 # ============================================================================
-# TEXT PARSER WITH DETAILED DEBUG
+# TEXT PARSER
 # ============================================================================
 def parse_text_data(text: str) -> dict:
-    """Parse the clean text format containing Predictions, Form, and Statistics."""
+    """Parse the complete text data."""
     start_time = time.time()
     
-    # Create debug log
     debug_log = []
     
     def debug(msg, type="info"):
@@ -148,42 +156,38 @@ def parse_text_data(text: str) -> dict:
         "league": league,
         "league_config": league_config,
         "matches": [],
+        "home_table": {},
+        "away_table": {},
         "form_data": {},
-        "statistics": {},
-        "standings": {}
+        "statistics": {}
     }
     
-    # ============================================================
-    # SECTION 1: Split text into sections
-    # ============================================================
+    # Split into sections
     sections = split_into_sections(text, debug)
-    debug(f"📂 Sections found: Predictions={len(sections.get('predictions', '')):,} chars, Form={len(sections.get('form', '')):,} chars, Statistics={len(sections.get('statistics', '')):,} chars", "info")
+    debug(f"📂 Sections: Predictions={len(sections.get('predictions', '')):,} chars, "
+          f"Home Table={len(sections.get('home_table', '')):,} chars, "
+          f"Away Table={len(sections.get('away_table', '')):,} chars, "
+          f"Form={len(sections.get('form', '')):,} chars", "info")
     
-    # ============================================================
-    # SECTION 2: Parse Predictions
-    # ============================================================
+    # Parse predictions
     matches = parse_predictions(sections.get("predictions", ""), debug)
     result["matches"] = matches
     debug(f"✅ Found {len(matches)} matches", "success")
     
-    # ============================================================
-    # SECTION 3: Parse Form
-    # ============================================================
+    # Parse home table
+    home_table = parse_table(sections.get("home_table", ""), "HOME", debug)
+    result["home_table"] = home_table
+    debug(f"✅ Found {len(home_table)} teams in home table", "success")
+    
+    # Parse away table
+    away_table = parse_table(sections.get("away_table", ""), "AWAY", debug)
+    result["away_table"] = away_table
+    debug(f"✅ Found {len(away_table)} teams in away table", "success")
+    
+    # Parse form (LAST 6 MATCHES TABLE)
     form_data = parse_form(sections.get("form", ""), debug)
     result["form_data"] = form_data
-    debug(f"✅ Found {len(form_data)} teams with form data", "success")
-    
-    # ============================================================
-    # SECTION 4: Parse Statistics
-    # ============================================================
-    stats_data = parse_statistics(sections.get("statistics", ""), debug)
-    result["statistics"] = stats_data
-    debug(f"✅ Statistics parsed", "success")
-    
-    # Extract standings from statistics
-    standings = parse_standings(sections.get("statistics", ""), debug)
-    result["standings"] = standings
-    debug(f"📊 Found {len(standings)} teams in standings", "success")
+    debug(f"✅ Found {len(form_data)} teams in form table", "success")
     
     elapsed = time.time() - start_time
     debug(f"⏱️ Parser completed in {elapsed:.2f} seconds", "success")
@@ -206,8 +210,13 @@ def parse_text_data(text: str) -> dict:
 
 
 def split_into_sections(text: str, debug=None) -> dict:
-    """Split the text into Predictions, Form, and Statistics sections."""
-    result = {"predictions": "", "form": "", "statistics": ""}
+    """Split text into sections."""
+    result = {
+        "predictions": "",
+        "home_table": "",
+        "away_table": "",
+        "form": ""
+    }
     lines = text.split('\n')
     
     def log(msg, type="info"):
@@ -215,65 +224,58 @@ def split_into_sections(text: str, debug=None) -> dict:
             debug(f"  {msg}", type)
     
     predictions_start = None
+    home_table_start = None
+    away_table_start = None
     form_start = None
-    stats_start = None
     
     for i, line in enumerate(lines):
         line_stripped = line.strip()
         
-        # Predictions start at "Round"
         if re.match(r'^Round\s*\d+', line_stripped):
             if predictions_start is None:
                 predictions_start = i
                 log(f"  → Found 'Round' at line {i+1}", "highlight")
         
-        # Form starts at "Top 5 in form teams" or "Worst form teams"
-        if "Top 5 in form teams" in line_stripped or "Worst form teams" in line_stripped:
+        if "HOME TABLE" in line_stripped:
+            if home_table_start is None:
+                home_table_start = i
+                log(f"  → Found 'HOME TABLE' at line {i+1}", "highlight")
+        
+        if "AWAY TABLE" in line_stripped:
+            if away_table_start is None:
+                away_table_start = i
+                log(f"  → Found 'AWAY TABLE' at line {i+1}", "highlight")
+        
+        if "LAST 6 MATCHES TABLE" in line_stripped:
             if form_start is None:
                 form_start = i
-                log(f"  → Found form start at line {i+1}", "highlight")
-        
-        # Statistics start at "Home wins / Draws / Away wins" or "Best attack"
-        if "Home wins / Draws / Away wins" in line_stripped or "Best attack" in line_stripped:
-            if stats_start is None:
-                stats_start = i
-                log(f"  → Found stats start at line {i+1}", "highlight")
-    
-    # If stats_start is None, look for other indicators
-    if stats_start is None:
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
-            if "Scores" in line_stripped and "1 - 1" in line_stripped:
-                stats_start = i
-                log(f"  → Found stats start (fallback) at line {i+1}", "highlight")
-                break
+                log(f"  → Found 'LAST 6 MATCHES TABLE' at line {i+1}", "highlight")
     
     # Extract sections
     if predictions_start is not None:
-        end = form_start if form_start is not None else stats_start if stats_start is not None else len(lines)
+        end = home_table_start if home_table_start is not None else len(lines)
         result["predictions"] = '\n'.join(lines[predictions_start:end])
         log(f"  Predictions: lines {predictions_start+1} to {end}", "info")
-    else:
-        log(f"  ⚠️ Predictions section NOT FOUND!", "error")
+    
+    if home_table_start is not None:
+        end = away_table_start if away_table_start is not None else len(lines)
+        result["home_table"] = '\n'.join(lines[home_table_start:end])
+        log(f"  Home Table: lines {home_table_start+1} to {end}", "info")
+    
+    if away_table_start is not None:
+        end = form_start if form_start is not None else len(lines)
+        result["away_table"] = '\n'.join(lines[away_table_start:end])
+        log(f"  Away Table: lines {away_table_start+1} to {end}", "info")
     
     if form_start is not None:
-        end = stats_start if stats_start is not None else len(lines)
-        result["form"] = '\n'.join(lines[form_start:end])
-        log(f"  Form: lines {form_start+1} to {end}", "info")
-    else:
-        log(f"  ⚠️ Form section NOT FOUND!", "warning")
-    
-    if stats_start is not None:
-        result["statistics"] = '\n'.join(lines[stats_start:])
-        log(f"  Statistics: lines {stats_start+1} to {len(lines)}", "info")
-    else:
-        log(f"  ⚠️ Statistics section NOT FOUND!", "warning")
+        result["form"] = '\n'.join(lines[form_start:])
+        log(f"  Form: lines {form_start+1} to {len(lines)}", "info")
     
     return result
 
 
 def parse_predictions(text: str, debug=None) -> list:
-    """Parse predictions from the text format - COMPLETE FIX."""
+    """Parse match predictions from the text."""
     matches = []
     lines = text.split('\n')
     
@@ -304,15 +306,16 @@ def parse_predictions(text: str, debug=None) -> list:
             i += 1
             continue
         
-        home_win_pct = int(pct_match.group(1))
+        home_pct = int(pct_match.group(1))
         draw_pct = int(pct_match.group(2))
-        away_win_pct = int(pct_match.group(3))
+        away_pct = int(pct_match.group(3))
         
         # Get the rest after percentages
         rest = cleaned[6:]
         
         # ========== EXTRACT SCORE CODE ==========
-        # Score code can be: 12, X2, X1, 21, etc.
+        # Score code can be: 12, 21, X1, X2, etc.
+        # X means Draw, followed by the first digit of the score
         score_match = re.search(r'^([X\d]{2})', rest)
         if not score_match:
             log(f"  ⚠️ Could not extract score code from: {line[:50]}", "warning")
@@ -322,15 +325,15 @@ def parse_predictions(text: str, debug=None) -> list:
         score_code = score_match.group(1)
         rest = rest[len(score_code):]  # Remove score code
         
-        # Determine prediction
-        if score_code == 'X1':
+        # Determine prediction and correct score
+        if score_code[0] == 'X':
+            # X means Draw, correct score is always 1-1
             prediction = 'X'
-            correct_score_home = None
-            correct_score_away = None
-        elif score_code == 'X2':
-            prediction = 'X'
-            correct_score_home = None
-            correct_score_away = None
+            correct_score_home = 1
+            correct_score_away = 1
+            # The second char might be part of the avg goals
+            # For X1: rest starts with " - 1.889°..."
+            # For X2: rest starts with " - 3.4116°..."
         elif score_code[0].isdigit() and score_code[1].isdigit():
             prediction = score_code[0]
             correct_score_home = int(score_code[0])
@@ -341,49 +344,48 @@ def parse_predictions(text: str, debug=None) -> list:
             continue
         
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
-        # Pattern: "-3.2325°-" or "-02.1528°" or " - 13.2325°-"
+        # Pattern: "-3.2325°" or "-1.889°" or "-02.1528°"
         avg_match = re.search(r'-?\s*(\d+\.\d+)°', rest)
         if not avg_match:
             log(f"  ⚠️ Could not extract avg_goals from: {line[:50]}", "warning")
             i += 1
             continue
         
-        raw = avg_match.group(1)  # "13.2325", "23.4116", "02.1528", etc.
+        raw = avg_match.group(1)  # "13.2325", "1.889", "02.1528", etc.
         
-        # Remove the score code's first digit if it's attached
-        if raw[0].isdigit() and score_code[0].isdigit() and raw[0] == score_code[0]:
-            raw = raw[1:]  # "13.2325" -> "3.2325"
-        
-        # Extract avg and temperature
+        # Extract avg goals and temperature
         # Pattern: "3.2325" -> avg=3.23, temp=25
+        #          "1.889" -> avg=1.88, temp=9
         #          "02.1528" -> avg=2.15, temp=28
-        #          "2.1528" -> avg=2.15, temp=28
         match = re.search(r'(\d+)\.(\d{2})(\d*)', raw)
         if match:
             int_part = int(match.group(1))
             dec_part = int(match.group(2))
             temp_str = match.group(3)
+            
+            # If int_part is > 10 and the score code is numeric, 
+            # the first digit might be from the score code
+            if int_part >= 10 and score_code[0].isdigit():
+                # Remove the first digit (which is the score code's first digit)
+                int_part = int_part % 10
+            
             avg_goals = float(f"{int_part}.{dec_part:02d}")
             temperature = int(temp_str) if temp_str else 0
-            
-            # Double-check: if avg_goals is > 10, we probably missed removing a digit
-            if avg_goals > 10:
-                # Try removing first digit
-                raw2 = raw[1:]
-                match2 = re.search(r'(\d+)\.(\d{2})(\d*)', raw2)
-                if match2:
-                    int_part2 = int(match2.group(1))
-                    dec_part2 = int(match2.group(2))
-                    avg_goals = float(f"{int_part2}.{dec_part2:02d}")
         else:
             log(f"  ⚠️ Could not parse avg/temp from: {raw}", "warning")
             i += 1
             continue
         
-        log(f"✅ Found: {home_win_pct}/{draw_pct}/{away_win_pct}, Code: {score_code}, Avg: {avg_goals:.2f}, Temp: {temperature}", "success")
+        # ========== EXTRACT COEFFICIENT ==========
+        # Look for coefficient after the degree symbol
+        coeff_match = re.search(r'°(\d+\.\d+)', rest)
+        coefficient = float(coeff_match.group(1)) if coeff_match else None
+        
+        log(f"✅ Found: {home_pct}/{draw_pct}/{away_pct}, Code: {score_code}, "
+            f"Pred: {prediction}, Score: {correct_score_home}-{correct_score_away}, "
+            f"Avg: {avg_goals:.2f}, Temp: {temperature}, Coef: {coefficient}", "success")
         
         # ========== FIND TEAMS ==========
-        # Look backwards for teams
         home_team = None
         away_team = None
         date_line = None
@@ -395,7 +397,6 @@ def parse_predictions(text: str, debug=None) -> list:
             if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
                 date_line = prev_line
                 # The team names are 2 lines before the date line
-                # But skip "PRE" and "VIEW" lines
                 if j - 2 >= 0:
                     home_candidate = lines[j-2].strip()
                     away_candidate = lines[j-1].strip()
@@ -405,7 +406,7 @@ def parse_predictions(text: str, debug=None) -> list:
                         home_team = home_candidate
                         away_team = away_candidate
                         break
-                    # If one of them is PRE/VIEW, try going further back
+                    # If one is PRE/VIEW, try going further back
                     elif j - 4 >= 0:
                         home_candidate = lines[j-4].strip()
                         away_candidate = lines[j-3].strip()
@@ -425,7 +426,7 @@ def parse_predictions(text: str, debug=None) -> list:
             i += 1
             continue
         
-        # Check for duplicate match (same home, away, date)
+        # Check for duplicate
         is_duplicate = False
         for existing in matches:
             if (existing["home_team"] == home_team and 
@@ -443,15 +444,16 @@ def parse_predictions(text: str, debug=None) -> list:
             "home_team": home_team,
             "away_team": away_team,
             "date": date_line,
-            "home_win_pct": home_win_pct,
+            "home_pct": home_pct,
             "draw_pct": draw_pct,
-            "away_win_pct": away_win_pct,
-            "prediction": prediction,
+            "away_pct": away_pct,
             "score_code": score_code,
+            "prediction": prediction,
             "correct_score_home": correct_score_home,
             "correct_score_away": correct_score_away,
             "avg_goals": avg_goals,
-            "temperature": temperature
+            "temperature": temperature,
+            "coefficient": coefficient
         })
         
         log(f"  ✅ Match added: {home_team} vs {away_team}", "success")
@@ -461,8 +463,72 @@ def parse_predictions(text: str, debug=None) -> list:
     return matches
 
 
+def parse_table(text: str, table_type: str, debug=None) -> dict:
+    """Parse HOME TABLE or AWAY TABLE."""
+    table_data = {}
+    lines = text.split('\n')
+    
+    def log(msg, type="info"):
+        if debug:
+            debug(f"  {msg}", type)
+    
+    in_table = False
+    header_found = False
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Check if this is a header line
+        if "PTS" in line and "GP" in line and "W" in line and "D" in line and "L" in line:
+            header_found = True
+            in_table = True
+            continue
+        
+        if not in_table:
+            continue
+        
+        # Replace tabs and collapse spaces
+        line = line.replace('\t', ' ')
+        line = ' '.join(line.split())
+        
+        # Pattern: "1 Arsenal 47 19 15 2 2 41 11 30"
+        match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
+        if not match:
+            # Try simpler pattern: position, team, points, then numbers
+            match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
+        
+        if match:
+            position = int(match.group(1))
+            team_name = match.group(2).strip()
+            points = int(match.group(3))
+            gp = int(match.group(4))
+            wins = int(match.group(5))
+            draws = int(match.group(6))
+            losses = int(match.group(7))
+            gf = int(match.group(8))
+            ga = int(match.group(9))
+            gd = int(match.group(10))
+            
+            table_data[team_name] = {
+                "position": position,
+                "points": points,
+                "gp": gp,
+                "wins": wins,
+                "draws": draws,
+                "losses": losses,
+                "gf": gf,
+                "ga": ga,
+                "gd": gd
+            }
+            log(f"  Found {table_type} table: {position}. {team_name} ({points} pts)", "info")
+    
+    return table_data
+
+
 def parse_form(text: str, debug=None) -> dict:
-    """Parse form data from the text format - COMPLETE FIX."""
+    """Parse LAST 6 MATCHES TABLE (form data)."""
     form_data = {}
     lines = text.split('\n')
     
@@ -470,174 +536,76 @@ def parse_form(text: str, debug=None) -> dict:
         if debug:
             debug(f"  {msg}", type)
     
-    log(f"Processing {len(lines)} lines in Form section", "info")
-    
-    in_top_form = False
-    in_bottom_form = False
+    in_form = False
+    header_found = False
     
     for line in lines:
         line = line.strip()
         if not line:
             continue
         
-        if "Top 5 in form teams" in line:
-            in_top_form = True
-            in_bottom_form = False
+        # Check if this is a header line
+        if "PTS" in line and "GP" in line and "W" in line and "D" in line and "L" in line:
+            header_found = True
+            in_form = True
             continue
         
-        if "Worst form teams" in line:
-            in_bottom_form = True
-            in_top_form = False
+        if not in_form:
             continue
         
-        if "Team" in line and "Form" in line and "Points" in line:
-            continue
-        
-        # Parse form data line
-        # Replace tabs with spaces and collapse multiple spaces
+        # Replace tabs and collapse spaces
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        # Pattern: "1. RB Bragantino WWWLWL 12"
-        match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)$', line)
+        # Pattern: "1 Manchester United 16 6 5 1 0 12 5 7"
+        match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
-            # Try more flexible pattern
-            match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+([DWL]+)\s+(\d+)', line)
-        
-        if match:
-            position = int(match.group(1))
-            team_name = match.group(2).strip()
-            form_sequence = match.group(3).strip()
-            points = int(match.group(4))
-            
-            results = list(form_sequence)
-            wins = results.count('W')
-            draws = results.count('D')
-            losses = results.count('L')
-            total = wins + draws + losses
-            
-            if total == 0:
-                continue
-            
-            losing_streak = 0
-            for r in reversed(results):
-                if r == 'L':
-                    losing_streak += 1
-                else:
-                    break
-            
-            last_5 = results[-5:] if len(results) >= 5 else results
-            form_points = sum(3 if x == 'W' else 1 if x == 'D' else 0 for x in last_5)
-            
-            form_data[team_name] = {
-                "position": position,
-                "points": points,
-                "form_points": form_points,
-                "losing_streak": losing_streak,
-                "wins": wins,
-                "draws": draws,
-                "losses": losses,
-                "games_played": total,
-                "form_sequence": form_sequence
-            }
-            log(f"  Found form data for {team_name}: {form_sequence} ({points} pts)", "info")
-    
-    if debug:
-        debug(f"Found {len(form_data)} teams with form data", "info")
-    
-    return form_data
-
-
-def parse_statistics(text: str, debug=None) -> dict:
-    """Parse the Statistics section."""
-    stats = {}
-    lines = text.split('\n')
-    
-    for line in lines:
-        line = line.strip()
-        
-        if "Home wins:" in line:
-            match = re.search(r'Home wins:\s*(\d+).*?(\d+)%', line)
-            if match:
-                stats["home_wins"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-        
-        if "Draws:" in line and "Home wins" not in line:
-            match = re.search(r'Draws:\s*(\d+).*?(\d+)%', line)
-            if match:
-                stats["draws"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-        
-        if "Away wins:" in line:
-            match = re.search(r'Away wins:\s*(\d+).*?(\d+)%', line)
-            if match:
-                stats["away_wins"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-        
-        if "Under 2.5 goals:" in line:
-            match = re.search(r'Under 2.5 goals:\s*(\d+).*?(\d+)%', line)
-            if match:
-                stats["under_25"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-        
-        if "Over 2.5 goals:" in line:
-            match = re.search(r'Over 2.5 goals:\s*(\d+).*?(\d+)%', line)
-            if match:
-                stats["over_25"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-        
-        if "Goals per game:" in line:
-            match = re.search(r'Goals per game:\s*(\d+\.\d+)', line)
-            if match:
-                stats["goals_per_game"] = float(match.group(1))
-        
-        if "Both teams scored games:" in line:
-            match = re.search(r'Both teams scored games:\s*(\d+).*?(\d+)%', line)
-            if match:
-                stats["btts"] = {"count": int(match.group(1)), "percentage": int(match.group(2))}
-    
-    return stats
-
-
-def parse_standings(text: str, debug=None) -> dict:
-    """Extract standings from Statistics section - FIXED."""
-    standings = {}
-    lines = text.split('\n')
-    
-    def log(msg, type="info"):
-        if debug:
-            debug(f"  {msg}", type)
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        # Replace tabs with spaces and collapse multiple spaces
-        line = line.replace('\t', ' ')
-        line = ' '.join(line.split())
-        
-        # Pattern: "1. Palmeiras 118" or "1.  Palmeiras   118"
-        match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)$', line)
-        if not match:
-            # Try more flexible
-            match = re.search(r'^(\d+)\.\s+([A-Za-z\s]+?)\s+(\d+)', line)
+            match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
         
         if match:
             position = int(match.group(1))
             team_name = match.group(2).strip()
             points = int(match.group(3))
+            gp = int(match.group(4))
+            wins = int(match.group(5))
+            draws = int(match.group(6))
+            losses = int(match.group(7))
+            gf = int(match.group(8))
+            ga = int(match.group(9))
+            gd = int(match.group(10))
             
-            standings[team_name] = {
+            # Determine losing streak from losses
+            # If losses >= 3, they might have a losing streak
+            losing_streak = 0
+            if losses >= 3:
+                # Approximate: if they have 3+ losses in 6 games
+                # They could be on a losing streak
+                losing_streak = min(losses, 6)
+            
+            form_data[team_name] = {
                 "position": position,
-                "points": points
+                "points": points,
+                "gp": gp,
+                "wins": wins,
+                "draws": draws,
+                "losses": losses,
+                "gf": gf,
+                "ga": ga,
+                "gd": gd,
+                "form_points": points,  # Points from last 6 = form points
+                "losing_streak": losing_streak
             }
-            if debug:
-                debug(f"  Found standing: {position}. {team_name} ({points} pts)", "info")
+            log(f"  Found form: {position}. {team_name} ({points} pts)", "info")
     
-    return standings
+    return form_data
 
 
 # ============================================================================
 # CONVERT DATA TO ANALYSIS FORMAT
 # ============================================================================
-def convert_match_to_data(match: dict, standings: dict, form_data: dict, league: str = "Unknown") -> dict:
-    """Convert extracted match data to analysis format"""
+def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_data: dict, 
+                          league: str = "Unknown") -> dict:
+    """Convert extracted match data to analysis format."""
     league_config = get_league_config(league)
     home_team = match.get('home_team', 'Unknown')
     away_team = match.get('away_team', 'Unknown')
@@ -645,53 +613,72 @@ def convert_match_to_data(match: dict, standings: dict, form_data: dict, league:
     data = {
         "home_team": home_team,
         "away_team": away_team,
-        "home_goals_total": match.get('home_goals', 0),
-        "away_goals_total": match.get('away_goals', 0),
-        "prediction": match.get('prediction'),
+        "date": match.get('date'),
+        "home_pct": match.get('home_pct'),
+        "draw_pct": match.get('draw_pct'),
+        "away_pct": match.get('away_pct'),
         "score_code": match.get('score_code'),
+        "prediction": match.get('prediction'),
         "correct_score_home": match.get('correct_score_home'),
         "correct_score_away": match.get('correct_score_away'),
         "avg_goals": match.get('avg_goals', league_config["goals_fallback"]),
+        "temperature": match.get('temperature'),
+        "coefficient": match.get('coefficient'),
         "score_matrix": [],
-        "home_win_pct": match.get('home_win_pct'),
-        "draw_pct": match.get('draw_pct'),
-        "away_win_pct": match.get('away_win_pct'),
-        "match_url": match.get('match_url'),
-        "actual_home": match.get('actual_home'),
-        "actual_away": match.get('actual_away'),
-        "is_finished": match.get('is_finished', False),
+        "is_finished": False,
+        "actual_home": None,
+        "actual_away": None
     }
     
-    # Add standings data if available
-    if home_team in standings:
-        data["home_standings_position"] = standings[home_team]["position"]
-        data["home_standings_points"] = standings[home_team]["points"]
-    if away_team in standings:
-        data["away_standings_position"] = standings[away_team]["position"]
-        data["away_standings_points"] = standings[away_team]["points"]
+    # Add home table data if available
+    if home_team in home_table:
+        data["home_position"] = home_table[home_team]["position"]
+        data["home_points"] = home_table[home_team]["points"]
+        data["home_gp"] = home_table[home_team]["gp"]
+        data["home_wins"] = home_table[home_team]["wins"]
+        data["home_draws"] = home_table[home_team]["draws"]
+        data["home_losses"] = home_table[home_team]["losses"]
+        data["home_gf"] = home_table[home_team]["gf"]
+        data["home_ga"] = home_table[home_team]["ga"]
+        data["home_gd"] = home_table[home_team]["gd"]
+    
+    # Add away table data if available
+    if away_team in away_table:
+        data["away_position"] = away_table[away_team]["position"]
+        data["away_points"] = away_table[away_team]["points"]
+        data["away_gp"] = away_table[away_team]["gp"]
+        data["away_wins"] = away_table[away_team]["wins"]
+        data["away_draws"] = away_table[away_team]["draws"]
+        data["away_losses"] = away_table[away_team]["losses"]
+        data["away_gf"] = away_table[away_team]["gf"]
+        data["away_ga"] = away_table[away_team]["ga"]
+        data["away_gd"] = away_table[away_team]["gd"]
     
     # Add form data if available
     if home_team in form_data:
         data["home_form_points"] = form_data[home_team]["form_points"]
+        data["home_form_wins"] = form_data[home_team]["wins"]
+        data["home_form_draws"] = form_data[home_team]["draws"]
+        data["home_form_losses"] = form_data[home_team]["losses"]
         data["home_losing_streak"] = form_data[home_team]["losing_streak"]
-        data["home_games_played"] = form_data[home_team]["games_played"]
-        data["home_form_sequence"] = form_data[home_team].get("form_sequence", "")
     if away_team in form_data:
         data["away_form_points"] = form_data[away_team]["form_points"]
+        data["away_form_wins"] = form_data[away_team]["wins"]
+        data["away_form_draws"] = form_data[away_team]["draws"]
+        data["away_form_losses"] = form_data[away_team]["losses"]
         data["away_losing_streak"] = form_data[away_team]["losing_streak"]
-        data["away_games_played"] = form_data[away_team]["games_played"]
-        data["away_form_sequence"] = form_data[away_team].get("form_sequence", "")
     
     # Set competitive blocks
-    def get_block(position):
+    def get_block(position, table_type="home"):
         if position is None:
             return None
         try:
             pos = int(position)
             league_size = league_config["league_size"]
             relegation_threshold = league_config["relegation_threshold"]
+            europe_threshold = league_config["europe_threshold"]
             
-            if pos <= 4:
+            if pos <= europe_threshold:
                 return "europe"
             elif pos >= relegation_threshold:
                 return "relegation"
@@ -700,16 +687,16 @@ def convert_match_to_data(match: dict, standings: dict, form_data: dict, league:
         except:
             return None
     
-    data["competitive_block_home"] = get_block(data.get("home_standings_position"))
-    data["competitive_block_away"] = get_block(data.get("away_standings_position"))
+    data["home_block"] = get_block(data.get("home_position"))
+    data["away_block"] = get_block(data.get("away_position"))
     
     # Check relegation fight
     data["is_relegation_fight"] = (
-        data["competitive_block_home"] == "relegation" or 
-        data["competitive_block_away"] == "relegation"
+        data["home_block"] == "relegation" or 
+        data["away_block"] == "relegation"
     )
     
-    # Create score matrix from correct score
+    # Create score matrix
     if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
         data['score_matrix'].append({
             "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
@@ -718,7 +705,6 @@ def convert_match_to_data(match: dict, standings: dict, form_data: dict, league:
             "probability": 100.0
         })
     elif data.get('score_code'):
-        # For X1/X2, show the score code
         data['score_matrix'].append({
             "score": data['score_code'],
             "home_goals": None,
@@ -732,8 +718,8 @@ def convert_match_to_data(match: dict, standings: dict, form_data: dict, league:
 # ============================================================================
 # ANALYSIS ENGINE
 # ============================================================================
-def analyze_match_v8(data: dict) -> dict:
-    """Universal logic analysis engine"""
+def analyze_match(data: dict) -> dict:
+    """Universal logic analysis engine."""
     result = {
         "primary_bet": None,
         "classification": None,
@@ -751,39 +737,30 @@ def analyze_match_v8(data: dict) -> dict:
         "warning_type": None,
     }
     
-    # Extract all needed values safely
+    # Extract values
     home_form = data.get("home_form_points", 0) or 0
     away_form = data.get("away_form_points", 0) or 0
-    home_goals = data.get("home_goals_total", 0) or 0
-    away_goals = data.get("away_goals_total", 0) or 0
+    home_block = data.get("home_block")
+    away_block = data.get("away_block")
+    is_relegation_fight = data.get("is_relegation_fight", False)
+    draw_pct = data.get("draw_pct", 0) or 0
+    avg_goals = data.get("avg_goals", 2.0)
+    prediction = data.get("prediction")
     home_losing_streak = data.get("home_losing_streak", 0) or 0
     away_losing_streak = data.get("away_losing_streak", 0) or 0
-    home_block = data.get("competitive_block_home")
-    away_block = data.get("competitive_block_away")
-    is_relegation_fight = data.get("is_relegation_fight", False)
-    
-    # Get draw_pct safely
-    draw_pct = data.get("draw_pct", 0)
-    if draw_pct is None:
-        draw_pct = 0
-    
-    # Get avg goals
-    avg_goals = data.get("avg_goals", 2.0)
-    if avg_goals is None or avg_goals == 0:
-        avg_goals = 2.0
+    home_position = data.get("home_position")
+    away_position = data.get("away_position")
     
     form_diff = abs(home_form - away_form)
     
     # Check if draw is predicted
-    pred = data.get("prediction")
-    score_code = data.get("score_code", "")
-    is_draw_predicted = (draw_pct is not None and draw_pct > 0) or pred == 'X' or 'X' in score_code
+    is_draw_predicted = prediction == 'X' or draw_pct > 0
     
     same_block = home_block is not None and away_block is not None and home_block == away_block
     
     # Desperation check
-    is_home_desperate = home_losing_streak >= 3 or is_relegation_fight
-    is_away_desperate = away_losing_streak >= 3 or is_relegation_fight
+    is_home_desperate = home_losing_streak >= 3 or home_block == "relegation"
+    is_away_desperate = away_losing_streak >= 3 or away_block == "relegation"
     is_any_desperate = is_home_desperate or is_away_desperate
     
     # Form check
@@ -795,8 +772,7 @@ def analyze_match_v8(data: dict) -> dict:
     # Dead rubber detection
     is_dead_rubber = False
     if (home_block == "mid" and away_block == "mid" and 
-        not is_relegation_fight and
-        not data.get("is_title_race", False)):
+        not is_relegation_fight):
         is_dead_rubber = True
         result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
         result["warning_type"] = "dead_rubber"
@@ -817,7 +793,7 @@ def analyze_match_v8(data: dict) -> dict:
     # PRIORITY 1: Home Desperation Lock
     if is_home_desperate and not is_away_desperate:
         winner_selection = "HOME"
-        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy (7/7 in dataset)"
+        result["winner_reason"] = "🏆 HOME TEAM DESPERATE → 100% accuracy"
         result["is_lock"] = True
         result["lock_reason"] = "Home team desperate (losing streak 3+ or relegation fight)"
     
@@ -848,38 +824,38 @@ def analyze_match_v8(data: dict) -> dict:
     
     if avg_goals < 2.00:
         goal_bet = "UNDER 2.5"
-        goal_accuracy = "95% (20/21 in dataset)"
+        goal_accuracy = "95%"
         goal_reason = f"Avg goals {avg_goals:.2f} < 2.00 → UNDER 2.5 is a LOCK"
         result["is_lock"] = True
         result["lock_reason"] = "Avg goals < 2.00 → UNDER 2.5 (95% accuracy)"
     
     elif avg_goals > 3.00 and is_draw_predicted:
         goal_bet = "OVER 2.5"
-        goal_accuracy = "100% (2/2 in dataset)"
+        goal_accuracy = "100%"
         goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Draw Prediction → OVER 2.5 is a LOCK"
         result["is_lock"] = True
         result["lock_reason"] = "Avg goals > 3.00 + Draw → OVER 2.5 (100% accuracy)"
     
     elif avg_goals > 3.00 and winner_selection == "AWAY":
         goal_bet = "OVER 2.5"
-        goal_accuracy = "80% (4/5 in dataset)"
+        goal_accuracy = "80%"
         goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Away Win → OVER 2.5"
         result["is_lock"] = True
         result["lock_reason"] = "Avg goals > 3.00 + Away Win → OVER 2.5 (80% accuracy)"
     
     elif avg_goals > 3.00 and winner_selection == "HOME":
         goal_bet = "OVER 2.5"
-        goal_accuracy = "62% (in dataset)"
+        goal_accuracy = "62%"
         goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Home Win → OVER 2.5 (62%)"
     
     elif 2.00 <= avg_goals <= 2.40:
         if is_draw_predicted:
             goal_bet = "UNDER 2.5"
-            goal_accuracy = "80% (in dataset)"
+            goal_accuracy = "80%"
             goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Draw → UNDER 2.5"
         elif winner_selection == "HOME":
             goal_bet = "UNDER 2.5"
-            goal_accuracy = "80% (in dataset)"
+            goal_accuracy = "80%"
             goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot + Home Win → UNDER 2.5"
         else:
             goal_bet = "SKIP"
@@ -895,7 +871,7 @@ def analyze_match_v8(data: dict) -> dict:
         result["primary_bet"] = {
             "market": "DRAW" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
             "reason": "ALL 4 draw conditions met: Form similar, goals in sweet spot, same block, no desperation",
-            "historical_accuracy": "57% (4/7 in dataset)",
+            "historical_accuracy": "57%",
         }
         result["classification"] = "DRAW" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
         result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
@@ -907,7 +883,7 @@ def analyze_match_v8(data: dict) -> dict:
         result["primary_bet"] = {
             "market": f"DOUBLE CHANCE: {winner_selection} or Draw" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else ""),
             "reason": f"Draw conditions not fully met → Double Chance wins 83% when draw predicted. {result.get('winner_reason', '')}",
-            "historical_accuracy": "83% (24/29 in dataset)",
+            "historical_accuracy": "83%",
         }
         result["classification"] = f"DOUBLE CHANCE: {winner_selection}" + (f" | {goal_bet}" if goal_bet and goal_bet != "SKIP" else "")
         result["verdict"] = "LOCK" if result["is_lock"] else "RECOMMENDED"
@@ -1007,23 +983,30 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
-            "match_date": str(date.today()),
+            "match_date": data.get("date", str(date.today())),
             "league": league,
-            "home_goals_total": data.get("home_goals_total"),
-            "away_goals_total": data.get("away_goals_total"),
-            "combined_goals": (data.get("home_goals_total") or 0) + (data.get("away_goals_total") or 0),
+            "home_pct": data.get("home_pct"),
+            "draw_pct": data.get("draw_pct"),
+            "away_pct": data.get("away_pct"),
+            "score_code": data.get("score_code"),
+            "prediction": data.get("prediction"),
+            "avg_goals": data.get("avg_goals"),
+            "temperature": data.get("temperature"),
+            "coefficient": data.get("coefficient"),
+            "home_position": data.get("home_position"),
+            "away_position": data.get("away_position"),
+            "home_points": data.get("home_points"),
+            "away_points": data.get("away_points"),
             "home_form_points": data.get("home_form_points"),
             "away_form_points": data.get("away_form_points"),
-            "home_form_sequence": data.get("home_form_sequence"),
-            "away_form_sequence": data.get("away_form_sequence"),
-            "form_difference": abs((data.get("home_form_points") or 0) - (data.get("away_form_points") or 0)),
-            "same_block": data.get("competitive_block_home") == data.get("competitive_block_away"),
-            "is_relegation_fight": data.get("is_relegation_fight", False),
             "home_losing_streak": data.get("home_losing_streak", 0),
             "away_losing_streak": data.get("away_losing_streak", 0),
+            "home_block": data.get("home_block"),
+            "away_block": data.get("away_block"),
+            "is_relegation_fight": data.get("is_relegation_fight", False),
             "is_lock": analysis.get("is_lock", False),
             "lock_reason": analysis.get("lock_reason"),
-            "prediction": primary["market"] if primary else "SKIP",
+            "bet_market": primary["market"] if primary else "SKIP",
             "classification": analysis.get("classification", "SKIP"),
             "pattern": "DRAW" if "DRAW" in analysis.get("classification", "") else "DOUBLE_CHANCE" if "DOUBLE" in analysis.get("classification", "") else "WIN" if "WIN" in analysis.get("classification", "") else "SKIP",
             "verdict": analysis.get("verdict", "SKIP"),
@@ -1035,11 +1018,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "warning": analysis.get("warning"),
             "warning_type": analysis.get("warning_type"),
             "score_matrix": json.dumps(data.get("score_matrix", [])),
-            "home_win_pct": data.get("home_win_pct"),
-            "draw_pct": data.get("draw_pct"),
-            "away_win_pct": data.get("away_win_pct"),
-            "score_code": data.get("score_code"),
-            "avg_goals": data.get("avg_goals"),
             "result_entered": False,
         }
         response = supabase.table("match_analyses").insert(record).execute()
@@ -1060,8 +1038,10 @@ def submit_result(analysis_id, home_goals, away_goals):
     try:
         total = home_goals + away_goals
         supabase.table("match_analyses").update({
-            "actual_home_goals": home_goals, "actual_away_goals": away_goals,
-            "actual_total_goals": total, "actual_over25": total > 2,
+            "actual_home_goals": home_goals,
+            "actual_away_goals": away_goals,
+            "actual_total_goals": total,
+            "actual_over25": total > 2,
             "actual_winner": "HOME" if home_goals > away_goals else "AWAY" if away_goals > home_goals else "DRAW",
             "actual_btts": home_goals > 0 and away_goals > 0,
             "result_entered": True,
@@ -1087,7 +1067,7 @@ def get_league_badge(league: str) -> str:
         return "no"
     elif "Brazil" in league or "Serie A" in league:
         return "br"
-    elif "Premier" in league:
+    elif "Premier" in league or "EPL" in league:
         return "uk"
     elif "La Liga" in league:
         return "es"
@@ -1095,32 +1075,26 @@ def get_league_badge(league: str) -> str:
         return "it"
     elif "Bundesliga" in league:
         return "de"
+    elif "Australia" in league or "NPL" in league:
+        return "au"
     else:
         return "unknown"
 
 
 def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
-    """Display analysis results for a single match"""
+    """Display analysis results for a single match."""
     
-    # League badge
     badge_class = get_league_badge(league)
     st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
     
-    # Display warnings first
     if analysis.get("warning"):
         st.markdown(f'<div class="dead-rubber-warning">{analysis["warning"]}</div>', unsafe_allow_html=True)
     
-    # Display Lock status
     if analysis.get("is_lock"):
         st.success(f"🔒 LOCK SIGNAL: {analysis.get('lock_reason', '')}")
     
-    # Check if draw is predicted
-    draw_value = data.get("draw_pct", 0)
-    prediction = data.get("prediction")
-    score_code = data.get("score_code", "")
-    is_draw_predicted = (draw_value is not None and draw_value > 0) or prediction == 'X' or 'X' in score_code
+    is_draw_predicted = data.get("prediction") == 'X' or (data.get("draw_pct", 0) or 0) > 0
     
-    # Display Draw Conditions if draw was predicted
     if is_draw_predicted:
         st.markdown("### 🎯 Draw Conditions Check")
         conditions = analysis.get("draw_conditions", {})
@@ -1157,43 +1131,31 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     if analysis.get("winner_reason"):
         st.markdown(f"**Winner Selection:** {analysis.get('winner_selection', 'Unknown')} — {analysis.get('winner_reason', '')}")
     
-    # Key Metrics
     st.markdown("### 📊 Key Metrics")
     
-    # Calculate metrics safely
-    home_goals = data.get("home_goals_total", 0) or 0
-    away_goals = data.get("away_goals_total", 0) or 0
-    avg_goals = data.get("avg_goals", home_goals + away_goals)
-    if avg_goals == 0:
-        avg_goals = 2.0
-    
+    avg_goals = data.get("avg_goals", 2.0)
     home_form = data.get("home_form_points", "?")
     away_form = data.get("away_form_points", "?")
-    home_pos = data.get("home_standings_position", "?")
-    away_pos = data.get("away_standings_position", "?")
+    home_pos = data.get("home_position", "?")
+    away_pos = data.get("away_position", "?")
+    home_block = data.get("home_block", "?")
+    away_block = data.get("away_block", "?")
     home_streak = data.get("home_losing_streak", 0)
     away_streak = data.get("away_losing_streak", 0)
-    home_seq = data.get("home_form_sequence", "")
-    away_seq = data.get("away_form_sequence", "")
     
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_form} vs {away_form}</div><div class="metric-label">Form Points</div></div>', unsafe_allow_html=True)
-        if home_seq and away_seq:
-            st.caption(f"{home_seq} vs {away_seq}")
     with m2:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{avg_goals:.2f}</div><div class="metric-label">Avg Goals</div></div>', unsafe_allow_html=True)
     with m3:
-        block_home = data.get("competitive_block_home", "?")
-        block_away = data.get("competitive_block_away", "?")
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{block_home} vs {block_away}</div><div class="metric-label">Competitive Block</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_block} vs {away_block}</div><div class="metric-label">Competitive Block</div></div>', unsafe_allow_html=True)
     with m4:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_pos} vs {away_pos}</div><div class="metric-label">Standings</div></div>', unsafe_allow_html=True)
     with m5:
         desperate = "Yes" if (home_streak >= 3 or away_streak >= 3 or data.get("is_relegation_fight", False)) else "No"
         st.markdown(f'<div class="metric-card"><div class="metric-value">{desperate}</div><div class="metric-label">Desperation</div></div>', unsafe_allow_html=True)
     
-    # Show streaks if present
     if home_streak >= 3 or away_streak >= 3:
         streak_msg = []
         if home_streak >= 3:
@@ -1206,7 +1168,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         st.info(f"⚽ Goal Bet: {analysis.get('goal_bet')} — {analysis.get('goal_reason')} (Accuracy: {analysis.get('goal_accuracy', 'N/A')})")
     
     if data.get("score_matrix"):
-        st.markdown("### 🎯 Score Matrix (Top 5)")
+        st.markdown("### 🎯 Score Matrix")
         sorted_scores = sorted(data["score_matrix"], key=lambda x: x.get("probability", 0), reverse=True)[:5]
         score_cols = st.columns(min(5, len(sorted_scores)))
         for idx, s in enumerate(sorted_scores):
@@ -1216,7 +1178,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
                     prob = s.get("probability", 0)
                     st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?-?")}</div><div style="font-size:0.7rem; color:#94a3b8;">{prob:.1f}%</div></div>', unsafe_allow_html=True)
                 else:
-                    # For X1/X2, show the code
                     bg = "#1a2a1a"
                     st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?")}</div><div style="font-size:0.7rem; color:#94a3b8;">Double Chance</div></div>', unsafe_allow_html=True)
     
@@ -1237,7 +1198,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     if analysis["verdict"] == "SKIP":
         st.markdown(f'<div class="output-card skip-card"><div class="verdict-skip"><div class="big-text">⚠️ SKIP — NO BET</div><p style="color:#94a3b8;">{"<br>".join(analysis.get("skip_reasons", []))}</p></div></div>', unsafe_allow_html=True)
     
-    # Show priority rules
     if data.get("home_losing_streak", 0) >= 3:
         st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE: {data.get("home_team", "Home")} has {data.get("home_losing_streak", 0)} game losing streak → BET HOME WIN (100% accuracy)</div>', unsafe_allow_html=True)
 
@@ -1246,8 +1206,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V8.3")
-    st.caption("Universal Logic Engine | Complete Fix (Avg Goals, X1/X2, Form, Teams)")
+    st.title("📊 Match Analyzer V9.0")
+    st.caption("Universal Logic Engine | Complete Rewrite")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1279,16 +1239,13 @@ def main():
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
 
-    # ========================================================================
-    # TAB 1: ANALYZE
-    # ========================================================================
     with tab1:
         st.markdown("### 📝 Paste Match Data")
 
         st.markdown("""
         <div class="upload-container">
             <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;">📋 Paste All Data</p>
-            <p style="color: #94a3b8; margin-bottom: 1rem;">Paste the Predictions, Form, and Statistics pages together in one text area</p>
+            <p style="color: #94a3b8; margin-bottom: 1rem;">Paste the Predictions, Tables, and Form data together</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1296,14 +1253,10 @@ def main():
             "Paste all data here", 
             height=400, 
             key="text_paste",
-            placeholder="Paste the complete text data (Predictions + Form + Statistics) here..."
+            placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-        with col_btn1:
-            analyze_clicked = st.button("🔮 ANALYZE V8.3", type="primary")
-
-        if analyze_clicked:
+        if st.button("🔮 ANALYZE V9.0", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1313,57 +1266,50 @@ def main():
 
                     league = parsed.get("league", "Unknown League")
                     matches = parsed.get("matches", [])
-                    standings = parsed.get("standings", {})
+                    home_table = parsed.get("home_table", {})
+                    away_table = parsed.get("away_table", {})
                     form_data = parsed.get("form_data", {})
-                    stats = parsed.get("statistics", {})
 
                     if matches:
                         st.success(f"✅ Found {len(matches)} matches in {league}")
 
-                        if stats:
-                            st.markdown("### 📊 League Statistics")
-                            stat_cols = st.columns(4)
-                            with stat_cols[0]:
-                                if "home_wins" in stats:
-                                    st.metric("Home Wins", f"{stats['home_wins']['count']} ({stats['home_wins']['percentage']}%)")
-                            with stat_cols[1]:
-                                if "draws" in stats:
-                                    st.metric("Draws", f"{stats['draws']['count']} ({stats['draws']['percentage']}%)")
-                            with stat_cols[2]:
-                                if "away_wins" in stats:
-                                    st.metric("Away Wins", f"{stats['away_wins']['count']} ({stats['away_wins']['percentage']}%)")
-                            with stat_cols[3]:
-                                if "goals_per_game" in stats:
-                                    st.metric("Goals/Game", f"{stats['goals_per_game']:.2f}")
-
-                        if standings:
-                            st.markdown("### 🏆 Standings (Top 5)")
-                            standings_df = pd.DataFrame([
-                                {"Pos": data["position"], "Team": team, "Pts": data["points"]}
-                                for team, data in list(standings.items())[:5]
+                        if home_table:
+                            st.markdown("### 🏆 Home Table (Top 5)")
+                            home_df = pd.DataFrame([
+                                {"Pos": data["position"], "Team": team, "Pts": data["points"], 
+                                 "W": data["wins"], "D": data["draws"], "L": data["losses"], 
+                                 "GF": data["gf"], "GA": data["ga"], "GD": data["gd"]}
+                                for team, data in list(home_table.items())[:5]
                             ])
-                            st.dataframe(standings_df, use_container_width=True, hide_index=True)
+                            st.dataframe(home_df, use_container_width=True, hide_index=True)
+
+                        if away_table:
+                            st.markdown("### 🏆 Away Table (Top 5)")
+                            away_df = pd.DataFrame([
+                                {"Pos": data["position"], "Team": team, "Pts": data["points"], 
+                                 "W": data["wins"], "D": data["draws"], "L": data["losses"], 
+                                 "GF": data["gf"], "GA": data["ga"], "GD": data["gd"]}
+                                for team, data in list(away_table.items())[:5]
+                            ])
+                            st.dataframe(away_df, use_container_width=True, hide_index=True)
 
                         for idx, match in enumerate(matches):
                             st.markdown(f"### Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
 
                             home = match.get('home_team')
                             away = match.get('away_team')
-                            if home in form_data and away in form_data:
-                                f1, f2, f3 = st.columns(3)
-                                with f1:
-                                    st.metric(f"{home} Form", f"{form_data[home]['form_points']} pts",
-                                             f"Last 5: {form_data[home]['form_sequence'][-5:] if len(form_data[home].get('form_sequence', '')) >= 5 else form_data[home].get('form_sequence', '')}")
-                                with f2:
-                                    st.metric(f"{away} Form", f"{form_data[away]['form_points']} pts",
-                                             f"Last 5: {form_data[away]['form_sequence'][-5:] if len(form_data[away].get('form_sequence', '')) >= 5 else form_data[away].get('form_sequence', '')}")
-                                with f3:
-                                    diff = abs(form_data[home]['form_points'] - form_data[away]['form_points'])
-                                    st.metric("Form Difference", diff,
-                                             "Similar" if diff <= 2 else "Significant")
+                            
+                            # Show prediction details
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Prediction", match.get('prediction', '?'))
+                            with col2:
+                                st.metric("Correct Score", f"{match.get('correct_score_home', '?')}-{match.get('correct_score_away', '?')}")
+                            with col3:
+                                st.metric("Avg Goals", f"{match.get('avg_goals', 0):.2f}")
 
-                            data = convert_match_to_data(match, standings, form_data, league)
-                            analysis = analyze_match_v8(data)
+                            data = convert_match_to_data(match, home_table, away_table, form_data, league)
+                            analysis = analyze_match(data)
                             save_to_db(data, analysis, league)
 
                             display_analysis(data, analysis, league)
@@ -1377,9 +1323,6 @@ def main():
                     st.error(f"❌ Error during analysis: {str(e)}")
                     st.code(traceback.format_exc())
 
-    # ========================================================================
-    # TAB 2: POST-MATCH
-    # ========================================================================
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending()
@@ -1388,21 +1331,11 @@ def main():
             for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
-                pred = a.get('prediction', 'No prediction')
-                pat = a.get('pattern', '')
+                pred = a.get('bet_market', 'No prediction')
                 is_lock = a.get('is_lock', False)
                 warning = a.get('warning')
 
-                if is_lock:
-                    badge = "🔒 LOCK"
-                elif pat == "DRAW":
-                    badge = "🎯 DRAW"
-                elif pat == "DOUBLE_CHANCE":
-                    badge = "🔄 DOUBLE CHANCE"
-                elif pat == "WIN":
-                    badge = "🏆 WIN"
-                else:
-                    badge = "⚠️ SKIP"
+                badge = "🔒 LOCK" if is_lock else "📊"
 
                 with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
                     if warning:
@@ -1415,19 +1348,16 @@ def main():
                             st.success("Result submitted!")
                             st.rerun()
         else:
-            st.info("No pending analyses. Go to the Analyze tab to process matches.")
+            st.info("No pending analyses.")
 
-    # ========================================================================
-    # TAB 3: RECORDS
-    # ========================================================================
     with tab3:
         st.subheader("📊 Performance Records")
         results = get_results()
         if not results:
-            st.info("No results recorded yet. Submit results in the Post-Match tab.")
+            st.info("No results recorded yet.")
         else:
             total = len(results)
-            skip_count = sum(1 for r in results if r.get('prediction') == 'SKIP')
+            skip_count = sum(1 for r in results if r.get('bet_market') == 'SKIP')
             bet_count = total - skip_count
 
             correct = 0
@@ -1436,7 +1366,7 @@ def main():
             lock_total = 0
 
             for r in results:
-                pred = r.get('prediction', '')
+                pred = r.get('bet_market', '')
                 if pred == 'SKIP':
                     continue
 
@@ -1474,13 +1404,11 @@ def main():
 
             rows = []
             for r in results:
-                pred = r.get('prediction', '')
-                pattern = r.get('pattern', '')
+                pred = r.get('bet_market', '')
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
                 is_lock = r.get('is_lock', False)
-                warning = r.get('warning')
                 league = r.get('league', '')
                 badge_class = get_league_badge(league)
 
@@ -1492,18 +1420,7 @@ def main():
                     badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
                     score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
 
-                if is_lock:
-                    match_display = f"🔒 {r.get('home_team', '')} vs {r.get('away_team', '')}"
-                elif warning:
-                    match_display = f"⚠️ {r.get('home_team', '')} vs {r.get('away_team', '')}"
-                elif pattern == "DRAW":
-                    match_display = f"🎯 {r.get('home_team', '')} vs {r.get('away_team', '')}"
-                elif pattern == "DOUBLE_CHANCE":
-                    match_display = f"🔄 {r.get('home_team', '')} vs {r.get('away_team', '')}"
-                elif pattern == "WIN":
-                    match_display = f"🏆 {r.get('home_team', '')} vs {r.get('away_team', '')}"
-                else:
-                    match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
+                match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
 
                 rows.append({
                     "Date": r.get("match_date", ""),
