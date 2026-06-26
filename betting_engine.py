@@ -1,7 +1,7 @@
 """
-MATCH ANALYZER V9.1 — COMPLETE FIXED
-Correctly parses: [6 digits][score_code] - [avg_goals][temperature]°[coefficient]
-Where score_code = prediction (1/2/X) + away goals (e.g., 21 = 2-1, X1 = 1-1, 13 = 1-3)
+MATCH ANALYZER V9.2 — COMPLETE FIXED
+Properly parses: [6 digits][score_code] - [avg_goals][temperature]°[coefficient]
+Fixed: Team detection, duplicate detection, avg goals parsing
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.1", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.2", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -334,14 +334,10 @@ def parse_predictions(text: str, debug=None) -> list:
             prediction = 'X'
             correct_score_home = 1
             correct_score_away = 1
-            # For X1, remove the '1' prefix from avg_goals
-            prefix_to_remove = '1'
         else:
             prediction = score_code[0]
             correct_score_home = int(score_code[0])
             correct_score_away = int(score_code[1])
-            # Remove the first digit of the score code from avg_goals
-            prefix_to_remove = score_code[0]
         
         # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
         # Pattern: "- X.YZZZ°" where X.Y = avg_goals, ZZZ = temperature
@@ -351,14 +347,16 @@ def parse_predictions(text: str, debug=None) -> list:
             i += 1
             continue
         
-        raw = avg_match.group(1)  # "22.7213", "11.889", "03.0313"
+        raw = avg_match.group(1)  # "22.7213", "33.2514", "11.889", "03.0313"
         
-        # Remove the prefix (which is from the score code)
-        # For 21: remove '2' from "22.7213" → "2.7213"
-        # For X1: remove '1' from "11.889" → "1.889"
-        # For 13: remove '1' from "03.0313" → "3.0313"
-        if raw.startswith(prefix_to_remove):
-            raw = raw[len(prefix_to_remove):]
+        # ========== FIX: Remove the FIRST digit of the raw number ==========
+        # The first digit is always part of the score code or a placeholder
+        # For 22.7213 → remove 2 → 2.7213 → avg=2.72, temp=13
+        # For 33.2514 → remove 3 → 3.2514 → avg=3.25, temp=14
+        # For 43.5013 → remove 4 → 3.5013 → avg=3.50, temp=13
+        # For 11.889  → remove 1 → 1.889  → avg=1.88, temp=9
+        # For 03.0313 → remove 0 → 3.0313 → avg=3.03, temp=13
+        raw = raw[1:]  # Always remove the first character
         
         # Extract avg_goals and temperature
         match = re.search(r'(\d+)\.(\d{2})(\d*)', raw)
@@ -383,47 +381,75 @@ def parse_predictions(text: str, debug=None) -> list:
             f"Avg: {avg_goals:.2f}, Temp: {temperature}, Coef: {coefficient}", "success")
         
         # ========== FIND TEAMS ==========
+        # Look backwards from the data line to find teams
+        # The pattern is:
+        #   Line i-4: AuV (league code, skip)
+        #   Line i-3: Home Team
+        #   Line i-2: Away Team
+        #   Line i-1: Date
+        #   Line i: Data line
+        
         home_team = None
         away_team = None
         date_line = None
         
-        for j in range(i-1, max(0, i-15), -1):
+        # Start looking from i-1 backwards
+        for j in range(i-1, max(0, i-20), -1):
             prev_line = lines[j].strip()
             
-            # Check for date line
+            # Check for date line (format: DD/MM/YYYY HH:MM)
             if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}', prev_line):
                 date_line = prev_line
-                # The team names are 2 lines before the date line
+                
+                # Now find the teams
+                # The home team is usually 2 lines before the date line
+                # The away team is usually 1 line before the date line
+                home_candidate = None
+                away_candidate = None
+                
+                # Try 2 lines before date
                 if j - 2 >= 0:
-                    home_candidate = lines[j-2].strip()
-                    away_candidate = lines[j-1].strip()
+                    candidate1 = lines[j-2].strip()
+                    candidate2 = lines[j-1].strip()
                     
-                    # Skip if "PRE" or "VIEW"
-                    if home_candidate not in ["PRE", "VIEW"] and away_candidate not in ["PRE", "VIEW"]:
-                        home_team = home_candidate
-                        away_team = away_candidate
-                        break
-                    # If one is PRE/VIEW, try going further back
-                    elif j - 4 >= 0:
-                        home_candidate = lines[j-4].strip()
-                        away_candidate = lines[j-3].strip()
-                        if home_candidate not in ["PRE", "VIEW"] and away_candidate not in ["PRE", "VIEW"]:
-                            home_team = home_candidate
-                            away_team = away_candidate
+                    # Check if these are valid team names (not codes, not blank)
+                    if (candidate1 and candidate1 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""] and
+                        candidate2 and candidate2 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""]):
+                        # Check if they look like team names (contain letters)
+                        if re.search(r'[A-Za-z]', candidate1) and re.search(r'[A-Za-z]', candidate2):
+                            home_candidate = candidate1
+                            away_candidate = candidate2
                             break
+                
+                # If that didn't work, try 4 lines before (skipping PRE/VIEW)
+                if not home_candidate and j - 4 >= 0:
+                    candidate1 = lines[j-4].strip()
+                    candidate2 = lines[j-3].strip()
+                    
+                    if (candidate1 and candidate1 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""] and
+                        candidate2 and candidate2 not in ["PRE", "VIEW", "AuV", "EPL", "Br1", ""]):
+                        if re.search(r'[A-Za-z]', candidate1) and re.search(r'[A-Za-z]', candidate2):
+                            home_candidate = candidate1
+                            away_candidate = candidate2
+                            break
+                
+                if home_candidate and away_candidate:
+                    home_team = home_candidate
+                    away_team = away_candidate
+                    break
         
         if not home_team or not away_team or not date_line:
             log(f"  ⚠️ Could not find teams or date", "warning")
             i += 1
             continue
         
-        # Skip if home or away is "PRE" or "VIEW"
-        if home_team in ["PRE", "VIEW"] or away_team in ["PRE", "VIEW"]:
-            log(f"  ⚠️ Skipping preview lines", "warning")
+        # Skip if home or away is "PRE" or "VIEW" or league codes
+        if home_team in ["PRE", "VIEW", "AuV", "EPL", "Br1"] or away_team in ["PRE", "VIEW", "AuV", "EPL", "Br1"]:
+            log(f"  ⚠️ Skipping preview/league lines", "warning")
             i += 1
             continue
         
-        # Check for duplicate
+        # Check for duplicate match (same home, away, date)
         is_duplicate = False
         for existing in matches:
             if (existing["home_team"] == home_team and 
@@ -470,7 +496,6 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
             debug(f"  {msg}", type)
     
     in_table = False
-    header_found = False
     
     for line in lines:
         line = line.strip()
@@ -479,7 +504,6 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
         
         # Check if this is a header line
         if "PTS" in line and "GP" in line and "W" in line and "D" in line and "L" in line:
-            header_found = True
             in_table = True
             continue
         
@@ -493,7 +517,6 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
         # Pattern: "1 Avondale FC 22 9 7 1 1 38 8 30"
         match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
-            # Try simpler pattern
             match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
         
         if match:
@@ -534,7 +557,6 @@ def parse_form(text: str, debug=None) -> dict:
             debug(f"  {msg}", type)
     
     in_form = False
-    header_found = False
     
     for line in lines:
         line = line.strip()
@@ -543,7 +565,6 @@ def parse_form(text: str, debug=None) -> dict:
         
         # Check if this is a header line
         if "PTS" in line and "GP" in line and "W" in line and "D" in line and "L" in line:
-            header_found = True
             in_form = True
             continue
         
@@ -663,7 +684,7 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["away_losing_streak"] = form_data[away_team]["losing_streak"]
     
     # Set competitive blocks
-    def get_block(position, table_type="home"):
+    def get_block(position):
         if position is None:
             return None
         try:
@@ -1200,8 +1221,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.1")
-    st.caption("Universal Logic Engine | Corrected Data Parsing")
+    st.title("📊 Match Analyzer V9.2")
+    st.caption("Universal Logic Engine | Complete Fixed Parser")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1250,7 +1271,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.1", type="primary"):
+        if st.button("🔮 ANALYZE V9.2", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
