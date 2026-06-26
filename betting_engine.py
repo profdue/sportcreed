@@ -1,7 +1,7 @@
 """
-MATCH ANALYZER V9.10 — COMPLETE FINAL
-Fixed display issues: priority rules, double chance reason, draw conditions
-Core logic is 100% correct
+MATCH ANALYZER V9.11 — COMPLETE FIX
+Fixed: Accented characters in team names (átlético, são paulo, grêmio, etc.)
+All universal truths + priority rules + goal locks implemented.
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V9.10", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Match Analyzer V9.11", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
@@ -96,6 +96,7 @@ def get_league_config(league: str) -> dict:
     elif "Brazil" in league or "Serie A" in league or "Br1" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
+        config["europe_threshold"] = 4
         config["goals_fallback"] = 2.66
     elif "Premier" in league or "EPL" in league:
         config["relegation_threshold"] = 18
@@ -410,7 +411,7 @@ def parse_predictions(text: str, debug=None) -> list:
         for j in range(date_index - 1, max(0, date_index - 4), -1):
             candidate = lines[j].strip()
             if candidate and candidate not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]:
-                if re.search(r'[A-Za-z]', candidate):
+                if re.search(r'[A-Za-zÀ-ÿ]', candidate):
                     away_team = candidate
                     break
         
@@ -426,7 +427,7 @@ def parse_predictions(text: str, debug=None) -> list:
                 for j in range(away_index - 1, max(0, away_index - 4), -1):
                     candidate = lines[j].strip()
                     if candidate and candidate not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]:
-                        if re.search(r'[A-Za-z]', candidate):
+                        if re.search(r'[A-Za-zÀ-ÿ]', candidate):
                             home_team = candidate
                             break
         
@@ -471,7 +472,7 @@ def parse_predictions(text: str, debug=None) -> list:
 
 
 def parse_table(text: str, table_type: str, debug=None) -> dict:
-    """Parse HOME TABLE or AWAY TABLE."""
+    """Parse HOME TABLE or AWAY TABLE - FIXED for accented characters."""
     table_data = {}
     lines = text.split('\n')
     
@@ -493,12 +494,14 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
         if not in_table:
             continue
         
+        # Replace tabs and collapse spaces
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
+        # FIXED: Use [^\d]+ to match team names with accents (á, é, í, ó, ú, etc.)
+        match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
-            match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
+            match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
         
         if match:
             position = int(match.group(1))
@@ -529,7 +532,7 @@ def parse_table(text: str, table_type: str, debug=None) -> dict:
 
 
 def parse_form(text: str, debug=None) -> dict:
-    """Parse LAST 6 MATCHES TABLE."""
+    """Parse LAST 6 MATCHES TABLE - FIXED for accented characters."""
     form_data = {}
     lines = text.split('\n')
     
@@ -554,9 +557,10 @@ def parse_form(text: str, debug=None) -> dict:
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
+        # FIXED: Use [^\d]+ to match team names with accents
+        match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
         if not match:
-            match = re.search(r'^(\d+)\s+([A-Za-z\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
+            match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
         
         if match:
             position = int(match.group(1))
@@ -713,7 +717,7 @@ def analyze_match(data: dict) -> dict:
         "draw_conditions": {},
         "winner_selection": None,
         "winner_reason": None,
-        "used_priority": None,  # Track which priority was used
+        "used_priority": None,
         "goal_bet": None,
         "goal_reason": None,
         "goal_accuracy": None,
@@ -1243,8 +1247,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("📊 Match Analyzer V9.10")
-    st.caption("Universal Logic Engine | Complete Final Fix")
+    st.title("📊 Match Analyzer V9.11")
+    st.caption("Universal Logic Engine | Complete Fix (Accented Characters)")
 
     with st.expander("📖 The Universal Truths", expanded=False):
         st.markdown("""
@@ -1298,7 +1302,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🔮 ANALYZE V9.10", type="primary"):
+        if st.button("🔮 ANALYZE V9.11", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
