@@ -1,10 +1,13 @@
 """
-MATCH ANALYZER V10.2 — DRAW-FOCUSED + SKIP FT MATCHES
-ONLY analyzes matches where:
-1. Match is NOT already played (no FT flag)
-2. Forebet predicts DRAW (X)
-Skips all 1X2 predictions and finished matches.
-Displays Outcome Bet and Goal Bet as SEPARATE bets.
+MATCH ANALYZER V10.3 — DEFINITIVE LOGIC
+ONLY analyzes matches where Forebet predicts DRAW (X).
+Skips all FT matches and non-draws.
+
+PRIORITY 1: Home Desperate + Away NOT Desperate → HOME WIN (100%)
+PRIORITY 2: ALL 4 draw conditions met → DRAW (57%)
+PRIORITY 3: ANY condition fails → DOUBLE CHANCE: HOME or AWAY (83%)
+
+Goal bets: UNDER/OVER 2.5 based on avg goals.
 """
 
 import streamlit as st
@@ -30,7 +33,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V10.2", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V10.3", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -137,7 +140,6 @@ def detect_league(text: str) -> str:
 # TEXT PARSER
 # ============================================================================
 def parse_text_data(text: str) -> dict:
-    """Parse the complete text data."""
     league = detect_league(text)
     league_config = get_league_config(league)
     
@@ -168,7 +170,6 @@ def parse_text_data(text: str) -> dict:
 
 
 def split_into_sections(text: str) -> dict:
-    """Split text into sections."""
     result = {
         "predictions": "",
         "home_table": "",
@@ -220,7 +221,6 @@ def split_into_sections(text: str) -> dict:
 
 
 def parse_predictions(text: str) -> list:
-    """Parse predictions from the text."""
     matches = []
     lines = text.split('\n')
     
@@ -231,8 +231,7 @@ def parse_predictions(text: str) -> list:
             i += 1
             continue
         
-        # ========== CHECK IF MATCH IS FINISHED (FT) ==========
-        # Look ahead for FT flag in the next few lines
+        # Check for FT flag
         is_finished = False
         actual_home = None
         actual_away = None
@@ -241,7 +240,6 @@ def parse_predictions(text: str) -> list:
             check_line = lines[j].strip()
             if "FT" in check_line:
                 is_finished = True
-                # Extract actual score: "FT 0 - 1" or "FT 0-1"
                 ft_match = re.search(r'FT\s+(\d+)\s*-\s*(\d+)', check_line)
                 if ft_match:
                     actual_home = int(ft_match.group(1))
@@ -265,7 +263,6 @@ def parse_predictions(text: str) -> list:
         
         rest = cleaned[6:]
         
-        # ========== EXTRACT PREDICTION ==========
         prediction_char = rest[0]
         rest = rest[1:]
         
@@ -277,7 +274,6 @@ def parse_predictions(text: str) -> list:
             i += 1
             continue
         
-        # ========== EXTRACT SCORE ==========
         dash_pos = rest.find('-')
         if dash_pos == -1:
             i += 1
@@ -286,7 +282,6 @@ def parse_predictions(text: str) -> list:
         score_part = rest[:dash_pos].strip()
         avg_part = rest[dash_pos+1:].strip()
         
-        # Parse the score
         if prediction == 'X':
             if score_part and score_part[0].isdigit():
                 draw_score = int(score_part[0])
@@ -320,7 +315,6 @@ def parse_predictions(text: str) -> list:
                 else:
                     away_goals = 0
         
-        # ========== EXTRACT AVG GOALS AND TEMPERATURE ==========
         avg_match = re.search(r'(\d+\.\d+)°', avg_part)
         if not avg_match:
             i += 1
@@ -344,7 +338,6 @@ def parse_predictions(text: str) -> list:
         coeff_match = re.search(r'°(\d+\.\d+)', avg_part)
         coefficient = float(coeff_match.group(1)) if coeff_match else None
         
-        # ========== FIND TEAMS ==========
         date_index = None
         for j in range(i-1, max(0, i-10), -1):
             prev_line = lines[j].strip()
@@ -422,7 +415,6 @@ def parse_predictions(text: str) -> list:
 
 
 def parse_table(text: str, table_type: str) -> dict:
-    """Parse HOME TABLE or AWAY TABLE."""
     table_data = {}
     lines = text.split('\n')
     
@@ -475,7 +467,6 @@ def parse_table(text: str, table_type: str) -> dict:
 
 
 def parse_form(text: str) -> dict:
-    """Parse LAST 6 MATCHES TABLE."""
     form_data = {}
     lines = text.split('\n')
     
@@ -538,7 +529,6 @@ def parse_form(text: str) -> dict:
 # ============================================================================
 def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_data: dict, 
                           league: str = "Unknown") -> dict:
-    """Convert extracted match data to analysis format."""
     league_config = get_league_config(league)
     home_team = match.get('home_team', 'Unknown')
     away_team = match.get('away_team', 'Unknown')
@@ -563,7 +553,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         "league_config": league_config
     }
     
-    # Add home table data
     if home_team in home_table:
         data["home_position"] = home_table[home_team]["position"]
         data["home_points"] = home_table[home_team]["points"]
@@ -575,7 +564,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["home_ga"] = home_table[home_team]["ga"]
         data["home_gd"] = home_table[home_team]["gd"]
     
-    # Add away table data
     if away_team in away_table:
         data["away_position"] = away_table[away_team]["position"]
         data["away_points"] = away_table[away_team]["points"]
@@ -587,7 +575,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["away_ga"] = away_table[away_team]["ga"]
         data["away_gd"] = away_table[away_team]["gd"]
     
-    # Add form data
     if home_team in form_data:
         data["home_form_points"] = form_data[home_team]["form_points"]
         data["home_form_wins"] = form_data[home_team]["wins"]
@@ -601,7 +588,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["away_form_losses"] = form_data[away_team]["losses"]
         data["away_losing_streak"] = form_data[away_team]["losing_streak"]
     
-    # Set competitive blocks
     def get_block(position):
         if position is None:
             return None
@@ -627,7 +613,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["away_block"] == "relegation"
     )
     
-    # Create score matrix
     if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
         data['score_matrix'].append({
             "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
@@ -647,6 +632,10 @@ def analyze_draw_match(data: dict) -> dict:
     ONLY analyze matches where:
     1. Match is NOT already played (no FT flag)
     2. Forebet predicts DRAW (X)
+    
+    PRIORITY 1: Home Desperate + Away NOT Desperate → HOME WIN (100%)
+    PRIORITY 2: ALL 4 draw conditions met → DRAW (57%)
+    PRIORITY 3: ANY condition fails → DOUBLE CHANCE: HOME or AWAY (83%)
     """
     
     result = {
@@ -670,9 +659,8 @@ def analyze_draw_match(data: dict) -> dict:
     }
     
     # ================================================================
-    # STEP 1: FILTER — Skip FT matches
+    # FILTER 1: Skip FT matches
     # ================================================================
-    
     if data.get("is_finished"):
         result["verdict"] = "SKIP"
         actual_home = data.get("actual_home", "?")
@@ -682,9 +670,8 @@ def analyze_draw_match(data: dict) -> dict:
         return result
     
     # ================================================================
-    # STEP 2: FILTER — Only analyze draw predictions
+    # FILTER 2: Only analyze draw predictions
     # ================================================================
-    
     if data.get("prediction") != 'X':
         result["verdict"] = "SKIP"
         result["skip_reason"] = "Not a draw prediction (X)"
@@ -692,9 +679,8 @@ def analyze_draw_match(data: dict) -> dict:
         return result
     
     # ================================================================
-    # STEP 3: EXTRACT DATA
+    # EXTRACT DATA
     # ================================================================
-    
     home_form = data.get("home_form_points", 0) or 0
     away_form = data.get("away_form_points", 0) or 0
     home_block = data.get("home_block")
@@ -733,7 +719,7 @@ def analyze_draw_match(data: dict) -> dict:
         result["warning_type"] = "dead_rubber"
     
     # ================================================================
-    # STEP 4: OUTCOME BET — DECISION (PRIORITY ORDER)
+    # OUTCOME BET — PRIORITY ORDER
     # ================================================================
     
     outcome_bet = None
@@ -743,6 +729,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["used_priority"] = None
     outcome_is_lock = False
     
+    # PRIORITY 1: Home Desperate + Away NOT Desperate (100%)
     if is_home_desperate and not is_away_desperate:
         outcome_bet = "HOME WIN"
         outcome_accuracy = "100%"
@@ -752,23 +739,26 @@ def analyze_draw_match(data: dict) -> dict:
         result["used_priority"] = "home_desperate"
         outcome_is_lock = True
     
+    # PRIORITY 2: ALL 4 Conditions Met (57%)
     elif all_conditions_met:
         outcome_bet = "DRAW"
         outcome_accuracy = "57%"
         outcome_reason = "🎯 ALL 4 draw conditions met → Form similar, goals in sweet spot, same block, no desperation"
         result["used_priority"] = "draw_conditions_met"
     
+    # PRIORITY 3: ANY Condition Fails (83%)
     else:
-        outcome_bet = "DOUBLE CHANCE: HOME or Draw"
+        # FIXED: Using HOME or AWAY (not HOME or Draw) — 83% accuracy
+        outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
         outcome_accuracy = "83%"
-        outcome_reason = "🔄 ANY draw condition fails → Double Chance wins 83% when draw predicted"
+        outcome_reason = "🔄 ANY draw condition fails → Match will NOT be a draw (83% accuracy)"
         result["used_priority"] = "draw_conditions_fail"
     
     result["winner_selection"] = outcome_bet
     result["winner_reason"] = outcome_reason
     
     # ================================================================
-    # STEP 5: GOAL BET (Secondary)
+    # GOAL BET
     # ================================================================
     
     goal_bet = None
@@ -802,7 +792,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["goal_is_lock"] = goal_is_lock
     
     # ================================================================
-    # STEP 6: BUILD FINAL RESULT
+    # BUILD FINAL RESULT
     # ================================================================
     
     result["primary_bet"] = {
@@ -1000,10 +990,10 @@ def get_league_badge(league: str) -> str:
 def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     """Display analysis results for a single match with split Outcome and Goal bets."""
     
-    # Check if skipped due to FT
+    # Check if skipped
     if analysis.get("verdict") == "SKIP":
         skip_reason = analysis.get("skip_reason") or "Not a draw prediction"
-        is_ft = "Already played (FT)" in skip_reason or "FT" in skip_reason
+        is_ft = "Already played" in skip_reason or "FT" in skip_reason
         
         if is_ft:
             st.markdown(f"""
@@ -1050,6 +1040,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     if analysis.get("warning"):
         st.markdown(f'<div class="dead-rubber-warning">{analysis["warning"]}</div>', unsafe_allow_html=True)
     
+    # Draw Conditions
     st.markdown("### 🎯 Draw Conditions Check")
     conditions = analysis.get("draw_conditions", {})
     c1, c2, c3, c4 = st.columns(4)
@@ -1070,12 +1061,12 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     if all_met:
         st.success("✅ ALL 4 conditions met → BET THE DRAW (57% accuracy)")
     else:
-        st.info("⚠️ Not all conditions met → Double Chance or Exact Winner recommended")
+        st.info("⚠️ Not all conditions met → Double Chance recommended")
     
     st.markdown("---")
     
     # ================================================================
-    # OUTCOME BET SECTION
+    # OUTCOME BET
     # ================================================================
     
     primary = analysis.get("primary_bet", {})
@@ -1103,7 +1094,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     """, unsafe_allow_html=True)
     
     # ================================================================
-    # GOAL BET SECTION
+    # GOAL BET
     # ================================================================
     
     goal_bet = primary.get('goal_bet')
@@ -1194,6 +1185,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
                     prob = s.get("probability", 0)
                     st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?-?")}</div><div style="font-size:0.7rem; color:#94a3b8;">{prob:.1f}%</div></div>', unsafe_allow_html=True)
     
+    # Priority Rule Used
     used_priority = analysis.get("used_priority")
     
     if used_priority == "home_desperate":
@@ -1201,22 +1193,22 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     elif used_priority == "draw_conditions_met":
         st.markdown(f'<div class="priority-rule">🎯 PRIORITY RULE 2: ALL 4 draw conditions met → BET DRAW (57% accuracy)</div>', unsafe_allow_html=True)
     elif used_priority == "draw_conditions_fail":
-        st.markdown(f'<div class="priority-rule">🔄 PRIORITY RULE 3: ANY draw condition fails → DOUBLE CHANCE (83% accuracy)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="priority-rule">🔄 PRIORITY RULE 3: ANY draw condition fails → DOUBLE CHANCE: HOME or AWAY (83% accuracy)</div>', unsafe_allow_html=True)
 
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V10.2")
-    st.caption("Draw-Focused Strategy | Skips FT Matches & Non-Draws")
+    st.title("🎯 Match Analyzer V10.3")
+    st.caption("Draw-Focused Strategy | DEFINITIVE LOGIC")
 
     with st.expander("📖 The Draw-Focused Logic", expanded=False):
         st.markdown("""
         **Filters:**
         1. ⏭️ **SKIP** matches already played (FT)
         2. ⏭️ **SKIP** matches where prediction is NOT X (Draw)
-        3. 🎯 **ANALYZE** only matches where prediction is X (Draw)
+        3. 🎯 **ANALYZE** only upcoming matches with X (Draw)
         
         **Priority Order for Draw Predictions:**
         
@@ -1224,7 +1216,7 @@ def main():
         |----------|-----------|-------------|----------|
         | **1** | Home Desperate + Away NOT Desperate | **HOME WIN** | **100%** |
         | **2** | ALL 4 Draw Conditions Met | **DRAW** | **57%** |
-        | **3** | ANY Draw Condition Fails | **DOUBLE CHANCE** | **83%** |
+        | **3** | ANY Draw Condition Fails | **DOUBLE CHANCE: HOME or AWAY** | **83%** |
         
         **The 4 Draw Conditions:**
         1. Form Difference ≤ 2 points
@@ -1258,7 +1250,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE DRAWS V10.2", type="primary"):
+        if st.button("🎯 ANALYZE DRAWS V10.3", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1274,7 +1266,6 @@ def main():
                     league_config = parsed.get("league_config", {})
 
                     if matches:
-                        # Count matches by status
                         ft_matches = [m for m in matches if m.get("is_finished")]
                         draw_matches = [m for m in matches if m.get("prediction") == 'X' and not m.get("is_finished")]
                         total_matches = len(matches)
@@ -1307,7 +1298,6 @@ def main():
                             st.dataframe(away_df, use_container_width=True, hide_index=True)
 
                         for idx, match in enumerate(matches):
-                            # Determine status icon
                             if match.get("is_finished"):
                                 status_icon = "⏭️"
                                 status_text = "FT (Skipped)"
@@ -1323,7 +1313,6 @@ def main():
                             home = match.get('home_team')
                             away = match.get('away_team')
                             
-                            # Show prediction details
                             col1, col2, col3 = st.columns(3)
                             with col1:
                                 st.metric("Prediction", match.get('prediction', '?'))
@@ -1401,7 +1390,6 @@ def main():
         if not results:
             st.info("No results recorded yet.")
         else:
-            # Filter out skipped and FT matches for accuracy calculation
             analyzed_results = [r for r in results if r.get('bet_market') != 'SKIP' and not r.get('skip_reason') and not r.get('is_finished')]
             ft_results = [r for r in results if r.get('is_finished')]
             skipped_results = [r for r in results if r.get('bet_market') == 'SKIP' or r.get('skip_reason')]
