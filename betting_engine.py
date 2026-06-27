@@ -1,13 +1,7 @@
 """
-MATCH ANALYZER V10.3 — DEFINITIVE LOGIC
-ONLY analyzes matches where Forebet predicts DRAW (X).
-Skips all FT matches and non-draws.
-
-PRIORITY 1: Home Desperate + Away NOT Desperate → HOME WIN (100%)
-PRIORITY 2: ALL 4 draw conditions met → DRAW (57%)
-PRIORITY 3: ANY condition fails → DOUBLE CHANCE: HOME or AWAY (83%)
-
-Goal bets: UNDER/OVER 2.5 based on avg goals.
+MATCH ANALYZER V10.4 — REORDERED DISPLAY
+Analyzed matches (draw predictions) shown FIRST.
+Skipped matches (FT + non-draws) shown AFTER, collapsed.
 """
 
 import streamlit as st
@@ -33,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V10.3", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V10.4", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -76,6 +70,7 @@ st.markdown("""
     .league-badge.au { background: #f59e0b; color: #000; }
     .league-badge.unknown { background: #64748b; color: #fff; }
     .separator-line { border: none; border-top: 1px dashed #475569; margin: 0.5rem 0; }
+    .section-divider { border: none; border-top: 2px solid #f59e0b; margin: 1.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -658,9 +653,7 @@ def analyze_draw_match(data: dict) -> dict:
         "warning_type": None,
     }
     
-    # ================================================================
     # FILTER 1: Skip FT matches
-    # ================================================================
     if data.get("is_finished"):
         result["verdict"] = "SKIP"
         actual_home = data.get("actual_home", "?")
@@ -669,18 +662,14 @@ def analyze_draw_match(data: dict) -> dict:
         result["classification"] = "⏭️ SKIPPED — Already Played"
         return result
     
-    # ================================================================
     # FILTER 2: Only analyze draw predictions
-    # ================================================================
     if data.get("prediction") != 'X':
         result["verdict"] = "SKIP"
         result["skip_reason"] = "Not a draw prediction (X)"
         result["classification"] = "⏭️ SKIPPED — Not a Draw Prediction"
         return result
     
-    # ================================================================
     # EXTRACT DATA
-    # ================================================================
     home_form = data.get("home_form_points", 0) or 0
     away_form = data.get("away_form_points", 0) or 0
     home_block = data.get("home_block")
@@ -718,10 +707,7 @@ def analyze_draw_match(data: dict) -> dict:
         result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
         result["warning_type"] = "dead_rubber"
     
-    # ================================================================
     # OUTCOME BET — PRIORITY ORDER
-    # ================================================================
-    
     outcome_bet = None
     outcome_accuracy = None
     outcome_reason = None
@@ -748,7 +734,6 @@ def analyze_draw_match(data: dict) -> dict:
     
     # PRIORITY 3: ANY Condition Fails (83%)
     else:
-        # FIXED: Using HOME or AWAY (not HOME or Draw) — 83% accuracy
         outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
         outcome_accuracy = "83%"
         outcome_reason = "🔄 ANY draw condition fails → Match will NOT be a draw (83% accuracy)"
@@ -757,10 +742,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["winner_selection"] = outcome_bet
     result["winner_reason"] = outcome_reason
     
-    # ================================================================
     # GOAL BET
-    # ================================================================
-    
     goal_bet = None
     goal_accuracy = None
     goal_reason = None
@@ -791,10 +773,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["goal_accuracy"] = goal_accuracy
     result["goal_is_lock"] = goal_is_lock
     
-    # ================================================================
     # BUILD FINAL RESULT
-    # ================================================================
-    
     result["primary_bet"] = {
         "outcome_bet": outcome_bet,
         "outcome_accuracy": outcome_accuracy,
@@ -987,8 +966,8 @@ def get_league_badge(league: str) -> str:
         return "unknown"
 
 
-def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
-    """Display analysis results for a single match with split Outcome and Goal bets."""
+def display_analysis(data: dict, analysis: dict, league: str = "Unknown", show_details: bool = True):
+    """Display analysis results for a single match."""
     
     # Check if skipped
     if analysis.get("verdict") == "SKIP":
@@ -1065,10 +1044,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     st.markdown("---")
     
-    # ================================================================
     # OUTCOME BET
-    # ================================================================
-    
     primary = analysis.get("primary_bet", {})
     
     if primary.get("is_lock"):
@@ -1093,10 +1069,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     </div>
     """, unsafe_allow_html=True)
     
-    # ================================================================
     # GOAL BET
-    # ================================================================
-    
     goal_bet = primary.get('goal_bet')
     
     if goal_bet:
@@ -1137,10 +1110,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         </div>
         """, unsafe_allow_html=True)
     
-    # ================================================================
     # KEY METRICS
-    # ================================================================
-    
     st.markdown("### 📊 Key Metrics")
     
     avg_goals = data.get("avg_goals", 2.0)
@@ -1200,8 +1170,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V10.3")
-    st.caption("Draw-Focused Strategy | DEFINITIVE LOGIC")
+    st.title("🎯 Match Analyzer V10.4")
+    st.caption("Draw-Focused Strategy | Analyzed Matches FIRST, Skipped AFTER")
 
     with st.expander("📖 The Draw-Focused Logic", expanded=False):
         st.markdown("""
@@ -1210,6 +1180,10 @@ def main():
         2. ⏭️ **SKIP** matches where prediction is NOT X (Draw)
         3. 🎯 **ANALYZE** only upcoming matches with X (Draw)
         
+        **Display Order:**
+        1. 🎯 **ANALYZED MATCHES** (shown first — actionable bets)
+        2. ⏭️ **SKIPPED MATCHES** (shown after — collapsed)
+        
         **Priority Order for Draw Predictions:**
         
         | Priority | Condition | Outcome Bet | Accuracy |
@@ -1217,24 +1191,13 @@ def main():
         | **1** | Home Desperate + Away NOT Desperate | **HOME WIN** | **100%** |
         | **2** | ALL 4 Draw Conditions Met | **DRAW** | **57%** |
         | **3** | ANY Draw Condition Fails | **DOUBLE CHANCE: HOME or AWAY** | **83%** |
-        
-        **The 4 Draw Conditions:**
-        1. Form Difference ≤ 2 points
-        2. Avg Goals between 2.00 - 2.40
-        3. Same competitive block
-        4. No desperation
-        
-        **Goal Bets (Secondary — Separate from Outcome):**
-        - Avg Goals < 2.00 → UNDER 2.5 (95%)
-        - Avg Goals > 3.00 → OVER 2.5 (100%)
-        - Avg Goals 2.00-2.40 → UNDER 2.5 (80%)
         """)
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze Draws", "📝 Post-Match", "📊 Records"])
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 Only upcoming matches with **X (Draw)** predictions will be analyzed. FT matches and non-draws are skipped.")
+        st.info("🎯 Only upcoming matches with **X (Draw)** predictions will be analyzed. Analyzed matches shown first.")
 
         st.markdown("""
         <div class="upload-container">
@@ -1250,7 +1213,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE DRAWS V10.3", type="primary"):
+        if st.button("🎯 ANALYZE DRAWS V10.4", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1266,76 +1229,94 @@ def main():
                     league_config = parsed.get("league_config", {})
 
                     if matches:
+                        # Count matches
                         ft_matches = [m for m in matches if m.get("is_finished")]
-                        draw_matches = [m for m in matches if m.get("prediction") == 'X' and not m.get("is_finished")]
                         total_matches = len(matches)
                         
                         st.success(f"✅ Found {total_matches} matches in {league}")
-                        st.info(f"⏭️ {len(ft_matches)} matches already played (FT) — skipped")
-                        st.info(f"🎯 {len(draw_matches)} upcoming matches with DRAW predictions — analyzing...")
                         
-                        if total_matches - len(ft_matches) - len(draw_matches) > 0:
-                            st.caption(f"⏭️ {total_matches - len(ft_matches) - len(draw_matches)} matches skipped (not draw predictions)")
-
-                        if home_table:
-                            st.markdown("### 🏆 Home Table (Top 5)")
-                            home_df = pd.DataFrame([
-                                {"Pos": data["position"], "Team": team, "Pts": data["points"], 
-                                 "W": data["wins"], "D": data["draws"], "L": data["losses"], 
-                                 "GF": data["gf"], "GA": data["ga"], "GD": data["gd"]}
-                                for team, data in list(home_table.items())[:5]
-                            ])
-                            st.dataframe(home_df, use_container_width=True, hide_index=True)
-
-                        if away_table:
-                            st.markdown("### 🏆 Away Table (Top 5)")
-                            away_df = pd.DataFrame([
-                                {"Pos": data["position"], "Team": team, "Pts": data["points"], 
-                                 "W": data["wins"], "D": data["draws"], "L": data["losses"], 
-                                 "GF": data["gf"], "GA": data["ga"], "GD": data["gd"]}
-                                for team, data in list(away_table.items())[:5]
-                            ])
-                            st.dataframe(away_df, use_container_width=True, hide_index=True)
-
-                        for idx, match in enumerate(matches):
-                            if match.get("is_finished"):
-                                status_icon = "⏭️"
-                                status_text = "FT (Skipped)"
-                            elif match.get("prediction") == 'X':
-                                status_icon = "🎯"
-                                status_text = "Draw Analysis"
-                            else:
-                                status_icon = "⏭️"
-                                status_text = "Skipped"
-
-                            st.markdown(f"### {status_icon} Match {idx + 1}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({status_text})")
-
-                            home = match.get('home_team')
-                            away = match.get('away_team')
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Prediction", match.get('prediction', '?'))
-                            with col2:
-                                st.metric("Correct Score", f"{match.get('correct_score_home', '?')}-{match.get('correct_score_away', '?')}")
-                            with col3:
-                                st.metric("Avg Goals", f"{match.get('avg_goals', 0):.2f}")
-
-                            if match.get("is_finished"):
-                                st.info(f"📅 Already played — FT Score: {match.get('actual_home', '?')}-{match.get('actual_away', '?')}")
-
+                        if ft_matches:
+                            st.info(f"⏭️ {len(ft_matches)} matches already played (FT) — skipped")
+                        
+                        # Process all matches
+                        analyzed_results = []
+                        skipped_results = []
+                        
+                        for match in matches:
                             match_with_config = dict(match)
                             match_with_config["league_config"] = league_config
-                            
                             data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
-                            
                             analysis = analyze_draw_match(data)
                             save_to_db(data, analysis, league)
+                            
+                            if analysis.get("verdict") == "SKIP":
+                                skipped_results.append((match, data, analysis))
+                            else:
+                                analyzed_results.append((match, data, analysis))
 
-                            display_analysis(data, analysis, league)
-
-                            if idx < len(matches) - 1:
-                                st.markdown("---")
+                        # ============================================================
+                        # DISPLAY ANALYZED MATCHES FIRST
+                        # ============================================================
+                        if analyzed_results:
+                            st.markdown("---")
+                            st.markdown("### 🎯 ANALYZED MATCHES")
+                            st.caption(f"{len(analyzed_results)} matches have actionable bets")
+                            
+                            for idx, (match, data, analysis) in enumerate(analyzed_results, 1):
+                                st.markdown(f"#### Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Prediction", match.get('prediction', '?'))
+                                with col2:
+                                    st.metric("Correct Score", f"{match.get('correct_score_home', '?')}-{match.get('correct_score_away', '?')}")
+                                with col3:
+                                    st.metric("Avg Goals", f"{match.get('avg_goals', 0):.2f}")
+                                
+                                display_analysis(data, analysis, league)
+                                
+                                if idx < len(analyzed_results):
+                                    st.markdown("---")
+                        
+                        # ============================================================
+                        # DISPLAY SKIPPED MATCHES AFTER (COLLAPSED)
+                        # ============================================================
+                        if skipped_results:
+                            st.markdown("---")
+                            st.markdown("### ⏭️ SKIPPED MATCHES")
+                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw predictions)")
+                            
+                            with st.expander(f"Click to expand {len(skipped_results)} skipped matches"):
+                                for idx, (match, data, analysis) in enumerate(skipped_results, 1):
+                                    st.markdown(f"#### Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
+                                    
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric("Prediction", match.get('prediction', '?'))
+                                    with col2:
+                                        st.metric("Correct Score", f"{match.get('correct_score_home', '?')}-{match.get('correct_score_away', '?')}")
+                                    with col3:
+                                        st.metric("Avg Goals", f"{match.get('avg_goals', 0):.2f}")
+                                    
+                                    if match.get("is_finished"):
+                                        st.info(f"📅 Already played — FT Score: {match.get('actual_home', '?')}-{match.get('actual_away', '?')}")
+                                    
+                                    display_analysis(data, analysis, league)
+                                    
+                                    if idx < len(skipped_results):
+                                        st.markdown("---")
+                        
+                        # Summary stats
+                        st.markdown("---")
+                        st.markdown("### 📊 Summary")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Matches", total_matches)
+                        with col2:
+                            st.metric("🎯 Analyzed", len(analyzed_results))
+                        with col3:
+                            st.metric("⏭️ Skipped", len(skipped_results))
+                            
                     else:
                         st.error("No matches found in the data. Please make sure you're pasting valid data.")
 
