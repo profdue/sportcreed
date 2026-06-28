@@ -1,7 +1,8 @@
 """
-MATCH ANALYZER V1.0 — TWO-TIER SYSTEM
+MATCH ANALYZER V1.1 — TWO-TIER SYSTEM (ALL MATCHES)
 Tier 1: LOCK Bets (100% accuracy) — Home Desperation, Elite Home, Elite Away
 Tier 2: Interwoven Framework (95% accuracy) — Multi-signal convergence with conflict detection
+Works on ALL matches — X, 1, and 2 predictions.
 Goal Bets: Secondary — added when clear
 """
 
@@ -28,7 +29,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.0", page_icon="🏆", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.1", page_icon="🏆", layout="wide")
 
 st.markdown("""
 <style>
@@ -656,7 +657,8 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 # ============================================================================
 def analyze_match(data: dict) -> dict:
     """
-    TWO-TIER SYSTEM:
+    TWO-TIER SYSTEM — Works on ALL matches (X, 1, 2)
+    
     TIER 1: LOCK Bets (100% accuracy) — Home Desperation, Elite Home, Elite Away
     TIER 2: Interwoven Framework (95% accuracy) — Multi-signal convergence with conflict detection
     Goal Bets: Secondary — added when clear
@@ -686,7 +688,7 @@ def analyze_match(data: dict) -> dict:
     }
     
     # ================================================================
-    # FILTER 1: Skip FT matches
+    # FILTER 1: Skip FT matches (already played)
     # ================================================================
     if data.get("is_finished"):
         result["verdict"] = "SKIP"
@@ -697,13 +699,9 @@ def analyze_match(data: dict) -> dict:
         return result
     
     # ================================================================
-    # FILTER 2: Only analyze draw predictions
+    # NO DRAW FILTER — Analyze ALL matches
+    # The Two-Tier system works on ALL predictions (X, 1, 2)
     # ================================================================
-    if data.get("prediction") != 'X':
-        result["verdict"] = "SKIP"
-        result["skip_reason"] = "Not a draw prediction (X)"
-        result["classification"] = "⏭️ SKIPPED — Not a Draw Prediction"
-        return result
     
     # ================================================================
     # EXTRACT DATA
@@ -721,6 +719,7 @@ def analyze_match(data: dict) -> dict:
     away_pos = data.get("away_position")
     home_is_elite = data.get("home_is_elite", False)
     away_is_elite = data.get("away_is_elite", False)
+    prediction = data.get("prediction")
     league_config = data.get("league_config", {})
     league_size = league_config.get("league_size", 20)
     
@@ -770,7 +769,7 @@ def analyze_match(data: dict) -> dict:
         result["used_priority"] = "home_desperate"
         tier1_signal = "Home Desperate"
     
-    # Signal 2: Elite Home (Draw ONLY) (100%)
+    # Signal 2: Elite Home (100%)
     elif home_is_elite and not away_is_elite:
         outcome_bet = "HOME WIN"
         outcome_accuracy = "100%"
@@ -781,7 +780,7 @@ def analyze_match(data: dict) -> dict:
         result["used_priority"] = "elite_home"
         tier1_signal = "Elite Home"
     
-    # Signal 3: Elite Away (Draw ONLY) (100%)
+    # Signal 3: Elite Away (100%)
     elif away_is_elite and not home_is_elite:
         outcome_bet = "AWAY WIN"
         outcome_accuracy = "100%"
@@ -856,7 +855,7 @@ def analyze_match(data: dict) -> dict:
         }
         
         # ============================================================
-        # CONFLICT DETECTION — NEW
+        # CONFLICT DETECTION
         # ============================================================
         
         # Conflict: Home and Away both high (≥4)
@@ -1155,7 +1154,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     # Check if skipped
     if analysis.get("verdict") == "SKIP":
-        skip_reason = analysis.get("skip_reason") or "Not a draw prediction"
+        skip_reason = analysis.get("skip_reason") or "No clear signal"
         is_ft = "Already played" in skip_reason or "FT" in skip_reason
         
         if is_ft:
@@ -1222,7 +1221,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     all_met = all(conditions.values())
     if all_met:
-        st.success("✅ ALL 4 conditions met → BET THE DRAW (57% accuracy)")
+        st.success("✅ ALL 4 draw conditions met → BET THE DRAW (57% accuracy)")
     else:
         st.info("⚠️ Not all conditions met → Using Tier 2 framework")
     
@@ -1381,18 +1380,20 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🏆 Match Analyzer V1.0")
-    st.caption("Two-Tier System | Tier 1: LOCK Bets (100%) | Tier 2: Interwoven Framework (95%)")
+    st.title("🏆 Match Analyzer V1.1")
+    st.caption("Two-Tier System | ALL Matches (X, 1, 2) | Tier 1: LOCK (100%) | Tier 2: Interwoven (95%)")
 
-    with st.expander("📖 The Two-Tier System", expanded=False):
+    with st.expander("📖 The Two-Tier System — ALL Matches", expanded=False):
         st.markdown("""
+        **Works on ALL matches — X, 1, and 2 predictions.**
+        
         **TIER 1: LOCK Bets (100% Accuracy)**
         
         | Signal | Trigger | Bet |
         |--------|---------|-----|
         | Home Desperation | Home in relegation zone OR 3+ losses | **HOME WIN** |
-        | Elite Home (Draw ONLY) | Home Top 3-4 Home Table + Away NOT Top 3-4 Away | **HOME WIN** |
-        | Elite Away (Draw ONLY) | Away Top 3-4 Away Table + Home NOT Top 3-4 Home | **AWAY WIN** |
+        | Elite Home | Home Top 3-4 Home Table + Away NOT Top 3-4 Away | **HOME WIN** |
+        | Elite Away | Away Top 3-4 Away Table + Home NOT Top 3-4 Home | **AWAY WIN** |
         
         **TIER 2: Interwoven Framework (95% Accuracy)**
         
@@ -1413,7 +1414,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🏆 Only upcoming matches with **X (Draw)** predictions are analyzed using the Two-Tier System.")
+        st.info("🏆 The Two-Tier System analyzes ALL matches (X, 1, 2). No draw-only filter.")
 
         st.markdown("""
         <div class="upload-container">
@@ -1429,7 +1430,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🏆 ANALYZE V1.0", type="primary"):
+        if st.button("🏆 ANALYZE V1.1", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1480,8 +1481,10 @@ def main():
                             
                             for idx, (match, data, analysis) in enumerate(analyzed_results, 1):
                                 tier = analysis.get("tier", "")
+                                pred = match.get('prediction', '?')
+                                pred_icon = "🎯" if pred == 'X' else "1️⃣" if pred == '1' else "2️⃣"
                                 tier_icon = "🔒" if tier == "Tier 1" else "📊"
-                                st.markdown(f"#### {tier_icon} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({tier})")
+                                st.markdown(f"#### {pred_icon} {tier_icon} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} (Pred: {pred} | {tier})")
                                 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -1506,7 +1509,9 @@ def main():
                             
                             with st.expander(f"Click to expand {len(skipped_results)} skipped matches"):
                                 for idx, (match, data, analysis) in enumerate(skipped_results, 1):
-                                    st.markdown(f"#### Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
+                                    pred = match.get('prediction', '?')
+                                    pred_icon = "🎯" if pred == 'X' else "1️⃣" if pred == '1' else "2️⃣"
+                                    st.markdown(f"#### {pred_icon} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} (Pred: {pred})")
                                     
                                     col1, col2, col3 = st.columns(3)
                                     with col1:
@@ -1527,17 +1532,20 @@ def main():
                         # Summary stats
                         st.markdown("---")
                         st.markdown("### 📊 Summary")
-                        col1, col2, col3, col4 = st.columns(4)
+                        col1, col2, col3, col4, col5 = st.columns(5)
                         with col1:
                             st.metric("Total Matches", total_matches)
                         with col2:
                             tier1_count = len([a for a in analyzed_results if a[2].get("tier") == "Tier 1"])
-                            st.metric("🔒 Tier 1 (100%)", tier1_count)
+                            st.metric("🔒 Tier 1", tier1_count)
                         with col3:
                             tier2_count = len([a for a in analyzed_results if a[2].get("tier") == "Tier 2"])
-                            st.metric("📊 Tier 2 (95%)", tier2_count)
+                            st.metric("📊 Tier 2", tier2_count)
                         with col4:
                             st.metric("⏭️ Skipped", len(skipped_results))
+                        with col5:
+                            ft_count = len([m for m in matches if m.get("is_finished")])
+                            st.metric("⏭️ FT", ft_count)
                             
                     else:
                         st.error("No matches found in the data. Please make sure you're pasting valid data.")
