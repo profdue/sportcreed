@@ -1,7 +1,7 @@
 """
-MATCH ANALYZER V11.0 — TWO-TIER SYSTEM
+MATCH ANALYZER V1.0 — TWO-TIER SYSTEM
 Tier 1: LOCK Bets (100% accuracy) — Home Desperation, Elite Home, Elite Away
-Tier 2: Interwoven Framework (95% accuracy) — Multi-signal convergence
+Tier 2: Interwoven Framework (95% accuracy) — Multi-signal convergence with conflict detection
 Goal Bets: Secondary — added when clear
 """
 
@@ -28,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.0", page_icon="🏆", layout="wide")
+st.set_page_config(page_title="Match Analyzer V1.0", page_icon="🏆", layout="wide")
 
 st.markdown("""
 <style>
@@ -633,6 +633,13 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
     data["home_is_elite"] = data.get("home_position") is not None and data["home_position"] <= home_elite_threshold
     data["away_is_elite"] = data.get("away_position") is not None and data["away_position"] <= away_elite_threshold
     
+    # Determine different blocks
+    data["different_blocks"] = (
+        data.get("home_block") is not None and 
+        data.get("away_block") is not None and 
+        data["home_block"] != data["away_block"]
+    )
+    
     if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
         data['score_matrix'].append({
             "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
@@ -651,7 +658,7 @@ def analyze_match(data: dict) -> dict:
     """
     TWO-TIER SYSTEM:
     TIER 1: LOCK Bets (100% accuracy) — Home Desperation, Elite Home, Elite Away
-    TIER 2: Interwoven Framework (95% accuracy) — Multi-signal convergence
+    TIER 2: Interwoven Framework (95% accuracy) — Multi-signal convergence with conflict detection
     Goal Bets: Secondary — added when clear
     """
     
@@ -705,6 +712,7 @@ def analyze_match(data: dict) -> dict:
     away_form = data.get("away_form_points", 0) or 0
     home_block = data.get("home_block")
     away_block = data.get("away_block")
+    different_blocks = data.get("different_blocks", False)
     is_relegation_fight = data.get("is_relegation_fight", False)
     avg_goals = data.get("avg_goals", 2.0)
     home_losing_streak = data.get("home_losing_streak", 0) or 0
@@ -847,17 +855,40 @@ def analyze_match(data: dict) -> dict:
             "draw_score": draw_score,
         }
         
-        # Decision based on scores
-        max_score = max(home_score, away_score, draw_score)
+        # ============================================================
+        # CONFLICT DETECTION — NEW
+        # ============================================================
+        
+        # Conflict: Home and Away both high (≥4)
+        if home_score >= 4 and away_score >= 4:
+            result["verdict"] = "SKIP"
+            result["skip_reason"] = f"TIER 2 — CONFLICT: Home ({home_score}) and Away ({away_score}) both high"
+            result["classification"] = "⏭️ SKIPPED — Conflict"
+            return result
+        
+        # Conflict: Draw and Home both high
+        if draw_score >= 6 and home_score >= 4:
+            result["verdict"] = "SKIP"
+            result["skip_reason"] = f"TIER 2 — CONFLICT: Draw ({draw_score}) and Home ({home_score}) both high"
+            result["classification"] = "⏭️ SKIPPED — Conflict"
+            return result
+        
+        # Conflict: Draw and Away both high
+        if draw_score >= 6 and away_score >= 4:
+            result["verdict"] = "SKIP"
+            result["skip_reason"] = f"TIER 2 — CONFLICT: Draw ({draw_score}) and Away ({away_score}) both high"
+            result["classification"] = "⏭️ SKIPPED — Conflict"
+            return result
         
         # Skip if all scores are low
+        max_score = max(home_score, away_score, draw_score)
         if max_score <= 2:
             result["verdict"] = "SKIP"
             result["skip_reason"] = "TIER 2 — All scores low (max ≤ 2)"
             result["classification"] = "⏭️ SKIPPED — Low Signal"
             return result
         
-        # Find highest score
+        # Decision based on scores
         if home_score == max_score:
             outcome_bet = "HOME WIN"
             outcome_accuracy = "95%"
@@ -1350,7 +1381,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🏆 Match Analyzer V11.0")
+    st.title("🏆 Match Analyzer V1.0")
     st.caption("Two-Tier System | Tier 1: LOCK Bets (100%) | Tier 2: Interwoven Framework (95%)")
 
     with st.expander("📖 The Two-Tier System", expanded=False):
@@ -1371,9 +1402,11 @@ def main():
         | Away Score | Away Form + Away Block + Away Desperation + Away Elite |
         | Draw Score | Form Similar + Goals Sweet Spot + Same Block + No Desperation |
         
-        **Decision:**
-        - Bet the highest score
-        - Skip if scores conflict or all scores are low
+        **Conflict Detection:**
+        - Skip if Home ≥ 4 AND Away ≥ 4
+        - Skip if Draw ≥ 6 AND Home ≥ 4
+        - Skip if Draw ≥ 6 AND Away ≥ 4
+        - Skip if all scores ≤ 2
         """)
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -1396,7 +1429,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🏆 ANALYZE V11.0", type="primary"):
+        if st.button("🏆 ANALYZE V1.0", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
