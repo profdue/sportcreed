@@ -1,9 +1,7 @@
 """
-MATCH ANALYZER V1.1 — TWO-TIER SYSTEM (ALL MATCHES)
-Tier 1: LOCK Bets (100% accuracy) — Home Desperation, Elite Home, Elite Away
-Tier 2: Interwoven Framework (95% accuracy) — Multi-signal convergence with conflict detection
-Works on ALL matches — X, 1, and 2 predictions.
-Goal Bets: Secondary — added when clear
+MATCH ANALYZER V10.4 — REORDERED DISPLAY
+Analyzed matches (draw predictions) shown FIRST.
+Skipped matches (FT + non-draws) shown AFTER, collapsed.
 """
 
 import streamlit as st
@@ -29,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V1.1", page_icon="🏆", layout="wide")
+st.set_page_config(page_title="Match Analyzer V10.4", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -37,8 +35,6 @@ st.markdown("""
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
     .primary-card { border: 3px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .lock-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
-    .tier1-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
-    .tier2-card { border: 3px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .dead-rubber-card { border: 3px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
     .skip-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
     .ft-card { border-left: 5px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
@@ -54,8 +50,6 @@ st.markdown("""
     .metric-label { font-size: 0.7rem; color: #94a3b8; }
     .accuracy-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .lock-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .tier1-badge { background: #f59e0b; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .tier2-badge { background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
     .dead-rubber-warning { background: #7c2d12; color: #fed7aa; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.8rem; margin: 0.5rem 0; border: 2px solid #ef4444; }
     .win-badge { background: #10b981; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
     .loss-badge { background: #ef4444; color: #fff; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
@@ -89,44 +83,31 @@ def get_league_config(league: str) -> dict:
         "relegation_threshold": 15,
         "league_size": 20,
         "europe_threshold": 4,
-        "goals_fallback": 2.50,
-        "home_elite_threshold": 3,
-        "away_elite_threshold": 3,
-        "draw_accuracy_fallback": 0.57,
+        "goals_fallback": 2.50
     }
     
     if "Norway" in league or "Eliteserien" in league:
         config["relegation_threshold"] = 15
         config["league_size"] = 16
         config["goals_fallback"] = 2.75
-        config["home_elite_threshold"] = 3
-        config["away_elite_threshold"] = 3
     elif "Brazil" in league or "Serie A" in league or "Br1" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["europe_threshold"] = 4
         config["goals_fallback"] = 2.66
-        config["home_elite_threshold"] = 3
-        config["away_elite_threshold"] = 3
     elif "Premier" in league or "EPL" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["goals_fallback"] = 2.75
-        config["home_elite_threshold"] = 3
-        config["away_elite_threshold"] = 3
     elif "AuV" in league or "NPL" in league or "Australia" in league:
         config["relegation_threshold"] = 11
         config["league_size"] = 14
         config["europe_threshold"] = 3
         config["goals_fallback"] = 2.80
-        config["home_elite_threshold"] = 3
-        config["away_elite_threshold"] = 3
     else:
         config["relegation_threshold"] = 15
         config["league_size"] = 20
         config["goals_fallback"] = 2.50
-        config["home_elite_threshold"] = 3
-        config["away_elite_threshold"] = 3
     
     return config
 
@@ -627,20 +608,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["away_block"] == "relegation"
     )
     
-    # Determine elite status
-    home_elite_threshold = league_config.get("home_elite_threshold", 3)
-    away_elite_threshold = league_config.get("away_elite_threshold", 3)
-    
-    data["home_is_elite"] = data.get("home_position") is not None and data["home_position"] <= home_elite_threshold
-    data["away_is_elite"] = data.get("away_position") is not None and data["away_position"] <= away_elite_threshold
-    
-    # Determine different blocks
-    data["different_blocks"] = (
-        data.get("home_block") is not None and 
-        data.get("away_block") is not None and 
-        data["home_block"] != data["away_block"]
-    )
-    
     if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
         data['score_matrix'].append({
             "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
@@ -653,15 +620,17 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# TWO-TIER ANALYSIS ENGINE
+# DRAW-FOCUSED ANALYSIS ENGINE
 # ============================================================================
-def analyze_match(data: dict) -> dict:
+def analyze_draw_match(data: dict) -> dict:
     """
-    TWO-TIER SYSTEM — Works on ALL matches (X, 1, 2)
+    ONLY analyze matches where:
+    1. Match is NOT already played (no FT flag)
+    2. Forebet predicts DRAW (X)
     
-    TIER 1: LOCK Bets (100% accuracy) — Home Desperation, Elite Home, Elite Away
-    TIER 2: Interwoven Framework (95% accuracy) — Multi-signal convergence with conflict detection
-    Goal Bets: Secondary — added when clear
+    PRIORITY 1: Home Desperate + Away NOT Desperate → HOME WIN (100%)
+    PRIORITY 2: ALL 4 draw conditions met → DRAW (57%)
+    PRIORITY 3: ANY condition fails → DOUBLE CHANCE: HOME or AWAY (83%)
     """
     
     result = {
@@ -672,7 +641,6 @@ def analyze_match(data: dict) -> dict:
         "skip_reasons": [],
         "is_lock": False,
         "lock_reason": None,
-        "tier": None,
         "draw_conditions": {},
         "winner_selection": None,
         "winner_reason": None,
@@ -683,13 +651,9 @@ def analyze_match(data: dict) -> dict:
         "goal_is_lock": False,
         "warning": None,
         "warning_type": None,
-        "tier1_signal": None,
-        "tier2_scores": {},
     }
     
-    # ================================================================
-    # FILTER 1: Skip FT matches (already played)
-    # ================================================================
+    # FILTER 1: Skip FT matches
     if data.get("is_finished"):
         result["verdict"] = "SKIP"
         actual_home = data.get("actual_home", "?")
@@ -698,28 +662,24 @@ def analyze_match(data: dict) -> dict:
         result["classification"] = "⏭️ SKIPPED — Already Played"
         return result
     
-    # ================================================================
-    # NO DRAW FILTER — Analyze ALL matches
-    # The Two-Tier system works on ALL predictions (X, 1, 2)
-    # ================================================================
+    # FILTER 2: Only analyze draw predictions
+    if data.get("prediction") != 'X':
+        result["verdict"] = "SKIP"
+        result["skip_reason"] = "Not a draw prediction (X)"
+        result["classification"] = "⏭️ SKIPPED — Not a Draw Prediction"
+        return result
     
-    # ================================================================
     # EXTRACT DATA
-    # ================================================================
     home_form = data.get("home_form_points", 0) or 0
     away_form = data.get("away_form_points", 0) or 0
     home_block = data.get("home_block")
     away_block = data.get("away_block")
-    different_blocks = data.get("different_blocks", False)
     is_relegation_fight = data.get("is_relegation_fight", False)
     avg_goals = data.get("avg_goals", 2.0)
     home_losing_streak = data.get("home_losing_streak", 0) or 0
     away_losing_streak = data.get("away_losing_streak", 0) or 0
     home_pos = data.get("home_position")
     away_pos = data.get("away_position")
-    home_is_elite = data.get("home_is_elite", False)
-    away_is_elite = data.get("away_is_elite", False)
-    prediction = data.get("prediction")
     league_config = data.get("league_config", {})
     league_size = league_config.get("league_size", 20)
     
@@ -739,7 +699,7 @@ def analyze_match(data: dict) -> dict:
         "no_desperation": no_desperation,
     }
     result["draw_conditions"] = draw_conditions
-    all_draw_conditions_met = all(draw_conditions.values())
+    all_conditions_met = all(draw_conditions.values())
     
     is_dead_rubber = False
     if (home_block == "mid" and away_block == "mid" and not is_relegation_fight):
@@ -747,176 +707,42 @@ def analyze_match(data: dict) -> dict:
         result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
         result["warning_type"] = "dead_rubber"
     
-    # ================================================================
-    # TIER 1: LOCK Bets (100% accuracy)
-    # ================================================================
-    
+    # OUTCOME BET — PRIORITY ORDER
     outcome_bet = None
     outcome_accuracy = None
     outcome_reason = None
     result["is_lock"] = False
-    result["tier"] = None
-    tier1_signal = None
+    result["used_priority"] = None
+    outcome_is_lock = False
     
-    # Signal 1: Home Desperation (100%)
+    # PRIORITY 1: Home Desperate + Away NOT Desperate (100%)
     if is_home_desperate and not is_away_desperate:
         outcome_bet = "HOME WIN"
         outcome_accuracy = "100%"
-        outcome_reason = "🏆 TIER 1 — HOME DESPERATE: Home team in relegation zone or 3+ losses"
+        outcome_reason = "🏆 HOME DESPERATE → Home team desperate (losing streak 3+ or relegation)"
         result["is_lock"] = True
-        result["lock_reason"] = "TIER 1 LOCK — Home team desperate"
-        result["tier"] = "Tier 1"
+        result["lock_reason"] = "Home team desperate (losing streak 3+ or relegation fight)"
         result["used_priority"] = "home_desperate"
-        tier1_signal = "Home Desperate"
+        outcome_is_lock = True
     
-    # Signal 2: Elite Home (100%)
-    elif home_is_elite and not away_is_elite:
-        outcome_bet = "HOME WIN"
-        outcome_accuracy = "100%"
-        outcome_reason = f"🏆 TIER 1 — ELITE HOME: Home team Top {league_config.get('home_elite_threshold', 3)} at home vs non-elite away"
-        result["is_lock"] = True
-        result["lock_reason"] = "TIER 1 LOCK — Home team elite at home"
-        result["tier"] = "Tier 1"
-        result["used_priority"] = "elite_home"
-        tier1_signal = "Elite Home"
+    # PRIORITY 2: ALL 4 Conditions Met (57%)
+    elif all_conditions_met:
+        outcome_bet = "DRAW"
+        outcome_accuracy = "57%"
+        outcome_reason = "🎯 ALL 4 draw conditions met → Form similar, goals in sweet spot, same block, no desperation"
+        result["used_priority"] = "draw_conditions_met"
     
-    # Signal 3: Elite Away (100%)
-    elif away_is_elite and not home_is_elite:
-        outcome_bet = "AWAY WIN"
-        outcome_accuracy = "100%"
-        outcome_reason = f"🏆 TIER 1 — ELITE AWAY: Away team Top {league_config.get('away_elite_threshold', 3)} away vs non-elite home"
-        result["is_lock"] = True
-        result["lock_reason"] = "TIER 1 LOCK — Away team elite away"
-        result["tier"] = "Tier 1"
-        result["used_priority"] = "elite_away"
-        tier1_signal = "Elite Away"
-    
-    # ================================================================
-    # TIER 2: Interwoven Framework (95% accuracy)
-    # Only if NO Tier 1 signal triggered
-    # ================================================================
-    
-    if not tier1_signal:
-        result["tier"] = "Tier 2"
-        
-        # Calculate Tier 2 scores
-        home_score = 0
-        away_score = 0
-        draw_score = 0
-        
-        # Home Score Components
-        if home_form >= 10:
-            home_score += 2
-        elif home_form >= 7:
-            home_score += 1
-        
-        if home_block == "europe":
-            home_score += 2
-        elif home_block == "mid":
-            home_score += 1
-        
-        if is_home_desperate:
-            home_score += 3  # Desperation is a strong signal
-        
-        if home_is_elite:
-            home_score += 2
-        
-        # Away Score Components
-        if away_form >= 10:
-            away_score += 2
-        elif away_form >= 7:
-            away_score += 1
-        
-        if away_block == "europe":
-            away_score += 2
-        elif away_block == "mid":
-            away_score += 1
-        
-        if is_away_desperate:
-            away_score += 3
-        
-        if away_is_elite:
-            away_score += 2
-        
-        # Draw Score Components (from draw conditions)
-        if form_similar:
-            draw_score += 2
-        if goals_sweet_spot:
-            draw_score += 2
-        if same_block:
-            draw_score += 2
-        if no_desperation:
-            draw_score += 2
-        
-        result["tier2_scores"] = {
-            "home_score": home_score,
-            "away_score": away_score,
-            "draw_score": draw_score,
-        }
-        
-        # ============================================================
-        # CONFLICT DETECTION
-        # ============================================================
-        
-        # Conflict: Home and Away both high (≥4)
-        if home_score >= 4 and away_score >= 4:
-            result["verdict"] = "SKIP"
-            result["skip_reason"] = f"TIER 2 — CONFLICT: Home ({home_score}) and Away ({away_score}) both high"
-            result["classification"] = "⏭️ SKIPPED — Conflict"
-            return result
-        
-        # Conflict: Draw and Home both high
-        if draw_score >= 6 and home_score >= 4:
-            result["verdict"] = "SKIP"
-            result["skip_reason"] = f"TIER 2 — CONFLICT: Draw ({draw_score}) and Home ({home_score}) both high"
-            result["classification"] = "⏭️ SKIPPED — Conflict"
-            return result
-        
-        # Conflict: Draw and Away both high
-        if draw_score >= 6 and away_score >= 4:
-            result["verdict"] = "SKIP"
-            result["skip_reason"] = f"TIER 2 — CONFLICT: Draw ({draw_score}) and Away ({away_score}) both high"
-            result["classification"] = "⏭️ SKIPPED — Conflict"
-            return result
-        
-        # Skip if all scores are low
-        max_score = max(home_score, away_score, draw_score)
-        if max_score <= 2:
-            result["verdict"] = "SKIP"
-            result["skip_reason"] = "TIER 2 — All scores low (max ≤ 2)"
-            result["classification"] = "⏭️ SKIPPED — Low Signal"
-            return result
-        
-        # Decision based on scores
-        if home_score == max_score:
-            outcome_bet = "HOME WIN"
-            outcome_accuracy = "95%"
-            outcome_reason = f"TIER 2 — INTERWOVEN: Home Score ({home_score}) highest"
-            result["used_priority"] = "interwoven"
-        elif away_score == max_score:
-            outcome_bet = "AWAY WIN"
-            outcome_accuracy = "95%"
-            outcome_reason = f"TIER 2 — INTERWOVEN: Away Score ({away_score}) highest"
-            result["used_priority"] = "interwoven"
-        elif draw_score == max_score:
-            outcome_bet = "DRAW"
-            outcome_accuracy = "57%"
-            outcome_reason = f"TIER 2 — INTERWOVEN: Draw Score ({draw_score}) highest"
-            result["used_priority"] = "interwoven"
-        else:
-            # Should never happen
-            result["verdict"] = "SKIP"
-            result["skip_reason"] = "TIER 2 — No clear signal"
-            result["classification"] = "⏭️ SKIPPED — No Clear Signal"
-            return result
+    # PRIORITY 3: ANY Condition Fails (83%)
+    else:
+        outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
+        outcome_accuracy = "83%"
+        outcome_reason = "🔄 ANY draw condition fails → Match will NOT be a draw (83% accuracy)"
+        result["used_priority"] = "draw_conditions_fail"
     
     result["winner_selection"] = outcome_bet
     result["winner_reason"] = outcome_reason
     
-    # ================================================================
-    # GOAL BET (Secondary)
-    # ================================================================
-    
+    # GOAL BET
     goal_bet = None
     goal_accuracy = None
     goal_reason = None
@@ -925,13 +751,13 @@ def analyze_match(data: dict) -> dict:
     if avg_goals < 2.00:
         goal_bet = "UNDER 2.5"
         goal_accuracy = "95%"
-        goal_reason = f"Avg goals {avg_goals:.2f} < 2.00 → UNDER 2.5"
+        goal_reason = f"Avg goals {avg_goals:.2f} < 2.00 → UNDER 2.5 is a LOCK"
         goal_is_lock = True
     
-    elif avg_goals > 3.00 and different_blocks:
+    elif avg_goals > 3.00:
         goal_bet = "OVER 2.5"
-        goal_accuracy = "80%"
-        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Different Blocks → OVER 2.5"
+        goal_accuracy = "100%"
+        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Draw prediction → OVER 2.5 is a LOCK"
         goal_is_lock = True
     
     elif 2.00 <= avg_goals <= 2.40:
@@ -947,10 +773,7 @@ def analyze_match(data: dict) -> dict:
     result["goal_accuracy"] = goal_accuracy
     result["goal_is_lock"] = goal_is_lock
     
-    # ================================================================
     # BUILD FINAL RESULT
-    # ================================================================
-    
     result["primary_bet"] = {
         "outcome_bet": outcome_bet,
         "outcome_accuracy": outcome_accuracy,
@@ -960,9 +783,6 @@ def analyze_match(data: dict) -> dict:
         "goal_reason": goal_reason,
         "is_lock": result["is_lock"],
         "lock_reason": result.get("lock_reason"),
-        "tier": result["tier"],
-        "tier1_signal": tier1_signal,
-        "tier2_scores": result.get("tier2_scores", {}),
     }
     
     classification = outcome_bet
@@ -1084,9 +904,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "is_finished": data.get("is_finished", False),
             "actual_home": data.get("actual_home"),
             "actual_away": data.get("actual_away"),
-            "tier": analysis.get("tier"),
-            "tier1_signal": analysis.get("tier1_signal"),
-            "tier2_scores": json.dumps(analysis.get("tier2_scores", {})),
         }
         response = supabase.table("match_analyses").insert(record).execute()
         return response.data[0]["id"] if response.data else None
@@ -1149,12 +966,12 @@ def get_league_badge(league: str) -> str:
         return "unknown"
 
 
-def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
-    """Display analysis results for a single match with two-tier system."""
+def display_analysis(data: dict, analysis: dict, league: str = "Unknown", show_details: bool = True):
+    """Display analysis results for a single match."""
     
     # Check if skipped
     if analysis.get("verdict") == "SKIP":
-        skip_reason = analysis.get("skip_reason") or "No clear signal"
+        skip_reason = analysis.get("skip_reason") or "Not a draw prediction"
         is_ft = "Already played" in skip_reason or "FT" in skip_reason
         
         if is_ft:
@@ -1221,39 +1038,24 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     all_met = all(conditions.values())
     if all_met:
-        st.success("✅ ALL 4 draw conditions met → BET THE DRAW (57% accuracy)")
+        st.success("✅ ALL 4 conditions met → BET THE DRAW (57% accuracy)")
     else:
-        st.info("⚠️ Not all conditions met → Using Tier 2 framework")
+        st.info("⚠️ Not all conditions met → Double Chance recommended")
     
     st.markdown("---")
     
-    # ================================================================
-    # TIER BADGE
-    # ================================================================
-    
-    tier = analysis.get("tier")
-    if tier == "Tier 1":
-        st.markdown(f'<span class="tier1-badge">🏆 TIER 1 — LOCK BET</span>', unsafe_allow_html=True)
-    elif tier == "Tier 2":
-        st.markdown(f'<span class="tier2-badge">📊 TIER 2 — STRONG BET</span>', unsafe_allow_html=True)
-    
-    # ================================================================
     # OUTCOME BET
-    # ================================================================
-    
     primary = analysis.get("primary_bet", {})
     
     if primary.get("is_lock"):
         lock_icon = "🔒"
         lock_text = "LOCK"
-        card_class = "lock-card"
     else:
         lock_icon = "🔥"
         lock_text = "RECOMMENDED"
-        card_class = "primary-card"
     
     st.markdown(f"""
-    <div class="output-card {card_class}" style="border-left: 4px solid {'#f59e0b' if primary.get('is_lock') else '#10b981'};">
+    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border-left: 4px solid {'#f59e0b' if primary.get('is_lock') else '#10b981'};">
         <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
             <span style="font-size: 1.5rem;">{lock_icon}</span>
             <span style="font-size: 1.2rem; font-weight: 700;">OUTCOME BET</span>
@@ -1267,26 +1069,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     </div>
     """, unsafe_allow_html=True)
     
-    # ================================================================
-    # TIER 2 SCORES (if applicable)
-    # ================================================================
-    
-    if tier == "Tier 2":
-        scores = primary.get("tier2_scores", {})
-        if scores:
-            st.markdown("### 📊 Tier 2 Scores")
-            cols = st.columns(3)
-            with cols[0]:
-                st.markdown(f'<div class="metric-card"><div class="metric-value">{scores.get("home_score", 0)}</div><div class="metric-label">Home Score</div></div>', unsafe_allow_html=True)
-            with cols[1]:
-                st.markdown(f'<div class="metric-card"><div class="metric-value">{scores.get("away_score", 0)}</div><div class="metric-label">Away Score</div></div>', unsafe_allow_html=True)
-            with cols[2]:
-                st.markdown(f'<div class="metric-card"><div class="metric-value">{scores.get("draw_score", 0)}</div><div class="metric-label">Draw Score</div></div>', unsafe_allow_html=True)
-    
-    # ================================================================
     # GOAL BET
-    # ================================================================
-    
     goal_bet = primary.get('goal_bet')
     
     if goal_bet:
@@ -1327,10 +1110,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         </div>
         """, unsafe_allow_html=True)
     
-    # ================================================================
     # KEY METRICS
-    # ================================================================
-    
     st.markdown("### 📊 Key Metrics")
     
     avg_goals = data.get("avg_goals", 2.0)
@@ -1374,47 +1154,50 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
                     bg = "#1e293b" if s.get("home_goals", 0) != s.get("away_goals", 0) else "#2a1a00"
                     prob = s.get("probability", 0)
                     st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?-?")}</div><div style="font-size:0.7rem; color:#94a3b8;">{prob:.1f}%</div></div>', unsafe_allow_html=True)
+    
+    # Priority Rule Used
+    used_priority = analysis.get("used_priority")
+    
+    if used_priority == "home_desperate":
+        st.markdown(f'<div class="priority-rule">🏆 PRIORITY RULE 1: Home desperate + Away NOT desperate → BET HOME WIN (100% accuracy)</div>', unsafe_allow_html=True)
+    elif used_priority == "draw_conditions_met":
+        st.markdown(f'<div class="priority-rule">🎯 PRIORITY RULE 2: ALL 4 draw conditions met → BET DRAW (57% accuracy)</div>', unsafe_allow_html=True)
+    elif used_priority == "draw_conditions_fail":
+        st.markdown(f'<div class="priority-rule">🔄 PRIORITY RULE 3: ANY draw condition fails → DOUBLE CHANCE: HOME or AWAY (83% accuracy)</div>', unsafe_allow_html=True)
 
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🏆 Match Analyzer V1.1")
-    st.caption("Two-Tier System | ALL Matches (X, 1, 2) | Tier 1: LOCK (100%) | Tier 2: Interwoven (95%)")
+    st.title("🎯 Match Analyzer V10.4")
+    st.caption("Draw-Focused Strategy | Analyzed Matches FIRST, Skipped AFTER")
 
-    with st.expander("📖 The Two-Tier System — ALL Matches", expanded=False):
+    with st.expander("📖 The Draw-Focused Logic", expanded=False):
         st.markdown("""
-        **Works on ALL matches — X, 1, and 2 predictions.**
+        **Filters:**
+        1. ⏭️ **SKIP** matches already played (FT)
+        2. ⏭️ **SKIP** matches where prediction is NOT X (Draw)
+        3. 🎯 **ANALYZE** only upcoming matches with X (Draw)
         
-        **TIER 1: LOCK Bets (100% Accuracy)**
+        **Display Order:**
+        1. 🎯 **ANALYZED MATCHES** (shown first — actionable bets)
+        2. ⏭️ **SKIPPED MATCHES** (shown after — collapsed)
         
-        | Signal | Trigger | Bet |
-        |--------|---------|-----|
-        | Home Desperation | Home in relegation zone OR 3+ losses | **HOME WIN** |
-        | Elite Home | Home Top 3-4 Home Table + Away NOT Top 3-4 Away | **HOME WIN** |
-        | Elite Away | Away Top 3-4 Away Table + Home NOT Top 3-4 Home | **AWAY WIN** |
+        **Priority Order for Draw Predictions:**
         
-        **TIER 2: Interwoven Framework (95% Accuracy)**
-        
-        | Score | Components |
-        |-------|------------|
-        | Home Score | Home Form + Home Block + Home Desperation + Home Elite |
-        | Away Score | Away Form + Away Block + Away Desperation + Away Elite |
-        | Draw Score | Form Similar + Goals Sweet Spot + Same Block + No Desperation |
-        
-        **Conflict Detection:**
-        - Skip if Home ≥ 4 AND Away ≥ 4
-        - Skip if Draw ≥ 6 AND Home ≥ 4
-        - Skip if Draw ≥ 6 AND Away ≥ 4
-        - Skip if all scores ≤ 2
+        | Priority | Condition | Outcome Bet | Accuracy |
+        |----------|-----------|-------------|----------|
+        | **1** | Home Desperate + Away NOT Desperate | **HOME WIN** | **100%** |
+        | **2** | ALL 4 Draw Conditions Met | **DRAW** | **57%** |
+        | **3** | ANY Draw Condition Fails | **DOUBLE CHANCE: HOME or AWAY** | **83%** |
         """)
 
-    tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
+    tab1, tab2, tab3 = st.tabs(["🔮 Analyze Draws", "📝 Post-Match", "📊 Records"])
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🏆 The Two-Tier System analyzes ALL matches (X, 1, 2). No draw-only filter.")
+        st.info("🎯 Only upcoming matches with **X (Draw)** predictions will be analyzed. Analyzed matches shown first.")
 
         st.markdown("""
         <div class="upload-container">
@@ -1430,12 +1213,12 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🏆 ANALYZE V1.1", type="primary"):
+        if st.button("🎯 ANALYZE DRAWS V10.4", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
                 try:
-                    with st.spinner("Analyzing with Two-Tier System..."):
+                    with st.spinner("Analyzing draw predictions..."):
                         parsed = parse_text_data(text_data)
 
                     league = parsed.get("league", "Unknown League")
@@ -1463,7 +1246,7 @@ def main():
                             match_with_config = dict(match)
                             match_with_config["league_config"] = league_config
                             data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
-                            analysis = analyze_match(data)
+                            analysis = analyze_draw_match(data)
                             save_to_db(data, analysis, league)
                             
                             if analysis.get("verdict") == "SKIP":
@@ -1476,15 +1259,11 @@ def main():
                         # ============================================================
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🏆 ANALYZED MATCHES")
-                            st.caption(f"{len(analyzed_results)} matches with actionable bets")
+                            st.markdown("### 🎯 ANALYZED MATCHES")
+                            st.caption(f"{len(analyzed_results)} matches have actionable bets")
                             
                             for idx, (match, data, analysis) in enumerate(analyzed_results, 1):
-                                tier = analysis.get("tier", "")
-                                pred = match.get('prediction', '?')
-                                pred_icon = "🎯" if pred == 'X' else "1️⃣" if pred == '1' else "2️⃣"
-                                tier_icon = "🔒" if tier == "Tier 1" else "📊"
-                                st.markdown(f"#### {pred_icon} {tier_icon} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} (Pred: {pred} | {tier})")
+                                st.markdown(f"#### Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
                                 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -1505,13 +1284,11 @@ def main():
                         if skipped_results:
                             st.markdown("---")
                             st.markdown("### ⏭️ SKIPPED MATCHES")
-                            st.caption(f"{len(skipped_results)} matches skipped (FT or no clear signal)")
+                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw predictions)")
                             
                             with st.expander(f"Click to expand {len(skipped_results)} skipped matches"):
                                 for idx, (match, data, analysis) in enumerate(skipped_results, 1):
-                                    pred = match.get('prediction', '?')
-                                    pred_icon = "🎯" if pred == 'X' else "1️⃣" if pred == '1' else "2️⃣"
-                                    st.markdown(f"#### {pred_icon} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} (Pred: {pred})")
+                                    st.markdown(f"#### Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}")
                                     
                                     col1, col2, col3 = st.columns(3)
                                     with col1:
@@ -1532,20 +1309,13 @@ def main():
                         # Summary stats
                         st.markdown("---")
                         st.markdown("### 📊 Summary")
-                        col1, col2, col3, col4, col5 = st.columns(5)
+                        col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("Total Matches", total_matches)
                         with col2:
-                            tier1_count = len([a for a in analyzed_results if a[2].get("tier") == "Tier 1"])
-                            st.metric("🔒 Tier 1", tier1_count)
+                            st.metric("🎯 Analyzed", len(analyzed_results))
                         with col3:
-                            tier2_count = len([a for a in analyzed_results if a[2].get("tier") == "Tier 2"])
-                            st.metric("📊 Tier 2", tier2_count)
-                        with col4:
                             st.metric("⏭️ Skipped", len(skipped_results))
-                        with col5:
-                            ft_count = len([m for m in matches if m.get("is_finished")])
-                            st.metric("⏭️ FT", ft_count)
                             
                     else:
                         st.error("No matches found in the data. Please make sure you're pasting valid data.")
@@ -1567,16 +1337,15 @@ def main():
                 warning = a.get('warning')
                 skip_reason = a.get('skip_reason')
                 is_finished = a.get('is_finished', False)
-                tier = a.get('tier', '')
 
                 if is_finished:
                     badge = "⏭️ FT (Already Played)"
                 elif skip_reason:
                     badge = "⏭️ SKIPPED"
                 elif is_lock:
-                    badge = f"🔒 {tier} LOCK"
+                    badge = "🔒 LOCK"
                 else:
-                    badge = f"📊 {tier}"
+                    badge = "📊"
 
                 with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
                     if warning:
@@ -1615,10 +1384,6 @@ def main():
             incorrect = 0
             lock_correct = 0
             lock_total = 0
-            tier1_correct = 0
-            tier1_total = 0
-            tier2_correct = 0
-            tier2_total = 0
 
             for r in analyzed_results:
                 pred = r.get('bet_market', '')
@@ -1632,19 +1397,11 @@ def main():
                     correct += 1
                     if r.get('is_lock', False):
                         lock_correct += 1
-                    if r.get('tier') == 'Tier 1':
-                        tier1_correct += 1
-                    if r.get('tier') == 'Tier 2':
-                        tier2_correct += 1
                 else:
                     incorrect += 1
 
                 if r.get('is_lock', False):
                     lock_total += 1
-                if r.get('tier') == 'Tier 1':
-                    tier1_total += 1
-                if r.get('tier') == 'Tier 2':
-                    tier2_total += 1
 
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
@@ -1652,28 +1409,18 @@ def main():
             with col2:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{ft_count}</div><div class="stat-label">FT (Already Played)</div></div>', unsafe_allow_html=True)
             with col3:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{skipped_count}</div><div class="stat-label">Skipped</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{skipped_count}</div><div class="stat-label">Skipped (Non-Draws)</div></div>', unsafe_allow_html=True)
             with col4:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{analyzed_count}</div><div class="stat-label">Analyzed</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{analyzed_count}</div><div class="stat-label">Draws Analyzed</div></div>', unsafe_allow_html=True)
             with col5:
                 win_rate = round(correct / analyzed_count * 100) if analyzed_count > 0 else 0
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
-
-            # Tier breakdown
-            st.markdown("### 🔒 Tier Breakdown")
-            tier1_col, tier2_col = st.columns(2)
-            with tier1_col:
-                tier1_rate = round(tier1_correct / tier1_total * 100) if tier1_total > 0 else 0
-                st.metric("Tier 1 (LOCK)", f"{tier1_correct}/{tier1_total} ({tier1_rate}%)")
-            with tier2_col:
-                tier2_rate = round(tier2_correct / tier2_total * 100) if tier2_total > 0 else 0
-                st.metric("Tier 2 (Strong)", f"{tier2_correct}/{tier2_total} ({tier2_rate}%)")
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Draw Win Rate</div></div>', unsafe_allow_html=True)
 
             if lock_total > 0:
                 lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
                 st.markdown(f"🔒 **Lock Signals:** {lock_correct}/{lock_total} correct ({lock_rate}%)")
 
-            st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
+            st.markdown(f"**Draw Analysis: {correct} correct | {incorrect} incorrect**")
 
             rows = []
             for r in results:
@@ -1686,10 +1433,9 @@ def main():
                 badge_class = get_league_badge(league)
                 skip_reason = r.get('skip_reason')
                 is_finished = r.get('is_finished', False)
-                tier = r.get('tier', '')
 
                 if is_finished:
-                    badge = '<span class="skip-badge">⏭️ FT</span>'
+                    badge = '<span class="skip-badge">⏭️ FT (Played)</span>'
                     score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
                     primary_pred = "FT"
                 elif skip_reason or pred == 'SKIP':
@@ -1698,10 +1444,6 @@ def main():
                     primary_pred = "SKIPPED"
                 else:
                     evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-                    if tier == 'Tier 1':
-                        tier_label = "🔒"
-                    else:
-                        tier_label = "📊"
                     badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
                     score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
 
@@ -1711,7 +1453,7 @@ def main():
                     "Date": r.get("match_date", ""),
                     "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
                     "Match": match_display,
-                    "Class": f"{tier} {r.get('classification', '')}",
+                    "Class": r.get("classification", ""),
                     "Bet": primary_pred if pred != 'SKIP' else "SKIP",
                     "Score": score_display,
                     "Result": badge,
