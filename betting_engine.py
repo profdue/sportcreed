@@ -1,8 +1,8 @@
 """
-MATCH ANALYZER V11.0 — DRAW SURVIVAL SCORE SYSTEM
-Weighted scoring system for Forebet draw predictions.
-7 factors analyzed to determine if a draw will "survive".
-Scores range from 0-14+ with 3-tiered action.
+MATCH ANALYZER V11.1 — DRAW SURVIVAL SCORE SYSTEM
+ONLY stores analyzed matches (draw predictions) in Supabase.
+Skips saving FT matches and non-draw predictions.
+Weighted scoring system with 7 factors for draw survival.
 """
 
 import streamlit as st
@@ -28,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.0", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V11.1", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -642,14 +642,10 @@ def calculate_draw_survival_score(data: dict) -> dict:
     FACTOR 7: Dominance Gap (LOW weight - negative)
     """
     
-    # Initialize factors
     factors = {}
     total_score = 0
     
-    # ================================================================
     # FACTOR 1: TEAM DRAW RATE (HIGH weight)
-    # ================================================================
-    
     home_draw_rate = data.get("home_draws", 0) / max(data.get("home_gp", 1), 1)
     away_draw_rate = data.get("away_draws", 0) / max(data.get("away_gp", 1), 1)
     combined_draw_rate = (home_draw_rate + away_draw_rate) / 2
@@ -672,10 +668,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f1_points
     
-    # ================================================================
     # FACTOR 2: POINTS DIFFERENCE (HIGH weight)
-    # ================================================================
-    
     home_points = data.get("home_points", 0)
     away_points = data.get("away_points", 0)
     points_diff = abs(home_points - away_points)
@@ -698,10 +691,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f2_points
     
-    # ================================================================
     # FACTOR 3: GOAL EXPECTANCY (HIGH weight)
-    # ================================================================
-    
     avg_goals = data.get("avg_goals", 2.0)
     
     if avg_goals < 2.00:
@@ -726,10 +716,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f3_points
     
-    # ================================================================
     # FACTOR 4: GD GAP (MEDIUM weight)
-    # ================================================================
-    
     home_gd = data.get("home_gd", 0)
     away_gd = data.get("away_gd", 0)
     gd_gap = abs(home_gd - away_gd)
@@ -752,10 +739,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f4_points
     
-    # ================================================================
     # FACTOR 5: SCORING RATE (MEDIUM weight)
-    # ================================================================
-    
     home_scoring = data.get("home_gf", 0) / max(data.get("home_gp", 1), 1)
     away_scoring = data.get("away_gf", 0) / max(data.get("away_gp", 1), 1)
     combined_scoring = (home_scoring + away_scoring) / 2
@@ -780,10 +764,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f5_points
     
-    # ================================================================
     # FACTOR 6: PROBABILITY BALANCE (LOW weight)
-    # ================================================================
-    
     home_pct = data.get("home_pct", 33)
     draw_pct = data.get("draw_pct", 34)
     away_pct = data.get("away_pct", 33)
@@ -809,10 +790,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f6_points
     
-    # ================================================================
     # FACTOR 7: DOMINANCE GAP (LOW weight - negative)
-    # ================================================================
-    
     home_win_rate = data.get("home_wins", 0) / max(data.get("home_gp", 1), 1)
     away_win_rate = data.get("away_wins", 0) / max(data.get("away_gp", 1), 1)
     dominance_gap = abs(home_win_rate - away_win_rate) * 100
@@ -835,10 +813,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f7_points
     
-    # ================================================================
     # DETERMINE DECISION
-    # ================================================================
-    
     if total_score <= 4:
         decision = "BET DOUBLE CHANCE"
         action = "SAFE"
@@ -864,10 +839,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
         recommended_bet = "SKIP or BET DRAW"
         accuracy = "N/A"
     
-    # ================================================================
     # GOAL BET
-    # ================================================================
-    
     goal_bet = None
     goal_accuracy = None
     goal_reason = None
@@ -884,10 +856,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
         goal_bet = "UNDER 2.5"
         goal_accuracy = "80%"
         goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot → UNDER 2.5"
-    
-    # ================================================================
-    # BUILD RESULT
-    # ================================================================
     
     return {
         "total_score": total_score,
@@ -975,10 +943,7 @@ def analyze_draw_match(data: dict) -> dict:
         result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
         result["warning_type"] = "dead_rubber"
     
-    # ================================================================
     # BUILD OUTCOME BET
-    # ================================================================
-    
     if score_result["action"] == "SAFE":
         outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
         outcome_accuracy = "83%"
@@ -1008,10 +973,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["is_lock"] = is_lock
     result["lock_reason"] = lock_reason
     
-    # ================================================================
     # GOAL BET
-    # ================================================================
-    
     goal_bet = score_result.get("goal_bet")
     goal_accuracy = score_result.get("goal_accuracy")
     goal_reason = score_result.get("goal_reason")
@@ -1021,10 +983,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["goal_accuracy"] = goal_accuracy
     result["goal_is_lock"] = goal_bet is not None
     
-    # ================================================================
     # BUILD FINAL RESULT
-    # ================================================================
-    
     result["primary_bet"] = {
         "outcome_bet": outcome_bet,
         "outcome_accuracy": outcome_accuracy,
@@ -1120,15 +1079,27 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 # SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
+    """
+    Save ONLY analyzed matches (draw predictions with action) to Supabase.
+    Skipped matches (FT or non-draw) are NOT saved.
+    """
+    
+    # Skip saving if match was skipped
+    if analysis.get("verdict") == "SKIP":
+        return None
+    
     try:
         primary = analysis.get("primary_bet", {})
         score_result = analysis.get("draw_survival_score", 0)
         
         record = {
+            # Match Information
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": data.get("date", str(date.today())),
             "league": league,
+            
+            # Forebet Predictions
             "home_pct": data.get("home_pct"),
             "draw_pct": data.get("draw_pct"),
             "away_pct": data.get("away_pct"),
@@ -1136,43 +1107,63 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "avg_goals": data.get("avg_goals"),
             "temperature": data.get("temperature"),
             "coefficient": data.get("coefficient"),
+            
+            # Standings Data
             "home_position": data.get("home_position"),
             "away_position": data.get("away_position"),
             "home_points": data.get("home_points"),
             "away_points": data.get("away_points"),
+            "home_block": data.get("home_block"),
+            "away_block": data.get("away_block"),
+            "is_relegation_fight": data.get("is_relegation_fight", False),
+            
+            # Form Data
             "home_form_points": data.get("home_form_points"),
             "away_form_points": data.get("away_form_points"),
             "home_losing_streak": data.get("home_losing_streak", 0),
             "away_losing_streak": data.get("away_losing_streak", 0),
-            "home_block": data.get("home_block"),
-            "away_block": data.get("away_block"),
-            "is_relegation_fight": data.get("is_relegation_fight", False),
-            "is_lock": analysis.get("is_lock", False),
-            "lock_reason": analysis.get("lock_reason"),
-            "bet_market": analysis.get("classification", "SKIP"),
-            "classification": analysis.get("classification", "SKIP"),
-            "pattern": "DRAW" if "DRAW" in analysis.get("classification", "") else "DOUBLE_CHANCE" if "DOUBLE" in analysis.get("classification", "") else "WIN" if "WIN" in analysis.get("classification", "") else "SKIP",
-            "verdict": analysis.get("verdict", "SKIP"),
-            "draw_conditions": json.dumps(analysis.get("draw_conditions", {})),
-            "winner_selection": analysis.get("winner_selection"),
-            "winner_reason": analysis.get("winner_reason"),
-            "goal_bet": analysis.get("goal_bet"),
-            "goal_accuracy": analysis.get("goal_accuracy"),
-            "warning": analysis.get("warning"),
-            "warning_type": analysis.get("warning_type"),
-            "score_matrix": json.dumps(data.get("score_matrix", [])),
-            "result_entered": False,
-            "skip_reason": analysis.get("skip_reason"),
-            "is_finished": data.get("is_finished", False),
-            "actual_home": data.get("actual_home"),
-            "actual_away": data.get("actual_away"),
+            
+            # Draw Survival Score (V11.0)
             "draw_survival_score": score_result,
             "action": analysis.get("action"),
             "recommended_bet": analysis.get("recommended_bet"),
             "factor_breakdown": json.dumps(analysis.get("factor_breakdown", {})),
+            
+            # Bet Decision
+            "bet_market": analysis.get("classification", "SKIP"),
+            "classification": analysis.get("classification", "SKIP"),
+            "pattern": "DRAW" if "DRAW" in analysis.get("classification", "") else "DOUBLE_CHANCE" if "DOUBLE" in analysis.get("classification", "") else "WIN" if "WIN" in analysis.get("classification", "") else "SKIP",
+            "verdict": analysis.get("verdict", "SKIP"),
+            "is_lock": analysis.get("is_lock", False),
+            "lock_reason": analysis.get("lock_reason"),
+            
+            # Winner Selection
+            "winner_selection": analysis.get("winner_selection"),
+            "winner_reason": analysis.get("winner_reason"),
+            
+            # Goal Bet
+            "goal_bet": analysis.get("goal_bet"),
+            "goal_accuracy": analysis.get("goal_accuracy"),
+            
+            # Warnings
+            "warning": analysis.get("warning"),
+            "warning_type": analysis.get("warning_type"),
+            
+            # Score Matrix
+            "score_matrix": json.dumps(data.get("score_matrix", [])),
+            
+            # Draw Conditions (for reference)
+            "draw_conditions": json.dumps(analysis.get("draw_conditions", {})),
+            
+            # Result Tracking (to be filled later)
+            "result_entered": False,
+            "actual_home": None,
+            "actual_away": None,
         }
+        
         response = supabase.table("match_analyses").insert(record).execute()
         return response.data[0]["id"] if response.data else None
+        
     except Exception as e:
         st.error(f"Failed to save: {e}")
         return None
@@ -1235,7 +1226,6 @@ def get_league_badge(league: str) -> str:
 def display_score_breakdown(factors: dict, total_score: int):
     """Display the Draw Survival Score breakdown."""
     
-    # Determine color based on score
     if total_score <= 4:
         color = "#10b981"
         status = "SAFE"
@@ -1344,10 +1334,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     st.markdown("---")
     
-    # ================================================================
     # OUTCOME BET
-    # ================================================================
-    
     primary = analysis.get("primary_bet", {})
     
     if primary.get("is_lock"):
@@ -1377,10 +1364,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     </div>
     """, unsafe_allow_html=True)
     
-    # ================================================================
     # GOAL BET
-    # ================================================================
-    
     goal_bet = primary.get('goal_bet')
     
     if goal_bet:
@@ -1417,10 +1401,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         </div>
         """, unsafe_allow_html=True)
     
-    # ================================================================
     # KEY METRICS
-    # ================================================================
-    
     st.markdown("### 📊 Key Metrics")
     
     avg_goals = data.get("avg_goals", 2.0)
@@ -1470,12 +1451,13 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V11.0")
-    st.caption("Draw Survival Score System | 7-Factor Weighted Analysis")
+    st.title("🎯 Match Analyzer V11.1")
+    st.caption("Draw Survival Score System | Only Stores Analyzed Matches")
 
     with st.expander("📖 The Draw Survival Score System", expanded=False):
         st.markdown("""
         **ONLY analyzes matches where Forebet predicts DRAW (X).**
+        **ONLY stores analyzed matches in Supabase (skipped matches are NOT saved).**
         
         **7 Factors Analyzed:**
         
@@ -1507,7 +1489,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 Only upcoming matches with **X (Draw)** predictions will be analyzed using the Draw Survival Score system.")
+        st.info("🎯 Only upcoming matches with **X (Draw)** predictions will be analyzed. Only analyzed matches are stored in Supabase.")
 
         st.markdown("""
         <div class="upload-container">
@@ -1523,7 +1505,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V11.0", type="primary"):
+        if st.button("🎯 ANALYZE V11.1", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1557,12 +1539,13 @@ def main():
                             match_with_config["league_config"] = league_config
                             data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
                             analysis = analyze_draw_match(data)
-                            save_to_db(data, analysis, league)
                             
-                            if analysis.get("verdict") == "SKIP":
-                                skipped_results.append((match, data, analysis))
-                            else:
+                            # Only save analyzed matches (non-skipped)
+                            if analysis.get("verdict") != "SKIP":
+                                save_to_db(data, analysis, league)
                                 analyzed_results.append((match, data, analysis))
+                            else:
+                                skipped_results.append((match, data, analysis))
 
                         # ============================================================
                         # DISPLAY ANALYZED MATCHES FIRST
@@ -1594,7 +1577,7 @@ def main():
                         if skipped_results:
                             st.markdown("---")
                             st.markdown("### ⏭️ SKIPPED MATCHES")
-                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw predictions)")
+                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw predictions) — NOT saved to database")
                             
                             with st.expander(f"Click to expand {len(skipped_results)} skipped matches"):
                                 for idx, (match, data, analysis) in enumerate(skipped_results, 1):
@@ -1647,35 +1630,21 @@ def main():
                 pred = a.get('bet_market', 'No prediction')
                 is_lock = a.get('is_lock', False)
                 warning = a.get('warning')
-                skip_reason = a.get('skip_reason')
-                is_finished = a.get('is_finished', False)
                 score = a.get('draw_survival_score', '?')
 
-                if is_finished:
-                    badge = "⏭️ FT (Already Played)"
-                elif skip_reason:
-                    badge = "⏭️ SKIPPED"
-                elif is_lock:
-                    badge = f"🔒 LOCK (Score: {score})"
-                else:
-                    badge = f"📊 Score: {score}"
+                badge = f"🔒 LOCK (Score: {score})" if is_lock else f"📊 Score: {score}"
 
                 with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
                     if warning:
                         st.warning(warning)
-                    if is_finished:
-                        st.info(f"⏭️ This match is already played (FT). Result: {a.get('actual_home', '?')}-{a.get('actual_away', '?')}")
-                    elif skip_reason:
-                        st.info(f"⏭️ {skip_reason}")
-                    else:
-                        st.info(f"📊 Draw Survival Score: {score}")
-                        c1, c2 = st.columns(2)
-                        with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
-                        with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
-                        if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
-                            if submit_result(a['id'], hg, ag):
-                                st.success("Result submitted!")
-                                st.rerun()
+                    st.info(f"📊 Draw Survival Score: {score}")
+                    c1, c2 = st.columns(2)
+                    with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
+                    with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
+                    if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
+                        if submit_result(a['id'], hg, ag):
+                            st.success("Result submitted!")
+                            st.rerun()
         else:
             st.info("No pending analyses.")
 
@@ -1685,16 +1654,7 @@ def main():
         if not results:
             st.info("No results recorded yet.")
         else:
-            # Filter matches
-            analyzed_results = [r for r in results if r.get('bet_market') != 'SKIP' and not r.get('skip_reason') and not r.get('is_finished')]
-            ft_results = [r for r in results if r.get('is_finished')]
-            skipped_results = [r for r in results if r.get('bet_market') == 'SKIP' or r.get('skip_reason')]
-            
             total = len(results)
-            analyzed_count = len(analyzed_results)
-            ft_count = len(ft_results)
-            skipped_count = len(skipped_results)
-
             correct = 0
             incorrect = 0
             lock_correct = 0
@@ -1706,7 +1666,7 @@ def main():
             cautious_scores = []
             dangerous_scores = []
             
-            for r in analyzed_results:
+            for r in results:
                 score = r.get('draw_survival_score', 0)
                 scores.append(score)
                 if score <= 4:
@@ -1716,7 +1676,7 @@ def main():
                 else:
                     dangerous_scores.append(score)
 
-            for r in analyzed_results:
+            for r in results:
                 pred = r.get('bet_market', '')
                 if pred == 'SKIP':
                     continue
@@ -1736,16 +1696,16 @@ def main():
 
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Tracked</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Analyzed</div></div>', unsafe_allow_html=True)
             with col2:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{ft_count}</div><div class="stat-label">FT (Already Played)</div></div>', unsafe_allow_html=True)
-            with col3:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{skipped_count}</div><div class="stat-label">Skipped (Non-Draws)</div></div>', unsafe_allow_html=True)
-            with col4:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{analyzed_count}</div><div class="stat-label">Draws Analyzed</div></div>', unsafe_allow_html=True)
-            with col5:
-                win_rate = round(correct / analyzed_count * 100) if analyzed_count > 0 else 0
+                win_rate = round(correct / total * 100) if total > 0 else 0
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
+            with col3:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
+            with col4:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
+            with col5:
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{len(safe_scores)}</div><div class="stat-label">SAFE Bets</div></div>', unsafe_allow_html=True)
 
             # Score distribution
             st.markdown("### 📊 Draw Survival Score Distribution")
@@ -1761,7 +1721,7 @@ def main():
                 lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
                 st.markdown(f"🔒 **Lock Signals:** {lock_correct}/{lock_total} correct ({lock_rate}%)")
 
-            st.markdown(f"**Draw Analysis: {correct} correct | {incorrect} incorrect**")
+            st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
 
             rows = []
             for r in results:
@@ -1772,23 +1732,12 @@ def main():
                 is_lock = r.get('is_lock', False)
                 league = r.get('league', '')
                 badge_class = get_league_badge(league)
-                skip_reason = r.get('skip_reason')
-                is_finished = r.get('is_finished', False)
                 score = r.get('draw_survival_score', '?')
                 action = r.get('action', '?')
 
-                if is_finished:
-                    badge = '<span class="skip-badge">⏭️ FT (Played)</span>'
-                    score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
-                    primary_pred = "FT"
-                elif skip_reason or pred == 'SKIP':
-                    badge = '<span class="skip-badge">⏭️ SKIP</span>'
-                    score_display = "—"
-                    primary_pred = "SKIPPED"
-                else:
-                    evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-                    badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
-                    score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
+                evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
+                badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
+                score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
 
                 match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
                 score_label = f"{score} ({action})" if score != '?' else '?'
@@ -1799,8 +1748,8 @@ def main():
                     "Match": match_display,
                     "Score": score_label,
                     "Class": r.get("classification", ""),
-                    "Bet": primary_pred if pred != 'SKIP' else "SKIP",
-                    "Score": score_display,
+                    "Bet": primary_pred,
+                    "Actual": score_display,
                     "Result": badge,
                 })
 
