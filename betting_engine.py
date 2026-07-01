@@ -1,8 +1,8 @@
 """
-MATCH ANALYZER V11.4 — STAKE-ADJUSTED DRAW SYSTEM WITH DATE DISPLAY
+MATCH ANALYZER V11.5 — STAKE-ADJUSTED DRAW SYSTEM WITH CORRECT DATE DISPLAY
 Always bet DOUBLE CHANCE (12) on every draw prediction.
 Stake adjusts based on Draw Survival Score.
-Pending results show match dates for easy tracking.
+Pending results show the ACTUAL match date from the data.
 """
 
 import streamlit as st
@@ -28,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.4", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V11.5", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -1102,10 +1102,13 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         primary = analysis.get("primary_bet", {})
         score_result = analysis.get("draw_survival_score", 0)
         
+        # Get the actual match date from the data
+        match_date = data.get("date", str(date.today()))
+        
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
-            "match_date": data.get("date", str(date.today())),
+            "match_date": match_date,  # Actual match date from data
             "league": league,
             "home_pct": data.get("home_pct"),
             "draw_pct": data.get("draw_pct"),
@@ -1451,8 +1454,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V11.4")
-    st.caption("Stake-Adjusted Draw System | Date Display for Pending Results")
+    st.title("🎯 Match Analyzer V11.5")
+    st.caption("Stake-Adjusted Draw System | Correct Match Date Display")
 
     with st.expander("📖 The Stake-Adjusted Draw System", expanded=False):
         st.markdown("""
@@ -1465,7 +1468,7 @@ def main():
         | **5-7** | ⚠️ CAUTIOUS | **Half** | 70-80% |
         | **≥ 8** | ❗ DANGEROUS | **Small or Skip** | N/A |
         
-        **Pending results now show match dates for easy tracking.** 📅
+        **Pending results now show the actual match date from the data.** 📅
         """)
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -1488,7 +1491,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V11.4", type="primary"):
+        if st.button("🎯 ANALYZE V11.5", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1618,7 +1621,6 @@ def main():
         st.subheader("📝 Enter Match Results")
         pending = get_pending()
         if pending:
-            # Group by date for better organization
             st.write(f"**{len(pending)} pending result(s)**")
             
             # Show current date for reference
