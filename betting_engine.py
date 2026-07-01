@@ -1,8 +1,7 @@
 """
-MATCH ANALYZER V11.6 — SIMPLIFIED POST-MATCH
+MATCH ANALYZER V11.6 — STAKE-ADJUSTED DRAW SYSTEM
 Always bet DOUBLE CHANCE (12) on every draw prediction.
 Stake adjusts based on Draw Survival Score.
-Post-Match tab shows ALL pending matches with their dates.
 """
 
 import streamlit as st
@@ -631,11 +630,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 # DRAW SURVIVAL SCORE SYSTEM
 # ============================================================================
 def calculate_draw_survival_score(data: dict) -> dict:
-    """
-    Calculate the Draw Survival Score using 7 factors.
-    Score range: 0-14+
-    """
-    
     factors = {}
     total_score = 0
     
@@ -734,8 +728,8 @@ def calculate_draw_survival_score(data: dict) -> dict:
     total_score += f4_points
     
     # FACTOR 5: SCORING RATE (MEDIUM weight)
-    home_scoring = data.get("home_gf", 0) / max(data.get("home_gp", 1), 1)
-    away_scoring = data.get("away_gf", 0) / max(data.get("away_gp", 1), 1)
+    home_scoring = float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1)
+    away_scoring = float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1)
     combined_scoring = (home_scoring + away_scoring) / 2
     
     if combined_scoring < 1.0:
@@ -875,11 +869,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
 # DRAW-FOCUSED ANALYSIS ENGINE
 # ============================================================================
 def analyze_draw_match(data: dict) -> dict:
-    """
-    Analyze draw predictions using the Draw Survival Score system.
-    ALWAYS bet DOUBLE CHANCE, but adjust stake based on score.
-    """
-    
     result = {
         "primary_bet": None,
         "classification": None,
@@ -999,13 +988,9 @@ def analyze_draw_match(data: dict) -> dict:
 
 
 # ============================================================================
-# EVALUATION ENGINE — FIXED
+# EVALUATION ENGINE
 # ============================================================================
 def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
-    """
-    Evaluate if a bet was correct.
-    FIXED: DOUBLE CHANCE: HOME or AWAY wins if NOT a draw.
-    """
     try:
         home = int(home_goals) if home_goals is not None else 0
         away = int(away_goals) if away_goals is not None else 0
@@ -1028,41 +1013,30 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
         total_bets += 1
         
         if 'DRAW' in bet and not 'DOUBLE' in bet:
-            # Exact Draw bet
             if home == away:
                 correct_count += 1
-                
         elif 'DOUBLE CHANCE' in bet or 'DOUBLE CHANCE:' in bet:
-            # Double Chance bet
             if 'HOME' in bet and 'AWAY' in bet:
-                # DOUBLE CHANCE: HOME or AWAY → wins if NOT a draw
                 if home != away:
                     correct_count += 1
             elif 'HOME' in bet or '1' in bet:
-                # DOUBLE CHANCE: HOME or DRAW → wins if home wins or draw
                 if home >= away:
                     correct_count += 1
             elif 'AWAY' in bet or '2' in bet:
-                # DOUBLE CHANCE: AWAY or DRAW → wins if away wins or draw
                 if away >= home:
                     correct_count += 1
             else:
-                # Fallback
                 if home >= away or away >= home:
                     correct_count += 1
-                    
         elif 'OVER 2.5' in bet:
             if total > 2:
                 correct_count += 1
-                
         elif 'UNDER 2.5' in bet:
             if total <= 2:
                 correct_count += 1
-                
         elif 'HOME WIN' in bet or ('HOME' in bet and not 'DOUBLE' in bet):
             if home > away:
                 correct_count += 1
-                
         elif 'AWAY WIN' in bet or ('AWAY' in bet and not 'DOUBLE' in bet):
             if away > home:
                 correct_count += 1
@@ -1082,15 +1056,9 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 # SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
-    """
-    Save ALL draw predictions (SAFE, CAUTIOUS, DANGEROUS) to Supabase.
-    Only FT and non-draw matches are skipped.
-    """
-    
     is_draw_prediction = data.get("prediction") == 'X'
     is_ft = data.get("is_finished", False)
     
-    # Skip FT and non-draw matches ONLY
     if is_ft or not is_draw_prediction:
         return None
     
@@ -1098,7 +1066,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         primary = analysis.get("primary_bet", {})
         score_result = analysis.get("draw_survival_score", 0)
         
-        # Get the actual match date from the data
         match_date = data.get("date", str(date.today()))
         
         record = {
@@ -1157,7 +1124,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
 
 
 def get_pending():
-    """Get pending results - ALL matches without scores entered."""
     try:
         response = supabase.table("match_analyses").select("*").eq("result_entered", False).execute()
         return response.data if response.data else []
@@ -1214,8 +1180,6 @@ def get_league_badge(league: str) -> str:
 
 
 def display_score_breakdown(factors: dict, total_score: int):
-    """Display the Draw Survival Score breakdown."""
-    
     if total_score <= 4:
         color = "#10b981"
         status = "SAFE"
@@ -1244,7 +1208,6 @@ def display_score_breakdown(factors: dict, total_score: int):
     </div>
     """, unsafe_allow_html=True)
     
-    # Display factor breakdown
     st.markdown("#### Factor Breakdown")
     
     for name, factor in factors.items():
@@ -1267,9 +1230,6 @@ def display_score_breakdown(factors: dict, total_score: int):
 
 
 def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
-    """Display analysis results for a single match."""
-    
-    # Check if skipped (FT or non-draw)
     if analysis.get("verdict") == "SKIP":
         skip_reason = analysis.get("skip_reason") or "Not a draw prediction"
         is_ft = "Already played" in skip_reason or "FT" in skip_reason
@@ -1309,17 +1269,12 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
             """, unsafe_allow_html=True)
         return
     
-    # ================================================================
-    # DISPLAY ANALYZED MATCH
-    # ================================================================
-    
     badge_class = get_league_badge(league)
     st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
     
     if analysis.get("warning"):
         st.markdown(f'<div class="dead-rubber-warning">{analysis["warning"]}</div>', unsafe_allow_html=True)
     
-    # Draw Survival Score
     display_score_breakdown(
         analysis.get("factor_breakdown", {}),
         analysis.get("draw_survival_score", 0)
@@ -1327,7 +1282,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     st.markdown("---")
     
-    # OUTCOME BET
     primary = analysis.get("primary_bet", {})
     action = primary.get("action", "UNKNOWN")
     
@@ -1341,7 +1295,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         lock_icon = "⚠️"
         lock_text = "CAUTIOUS — Half Stake"
         border_color = "#f59e0b"
-    else:  # DANGEROUS
+    else:
         card_class = "danger-card"
         lock_icon = "❗"
         lock_text = "DANGEROUS — Small Stake or Skip"
@@ -1365,7 +1319,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     </div>
     """, unsafe_allow_html=True)
     
-    # GOAL BET
     goal_bet = primary.get('goal_bet')
     
     if goal_bet:
@@ -1402,7 +1355,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         </div>
         """, unsafe_allow_html=True)
     
-    # KEY METRICS
     st.markdown("### 📊 Key Metrics")
     
     avg_goals = data.get("avg_goals", 2.0)
@@ -1615,13 +1567,9 @@ def main():
 
     with tab2:
         st.subheader("📝 Enter Match Results")
-        
-        # Get pending matches
         pending = get_pending()
-        
         if pending:
             st.write(f"**{len(pending)} pending result(s)**")
-            
             for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
@@ -1641,17 +1589,13 @@ def main():
                 with st.expander(f"📅 {match_date} | {badge} | {ht} vs {at}"):
                     st.info(f"📊 Draw Survival Score: {score} ({action}) — Stake: {stake}")
                     st.caption(f"📅 Match Date: {match_date}")
-                    
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
-                    
-                    # Show expected score for reference
                     expected_home = a.get('correct_score_home')
                     expected_away = a.get('correct_score_away')
                     if expected_home is not None and expected_away is not None:
                         st.caption(f"📊 Expected Score: {expected_home}-{expected_away}")
-                    
                     if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
                         if submit_result(a['id'], hg, ag):
                             st.success("Result submitted!")
@@ -1690,17 +1634,14 @@ def main():
                 pred = r.get('bet_market', '')
                 if pred == 'SKIP':
                     continue
-
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
                 evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
-
                 if evaluation["is_correct"]:
                     correct += 1
                     if r.get('is_lock', False):
                         lock_correct += 1
                 else:
                     incorrect += 1
-
                 if r.get('is_lock', False):
                     lock_total += 1
 
