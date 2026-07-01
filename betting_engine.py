@@ -1,7 +1,7 @@
 """
-MATCH ANALYZER V11.6 — STAKE-ADJUSTED DRAW SYSTEM
-Always bet DOUBLE CHANCE (12) on every draw prediction.
-Stake adjusts based on Draw Survival Score.
+MATCH ANALYZER V11.6 — CLEAN
+Stake-Adjusted Draw System | Simplified Post-Match Display
+NO extra columns — only what exists in Supabase.
 """
 
 import streamlit as st
@@ -1053,7 +1053,7 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 
 
 # ============================================================================
-# SUPABASE OPERATIONS
+# SUPABASE OPERATIONS — CLEAN (NO EXTRA COLUMNS)
 # ============================================================================
 def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
     is_draw_prediction = data.get("prediction") == 'X'
@@ -1405,7 +1405,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # ============================================================================
 def main():
     st.title("🎯 Match Analyzer V11.6")
-    st.caption("Stake-Adjusted Draw System | Simplified Post-Match Display")
+    st.caption("Stake-Adjusted Draw System | Clean Version")
 
     with st.expander("📖 The Stake-Adjusted Draw System", expanded=False):
         st.markdown("""
