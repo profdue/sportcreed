@@ -1,7 +1,10 @@
 """
-MATCH ANALYZER V11.2 — DRAW SURVIVAL SCORE SYSTEM
-Stores ALL draw predictions (SAFE, CAUTIOUS, DANGEROUS) in Supabase.
-Only FT and non-draw matches are skipped.
+MATCH ANALYZER V11.3 — STAKE-ADJUSTED DRAW SYSTEM
+Always bet DOUBLE CHANCE (12) on every draw prediction.
+Stake adjusts based on Draw Survival Score:
+- SAFE (≤4): Full stake
+- CAUTIOUS (5-7): Half stake
+- DANGEROUS (≥8): Small stake or skip
 """
 
 import streamlit as st
@@ -27,7 +30,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.2", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V11.3", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -35,6 +38,8 @@ st.markdown("""
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
     .primary-card { border: 3px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
     .lock-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
+    .cautious-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #1a2a00 0%, #0a1a00 100%); }
+    .danger-card { border: 3px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
     .dead-rubber-card { border: 3px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
     .skip-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
     .ft-card { border-left: 5px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
@@ -76,7 +81,7 @@ st.markdown("""
     .factor-name { color: #94a3b8; }
     .factor-value { font-weight: 600; }
     .factor-points { color: #fbbf24; font-weight: 700; }
-    .danger-card { border-left: 5px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
+    .stake-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -632,14 +637,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
     """
     Calculate the Draw Survival Score using 7 factors.
     Score range: 0-14+
-    
-    FACTOR 1: Team Draw Rate (HIGH weight)
-    FACTOR 2: Points Difference (HIGH weight)
-    FACTOR 3: Goal Expectancy (HIGH weight)
-    FACTOR 4: GD Gap (MEDIUM weight)
-    FACTOR 5: Scoring Rate (MEDIUM weight)
-    FACTOR 6: Probability Balance (LOW weight)
-    FACTOR 7: Dominance Gap (LOW weight - negative)
     """
     
     factors = {}
@@ -815,28 +812,28 @@ def calculate_draw_survival_score(data: dict) -> dict:
     
     # DETERMINE DECISION
     if total_score <= 4:
-        decision = "BET DOUBLE CHANCE"
         action = "SAFE"
+        stake = "Full"
         color = "#10b981"
         emoji = "✅"
-        explanation = "Draw unlikely to survive → Bet DOUBLE CHANCE (HOME or AWAY)"
+        explanation = f"Draw unlikely to survive (Score: {total_score}) → Full stake"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "83%"
     elif total_score <= 7:
-        decision = "REDUCE STAKE or SKIP"
         action = "CAUTIOUS"
+        stake = "Half"
         color = "#f59e0b"
         emoji = "⚠️"
-        explanation = "Draw might survive → Reduce stake or skip"
-        recommended_bet = "SMALL STAKE or SKIP"
+        explanation = f"Draw might survive (Score: {total_score}) → Half stake"
+        recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "70-80%"
     else:
-        decision = "SKIP or BET DRAW"
         action = "DANGEROUS"
+        stake = "Small or Skip"
         color = "#ef4444"
-        emoji = "❌"
-        explanation = "Draw likely to survive → Avoid betting against draw"
-        recommended_bet = "SKIP or BET DRAW"
+        emoji = "❗"
+        explanation = f"Draw likely to survive (Score: {total_score}) → Small stake or skip"
+        recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "N/A"
     
     # GOAL BET
@@ -860,8 +857,8 @@ def calculate_draw_survival_score(data: dict) -> dict:
     return {
         "total_score": total_score,
         "factors": factors,
-        "decision": decision,
         "action": action,
+        "stake": stake,
         "color": color,
         "emoji": emoji,
         "explanation": explanation,
@@ -883,7 +880,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
 def analyze_draw_match(data: dict) -> dict:
     """
     Analyze draw predictions using the Draw Survival Score system.
-    ALL draw predictions are analyzed (SAFE, CAUTIOUS, DANGEROUS).
+    ALWAYS bet DOUBLE CHANCE, but adjust stake based on score.
     """
     
     result = {
@@ -906,6 +903,7 @@ def analyze_draw_match(data: dict) -> dict:
         "draw_survival_score": None,
         "factor_breakdown": None,
         "action": None,
+        "stake": None,
         "recommended_bet": None
     }
     
@@ -929,6 +927,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["draw_survival_score"] = score_result["total_score"]
     result["factor_breakdown"] = score_result["factors"]
     result["action"] = score_result["action"]
+    result["stake"] = score_result["stake"]
     result["recommended_bet"] = score_result["recommended_bet"]
     
     # Dead rubber detection
@@ -942,35 +941,26 @@ def analyze_draw_match(data: dict) -> dict:
         result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
         result["warning_type"] = "dead_rubber"
     
-    # BUILD OUTCOME BET
+    # BUILD OUTCOME BET — ALWAYS DOUBLE CHANCE (12)
+    outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
+    outcome_accuracy = score_result["accuracy"]
+    outcome_reason = score_result["explanation"]
+    
     if score_result["action"] == "SAFE":
-        outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
-        outcome_accuracy = "83%"
-        outcome_reason = score_result["explanation"]
         is_lock = True
-        lock_reason = f"Draw Survival Score: {score_result['total_score']} ≤ 4 → SAFE"
+        lock_reason = f"Score: {score_result['total_score']} (≤4) → SAFE — Full stake"
         result["used_priority"] = "safe"
         result["verdict"] = "LOCK"
-        
     elif score_result["action"] == "CAUTIOUS":
-        outcome_bet = "REDUCE STAKE or SKIP"
-        outcome_accuracy = "70-80%"
-        outcome_reason = score_result["explanation"]
         is_lock = False
         lock_reason = None
         result["used_priority"] = "cautious"
         result["verdict"] = "RECOMMENDED"
-        
     else:  # DANGEROUS
-        outcome_bet = "SKIP or BET DRAW"
-        outcome_accuracy = "N/A"
-        outcome_reason = score_result["explanation"]
         is_lock = False
         lock_reason = None
         result["used_priority"] = "dangerous"
-        # DANGEROUS is still a "SKIP" for betting but we store it
-        result["verdict"] = "SKIP"
-        result["skip_reason"] = "Draw Survival Score ≥ 8 → Too dangerous to bet against draw"
+        result["verdict"] = "RECOMMENDED"
     
     result["winner_selection"] = outcome_bet
     result["winner_reason"] = outcome_reason
@@ -999,7 +989,8 @@ def analyze_draw_match(data: dict) -> dict:
         "lock_reason": lock_reason,
         "score": score_result["total_score"],
         "factors": score_result["factors"],
-        "action": score_result["action"]
+        "action": score_result["action"],
+        "stake": score_result["stake"]
     }
     
     classification = outcome_bet
@@ -1080,7 +1071,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
     Only FT and non-draw matches are skipped.
     """
     
-    # Check if this is a draw prediction
     is_draw_prediction = data.get("prediction") == 'X'
     is_ft = data.get("is_finished", False)
     
@@ -1088,19 +1078,15 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
     if is_ft or not is_draw_prediction:
         return None
     
-    # Save ALL draw predictions (including DANGEROUS)
     try:
         primary = analysis.get("primary_bet", {})
         score_result = analysis.get("draw_survival_score", 0)
         
         record = {
-            # Match Information
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
             "match_date": data.get("date", str(date.today())),
             "league": league,
-            
-            # Forebet Predictions
             "home_pct": data.get("home_pct"),
             "draw_pct": data.get("draw_pct"),
             "away_pct": data.get("away_pct"),
@@ -1108,8 +1094,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "avg_goals": data.get("avg_goals"),
             "temperature": data.get("temperature"),
             "coefficient": data.get("coefficient"),
-            
-            # Standings Data
             "home_position": data.get("home_position"),
             "away_position": data.get("away_position"),
             "home_points": data.get("home_points"),
@@ -1117,46 +1101,29 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "home_block": data.get("home_block"),
             "away_block": data.get("away_block"),
             "is_relegation_fight": data.get("is_relegation_fight", False),
-            
-            # Form Data
             "home_form_points": data.get("home_form_points"),
             "away_form_points": data.get("away_form_points"),
             "home_losing_streak": data.get("home_losing_streak", 0),
             "away_losing_streak": data.get("away_losing_streak", 0),
-            
-            # Draw Survival Score (V11.0)
             "draw_survival_score": score_result,
             "action": analysis.get("action"),
+            "stake": analysis.get("stake"),
             "recommended_bet": analysis.get("recommended_bet"),
             "factor_breakdown": json.dumps(analysis.get("factor_breakdown", {})),
-            
-            # Bet Decision
             "bet_market": analysis.get("classification", "SKIP"),
             "classification": analysis.get("classification", "SKIP"),
             "pattern": "DRAW" if "DRAW" in analysis.get("classification", "") else "DOUBLE_CHANCE" if "DOUBLE" in analysis.get("classification", "") else "WIN" if "WIN" in analysis.get("classification", "") else "SKIP",
             "verdict": analysis.get("verdict", "SKIP"),
             "is_lock": analysis.get("is_lock", False),
             "lock_reason": analysis.get("lock_reason"),
-            
-            # Winner Selection
             "winner_selection": analysis.get("winner_selection"),
             "winner_reason": analysis.get("winner_reason"),
-            
-            # Goal Bet
             "goal_bet": analysis.get("goal_bet"),
             "goal_accuracy": analysis.get("goal_accuracy"),
-            
-            # Warnings
             "warning": analysis.get("warning"),
             "warning_type": analysis.get("warning_type"),
-            
-            # Score Matrix
             "score_matrix": json.dumps(data.get("score_matrix", [])),
-            
-            # Draw Conditions (for reference)
             "draw_conditions": json.dumps(analysis.get("draw_conditions", {})),
-            
-            # Result Tracking (to be filled later)
             "result_entered": False,
             "actual_home": None,
             "actual_away": None,
@@ -1230,12 +1197,15 @@ def display_score_breakdown(factors: dict, total_score: int):
     if total_score <= 4:
         color = "#10b981"
         status = "SAFE"
+        emoji = "✅"
     elif total_score <= 7:
         color = "#f59e0b"
         status = "CAUTIOUS"
+        emoji = "⚠️"
     else:
         color = "#ef4444"
         status = "DANGEROUS"
+        emoji = "❗"
     
     st.markdown(f"""
     <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1.5rem; margin: 0.5rem 0; border-left: 4px solid {color};">
@@ -1245,7 +1215,7 @@ def display_score_breakdown(factors: dict, total_score: int):
                 <div style="font-size: 3rem; font-weight: 800; color: {color};">{total_score}</div>
             </div>
             <div style="text-align: right;">
-                <div style="font-size: 1.2rem; font-weight: 700; color: {color};">{status}</div>
+                <div style="font-size: 1.2rem; font-weight: 700; color: {color};">{emoji} {status}</div>
                 <div style="font-size: 0.8rem; color: #94a3b8;">Score ≤ 4 = SAFE<br>Score 5-7 = CAUTIOUS<br>Score ≥ 8 = DANGEROUS</div>
             </div>
         </div>
@@ -1277,13 +1247,10 @@ def display_score_breakdown(factors: dict, total_score: int):
 def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     """Display analysis results for a single match."""
     
-    # Check if skipped
+    # Check if skipped (FT or non-draw)
     if analysis.get("verdict") == "SKIP":
         skip_reason = analysis.get("skip_reason") or "Not a draw prediction"
         is_ft = "Already played" in skip_reason or "FT" in skip_reason
-        
-        # Check if this is DANGEROUS (still stored but skipped as bet)
-        is_dangerous = analysis.get("action") == "DANGEROUS"
         
         if is_ft:
             st.markdown(f"""
@@ -1299,28 +1266,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
                         Expected Score: {data.get('correct_score_home', '?')}-{data.get('correct_score_away', '?')} 
                         | Avg Goals: {data.get('avg_goals', 0):.2f}
                     </p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        elif is_dangerous:
-            # DANGEROUS matches are still displayed with warning
-            st.markdown(f"""
-            <div class="output-card danger-card">
-                <div class="verdict-skip">
-                    <div class="big-text" style="color: #ef4444;">⚠️ DANGEROUS — Stored for Validation</div>
-                    <p style="color:#94a3b8; font-size:1.1rem; margin:0.5rem 0;">
-                        {data.get('home_team', 'Unknown')} vs {data.get('away_team', 'Unknown')}
-                    </p>
-                    <p style="color:#ef4444; font-weight:600;">{skip_reason}</p>
-                    <p style="color:#94a3b8;">Prediction: {data.get('prediction', '?')} — {skip_reason}</p>
-                    <p style="color:#94a3b8; font-size:0.9rem;">📊 Draw Survival Score: {analysis.get('draw_survival_score', '?')}</p>
-                    <p style="color:#64748b; font-size:0.8rem;">
-                        Expected Score: {data.get('correct_score_home', '?')}-{data.get('correct_score_away', '?')} 
-                        | Avg Goals: {data.get('avg_goals', 0):.2f}
-                    </p>
-                    <div style="margin-top: 0.5rem; padding: 0.5rem; background: #1a1a2e; border-radius: 8px; border: 1px solid #ef4444;">
-                        <span style="color: #fbbf24; font-size: 0.8rem;">📌 This match is STORED for validation. Results will be tracked.</span>
-                    </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1362,30 +1307,38 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     # OUTCOME BET
     primary = analysis.get("primary_bet", {})
+    action = primary.get("action", "UNKNOWN")
     
-    if primary.get("is_lock"):
+    if action == "SAFE":
+        card_class = "lock-card"
         lock_icon = "🔒"
-        lock_text = "LOCK"
+        lock_text = "SAFE — Full Stake"
         border_color = "#f59e0b"
-    else:
-        lock_icon = "🔥"
-        lock_text = "RECOMMENDED"
-        border_color = "#10b981"
+    elif action == "CAUTIOUS":
+        card_class = "cautious-card"
+        lock_icon = "⚠️"
+        lock_text = "CAUTIOUS — Half Stake"
+        border_color = "#f59e0b"
+    else:  # DANGEROUS
+        card_class = "danger-card"
+        lock_icon = "❗"
+        lock_text = "DANGEROUS — Small Stake or Skip"
+        border_color = "#ef4444"
     
     st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border-left: 4px solid {border_color};">
+    <div class="output-card {card_class}" style="border-left: 4px solid {border_color};">
         <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
             <span style="font-size: 1.5rem;">{lock_icon}</span>
-            <span style="font-size: 1.2rem; font-weight: 700;">OUTCOME BET</span>
-            <span style="background: {border_color}; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">{lock_text}</span>
+            <span style="font-size: 1.2rem; font-weight: 700;">OUTCOME BET — {lock_text}</span>
         </div>
         <div style="font-size: 1.3rem; font-weight: 800; margin-bottom: 0.25rem;">{primary.get('outcome_bet', 'Unknown')}</div>
         <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem;">
             <span>📊 Accuracy: {primary.get('outcome_accuracy', 'N/A')}</span>
             <span>📝 Reason: {primary.get('outcome_reason', 'N/A')}</span>
+            <span style="background: {border_color}; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Stake: {primary.get('stake', '?')}</span>
         </div>
         <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #64748b;">
-            Score: {primary.get('score', '?')} → {primary.get('action', '?')}
+            Score: {primary.get('score', '?')} → {action}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1477,13 +1430,19 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V11.2")
-    st.caption("Draw Survival Score System | Stores ALL Draw Predictions")
+    st.title("🎯 Match Analyzer V11.3")
+    st.caption("Stake-Adjusted Draw System | Always Bet DOUBLE CHANCE")
 
-    with st.expander("📖 The Draw Survival Score System", expanded=False):
+    with st.expander("📖 The Stake-Adjusted Draw System", expanded=False):
         st.markdown("""
         **ONLY analyzes matches where Forebet predicts DRAW (X).**
-        **ALL draw predictions are stored** (SAFE, CAUTIOUS, DANGEROUS).
+        **ALWAYS bet DOUBLE CHANCE (12), but adjust stake based on risk.**
+        
+        | Score | Action | Stake | Accuracy |
+        |-------|--------|-------|----------|
+        | **≤ 4** | ✅ SAFE | **Full** | 83% |
+        | **5-7** | ⚠️ CAUTIOUS | **Half** | 70-80% |
+        | **≥ 8** | ❗ DANGEROUS | **Small or Skip** | N/A |
         
         **7 Factors Analyzed:**
         
@@ -1497,14 +1456,6 @@ def main():
         | **6. Probability Balance** | LOW | Balanced probabilities = draws |
         | **7. Dominance Gap** | LOW (negative) | Dominance kills draws |
         
-        **Decision Rules:**
-        
-        | Score | Action | Bet | Stored? |
-        |-------|--------|-----|---------|
-        | **≤ 4** | ✅ SAFE | DOUBLE CHANCE: HOME or AWAY (83%) | ✅ Yes |
-        | **5-7** | ⚠️ CAUTIOUS | Reduce stake or SKIP (70-80%) | ✅ Yes |
-        | **≥ 8** | ❌ DANGEROUS | SKIP or BET DRAW | ✅ Yes (for validation) |
-        
         **Goal Bets (Secondary):**
         - Avg Goals < 2.00 → UNDER 2.5 (95%)
         - Avg Goals > 3.00 → OVER 2.5 (100%)
@@ -1515,7 +1466,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 ALL draw predictions are stored (SAFE, CAUTIOUS, DANGEROUS). Only FT and non-draws are skipped.")
+        st.info("🎯 ALL draw predictions are analyzed. Stake adjusts based on Draw Survival Score.")
 
         st.markdown("""
         <div class="upload-container">
@@ -1531,7 +1482,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V11.2", type="primary"):
+        if st.button("🎯 ANALYZE V11.3", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1547,7 +1498,6 @@ def main():
                     league_config = parsed.get("league_config", {})
 
                     if matches:
-                        # Count matches
                         ft_matches = [m for m in matches if m.get("is_finished")]
                         draw_matches = [m for m in matches if m.get("prediction") == 'X' and not m.get("is_finished")]
                         non_draw_matches = [m for m in matches if m.get("prediction") != 'X' and not m.get("is_finished")]
@@ -1558,7 +1508,6 @@ def main():
                         if ft_matches:
                             st.info(f"⏭️ {len(ft_matches)} matches already played (FT) — skipped")
                         
-                        # Process all matches
                         analyzed_results = []
                         skipped_results = []
                         stored_count = 0
@@ -1569,8 +1518,7 @@ def main():
                             data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
                             analysis = analyze_draw_match(data)
                             
-                            # Save ALL draw predictions (including DANGEROUS)
-                            if analysis.get("verdict") != "SKIP" or analysis.get("action") == "DANGEROUS":
+                            if analysis.get("verdict") != "SKIP":
                                 saved_id = save_to_db(data, analysis, league)
                                 if saved_id:
                                     stored_count += 1
@@ -1578,19 +1526,17 @@ def main():
                             else:
                                 skipped_results.append((match, data, analysis))
 
-                        # Display storage status
                         st.info(f"💾 {stored_count} draw predictions stored in Supabase")
 
-                        # ============================================================
-                        # DISPLAY ANALYZED MATCHES FIRST
-                        # ============================================================
                         if analyzed_results:
                             st.markdown("---")
                             st.markdown("### 🎯 DRAW PREDICTIONS (Stored)")
-                            st.caption(f"{len(analyzed_results)} draw predictions analyzed and stored")
+                            st.caption(f"{len(analyzed_results)} draw predictions analyzed with stake adjustment")
                             
                             for idx, (match, data, analysis) in enumerate(analyzed_results, 1):
                                 action = analysis.get("action", "UNKNOWN")
+                                stake = analysis.get("stake", "?")
+                                
                                 if action == "SAFE":
                                     emoji = "✅"
                                     label = "SAFE"
@@ -1598,10 +1544,10 @@ def main():
                                     emoji = "⚠️"
                                     label = "CAUTIOUS"
                                 else:
-                                    emoji = "❌"
+                                    emoji = "❗"
                                     label = "DANGEROUS"
                                 
-                                st.markdown(f"#### {emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({label})")
+                                st.markdown(f"#### {emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({label} — {stake} Stake)")
                                 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -1616,13 +1562,10 @@ def main():
                                 if idx < len(analyzed_results):
                                     st.markdown("---")
                         
-                        # ============================================================
-                        # DISPLAY SKIPPED MATCHES AFTER (COLLAPSED)
-                        # ============================================================
                         if skipped_results:
                             st.markdown("---")
                             st.markdown("### ⏭️ SKIPPED MATCHES (Not Stored)")
-                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw) — NOT saved to database")
+                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw)")
                             
                             with st.expander(f"Click to expand {len(skipped_results)} skipped matches"):
                                 for idx, (match, data, analysis) in enumerate(skipped_results, 1):
@@ -1644,7 +1587,6 @@ def main():
                                     if idx < len(skipped_results):
                                         st.markdown("---")
                         
-                        # Summary stats
                         st.markdown("---")
                         st.markdown("### 📊 Summary")
                         col1, col2, col3, col4, col5 = st.columns(5)
@@ -1675,24 +1617,19 @@ def main():
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
                 pred = a.get('bet_market', 'No prediction')
-                is_lock = a.get('is_lock', False)
-                warning = a.get('warning')
                 score = a.get('draw_survival_score', '?')
                 action = a.get('action', '?')
+                stake = a.get('stake', '?')
 
-                if is_lock:
-                    badge = f"🔒 LOCK (Score: {score})"
-                elif action == "DANGEROUS":
-                    badge = f"⚠️ DANGEROUS (Score: {score})"
+                if action == "SAFE":
+                    badge = f"✅ SAFE (Score: {score}) — {stake} Stake"
+                elif action == "CAUTIOUS":
+                    badge = f"⚠️ CAUTIOUS (Score: {score}) — {stake} Stake"
                 else:
-                    badge = f"📊 Score: {score}"
+                    badge = f"❗ DANGEROUS (Score: {score}) — {stake} Stake"
 
                 with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
-                    if warning:
-                        st.warning(warning)
-                    if action == "DANGEROUS":
-                        st.warning(f"⚠️ This match was marked DANGEROUS (Score: {score}). Still tracking for validation.")
-                    st.info(f"📊 Draw Survival Score: {score} ({action})")
+                    st.info(f"📊 Draw Survival Score: {score} ({action}) — Stake: {stake}")
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
@@ -1715,7 +1652,6 @@ def main():
             lock_correct = 0
             lock_total = 0
 
-            # Score distribution
             scores = []
             safe_scores = []
             cautious_scores = []
@@ -1762,7 +1698,6 @@ def main():
             with col5:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{len(safe_scores)}</div><div class="stat-label">SAFE Bets</div></div>', unsafe_allow_html=True)
 
-            # Score distribution
             st.markdown("### 📊 Draw Survival Score Distribution")
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -1770,7 +1705,7 @@ def main():
             with col2:
                 st.metric("⚠️ CAUTIOUS (5-7)", len(cautious_scores))
             with col3:
-                st.metric("❌ DANGEROUS (≥8)", len(dangerous_scores))
+                st.metric("❗ DANGEROUS (≥8)", len(dangerous_scores))
 
             if lock_total > 0:
                 lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
@@ -1784,25 +1719,24 @@ def main():
                 actual_home = r.get('actual_home_goals')
                 actual_away = r.get('actual_away_goals')
                 primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-                is_lock = r.get('is_lock', False)
                 league = r.get('league', '')
                 badge_class = get_league_badge(league)
                 score = r.get('draw_survival_score', '?')
                 action = r.get('action', '?')
+                stake = r.get('stake', '?')
 
                 evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
                 badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
                 score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
 
                 match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
-                score_label = f"{score} ({action})" if score != '?' else '?'
+                score_label = f"{score} ({action}) — {stake}" if score != '?' else '?'
 
                 rows.append({
                     "Date": r.get("match_date", ""),
                     "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
                     "Match": match_display,
                     "Score": score_label,
-                    "Class": r.get("classification", ""),
                     "Bet": primary_pred,
                     "Actual": score_display,
                     "Result": badge,
