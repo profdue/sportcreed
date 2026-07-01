@@ -1002,9 +1002,13 @@ def analyze_draw_match(data: dict) -> dict:
 
 
 # ============================================================================
-# EVALUATION ENGINE
+# EVALUATION ENGINE — FIXED
 # ============================================================================
 def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
+    """
+    Evaluate if a bet was correct.
+    FIXED: DOUBLE CHANCE: HOME or AWAY wins if NOT a draw.
+    """
     try:
         home = int(home_goals) if home_goals is not None else 0
         away = int(away_goals) if away_goals is not None else 0
@@ -1025,28 +1029,43 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     for bet in bets:
         bet = bet.strip()
         total_bets += 1
+        
         if 'DRAW' in bet and not 'DOUBLE' in bet:
+            # Exact Draw bet
             if home == away:
                 correct_count += 1
+                
         elif 'DOUBLE CHANCE' in bet or 'DOUBLE CHANCE:' in bet:
-            if 'HOME' in bet or '1' in bet:
+            # Double Chance bet
+            if 'HOME' in bet and 'AWAY' in bet:
+                # DOUBLE CHANCE: HOME or AWAY → wins if NOT a draw
+                if home != away:
+                    correct_count += 1
+            elif 'HOME' in bet or '1' in bet:
+                # DOUBLE CHANCE: HOME or DRAW → wins if home wins or draw
                 if home >= away:
                     correct_count += 1
             elif 'AWAY' in bet or '2' in bet:
+                # DOUBLE CHANCE: AWAY or DRAW → wins if away wins or draw
                 if away >= home:
                     correct_count += 1
             else:
+                # Fallback
                 if home >= away or away >= home:
                     correct_count += 1
+                    
         elif 'OVER 2.5' in bet:
             if total > 2:
                 correct_count += 1
+                
         elif 'UNDER 2.5' in bet:
             if total <= 2:
                 correct_count += 1
+                
         elif 'HOME WIN' in bet or ('HOME' in bet and not 'DOUBLE' in bet):
             if home > away:
                 correct_count += 1
+                
         elif 'AWAY WIN' in bet or ('AWAY' in bet and not 'DOUBLE' in bet):
             if away > home:
                 correct_count += 1
