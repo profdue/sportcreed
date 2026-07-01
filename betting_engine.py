@@ -1,6 +1,7 @@
 """
-MATCH ANALYZER V11.6 — COMPLETE DATA INTEGRATION
-Uses structured table data with Last 5 form sequence.
+MATCH ANALYZER V11.7 — COMPLETE DATA INTEGRATION
+Handles both horizontal and vertical table formats.
+Parses structured teams data with Last 5 form sequence.
 Accurately detects losing streaks from Last 5 (consecutive L's).
 """
 
@@ -27,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.6", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V11.7", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -164,6 +165,8 @@ def losing_streak_from_last5(last5: str) -> int:
 
 def get_block(position: int, league_size: int = 20) -> str:
     """Determine competitive block from position"""
+    if position is None:
+        return None
     if position <= 4:
         return "europe"
     elif position <= 14:
@@ -190,7 +193,7 @@ def parse_text_data(text: str) -> dict:
         "league": league,
         "league_config": league_config,
         "matches": [],
-        "teams_data": {}  # New: structured team data with Last 5
+        "teams_data": {}
     }
     
     sections = split_into_sections(text)
@@ -199,7 +202,7 @@ def parse_text_data(text: str) -> dict:
     matches = parse_predictions(sections.get("predictions", ""))
     result["matches"] = matches
     
-    # Parse structured teams data (NEW)
+    # Parse structured teams data (handles both horizontal and vertical)
     teams_data = parse_structured_teams_data(text)
     result["teams_data"] = teams_data
     
@@ -453,49 +456,41 @@ def parse_predictions(text: str) -> list:
 
 def parse_structured_teams_data(text: str) -> dict:
     """
-    Parse the structured teams data with Last 5 form.
-    This parses the formatted tables like:
-    
-    #  Team  P  W  D  L  DIFF  GLS  Last 5  Pts
-    1  Vila Nova FC  15  8  4  3  +6  23:17  W W L W L  28
+    Parse structured teams data with Last 5 form.
+    Handles BOTH horizontal and vertical table formats.
     """
     teams_data = {}
     lines = text.split('\n')
     
+    # ================================================================
+    # METHOD 1: Try horizontal format first
+    # ================================================================
     in_table = False
-    table_type = None  # 'overall', 'home', 'away'
+    table_type = None
     
-    # Find the table sections
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
         
-        # Detect table headers
+        # Look for horizontal table header: "All Home Away" or "# Team P W D L DIFF GLS Last 5 Pts"
         if "All" in line and "Home" in line and "Away" in line:
             in_table = True
             table_type = 'overall'
             continue
         
-        if "All" in line and "Home" in line and "Away" in line and i < 10:
+        if "#" in line and "Team" in line and "P" in line and "W" in line and "D" in line and "L" in line:
             in_table = True
-            table_type = 'overall'
-            continue
-        
-        if "All" in line and "Home" in line and "Away" in line:
-            # This might be a new table section
             continue
         
         if not in_table:
             continue
         
-        # Parse data rows
-        # Pattern: "1  Vila Nova FC  15  8  4  3  +6  23:17  W W L W L  28"
-        # Or with tabs: "1\tVila Nova FC\t15\t8\t4\t3\t+6\t23:17\tW W L W L\t28"
+        # Parse horizontal row
         line = line.replace('\t', ' ')
         line = ' '.join(line.split())
         
-        # Match pattern: position, team name, games, wins, draws, losses, diff, goals, last5, points
+        # Pattern: position, team name, games, wins, draws, losses, diff, goals, last5, points
         match = re.search(
             r'^(\d+)\s+([A-Za-z\s\-]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+:\d+)\s+([DWL\s]+?)\s+(\d+)$',
             line
@@ -539,38 +534,156 @@ def parse_structured_teams_data(text: str) -> dict:
                     "block": get_block(position),
                     "desperate": is_desperate(position, last5)
                 }
-            elif table_type == 'home':
-                teams_data[team_name]['home'] = {
-                    "position": position,
-                    "games": games,
-                    "wins": wins,
-                    "draws": draws,
-                    "losses": losses,
-                    "diff": diff,
-                    "goals": goals,
-                    "last5": last5,
-                    "points": points,
-                    "form_points": form_points_from_last5(last5),
-                    "losing_streak": losing_streak_from_last5(last5),
-                    "block": get_block(position),
-                    "desperate": is_desperate(position, last5)
-                }
-            elif table_type == 'away':
-                teams_data[team_name]['away'] = {
-                    "position": position,
-                    "games": games,
-                    "wins": wins,
-                    "draws": draws,
-                    "losses": losses,
-                    "diff": diff,
-                    "goals": goals,
-                    "last5": last5,
-                    "points": points,
-                    "form_points": form_points_from_last5(last5),
-                    "losing_streak": losing_streak_from_last5(last5),
-                    "block": get_block(position),
-                    "desperate": is_desperate(position, last5)
-                }
+    
+    # ================================================================
+    # METHOD 2: Try vertical format if horizontal didn't find data
+    # ================================================================
+    if not teams_data:
+        # Find the vertical table sections
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Look for "All" or "Home" or "Away" as standalone headers
+            if line == "All":
+                table_type = 'overall'
+                i += 1
+                # Skip the next line which is likely "Home"
+                if i < len(lines) and lines[i].strip() == "Home":
+                    i += 1
+                if i < len(lines) and lines[i].strip() == "Away":
+                    i += 1
+                if i < len(lines) and lines[i].strip() == "#":
+                    i += 1
+                if i < len(lines) and lines[i].strip() == "Team":
+                    i += 1
+                # Now parse each team's data
+                while i < len(lines):
+                    team_name = lines[i].strip()
+                    if not team_name or team_name in ["All", "Home", "Away", "#", "Team", "P", "W", "D", "L", "DIFF", "GLS", "Last 5", "Pts"]:
+                        i += 1
+                        continue
+                    if team_name in ["Vila Nova FC", "Novorizontino", "Criciúma", "São Bernardo", "Juventude", "Operário-PR", "Fortaleza", "Sport Recife", "Athletic Club", "Goiás", "Atlético Goianiense", "Náutico", "Cuiabá", "CRB", "Ceará", "Botafogo-SP", "Londrina", "Avaí", "Ponte Preta", "América-MG"]:
+                        # Get the data lines
+                        data_lines = []
+                        for k in range(i+1, min(i+10, len(lines))):
+                            val = lines[k].strip()
+                            if val and val not in ["All", "Home", "Away", "#", "Team", "P", "W", "D", "L", "DIFF", "GLS", "Last 5", "Pts"] and not val.isdigit() and not val.startswith('+') and not ':' in val and not re.match(r'^[DWL\s]+$', val):
+                                break
+                            data_lines.append(val)
+                            if len(data_lines) >= 9:
+                                break
+                        
+                        # Parse the data
+                        try:
+                            # Find the data values
+                            values = []
+                            for k in range(i+1, min(i+12, len(lines))):
+                                val = lines[k].strip()
+                                if val and val not in ["All", "Home", "Away", "#", "Team", "P", "W", "D", "L", "DIFF", "GLS", "Last 5", "Pts"]:
+                                    if val.isdigit() or val.startswith('+') or ':' in val or re.match(r'^[DWL\s]+$', val):
+                                        values.append(val)
+                            
+                            # Expected: games, wins, draws, losses, diff, goals, last5, points
+                            if len(values) >= 8:
+                                games = int(values[0])
+                                wins = int(values[1])
+                                draws = int(values[2])
+                                losses = int(values[3])
+                                diff = int(values[4])
+                                goals = values[5]
+                                last5 = values[6].replace(' ', '')
+                                points = int(values[7])
+                                
+                                if team_name not in teams_data:
+                                    teams_data[team_name] = {}
+                                
+                                if table_type == 'overall':
+                                    teams_data[team_name]['overall'] = {
+                                        "position": 0,  # Will be set later
+                                        "games": games,
+                                        "wins": wins,
+                                        "draws": draws,
+                                        "losses": losses,
+                                        "diff": diff,
+                                        "goals": goals,
+                                        "last5": last5,
+                                        "points": points,
+                                        "form_points": form_points_from_last5(last5),
+                                        "losing_streak": losing_streak_from_last5(last5),
+                                        "block": get_block(None),
+                                        "desperate": is_desperate(None, last5)
+                                    }
+                        except Exception as e:
+                            pass
+                        
+                        i += 1
+                        continue
+                    i += 1
+                break
+            i += 1
+    
+    # ================================================================
+    # If still no data, try pattern-based parsing
+    # ================================================================
+    if not teams_data:
+        # Look for teams with their data in any format
+        team_patterns = [
+            "Vila Nova FC", "Novorizontino SP", "Criciúma", "São Bernardo SP", 
+            "Juventude", "Operário PR", "Fortaleza", "Sport Recife", 
+            "Athletic Club MG", "Goiás", "Atlético GO", "Nautico", 
+            "Cuiabá", "CRB AL", "Ceará SC", "Botafogo SP", 
+            "Londrina", "Avai FC", "Ponte Preta", "América Mineiro"
+        ]
+        
+        for pattern in team_patterns:
+            for i, line in enumerate(lines):
+                if pattern in line:
+                    # Found a team, try to find its data nearby
+                    team_name = pattern
+                    if team_name not in teams_data:
+                        teams_data[team_name] = {}
+                    
+                    # Look for numbers in surrounding lines
+                    data_found = []
+                    for k in range(i+1, min(i+15, len(lines))):
+                        val = lines[k].strip()
+                        if val:
+                            # Check if it's a number or data
+                            if val.isdigit() or val.startswith('+') or ':' in val or re.match(r'^[DWL\s]+$', val):
+                                data_found.append(val)
+                            elif val in team_patterns:
+                                break
+                    
+                    if len(data_found) >= 8:
+                        try:
+                            games = int(data_found[0])
+                            wins = int(data_found[1])
+                            draws = int(data_found[2])
+                            losses = int(data_found[3])
+                            diff = int(data_found[4])
+                            goals = data_found[5]
+                            last5 = data_found[6].replace(' ', '')
+                            points = int(data_found[7])
+                            
+                            teams_data[team_name]['overall'] = {
+                                "position": 0,
+                                "games": games,
+                                "wins": wins,
+                                "draws": draws,
+                                "losses": losses,
+                                "diff": diff,
+                                "goals": goals,
+                                "last5": last5,
+                                "points": points,
+                                "form_points": form_points_from_last5(last5),
+                                "losing_streak": losing_streak_from_last5(last5),
+                                "block": get_block(None),
+                                "desperate": is_desperate(None, last5)
+                            }
+                        except:
+                            pass
+                    break
     
     return teams_data
 
@@ -610,46 +723,51 @@ def convert_match_to_data(match: dict, teams_data: dict, league: str = "Unknown"
     home_data = teams_data.get(home_team, {})
     away_data = teams_data.get(away_team, {})
     
-    # Home team data (use overall, fallback to home if available)
+    # Home team data
     if home_data:
         overall = home_data.get('overall', {})
-        home = home_data.get('home', {})
         
-        # Use overall data first, then home data for home-specific
-        data["home_position"] = overall.get('position', home.get('position'))
-        data["home_points"] = overall.get('points', home.get('points'))
-        data["home_gp"] = overall.get('games', home.get('games'))
-        data["home_wins"] = overall.get('wins', home.get('wins'))
-        data["home_draws"] = overall.get('draws', home.get('draws'))
-        data["home_losses"] = overall.get('losses', home.get('losses'))
-        data["home_gf"] = overall.get('goals', home.get('goals', '0:0')).split(':')[0]
-        data["home_ga"] = overall.get('goals', home.get('goals', '0:0')).split(':')[1]
-        data["home_gd"] = overall.get('diff', home.get('diff'))
-        data["home_last5"] = overall.get('last5', home.get('last5', ''))
-        data["home_form_points"] = overall.get('form_points', home.get('form_points', 0))
-        data["home_losing_streak"] = overall.get('losing_streak', home.get('losing_streak', 0))
-        data["home_block"] = overall.get('block', home.get('block'))
-        data["home_desperate"] = overall.get('desperate', home.get('desperate', False))
+        data["home_position"] = overall.get('position')
+        data["home_points"] = overall.get('points')
+        data["home_gp"] = overall.get('games')
+        data["home_wins"] = overall.get('wins')
+        data["home_draws"] = overall.get('draws')
+        data["home_losses"] = overall.get('losses')
+        
+        goals = overall.get('goals', '0:0')
+        if ':' in goals:
+            data["home_gf"] = int(goals.split(':')[0]) if goals.split(':')[0].isdigit() else 0
+            data["home_ga"] = int(goals.split(':')[1]) if goals.split(':')[1].isdigit() else 0
+        
+        data["home_gd"] = overall.get('diff')
+        data["home_last5"] = overall.get('last5', '')
+        data["home_form_points"] = overall.get('form_points', 0)
+        data["home_losing_streak"] = overall.get('losing_streak', 0)
+        data["home_block"] = overall.get('block')
+        data["home_desperate"] = overall.get('desperate', False)
     
-    # Away team data (use overall, fallback to away if available)
+    # Away team data
     if away_data:
         overall = away_data.get('overall', {})
-        away = away_data.get('away', {})
         
-        data["away_position"] = overall.get('position', away.get('position'))
-        data["away_points"] = overall.get('points', away.get('points'))
-        data["away_gp"] = overall.get('games', away.get('games'))
-        data["away_wins"] = overall.get('wins', away.get('wins'))
-        data["away_draws"] = overall.get('draws', away.get('draws'))
-        data["away_losses"] = overall.get('losses', away.get('losses'))
-        data["away_gf"] = overall.get('goals', away.get('goals', '0:0')).split(':')[0]
-        data["away_ga"] = overall.get('goals', away.get('goals', '0:0')).split(':')[1]
-        data["away_gd"] = overall.get('diff', away.get('diff'))
-        data["away_last5"] = overall.get('last5', away.get('last5', ''))
-        data["away_form_points"] = overall.get('form_points', away.get('form_points', 0))
-        data["away_losing_streak"] = overall.get('losing_streak', away.get('losing_streak', 0))
-        data["away_block"] = overall.get('block', away.get('block'))
-        data["away_desperate"] = overall.get('desperate', away.get('desperate', False))
+        data["away_position"] = overall.get('position')
+        data["away_points"] = overall.get('points')
+        data["away_gp"] = overall.get('games')
+        data["away_wins"] = overall.get('wins')
+        data["away_draws"] = overall.get('draws')
+        data["away_losses"] = overall.get('losses')
+        
+        goals = overall.get('goals', '0:0')
+        if ':' in goals:
+            data["away_gf"] = int(goals.split(':')[0]) if goals.split(':')[0].isdigit() else 0
+            data["away_ga"] = int(goals.split(':')[1]) if goals.split(':')[1].isdigit() else 0
+        
+        data["away_gd"] = overall.get('diff')
+        data["away_last5"] = overall.get('last5', '')
+        data["away_form_points"] = overall.get('form_points', 0)
+        data["away_losing_streak"] = overall.get('losing_streak', 0)
+        data["away_block"] = overall.get('block')
+        data["away_desperate"] = overall.get('desperate', False)
     
     # Set is_relegation_fight
     data["is_relegation_fight"] = (
@@ -673,11 +791,6 @@ def convert_match_to_data(match: dict, teams_data: dict, league: str = "Unknown"
 # DRAW SURVIVAL SCORE SYSTEM
 # ============================================================================
 def calculate_draw_survival_score(data: dict) -> dict:
-    """
-    Calculate the Draw Survival Score using 7 factors.
-    Score range: 0-14+
-    """
-    
     factors = {}
     total_score = 0
     
@@ -917,11 +1030,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
 # DRAW-FOCUSED ANALYSIS ENGINE
 # ============================================================================
 def analyze_draw_match(data: dict) -> dict:
-    """
-    Analyze draw predictions using the Draw Survival Score system.
-    ALWAYS bet DOUBLE CHANCE, but adjust stake based on score.
-    """
-    
     result = {
         "primary_bet": None,
         "classification": None,
@@ -1468,7 +1576,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V11.6")
+    st.title("🎯 Match Analyzer V11.7")
     st.caption("Stake-Adjusted Draw System | Complete Data Integration")
 
     with st.expander("📖 The Stake-Adjusted Draw System", expanded=False):
@@ -1482,7 +1590,7 @@ def main():
         | **5-7** | ⚠️ CAUTIOUS | **Half** | 70-80% |
         | **≥ 8** | ❗ DANGEROUS | **Small or Skip** | N/A |
         
-        **Now using structured data with Last 5 form for accurate losing streak detection.** 📊
+        **Parses both horizontal and vertical table formats.** 📊
         """)
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -1505,7 +1613,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + Tables with Last 5)..."
         )
 
-        if st.button("🎯 ANALYZE V11.6", type="primary"):
+        if st.button("🎯 ANALYZE V11.7", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1523,6 +1631,8 @@ def main():
                         
                         if teams_data:
                             st.info(f"📊 Found {len(teams_data)} teams with structured data (Last 5 form)")
+                        else:
+                            st.warning("⚠️ No structured teams data found. Form data may be missing.")
                         
                         analyzed_results = []
                         skipped_results = []
