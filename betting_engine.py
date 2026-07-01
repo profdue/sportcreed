@@ -1,10 +1,8 @@
 """
-MATCH ANALYZER V11.3 — STAKE-ADJUSTED DRAW SYSTEM
+MATCH ANALYZER V11.4 — STAKE-ADJUSTED DRAW SYSTEM WITH DATE DISPLAY
 Always bet DOUBLE CHANCE (12) on every draw prediction.
-Stake adjusts based on Draw Survival Score:
-- SAFE (≤4): Full stake
-- CAUTIOUS (5-7): Half stake
-- DANGEROUS (≥8): Small stake or skip
+Stake adjusts based on Draw Survival Score.
+Pending results show match dates for easy tracking.
 """
 
 import streamlit as st
@@ -30,7 +28,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.3", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V11.4", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -82,6 +80,9 @@ st.markdown("""
     .factor-value { font-weight: 600; }
     .factor-points { color: #fbbf24; font-weight: 700; }
     .stake-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .date-today { color: #ef4444; font-weight: 700; }
+    .date-past { color: #f59e0b; font-weight: 700; }
+    .date-future { color: #10b981; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1157,8 +1158,9 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
 
 
 def get_pending():
+    """Get pending results ordered by match date (soonest first)."""
     try:
-        response = supabase.table("match_analyses").select("*").eq("result_entered", False).order("created_at", desc=True).execute()
+        response = supabase.table("match_analyses").select("*").eq("result_entered", False).order("match_date", asc=True).execute()
         return response.data if response.data else []
     except: return []
 
@@ -1449,8 +1451,8 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V11.3")
-    st.caption("Stake-Adjusted Draw System | Always Bet DOUBLE CHANCE")
+    st.title("🎯 Match Analyzer V11.4")
+    st.caption("Stake-Adjusted Draw System | Date Display for Pending Results")
 
     with st.expander("📖 The Stake-Adjusted Draw System", expanded=False):
         st.markdown("""
@@ -1463,22 +1465,7 @@ def main():
         | **5-7** | ⚠️ CAUTIOUS | **Half** | 70-80% |
         | **≥ 8** | ❗ DANGEROUS | **Small or Skip** | N/A |
         
-        **7 Factors Analyzed:**
-        
-        | Factor | Weight | What It Measures |
-        |--------|--------|------------------|
-        | **1. Team Draw Rate** | HIGH | How often each team draws |
-        | **2. Points Difference** | HIGH | How evenly matched teams are |
-        | **3. Goal Expectancy** | HIGH | Low-scoring games = more draws |
-        | **4. GD Gap** | MEDIUM | Balanced attack/defense = draws |
-        | **5. Scoring Rate** | MEDIUM | Low scoring = more draws |
-        | **6. Probability Balance** | LOW | Balanced probabilities = draws |
-        | **7. Dominance Gap** | LOW (negative) | Dominance kills draws |
-        
-        **Goal Bets (Secondary):**
-        - Avg Goals < 2.00 → UNDER 2.5 (95%)
-        - Avg Goals > 3.00 → OVER 2.5 (100%)
-        - Avg Goals 2.00-2.40 → UNDER 2.5 (80%)
+        **Pending results now show match dates for easy tracking.** 📅
         """)
 
     tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
@@ -1501,7 +1488,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V11.3", type="primary"):
+        if st.button("🎯 ANALYZE V11.4", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1631,7 +1618,39 @@ def main():
         st.subheader("📝 Enter Match Results")
         pending = get_pending()
         if pending:
+            # Group by date for better organization
             st.write(f"**{len(pending)} pending result(s)**")
+            
+            # Show current date for reference
+            today = date.today().strftime("%d/%m/%Y")
+            st.caption(f"📅 Today: {today}")
+            
+            # Count by status
+            past_count = 0
+            today_count = 0
+            future_count = 0
+            
+            for a in pending:
+                match_date = a.get('match_date', '')
+                if match_date:
+                    if match_date < today:
+                        past_count += 1
+                    elif match_date == today:
+                        today_count += 1
+                    else:
+                        future_count += 1
+            
+            # Show status summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🔴 Today", today_count)
+            with col2:
+                st.metric("⏳ Past", past_count)
+            with col3:
+                st.metric("📅 Future", future_count)
+            
+            st.markdown("---")
+            
             for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
@@ -1639,6 +1658,22 @@ def main():
                 score = a.get('draw_survival_score', '?')
                 action = a.get('action', '?')
                 stake = a.get('stake', '?')
+                match_date = a.get('match_date', 'Date unknown')
+                
+                # Determine if match is today or in the past
+                is_today = match_date == today
+                is_past = match_date < today if match_date != 'Date unknown' else False
+                
+                # Build date badge
+                if is_today:
+                    date_badge = "🔴 TODAY"
+                    date_icon = "🔴"
+                elif is_past:
+                    date_badge = "⏳ PAST"
+                    date_icon = "⏳"
+                else:
+                    date_badge = "📅 FUTURE"
+                    date_icon = "📅"
 
                 if action == "SAFE":
                     badge = f"✅ SAFE (Score: {score}) — {stake} Stake"
@@ -1647,11 +1682,24 @@ def main():
                 else:
                     badge = f"❗ DANGEROUS (Score: {score}) — {stake} Stake"
 
-                with st.expander(f"{badge} | {ht} vs {at} — Predicted: {pred}"):
+                with st.expander(f"{date_icon} {badge} | {ht} vs {at} — {match_date} | Predicted: {pred}"):
                     st.info(f"📊 Draw Survival Score: {score} ({action}) — Stake: {stake}")
+                    st.caption(f"📅 Match Date: {match_date} {date_badge}")
+                    
+                    # Show warning if match is in the past
+                    if is_past:
+                        st.warning("⏳ This match is in the past. Please enter the result.")
+                    
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
+                    
+                    # Show expected score for reference
+                    expected_home = a.get('correct_score_home')
+                    expected_away = a.get('correct_score_away')
+                    if expected_home is not None and expected_away is not None:
+                        st.caption(f"📊 Expected Score: {expected_home}-{expected_away}")
+                    
                     if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
                         if submit_result(a['id'], hg, ag):
                             st.success("Result submitted!")
