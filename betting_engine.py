@@ -3,10 +3,11 @@ MATCH ANALYZER V11.5 — STAKE-ADJUSTED DRAW SYSTEM WITH CORRECT DATE DISPLAY
 Always bet DOUBLE CHANCE (12) on every draw prediction.
 Stake adjusts based on Draw Survival Score.
 Pending results show the ACTUAL match date from the data.
+Fixed: Date comparison for pending matches.
 """
 
 import streamlit as st
-from datetime import date
+from datetime import date, datetime
 from supabase import create_client, Client
 import pandas as pd
 import re
@@ -1620,11 +1621,12 @@ def main():
     with tab2:
         st.subheader("📝 Enter Match Results")
         pending = get_pending()
+        
         if pending:
             st.write(f"**{len(pending)} pending result(s)**")
             
             # Show current date for reference
-            today = date.today().strftime("%d/%m/%Y")
+            today = datetime.now().strftime("%d/%m/%Y")
             st.caption(f"📅 Today: {today}")
             
             # Count by status
@@ -1635,12 +1637,21 @@ def main():
             for a in pending:
                 match_date = a.get('match_date', '')
                 if match_date:
-                    if match_date < today:
-                        past_count += 1
-                    elif match_date == today:
-                        today_count += 1
-                    else:
-                        future_count += 1
+                    # Parse date for comparison
+                    try:
+                        parts = match_date.split('/')
+                        if len(parts) == 3:
+                            date_str = parts[2] + parts[1] + parts[0]
+                            today_str = today.split('/')[2] + today.split('/')[1] + today.split('/')[0]
+                            
+                            if date_str == today_str:
+                                today_count += 1
+                            elif date_str < today_str:
+                                past_count += 1
+                            else:
+                                future_count += 1
+                    except:
+                        pass
             
             # Show status summary
             col1, col2, col3 = st.columns(3)
@@ -1663,8 +1674,23 @@ def main():
                 match_date = a.get('match_date', 'Date unknown')
                 
                 # Determine if match is today or in the past
-                is_today = match_date == today
-                is_past = match_date < today if match_date != 'Date unknown' else False
+                is_today = False
+                is_past = False
+                
+                try:
+                    if match_date != 'Date unknown' and match_date:
+                        parts = match_date.split('/')
+                        if len(parts) == 3:
+                            date_str = parts[2] + parts[1] + parts[0]
+                            today_str = today.split('/')[2] + today.split('/')[1] + today.split('/')[0]
+                            
+                            if date_str == today_str:
+                                is_today = True
+                            elif date_str < today_str:
+                                is_past = True
+                except:
+                    is_today = False
+                    is_past = False
                 
                 # Build date badge
                 if is_today:
