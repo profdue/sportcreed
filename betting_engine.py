@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V12.1 — DISPLAY FIXES
-Fixed Stake Labels | Fixed Score Display | Goal Bets Shown | Dead Rubber Indicator
+MATCH ANALYZER V12.1 — COMPLETE FIXED VERSION
+Fixed: NoneType error | Winning Streak columns | Organized Records/Backtest
 """
 
 import streamlit as st
@@ -92,7 +92,7 @@ st.markdown("""
 
 
 # ============================================================================
-# STAKE MAPPING - V12.0 FIX
+# STAKE MAPPING
 # ============================================================================
 def get_stake_display(stake_value: str) -> tuple:
     """
@@ -1203,31 +1203,52 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 # ============================================================================
 # BACKTEST FUNCTION
 # ============================================================================
-def backtest(matches: list) -> list:
-    results = []
-    for match in matches:
-        score = match.get("draw_survival_score", 0)
-        if score <= 4:
+def backtest(results: list) -> list:
+    """Generate backtest results from recorded matches"""
+    backtest_results = []
+    for r in results:
+        pred = r.get('bet_market', '')
+        if pred == 'SKIP':
+            continue
+        
+        score = r.get('draw_survival_score', 0)
+        display_score = max(0, score) if isinstance(score, (int, float)) else score
+        
+        if display_score <= 4:
             action = "SAFE"
             stake = "2 units"
-        elif score <= 7:
+        elif display_score <= 7:
             action = "CAUTIOUS"
             stake = "1 unit"
-        elif score <= 9:
+        elif display_score <= 9:
             action = "DANGEROUS"
             stake = "0.25 unit"
         else:
             action = "SKIP"
             stake = "0 units"
         
-        results.append({
-            "match": match,
-            "score": score,
-            "action": action,
-            "stake": stake,
-            "result": match.get("actual_result")
+        actual_home = r.get('actual_home_goals')
+        actual_away = r.get('actual_away_goals')
+        
+        if actual_home is not None and actual_away is not None:
+            primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+            evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
+            result_text = "WIN" if evaluation["is_correct"] else "LOSS"
+        else:
+            result_text = "PENDING"
+        
+        backtest_results.append({
+            "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
+            "Date": r.get('match_date', ''),
+            "Score": display_score,
+            "Action": action,
+            "Stake": stake,
+            "Bet": pred,
+            "Actual": f"{actual_home}-{actual_away}" if actual_home is not None else "—",
+            "Result": result_text,
         })
-    return results
+    
+    return backtest_results
 
 
 # ============================================================================
@@ -1746,6 +1767,149 @@ def display_live_dashboard():
 
 
 # ============================================================================
+# DISPLAY RECORDS TABLE
+# ============================================================================
+def display_records_table(results: list):
+    """Display the records table with proper formatting and dead rubber detection"""
+    if not results:
+        st.info("No results recorded yet.")
+        return
+    
+    total = len(results)
+    correct = 0
+    incorrect = 0
+    lock_correct = 0
+    lock_total = 0
+
+    scores = []
+    safe_scores = []
+    cautious_scores = []
+    dangerous_scores = []
+    
+    for r in results:
+        score = r.get('draw_survival_score', 0)
+        # Ensure score is not negative for display
+        display_score = max(0, score)
+        scores.append(display_score)
+        if display_score <= 4:
+            safe_scores.append(display_score)
+        elif display_score <= 7:
+            cautious_scores.append(display_score)
+        elif display_score <= 9:
+            dangerous_scores.append(display_score)
+
+    for r in results:
+        pred = r.get('bet_market', '')
+        if pred == 'SKIP':
+            continue
+        primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+        evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        if evaluation["is_correct"]:
+            correct += 1
+            if r.get('is_lock', False):
+                lock_correct += 1
+        else:
+            incorrect += 1
+        if r.get('is_lock', False):
+            lock_total += 1
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Draws Tracked</div></div>', unsafe_allow_html=True)
+    with col2:
+        win_rate = round(correct / total * 100) if total > 0 else 0
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
+    with col4:
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
+    with col5:
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{len(safe_scores)}</div><div class="stat-label">SAFE Bets (2u)</div></div>', unsafe_allow_html=True)
+
+    st.markdown("### 📊 Draw Survival Score Distribution")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("✅ SAFE (≤4)", len(safe_scores))
+    with col2:
+        st.metric("⚠️ CAUTIOUS (5-7)", len(cautious_scores))
+    with col3:
+        st.metric("❗ DANGEROUS (8-9)", len(dangerous_scores))
+    with col4:
+        st.metric("⏭️ SKIP (≥10)", total - len(safe_scores) - len(cautious_scores) - len(dangerous_scores))
+
+    if lock_total > 0:
+        lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
+        st.markdown(f"🔒 **Lock Signals:** {lock_correct}/{lock_total} correct ({lock_rate}%)")
+
+    st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
+
+    # Build the records table
+    rows = []
+    for r in results:
+        pred = r.get('bet_market', '')
+        actual_home = r.get('actual_home_goals')
+        actual_away = r.get('actual_away_goals')
+        primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+        league = r.get('league', '')
+        badge_class = get_league_badge(league)
+        score = r.get('draw_survival_score', '?')
+        # Don't show negative scores
+        display_score = max(0, score) if isinstance(score, (int, float)) else score
+        action = r.get('action', '?')
+        stake = r.get('stake', '?')
+        stake_display, _ = get_stake_display(stake)
+        
+        # Check for dead rubber - FIXED
+        warning = r.get('warning') or ''
+        dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
+
+        evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
+        badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
+        score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
+
+        match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
+        score_label = f"{display_score} ({action}) — {stake_display}{dead_rubber_badge}" if score != '?' else '?'
+
+        rows.append({
+            "Date": r.get("match_date", ""),
+            "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
+            "Match": match_display,
+            "Score": score_label,
+            "Bet": pred,
+            "Actual": score_display,
+            "Result": badge,
+        })
+
+    df = pd.DataFrame(rows)
+    st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+    
+    # Backtest section - properly organized
+    st.markdown("### 🔬 Backtest Results")
+    backtest_results = backtest(results)
+    if backtest_results:
+        backtest_df = pd.DataFrame(backtest_results)
+        st.dataframe(backtest_df, use_container_width=True)
+        
+        # Summary stats
+        total_backtest = len(backtest_results)
+        wins = sum(1 for r in backtest_results if r["Result"] == "WIN")
+        losses = sum(1 for r in backtest_results if r["Result"] == "LOSS")
+        pending = sum(1 for r in backtest_results if r["Result"] == "PENDING")
+        
+        if total_backtest > 0:
+            win_rate_backtest = round(wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total", total_backtest)
+            with col2:
+                st.metric("Wins", wins)
+            with col3:
+                st.metric("Losses", losses)
+            with col4:
+                st.metric("Win Rate", f"{win_rate_backtest}%")
+
+
+# ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
@@ -1968,122 +2132,7 @@ def main():
     with tab3:
         st.subheader("📊 Performance Records")
         results = get_results()
-        if not results:
-            st.info("No results recorded yet.")
-        else:
-            total = len(results)
-            correct = 0
-            incorrect = 0
-            lock_correct = 0
-            lock_total = 0
-
-            scores = []
-            safe_scores = []
-            cautious_scores = []
-            dangerous_scores = []
-            
-            for r in results:
-                score = r.get('draw_survival_score', 0)
-                # Ensure score is not negative for display
-                display_score = max(0, score)
-                scores.append(display_score)
-                if display_score <= 4:
-                    safe_scores.append(display_score)
-                elif display_score <= 7:
-                    cautious_scores.append(display_score)
-                elif display_score <= 9:
-                    dangerous_scores.append(display_score)
-
-            for r in results:
-                pred = r.get('bet_market', '')
-                if pred == 'SKIP':
-                    continue
-                primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-                evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
-                if evaluation["is_correct"]:
-                    correct += 1
-                    if r.get('is_lock', False):
-                        lock_correct += 1
-                else:
-                    incorrect += 1
-                if r.get('is_lock', False):
-                    lock_total += 1
-
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Draws Tracked</div></div>', unsafe_allow_html=True)
-            with col2:
-                win_rate = round(correct / total * 100) if total > 0 else 0
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
-            with col3:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
-            with col4:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
-            with col5:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{len(safe_scores)}</div><div class="stat-label">SAFE Bets (2u)</div></div>', unsafe_allow_html=True)
-
-            st.markdown("### 📊 Draw Survival Score Distribution")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("✅ SAFE (≤4)", len(safe_scores))
-            with col2:
-                st.metric("⚠️ CAUTIOUS (5-7)", len(cautious_scores))
-            with col3:
-                st.metric("❗ DANGEROUS (8-9)", len(dangerous_scores))
-            with col4:
-                st.metric("⏭️ SKIP (≥10)", total - len(safe_scores) - len(cautious_scores) - len(dangerous_scores))
-
-            if lock_total > 0:
-                lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
-                st.markdown(f"🔒 **Lock Signals:** {lock_correct}/{lock_total} correct ({lock_rate}%)")
-
-            st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
-
-        rows = []
-        for r in results:
-            pred = r.get('bet_market', '')
-            actual_home = r.get('actual_home_goals')
-            actual_away = r.get('actual_away_goals')
-            primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-            league = r.get('league', '')
-            badge_class = get_league_badge(league)
-            score = r.get('draw_survival_score', '?')
-            # Don't show negative scores
-            display_score = max(0, score) if isinstance(score, (int, float)) else score
-            action = r.get('action', '?')
-            stake = r.get('stake', '?')
-            stake_display, _ = get_stake_display(stake)
-            
-            # Check for dead rubber - FIXED
-            warning = r.get('warning') or ''
-            dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
-        
-            evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-            badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
-            score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
-        
-            match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
-            score_label = f"{display_score} ({action}) — {stake_display}{dead_rubber_badge}" if score != '?' else '?'
-        
-            rows.append({
-                "Date": r.get("match_date", ""),
-                "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
-                "Match": match_display,
-                "Score": score_label,
-                "Bet": pred,
-                "Actual": score_display,
-                "Result": badge,
-            })
-
-            df = pd.DataFrame(rows)
-            st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
-            
-            # Backtest section
-            st.markdown("### 🔬 Backtest Results")
-            backtest_results = backtest(results)
-            backtest_df = pd.DataFrame(backtest_results)
-            if not backtest_df.empty:
-                st.dataframe(backtest_df)
+        display_records_table(results)
 
     with tab4:
         display_live_dashboard()
