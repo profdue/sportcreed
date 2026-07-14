@@ -2039,41 +2039,41 @@ def main():
 
             st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
 
-            rows = []
-            for r in results:
-                pred = r.get('bet_market', '')
-                actual_home = r.get('actual_home_goals')
-                actual_away = r.get('actual_away_goals')
-                primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-                league = r.get('league', '')
-                badge_class = get_league_badge(league)
-                score = r.get('draw_survival_score', '?')
-                # Don't show negative scores
-                display_score = max(0, score) if isinstance(score, (int, float)) else score
-                action = r.get('action', '?')
-                stake = r.get('stake', '?')
-                stake_display, _ = get_stake_display(stake)
-                
-                # Check for dead rubber - FIXED
-                warning = r.get('warning') or ''
-                dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
-
-                evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-                badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
-                score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
-
-                match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
-                score_label = f"{display_score} ({action}) — {stake_display}{dead_rubber_badge}" if score != '?' else '?'
-
-                rows.append({
-                    "Date": r.get("match_date", ""),
-                    "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
-                    "Match": match_display,
-                    "Score": score_label,
-                    "Bet": pred,
-                    "Actual": score_display,
-                    "Result": badge,
-                })
+        rows = []
+        for r in results:
+            pred = r.get('bet_market', '')
+            actual_home = r.get('actual_home_goals')
+            actual_away = r.get('actual_away_goals')
+            primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+            league = r.get('league', '')
+            badge_class = get_league_badge(league)
+            score = r.get('draw_survival_score', '?')
+            # Don't show negative scores
+            display_score = max(0, score) if isinstance(score, (int, float)) else score
+            action = r.get('action', '?')
+            stake = r.get('stake', '?')
+            stake_display, _ = get_stake_display(stake)
+            
+            # Check for dead rubber - FIXED
+            warning = r.get('warning') or ''
+            dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
+        
+            evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
+            badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
+            score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
+        
+            match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
+            score_label = f"{display_score} ({action}) — {stake_display}{dead_rubber_badge}" if score != '?' else '?'
+        
+            rows.append({
+                "Date": r.get("match_date", ""),
+                "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
+                "Match": match_display,
+                "Score": score_label,
+                "Bet": pred,
+                "Actual": score_display,
+                "Result": badge,
+            })
 
             df = pd.DataFrame(rows)
             st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
