@@ -1476,9 +1476,10 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     badge_class = get_league_badge(league)
     st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
     
-    # Dead rubber warning
-    if analysis.get("warning"):
-        st.markdown(f'<div class="dead-rubber-warning">{analysis["warning"]}</div>', unsafe_allow_html=True)
+    # Dead rubber warning - FIXED
+    warning = analysis.get("warning") or ''
+    if warning:
+        st.markdown(f'<div class="dead-rubber-warning">{warning}</div>', unsafe_allow_html=True)
     
     display_score_breakdown(
         analysis.get("factor_breakdown", {}),
@@ -2053,9 +2054,9 @@ def main():
                 stake = r.get('stake', '?')
                 stake_display, _ = get_stake_display(stake)
                 
-                # Check for dead rubber
-                warning = r.get('warning', '')
-                dead_rubber_badge = ' ⚠️DR' if 'DEAD RUBBER' in warning else ''
+                # Check for dead rubber - FIXED
+                warning = r.get('warning') or ''
+                dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
 
                 evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
                 badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
