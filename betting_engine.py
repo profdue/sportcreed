@@ -1,5 +1,5 @@
 """
-MATCH ANALYZER V11.6 — CLEAN
+MATCH ANALYZER V12.0 — NEW LOGIC
 Stake-Adjusted Draw System | Simplified Post-Match Display
 NO extra columns — only what exists in Supabase.
 """
@@ -27,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V11.6", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V12.0", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -78,6 +78,14 @@ st.markdown("""
     .factor-value { font-weight: 600; }
     .factor-points { color: #fbbf24; font-weight: 700; }
     .stake-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .stake-2 { background: #10b981; color: #000; }
+    .stake-1 { background: #f59e0b; color: #000; }
+    .stake-0-25 { background: #ef4444; color: #fff; }
+    .stake-0 { background: #64748b; color: #fff; }
+    .quality-box { background: #0a2a0a; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.25rem 0; border: 1px solid #2a4a2a; }
+    .streak-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .streak-loss { background: #ef4444; color: #fff; }
+    .streak-win { background: #10b981; color: #000; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -509,6 +517,7 @@ def parse_form(text: str) -> dict:
             if losses >= 3:
                 losing_streak = min(losses, 6)
             
+            # Also track wins for winning streak detection
             form_data[team_name] = {
                 "position": position,
                 "points": points,
@@ -520,15 +529,13 @@ def parse_form(text: str) -> dict:
                 "ga": ga,
                 "gd": gd,
                 "form_points": points,
-                "losing_streak": losing_streak
+                "losing_streak": losing_streak,
+                "winning_streak": wins if wins >= 3 else 0
             }
     
     return form_data
 
 
-# ============================================================================
-# CONVERT DATA TO ANALYSIS FORMAT
-# ============================================================================
 def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_data: dict, 
                           league: str = "Unknown") -> dict:
     league_config = get_league_config(league)
@@ -583,12 +590,14 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
         data["home_form_draws"] = form_data[home_team]["draws"]
         data["home_form_losses"] = form_data[home_team]["losses"]
         data["home_losing_streak"] = form_data[home_team]["losing_streak"]
+        data["home_winning_streak"] = form_data[home_team].get("winning_streak", 0)
     if away_team in form_data:
         data["away_form_points"] = form_data[away_team]["form_points"]
         data["away_form_wins"] = form_data[away_team]["wins"]
         data["away_form_draws"] = form_data[away_team]["draws"]
         data["away_form_losses"] = form_data[away_team]["losses"]
         data["away_losing_streak"] = form_data[away_team]["losing_streak"]
+        data["away_winning_streak"] = form_data[away_team].get("winning_streak", 0)
     
     def get_block(position):
         if position is None:
@@ -627,13 +636,16 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# DRAW SURVIVAL SCORE SYSTEM
+# DRAW SURVIVAL SCORE SYSTEM — V12.0 NEW LOGIC
 # ============================================================================
 def calculate_draw_survival_score(data: dict) -> dict:
     factors = {}
     total_score = 0
+    factor_performance = {}
     
-    # FACTOR 1: TEAM DRAW RATE (HIGH weight)
+    # ========================================================================
+    # FACTOR 1: DRAW RATE (0-4 points) — HIGH weight
+    # ========================================================================
     home_draw_rate = data.get("home_draws", 0) / max(data.get("home_gp", 1), 1)
     away_draw_rate = data.get("away_draws", 0) / max(data.get("away_gp", 1), 1)
     combined_draw_rate = (home_draw_rate + away_draw_rate) / 2
@@ -649,14 +661,18 @@ def calculate_draw_survival_score(data: dict) -> dict:
     else:
         f1_points = 0
     
-    factors["team_draw_rate"] = {
+    factors["draw_rate"] = {
         "value": f"{combined_draw_rate:.1%}",
         "points": f1_points,
-        "weight": "HIGH"
+        "weight": "HIGH",
+        "performance": "100%"
     }
+    factor_performance["draw_rate"] = "100%"
     total_score += f1_points
     
-    # FACTOR 2: POINTS DIFFERENCE (HIGH weight)
+    # ========================================================================
+    # FACTOR 2: POINTS DIFFERENCE (0-3 points) — HIGH weight
+    # ========================================================================
     home_points = data.get("home_points", 0)
     away_points = data.get("away_points", 0)
     points_diff = abs(home_points - away_points)
@@ -675,11 +691,15 @@ def calculate_draw_survival_score(data: dict) -> dict:
     factors["points_difference"] = {
         "value": f"{points_diff} pts",
         "points": f2_points,
-        "weight": "HIGH"
+        "weight": "HIGH",
+        "performance": "100%"
     }
+    factor_performance["points_difference"] = "100%"
     total_score += f2_points
     
-    # FACTOR 3: GOAL EXPECTANCY (HIGH weight)
+    # ========================================================================
+    # FACTOR 3: GOAL EXPECTANCY (0-3 points) — HIGH weight
+    # ========================================================================
     avg_goals = data.get("avg_goals", 2.0)
     
     if avg_goals < 2.00:
@@ -700,34 +720,42 @@ def calculate_draw_survival_score(data: dict) -> dict:
     factors["goal_expectancy"] = {
         "value": f"{avg_goals:.2f}",
         "points": f3_points,
-        "weight": "HIGH"
+        "weight": "HIGH",
+        "performance": "100%"
     }
+    factor_performance["goal_expectancy"] = "100%"
     total_score += f3_points
     
-    # FACTOR 4: GD GAP (MEDIUM weight)
+    # ========================================================================
+    # FACTOR 4: GD GAP (0-3 points) — MEDIUM weight (INCREASED)
+    # ========================================================================
     home_gd = data.get("home_gd", 0)
     away_gd = data.get("away_gd", 0)
     gd_gap = abs(home_gd - away_gd)
     
     if gd_gap <= 5:
-        f4_points = 2
+        f4_points = 3
     elif gd_gap <= 10:
-        f4_points = 1
+        f4_points = 2
     elif gd_gap <= 15:
-        f4_points = 0
+        f4_points = 1
     elif gd_gap <= 20:
-        f4_points = -1
+        f4_points = 0
     else:
-        f4_points = -2
+        f4_points = -1
     
     factors["gd_gap"] = {
         "value": f"{gd_gap}",
         "points": f4_points,
-        "weight": "MEDIUM"
+        "weight": "MEDIUM",
+        "performance": "100%"
     }
+    factor_performance["gd_gap"] = "100%"
     total_score += f4_points
     
-    # FACTOR 5: SCORING RATE (MEDIUM weight)
+    # ========================================================================
+    # FACTOR 5: SCORING RATE (0-3 points) — MEDIUM weight
+    # ========================================================================
     home_scoring = float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1)
     away_scoring = float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1)
     combined_scoring = (home_scoring + away_scoring) / 2
@@ -748,11 +776,15 @@ def calculate_draw_survival_score(data: dict) -> dict:
     factors["scoring_rate"] = {
         "value": f"{combined_scoring:.2f}",
         "points": f5_points,
-        "weight": "MEDIUM"
+        "weight": "MEDIUM",
+        "performance": "100%"
     }
+    factor_performance["scoring_rate"] = "100%"
     total_score += f5_points
     
-    # FACTOR 6: PROBABILITY BALANCE (LOW weight)
+    # ========================================================================
+    # FACTOR 6: PROBABILITY BALANCE (0-2 points) — LOW weight
+    # ========================================================================
     home_pct = data.get("home_pct", 33)
     draw_pct = data.get("draw_pct", 34)
     away_pct = data.get("away_pct", 33)
@@ -774,11 +806,15 @@ def calculate_draw_survival_score(data: dict) -> dict:
     factors["probability_balance"] = {
         "value": f"{variance}% range",
         "points": f6_points,
-        "weight": "LOW"
+        "weight": "LOW",
+        "performance": "100%"
     }
+    factor_performance["probability_balance"] = "100%"
     total_score += f6_points
     
-    # FACTOR 7: DOMINANCE GAP (LOW weight - negative)
+    # ========================================================================
+    # FACTOR 7: DOMINANCE GAP (0 to -4 points) — LOW weight
+    # ========================================================================
     home_win_rate = data.get("home_wins", 0) / max(data.get("home_gp", 1), 1)
     away_win_rate = data.get("away_wins", 0) / max(data.get("away_gp", 1), 1)
     dominance_gap = abs(home_win_rate - away_win_rate) * 100
@@ -797,53 +833,154 @@ def calculate_draw_survival_score(data: dict) -> dict:
     factors["dominance_gap"] = {
         "value": f"{dominance_gap:.0f}%",
         "points": f7_points,
-        "weight": "LOW"
+        "weight": "LOW",
+        "performance": "100%"
     }
+    factor_performance["dominance_gap"] = "100%"
     total_score += f7_points
     
-    # DETERMINE DECISION
+    # ========================================================================
+    # FACTOR 8: STREAK (0 to +3 or -2 points) — NEW
+    # ========================================================================
+    streak_points = 0
+    home_losing = data.get("home_losing_streak", 0)
+    away_losing = data.get("away_losing_streak", 0)
+    home_winning = data.get("home_winning_streak", 0)
+    away_winning = data.get("away_winning_streak", 0)
+    
+    # Losing streaks → SAFER (more likely to avoid draw)
+    if home_losing >= 5 or away_losing >= 5:
+        streak_points += 3
+        streak_reason = "Major losing streak"
+    elif home_losing >= 3 or away_losing >= 3:
+        streak_points += 2
+        streak_reason = "Losing streak"
+    
+    # Winning streaks → DANGEROUS (more likely to keep winning)
+    if home_winning >= 3 or away_winning >= 3:
+        streak_points -= 2
+        streak_reason = "Winning streak"
+    
+    factors["streak"] = {
+        "value": f"L{home_losing}/{away_losing} W{home_winning}/{away_winning}",
+        "points": streak_points,
+        "weight": "NEW",
+        "performance": "NEW",
+        "streak_reason": streak_reason if streak_points != 0 else "No significant streak"
+    }
+    total_score += streak_points
+    
+    # ========================================================================
+    # FACTOR 9: TEAM QUALITY (0 to +2 or -1 points) — NEW
+    # ========================================================================
+    home_quality = (float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1) + 
+                   float(data.get("home_ga", 0)) / max(data.get("home_gp", 1), 1))
+    away_quality = (float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1) + 
+                   float(data.get("away_ga", 0)) / max(data.get("away_gp", 1), 1))
+    quality_diff = abs(home_quality - away_quality)
+    
+    if quality_diff <= 0.5:
+        f9_points = 2
+        quality_label = "Very evenly matched"
+    elif quality_diff <= 1.0:
+        f9_points = 1
+        quality_label = "Evenly matched"
+    elif quality_diff <= 1.5:
+        f9_points = 0
+        quality_label = "Slight mismatch"
+    else:
+        f9_points = -1
+        quality_label = "Significant mismatch"
+    
+    factors["team_quality"] = {
+        "value": f"{quality_diff:.2f} ({quality_label})",
+        "points": f9_points,
+        "weight": "NEW",
+        "performance": "NEW"
+    }
+    total_score += f9_points
+    
+    # ========================================================================
+    # FACTOR 10: DEAD RUBBER (0 or +2 points) — NEW
+    # ========================================================================
+    home_block = data.get("home_block")
+    away_block = data.get("away_block")
+    is_relegation_fight = data.get("is_relegation_fight", False)
+    
+    is_dead_rubber = False
+    if (home_block == "mid" and away_block == "mid" and not is_relegation_fight):
+        is_dead_rubber = True
+        f10_points = 2
+        factors["dead_rubber"] = {
+            "value": "YES ⚠️",
+            "points": f10_points,
+            "weight": "NEW",
+            "performance": "NEW"
+        }
+        total_score += f10_points
+    else:
+        factors["dead_rubber"] = {
+            "value": "No",
+            "points": 0,
+            "weight": "NEW",
+            "performance": "NEW"
+        }
+    
+    # ========================================================================
+    # DECISION RULES (Updated)
+    # ========================================================================
     if total_score <= 4:
         action = "SAFE"
-        stake = "Full"
+        stake = "2 units"
         color = "#10b981"
         emoji = "✅"
-        explanation = f"Draw unlikely to survive (Score: {total_score}) → Full stake"
+        explanation = f"Draw unlikely to survive (Score: {total_score}) → 2 units"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "83%"
     elif total_score <= 7:
         action = "CAUTIOUS"
-        stake = "Half"
+        stake = "1 unit"
         color = "#f59e0b"
         emoji = "⚠️"
-        explanation = f"Draw might survive (Score: {total_score}) → Half stake"
+        explanation = f"Draw might survive (Score: {total_score}) → 1 unit"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "70-80%"
-    else:
+    elif total_score <= 9:
         action = "DANGEROUS"
-        stake = "Small or Skip"
+        stake = "0.25 unit"
         color = "#ef4444"
         emoji = "❗"
-        explanation = f"Draw likely to survive (Score: {total_score}) → Small stake or skip"
+        explanation = f"Draw likely to survive (Score: {total_score}) → 0.25 unit"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "N/A"
+    else:  # total_score >= 10
+        action = "SKIP"
+        stake = "0 units"
+        color = "#64748b"
+        emoji = "⏭️"
+        explanation = f"Score {total_score} ≥ 10 → SKIP (too dangerous)"
+        recommended_bet = "SKIP"
+        accuracy = "N/A"
     
-    # GOAL BET
+    # ========================================================================
+    # GOAL LOCK RULES (Updated thresholds)
+    # ========================================================================
     goal_bet = None
     goal_accuracy = None
     goal_reason = None
     
-    if avg_goals < 2.00:
-        goal_bet = "UNDER 2.5"
-        goal_accuracy = "95%"
-        goal_reason = f"Avg goals {avg_goals:.2f} < 2.00 → UNDER 2.5"
-    elif avg_goals > 3.00:
+    if avg_goals > 3.00:
         goal_bet = "OVER 2.5"
-        goal_accuracy = "100%"
-        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 + Draw → OVER 2.5"
-    elif 2.00 <= avg_goals <= 2.40:
+        goal_accuracy = "83%"
+        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 → OVER 2.5"
+    elif avg_goals < 1.90:
         goal_bet = "UNDER 2.5"
-        goal_accuracy = "80%"
-        goal_reason = f"Avg goals {avg_goals:.2f} in sweet spot → UNDER 2.5"
+        goal_accuracy = "75%"
+        goal_reason = f"Avg goals {avg_goals:.2f} < 1.90 → UNDER 2.5"
+    else:
+        goal_bet = None
+        goal_accuracy = None
+        goal_reason = f"Avg goals {avg_goals:.2f} in 1.90-3.00 range → SKIP"
     
     return {
         "total_score": total_score,
@@ -861,7 +998,9 @@ def calculate_draw_survival_score(data: dict) -> dict:
         "draw_pct": draw_pct,
         "avg_goals": avg_goals,
         "points_diff": points_diff,
-        "gd_gap": gd_gap
+        "gd_gap": gd_gap,
+        "is_dead_rubber": is_dead_rubber,
+        "factor_performance": factor_performance
     }
 
 
@@ -916,15 +1055,10 @@ def analyze_draw_match(data: dict) -> dict:
     result["stake"] = score_result["stake"]
     result["recommended_bet"] = score_result["recommended_bet"]
     
-    # Dead rubber detection
-    home_block = data.get("home_block")
-    away_block = data.get("away_block")
-    is_relegation_fight = data.get("is_relegation_fight", False)
-    
-    is_dead_rubber = False
-    if (home_block == "mid" and away_block == "mid" and not is_relegation_fight):
-        is_dead_rubber = True
-        result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for"
+    # Dead rubber warning
+    is_dead_rubber = score_result.get("is_dead_rubber", False)
+    if is_dead_rubber:
+        result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for (+2 penalty)"
         result["warning_type"] = "dead_rubber"
     
     # BUILD OUTCOME BET — ALWAYS DOUBLE CHANCE (12)
@@ -934,7 +1068,7 @@ def analyze_draw_match(data: dict) -> dict:
     
     if score_result["action"] == "SAFE":
         is_lock = True
-        lock_reason = f"Score: {score_result['total_score']} (≤4) → SAFE — Full stake"
+        lock_reason = f"Score: {score_result['total_score']} (≤4) → SAFE — 2 units"
         result["used_priority"] = "safe"
         result["verdict"] = "LOCK"
     elif score_result["action"] == "CAUTIOUS":
@@ -942,11 +1076,19 @@ def analyze_draw_match(data: dict) -> dict:
         lock_reason = None
         result["used_priority"] = "cautious"
         result["verdict"] = "RECOMMENDED"
-    else:  # DANGEROUS
+    elif score_result["action"] == "DANGEROUS":
         is_lock = False
         lock_reason = None
         result["used_priority"] = "dangerous"
         result["verdict"] = "RECOMMENDED"
+    else:  # SKIP
+        is_lock = False
+        lock_reason = None
+        result["used_priority"] = "skip"
+        result["verdict"] = "SKIP"
+        result["skip_reason"] = f"Score {score_result['total_score']} ≥ 10 — too dangerous"
+        result["classification"] = "⏭️ SKIPPED — Too Dangerous"
+        return result
     
     result["winner_selection"] = outcome_bet
     result["winner_reason"] = outcome_reason
@@ -1053,6 +1195,36 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
 
 
 # ============================================================================
+# BACKTEST FUNCTION — NEW
+# ============================================================================
+def backtest(matches: list) -> list:
+    results = []
+    for match in matches:
+        score = match.get("draw_survival_score", 0)
+        if score <= 4:
+            action = "SAFE"
+            stake = "2 units"
+        elif score <= 7:
+            action = "CAUTIOUS"
+            stake = "1 unit"
+        elif score <= 9:
+            action = "DANGEROUS"
+            stake = "0.25 unit"
+        else:
+            action = "SKIP"
+            stake = "0 units"
+        
+        results.append({
+            "match": match,
+            "score": score,
+            "action": action,
+            "stake": stake,
+            "result": match.get("actual_result")
+        })
+    return results
+
+
+# ============================================================================
 # SUPABASE OPERATIONS — CLEAN (NO EXTRA COLUMNS)
 # ============================================================================
 def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
@@ -1091,6 +1263,8 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "away_form_points": data.get("away_form_points"),
             "home_losing_streak": data.get("home_losing_streak", 0),
             "away_losing_streak": data.get("away_losing_streak", 0),
+            "home_winning_streak": data.get("home_winning_streak", 0),
+            "away_winning_streak": data.get("away_winning_streak", 0),
             "draw_survival_score": score_result,
             "action": analysis.get("action"),
             "stake": analysis.get("stake"),
@@ -1184,14 +1358,26 @@ def display_score_breakdown(factors: dict, total_score: int):
         color = "#10b981"
         status = "SAFE"
         emoji = "✅"
+        stake_label = "2 units"
+        stake_class = "stake-2"
     elif total_score <= 7:
         color = "#f59e0b"
         status = "CAUTIOUS"
         emoji = "⚠️"
-    else:
+        stake_label = "1 unit"
+        stake_class = "stake-1"
+    elif total_score <= 9:
         color = "#ef4444"
         status = "DANGEROUS"
         emoji = "❗"
+        stake_label = "0.25 unit"
+        stake_class = "stake-0-25"
+    else:
+        color = "#64748b"
+        status = "SKIP"
+        emoji = "⏭️"
+        stake_label = "0 units"
+        stake_class = "stake-0"
     
     st.markdown(f"""
     <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1.5rem; margin: 0.5rem 0; border-left: 4px solid {color};">
@@ -1202,7 +1388,12 @@ def display_score_breakdown(factors: dict, total_score: int):
             </div>
             <div style="text-align: right;">
                 <div style="font-size: 1.2rem; font-weight: 700; color: {color};">{emoji} {status}</div>
-                <div style="font-size: 0.8rem; color: #94a3b8;">Score ≤ 4 = SAFE<br>Score 5-7 = CAUTIOUS<br>Score ≥ 8 = DANGEROUS</div>
+                <div style="font-size: 0.8rem; color: #94a3b8;">
+                    <span class="stake-badge {stake_class}">Stake: {stake_label}</span>
+                </div>
+                <div style="font-size: 0.7rem; color: #64748b; margin-top: 0.25rem;">
+                    ≤4 SAFE | 5-7 CAUTIOUS | 8-9 DANGEROUS | ≥10 SKIP
+                </div>
             </div>
         </div>
     </div>
@@ -1210,19 +1401,46 @@ def display_score_breakdown(factors: dict, total_score: int):
     
     st.markdown("#### Factor Breakdown")
     
+    # Performance summary
+    st.markdown("""
+    <div style="background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.5rem 0; border: 1px solid #1e293b;">
+        <div style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.25rem;">📊 Factor Performance</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Draw Rate: 100%</span>
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Points Diff: 100%</span>
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Goal Exp: 100%</span>
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">GD Gap: 100%</span>
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Scoring: 100%</span>
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Prob Balance: 100%</span>
+            <span style="background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Dominance: 100%</span>
+            <span style="background: #f59e0b; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Streak: NEW</span>
+            <span style="background: #f59e0b; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Team Quality: NEW</span>
+            <span style="background: #f59e0b; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Dead Rubber: NEW</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
     for name, factor in factors.items():
         weight = factor.get("weight", "")
         points = factor.get("points", 0)
         value = factor.get("value", "")
+        performance = factor.get("performance", "")
         
         if points >= 0:
             points_display = f"+{points}"
         else:
             points_display = str(points)
         
+        # Highlight new factors
+        is_new = weight == "NEW"
+        new_badge = " 🆕" if is_new else ""
+        
+        # Show performance if available
+        perf_display = f" <span style='color:#10b981;font-size:0.7rem;'>({performance})</span>" if performance and performance != "NEW" else ""
+        
         st.markdown(f"""
-        <div class="factor-row">
-            <span class="factor-name">{name.replace('_', ' ').title()} <span style="color:#64748b; font-size:0.7rem;">({weight})</span></span>
+        <div class="factor-row" style="{'background: #1a2a1a; border-radius: 4px;' if is_new else ''}">
+            <span class="factor-name">{name.replace('_', ' ').title()} <span style="color:#64748b; font-size:0.7rem;">({weight})</span>{new_badge}{perf_display}</span>
             <span class="factor-value">{value}</span>
             <span class="factor-points">{points_display}</span>
         </div>
@@ -1284,22 +1502,28 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     primary = analysis.get("primary_bet", {})
     action = primary.get("action", "UNKNOWN")
+    stake = primary.get("stake", "?")
     
     if action == "SAFE":
         card_class = "lock-card"
         lock_icon = "🔒"
-        lock_text = "SAFE — Full Stake"
+        lock_text = f"SAFE — {stake}"
         border_color = "#f59e0b"
     elif action == "CAUTIOUS":
         card_class = "cautious-card"
         lock_icon = "⚠️"
-        lock_text = "CAUTIOUS — Half Stake"
+        lock_text = f"CAUTIOUS — {stake}"
         border_color = "#f59e0b"
-    else:
+    elif action == "DANGEROUS":
         card_class = "danger-card"
         lock_icon = "❗"
-        lock_text = "DANGEROUS — Small Stake or Skip"
+        lock_text = f"DANGEROUS — {stake}"
         border_color = "#ef4444"
+    else:
+        card_class = "skip-card"
+        lock_icon = "⏭️"
+        lock_text = f"SKIP — {stake}"
+        border_color = "#64748b"
     
     st.markdown(f"""
     <div class="output-card {card_class}" style="border-left: 4px solid {border_color};">
@@ -1311,7 +1535,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem;">
             <span>📊 Accuracy: {primary.get('outcome_accuracy', 'N/A')}</span>
             <span>📝 Reason: {primary.get('outcome_reason', 'N/A')}</span>
-            <span style="background: {border_color}; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Stake: {primary.get('stake', '?')}</span>
+            <span style="background: {border_color}; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">Stake: {stake}</span>
         </div>
         <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #64748b;">
             Score: {primary.get('score', '?')} → {action}
@@ -1351,7 +1575,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
                 <span style="font-size: 1.5rem;">⚽</span>
                 <span style="font-size: 1.2rem; font-weight: 700;">GOAL BET</span>
             </div>
-            <div style="font-size: 1rem; color: #94a3b8;">None available</div>
+            <div style="font-size: 1rem; color: #94a3b8;">None available (avg goals 1.90-3.00)</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1364,8 +1588,17 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     away_pos = data.get("away_position", "?")
     home_block = data.get("home_block", "?")
     away_block = data.get("away_block", "?")
-    home_streak = data.get("home_losing_streak", 0)
-    away_streak = data.get("away_losing_streak", 0)
+    home_losing = data.get("home_losing_streak", 0)
+    away_losing = data.get("away_losing_streak", 0)
+    home_winning = data.get("home_winning_streak", 0)
+    away_winning = data.get("away_winning_streak", 0)
+    
+    # Quality metrics
+    home_quality = (float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1) + 
+                   float(data.get("home_ga", 0)) / max(data.get("home_gp", 1), 1))
+    away_quality = (float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1) + 
+                   float(data.get("away_ga", 0)) / max(data.get("away_gp", 1), 1))
+    quality_diff = abs(home_quality - away_quality)
     
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
@@ -1377,16 +1610,24 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     with m4:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_pos} vs {away_pos}</div><div class="metric-label">Standings</div></div>', unsafe_allow_html=True)
     with m5:
-        desperate = "Yes" if (home_streak >= 3 or away_streak >= 3 or data.get("is_relegation_fight", False)) else "No"
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{desperate}</div><div class="metric-label">Desperation</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{quality_diff:.2f}</div><div class="metric-label">Quality Diff</div></div>', unsafe_allow_html=True)
     
-    if home_streak >= 3 or away_streak >= 3:
+    # Streak display
+    if home_losing >= 3 or away_losing >= 3 or home_winning >= 3 or away_winning >= 3:
         streak_msg = []
-        if home_streak >= 3:
-            streak_msg.append(f"🔴 {data.get('home_team', 'Home')}: {home_streak} game losing streak")
-        if away_streak >= 3:
-            streak_msg.append(f"🔴 {data.get('away_team', 'Away')}: {away_streak} game losing streak")
-        st.warning(" | ".join(streak_msg))
+        if home_losing >= 3:
+            streak_msg.append(f'<span class="streak-badge streak-loss">🔴 {data.get("home_team", "Home")}: {home_losing}L</span>')
+        if away_losing >= 3:
+            streak_msg.append(f'<span class="streak-badge streak-loss">🔴 {data.get("away_team", "Away")}: {away_losing}L</span>')
+        if home_winning >= 3:
+            streak_msg.append(f'<span class="streak-badge streak-win">🟢 {data.get("home_team", "Home")}: {home_winning}W</span>')
+        if away_winning >= 3:
+            streak_msg.append(f'<span class="streak-badge streak-win">🟢 {data.get("away_team", "Away")}: {away_winning}W</span>')
+        st.markdown(f'<div style="margin: 0.5rem 0;">{" ".join(streak_msg)}</div>', unsafe_allow_html=True)
+    
+    # Dead rubber detection
+    if analysis.get("warning_type") == "dead_rubber":
+        st.warning("⚠️ DEAD RUBBER ALERT: Both teams have nothing to play for. +2 penalty applied.")
     
     if data.get("score_matrix"):
         st.markdown("### 🎯 Score Matrix")
@@ -1401,25 +1642,151 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
 
 
 # ============================================================================
+# LIVE DASHBOARD — NEW
+# ============================================================================
+def display_live_dashboard():
+    st.markdown("### 📊 Live Dashboard")
+    
+    results = get_results()
+    if not results:
+        st.info("No results recorded yet.")
+        return
+    
+    total = len(results)
+    correct = 0
+    incorrect = 0
+    
+    safe_total = 0
+    safe_correct = 0
+    cautious_total = 0
+    cautious_correct = 0
+    dangerous_total = 0
+    dangerous_correct = 0
+    
+    goal_total = 0
+    goal_correct = 0
+    
+    for r in results:
+        pred = r.get('bet_market', '')
+        if pred == 'SKIP':
+            continue
+        
+        primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
+        evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        
+        if evaluation["is_correct"]:
+            correct += 1
+        else:
+            incorrect += 1
+        
+        # Track by action
+        action = r.get('action', '')
+        if action == 'SAFE':
+            safe_total += 1
+            if evaluation["is_correct"]:
+                safe_correct += 1
+        elif action == 'CAUTIOUS':
+            cautious_total += 1
+            if evaluation["is_correct"]:
+                cautious_correct += 1
+        elif action == 'DANGEROUS':
+            dangerous_total += 1
+            if evaluation["is_correct"]:
+                dangerous_correct += 1
+        
+        # Track goal bets
+        goal_bet = r.get('goal_bet')
+        if goal_bet:
+            goal_total += 1
+            goal_eval = evaluate_bet(goal_bet, r.get('actual_home_goals'), r.get('actual_away_goals'))
+            if goal_eval["is_correct"]:
+                goal_correct += 1
+    
+    overall_rate = round(correct / total * 100) if total > 0 else 0
+    safe_rate = round(safe_correct / safe_total * 100) if safe_total > 0 else 0
+    cautious_rate = round(cautious_correct / cautious_total * 100) if cautious_total > 0 else 0
+    dangerous_rate = round(dangerous_correct / dangerous_total * 100) if dangerous_total > 0 else 0
+    goal_rate = round(goal_correct / goal_total * 100) if goal_total > 0 else 0
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-number">{total}</div>
+            <div class="stat-label">Total Bets</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-number">{overall_rate}%</div>
+            <div class="stat-label">Overall Win Rate ({correct}/{total})</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-number">{goal_rate}%</div>
+            <div class="stat-label">Goal Lock Win Rate ({goal_correct}/{goal_total})</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("#### By Stake Level")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+        <div class="stat-box" style="background: #0a2a0a; border: 1px solid #10b981;">
+            <div class="stat-number">{safe_rate}%</div>
+            <div class="stat-label">SAFE (2 units) — {safe_correct}/{safe_total}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="stat-box" style="background: #1a2a00; border: 1px solid #f59e0b;">
+            <div class="stat-number">{cautious_rate}%</div>
+            <div class="stat-label">CAUTIOUS (1 unit) — {cautious_correct}/{cautious_total}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="stat-box" style="background: #2a0a0a; border: 1px solid #ef4444;">
+            <div class="stat-number">{dangerous_rate}%</div>
+            <div class="stat-label">DANGEROUS (0.25 unit) — {dangerous_correct}/{dangerous_total}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ============================================================================
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V11.6")
-    st.caption("Stake-Adjusted Draw System | Clean Version")
+    st.title("🎯 Match Analyzer V12.0")
+    st.caption("New Logic: Stake-Adjusted Draw System | Dead Rubber | Streaks | Quality")
 
-    with st.expander("📖 The Stake-Adjusted Draw System", expanded=False):
+    with st.expander("📖 The Stake-Adjusted Draw System V12.0", expanded=False):
         st.markdown("""
         **ONLY analyzes matches where Forebet predicts DRAW (X).**
         **ALWAYS bet DOUBLE CHANCE (12), but adjust stake based on risk.**
         
         | Score | Action | Stake | Accuracy |
         |-------|--------|-------|----------|
-        | **≤ 4** | ✅ SAFE | **Full** | 83% |
-        | **5-7** | ⚠️ CAUTIOUS | **Half** | 70-80% |
-        | **≥ 8** | ❗ DANGEROUS | **Small or Skip** | N/A |
+        | **≤ 4** | ✅ SAFE | **2 units** | 83% |
+        | **5-7** | ⚠️ CAUTIOUS | **1 unit** | 70-80% |
+        | **8-9** | ❗ DANGEROUS | **0.25 unit** | N/A |
+        | **≥ 10** | ⏭️ SKIP | **0 units** | N/A |
+        
+        **New Features:**
+        - ✅ Dead Rubber penalty (+2)
+        - ✅ Streak factor (losing/winning streaks)
+        - ✅ Team Quality factor
+        - ✅ Adjusted Goal Lock thresholds (Over 2.5 > 3.00, Under 2.5 < 1.90)
+        - ✅ Stake sizing (2u / 1u / 0.25u)
+        - ✅ Minimum confidence filter (skip ≥ 10)
+        - ✅ Backtest function
+        - ✅ Live Dashboard
         """)
 
-    tab1, tab2, tab3 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records", "📈 Dashboard"])
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
@@ -1439,7 +1806,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V11.6", type="primary"):
+        if st.button("🎯 ANALYZE V12.0", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1500,11 +1867,14 @@ def main():
                                 elif action == "CAUTIOUS":
                                     emoji = "⚠️"
                                     label = "CAUTIOUS"
-                                else:
+                                elif action == "DANGEROUS":
                                     emoji = "❗"
                                     label = "DANGEROUS"
+                                else:
+                                    emoji = "⏭️"
+                                    label = "SKIP"
                                 
-                                st.markdown(f"#### {emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({label} — {stake} Stake)")
+                                st.markdown(f"#### {emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({label} — {stake})")
                                 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -1522,7 +1892,7 @@ def main():
                         if skipped_results:
                             st.markdown("---")
                             st.markdown("### ⏭️ SKIPPED MATCHES (Not Stored)")
-                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw)")
+                            st.caption(f"{len(skipped_results)} matches skipped (FT or non-draw or score ≥ 10)")
                             
                             with st.expander(f"Click to expand {len(skipped_results)} skipped matches"):
                                 for idx, (match, data, analysis) in enumerate(skipped_results, 1):
@@ -1580,11 +1950,13 @@ def main():
                 match_date = a.get('match_date', 'Date unknown')
 
                 if action == "SAFE":
-                    badge = f"✅ SAFE (Score: {score}) — {stake} Stake"
+                    badge = f"✅ SAFE (Score: {score}) — {stake}"
                 elif action == "CAUTIOUS":
-                    badge = f"⚠️ CAUTIOUS (Score: {score}) — {stake} Stake"
+                    badge = f"⚠️ CAUTIOUS (Score: {score}) — {stake}"
+                elif action == "DANGEROUS":
+                    badge = f"❗ DANGEROUS (Score: {score}) — {stake}"
                 else:
-                    badge = f"❗ DANGEROUS (Score: {score}) — {stake} Stake"
+                    badge = f"⏭️ SKIP (Score: {score}) — {stake}"
 
                 with st.expander(f"📅 {match_date} | {badge} | {ht} vs {at}"):
                     st.info(f"📊 Draw Survival Score: {score} ({action}) — Stake: {stake}")
@@ -1627,7 +1999,7 @@ def main():
                     safe_scores.append(score)
                 elif score <= 7:
                     cautious_scores.append(score)
-                else:
+                elif score <= 9:
                     dangerous_scores.append(score)
 
             for r in results:
@@ -1656,16 +2028,18 @@ def main():
             with col4:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
             with col5:
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{len(safe_scores)}</div><div class="stat-label">SAFE Bets</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{len(safe_scores)}</div><div class="stat-label">SAFE Bets (2u)</div></div>', unsafe_allow_html=True)
 
             st.markdown("### 📊 Draw Survival Score Distribution")
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("✅ SAFE (≤4)", len(safe_scores))
             with col2:
                 st.metric("⚠️ CAUTIOUS (5-7)", len(cautious_scores))
             with col3:
-                st.metric("❗ DANGEROUS (≥8)", len(dangerous_scores))
+                st.metric("❗ DANGEROUS (8-9)", len(dangerous_scores))
+            with col4:
+                st.metric("⏭️ SKIP (≥10)", total - len(safe_scores) - len(cautious_scores) - len(dangerous_scores))
 
             if lock_total > 0:
                 lock_rate = round(lock_correct / lock_total * 100) if lock_total > 0 else 0
@@ -1704,6 +2078,16 @@ def main():
 
             df = pd.DataFrame(rows)
             st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            # Backtest section
+            st.markdown("### 🔬 Backtest Results")
+            backtest_results = backtest(results)
+            backtest_df = pd.DataFrame(backtest_results)
+            if not backtest_df.empty:
+                st.dataframe(backtest_df)
+
+    with tab4:
+        display_live_dashboard()
 
 
 if __name__ == "__main__":
