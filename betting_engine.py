@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V12.1 — COMPLETE FIXED VERSION
-Fixed: NoneType error | Winning Streak columns | Organized Records/Backtest
+MATCH ANALYZER V12.2 — COMPLETE FIXED VERSION
+Fixed: Negative DSS Normalization | Database-Based Goal Logic | Proper Stake Labels
 """
 
 import streamlit as st
@@ -26,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V12.1", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V12.2", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -87,6 +87,9 @@ st.markdown("""
     .streak-win { background: #10b981; color: #000; }
     .dead-rubber-badge { background: #7c2d12; color: #fed7aa; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; border: 1px solid #ef4444; }
     .goal-badge { background: #3b82f6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .goal-confidence-high { color: #10b981; font-weight: 700; }
+    .goal-confidence-medium { color: #f59e0b; font-weight: 700; }
+    .goal-confidence-low { color: #ef4444; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -661,7 +664,7 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# DRAW SURVIVAL SCORE SYSTEM — V12.0 NEW LOGIC
+# DRAW SURVIVAL SCORE SYSTEM — V12.2 FIXED NORMALIZATION
 # ============================================================================
 def calculate_draw_survival_score(data: dict) -> dict:
     factors = {}
@@ -875,8 +878,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     factors["streak"] = {
         "value": f"L{home_losing}/{away_losing} W{home_winning}/{away_winning}",
         "points": streak_points,
-        "weight": "NEW",
-        "streak_reason": streak_reason
+        "weight": "NEW"
     }
     total_score += streak_points
     
@@ -934,63 +936,129 @@ def calculate_draw_survival_score(data: dict) -> dict:
         }
     
     # ========================================================================
-    # DECISION RULES (Updated)
+    # NORMALIZE: Ensure DSS is NEVER negative
     # ========================================================================
-    if total_score <= 4:
+    # The worst possible score is when ALL negative factors hit:
+    # Points Diff: -1 + Goal Expectancy: -2 + GD Gap: -1 + 
+    # Scoring Rate: -2 + Prob Balance: -2 + Dominance Gap: -4 + 
+    # Streak: -2 + Team Quality: -1 = -15
+    MIN_OFFSET = 15
+    
+    # Final score with offset
+    normalized_score = total_score + MIN_OFFSET
+    
+    # Ensure minimum is 0
+    if normalized_score < 0:
+        normalized_score = 0
+    
+    # ========================================================================
+    # DECISION RULES (Updated - using normalized score)
+    # ========================================================================
+    if normalized_score <= 4:
         action = "SAFE"
         stake = "2 units"
         color = "#10b981"
         emoji = "✅"
-        explanation = f"Draw unlikely to survive (Score: {total_score}) → 2 units"
+        explanation = f"Draw unlikely to survive (Score: {normalized_score}) → 2 units"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "83%"
-    elif total_score <= 7:
+    elif normalized_score <= 7:
         action = "CAUTIOUS"
         stake = "1 unit"
         color = "#f59e0b"
         emoji = "⚠️"
-        explanation = f"Draw might survive (Score: {total_score}) → 1 unit"
+        explanation = f"Draw might survive (Score: {normalized_score}) → 1 unit"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "70-80%"
-    elif total_score <= 9:
+    elif normalized_score <= 9:
         action = "DANGEROUS"
         stake = "0.25 unit"
         color = "#ef4444"
         emoji = "❗"
-        explanation = f"Draw likely to survive (Score: {total_score}) → 0.25 unit"
+        explanation = f"Draw likely to survive (Score: {normalized_score}) → 0.25 unit"
         recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "N/A"
-    else:  # total_score >= 10
+    else:  # normalized_score >= 10
         action = "SKIP"
         stake = "0 units"
         color = "#64748b"
         emoji = "⏭️"
-        explanation = f"Score {total_score} ≥ 10 → SKIP (too dangerous)"
+        explanation = f"Score {normalized_score} ≥ 10 → SKIP (too dangerous)"
         recommended_bet = "SKIP"
         accuracy = "N/A"
     
     # ========================================================================
-    # GOAL LOCK RULES (Updated thresholds)
+    # GOAL LOCK RULES — USING DATABASE DATA (NOT FOREBET AVG)
     # ========================================================================
     goal_bet = None
-    goal_accuracy = None
+    goal_confidence = None
     goal_reason = None
     
-    if avg_goals > 3.00:
+    # Calculate database-based metrics
+    home_scoring = float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1)
+    away_scoring = float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1)
+    combined_scoring = home_scoring + away_scoring
+    
+    home_conceding = float(data.get("home_ga", 0)) / max(data.get("home_gp", 1), 1)
+    away_conceding = float(data.get("away_ga", 0)) / max(data.get("away_gp", 1), 1)
+    combined_conceding = home_conceding + away_conceding
+    
+    home_form = data.get("home_form_points", 0)
+    away_form = data.get("away_form_points", 0)
+    combined_form = home_form + away_form
+    
+    home_block = data.get("home_block")
+    away_block = data.get("away_block")
+    
+    # OVER PATTERNS
+    
+    # OVER Pattern 1: Combined Scoring ≥ 2.50
+    if combined_scoring >= 2.50:
         goal_bet = "OVER 2.5"
-        goal_accuracy = "83%"
-        goal_reason = f"Avg goals {avg_goals:.2f} > 3.00 → OVER 2.5"
-    elif avg_goals < 1.90:
+        goal_confidence = "HIGH"
+        goal_reason = f"Combined Scoring {combined_scoring:.2f} ≥ 2.50"
+    
+    # OVER Pattern 2: Combined Conceding ≥ 2.50
+    elif combined_conceding >= 2.50:
+        goal_bet = "OVER 2.5"
+        goal_confidence = "HIGH"
+        goal_reason = f"Combined Conceding {combined_conceding:.2f} ≥ 2.50"
+    
+    # OVER Pattern 3: Mid vs Mid with Combined Scoring ≥ 2.00
+    elif home_block == "mid" and away_block == "mid" and combined_scoring >= 2.00:
+        goal_bet = "OVER 2.5"
+        goal_confidence = "MEDIUM"
+        goal_reason = f"Mid/Mid with Combined Scoring {combined_scoring:.2f} ≥ 2.00"
+    
+    # UNDER PATTERNS
+    
+    # UNDER Pattern 1: Both scoring AND conceding are low
+    elif combined_scoring < 2.00 and combined_conceding < 2.00:
         goal_bet = "UNDER 2.5"
-        goal_accuracy = "75%"
-        goal_reason = f"Avg goals {avg_goals:.2f} < 1.90 → UNDER 2.5"
+        goal_confidence = "HIGH"
+        goal_reason = f"Both scoring ({combined_scoring:.2f}) and conceding ({combined_conceding:.2f}) are low"
+    
+    # UNDER Pattern 2: Europe vs Europe
+    elif home_block == "europe" and away_block == "europe":
+        goal_bet = "UNDER 2.5"
+        goal_confidence = "MEDIUM"
+        goal_reason = "Europe vs Europe - defensive battle"
+    
+    # UNDER Pattern 3: Both teams have low scoring rates
+    elif home_scoring < 1.25 and away_scoring < 1.25:
+        goal_bet = "UNDER 2.5"
+        goal_confidence = "HIGH"
+        goal_reason = f"Both teams have low scoring rates ({home_scoring:.2f}/{away_scoring:.2f})"
+    
+    # No clear pattern
     else:
         goal_bet = None
-        goal_accuracy = None
-        goal_reason = f"Avg goals {avg_goals:.2f} in 1.90-3.00 range → SKIP"
+        goal_confidence = None
+        goal_reason = "No clear pattern from database"
     
     return {
-        "total_score": total_score,
+        "total_score": normalized_score,
+        "raw_score": total_score,  # Keep for debugging
         "factors": factors,
         "action": action,
         "stake": stake,
@@ -1000,13 +1068,17 @@ def calculate_draw_survival_score(data: dict) -> dict:
         "recommended_bet": recommended_bet,
         "accuracy": accuracy,
         "goal_bet": goal_bet,
-        "goal_accuracy": goal_accuracy,
+        "goal_confidence": goal_confidence,
         "goal_reason": goal_reason,
         "draw_pct": draw_pct,
         "avg_goals": avg_goals,
         "points_diff": points_diff,
         "gd_gap": gd_gap,
-        "is_dead_rubber": is_dead_rubber
+        "is_dead_rubber": is_dead_rubber,
+        "combined_scoring": combined_scoring,
+        "combined_conceding": combined_conceding,
+        "home_scoring": home_scoring,
+        "away_scoring": away_scoring
     }
 
 
@@ -1027,7 +1099,7 @@ def analyze_draw_match(data: dict) -> dict:
         "used_priority": None,
         "goal_bet": None,
         "goal_reason": None,
-        "goal_accuracy": None,
+        "goal_confidence": None,
         "goal_is_lock": False,
         "warning": None,
         "warning_type": None,
@@ -1101,14 +1173,14 @@ def analyze_draw_match(data: dict) -> dict:
     result["is_lock"] = is_lock
     result["lock_reason"] = lock_reason
     
-    # GOAL BET
+    # GOAL BET - Using database-based logic
     goal_bet = score_result.get("goal_bet")
-    goal_accuracy = score_result.get("goal_accuracy")
+    goal_confidence = score_result.get("goal_confidence")
     goal_reason = score_result.get("goal_reason")
     
     result["goal_bet"] = goal_bet
     result["goal_reason"] = goal_reason
-    result["goal_accuracy"] = goal_accuracy
+    result["goal_confidence"] = goal_confidence
     result["goal_is_lock"] = goal_bet is not None
     
     # BUILD FINAL RESULT
@@ -1117,11 +1189,12 @@ def analyze_draw_match(data: dict) -> dict:
         "outcome_accuracy": outcome_accuracy,
         "outcome_reason": outcome_reason,
         "goal_bet": goal_bet,
-        "goal_accuracy": goal_accuracy,
+        "goal_confidence": goal_confidence,
         "goal_reason": goal_reason,
         "is_lock": is_lock,
         "lock_reason": lock_reason,
         "score": score_result["total_score"],
+        "raw_score": score_result.get("raw_score"),
         "factors": score_result["factors"],
         "action": score_result["action"],
         "stake": score_result["stake"]
@@ -1129,7 +1202,8 @@ def analyze_draw_match(data: dict) -> dict:
     
     classification = outcome_bet
     if goal_bet:
-        classification += f" | {goal_bet}"
+        confidence_emoji = "🔵" if goal_confidence == "HIGH" else "🟡" if goal_confidence == "MEDIUM" else "🟠"
+        classification += f" | {goal_bet} {confidence_emoji}"
     result["classification"] = classification
     
     return result
@@ -1153,50 +1227,59 @@ def evaluate_bet(primary_pred: str, home_goals, away_goals) -> dict:
     else:
         bets = [pred]
     
-    correct_count = 0
-    total_bets = 0
+    results = []
     
     for bet in bets:
         bet = bet.strip()
-        total_bets += 1
+        is_win = False
         
-        if 'DRAW' in bet and not 'DOUBLE' in bet:
-            if home == away:
-                correct_count += 1
-        elif 'DOUBLE CHANCE' in bet or 'DOUBLE CHANCE:' in bet:
-            if 'HOME' in bet and 'AWAY' in bet:
-                if home != away:
-                    correct_count += 1
-            elif 'HOME' in bet or '1' in bet:
-                if home >= away:
-                    correct_count += 1
-            elif 'AWAY' in bet or '2' in bet:
-                if away >= home:
-                    correct_count += 1
+        if 'DOUBLE CHANCE' in bet:
+            if 'HOME' in bet:
+                is_win = home != away  # Home or Draw
+            elif 'AWAY' in bet:
+                is_win = away != home  # Away or Draw
             else:
-                if home >= away or away >= home:
-                    correct_count += 1
+                is_win = home != away  # Either wins
+        
         elif 'OVER 2.5' in bet:
-            if total > 2:
-                correct_count += 1
+            is_win = total > 2
+        
         elif 'UNDER 2.5' in bet:
-            if total <= 2:
-                correct_count += 1
-        elif 'HOME WIN' in bet or ('HOME' in bet and not 'DOUBLE' in bet):
-            if home > away:
-                correct_count += 1
-        elif 'AWAY WIN' in bet or ('AWAY' in bet and not 'DOUBLE' in bet):
-            if away > home:
-                correct_count += 1
+            is_win = total <= 2
+        
+        elif 'OVER 3.5' in bet:
+            is_win = total > 3
+        
+        elif 'UNDER 3.5' in bet:
+            is_win = total <= 3
+        
+        elif 'BTTS' in bet:
+            is_win = home > 0 and away > 0
+        
+        elif 'DRAW' in bet and 'DOUBLE' not in bet:
+            is_win = home == away
+        
+        elif 'HOME WIN' in bet:
+            is_win = home > away
+        
+        elif 'AWAY WIN' in bet:
+            is_win = away > home
+        
+        results.append({
+            "bet": bet,
+            "win": is_win,
+            "result": "WIN" if is_win else "LOSS"
+        })
     
-    is_correct = correct_count == total_bets if total_bets > 0 else False
+    # Overall status
+    all_won = all(r["win"] for r in results) if results else False
     
     return {
-        "is_correct": is_correct,
+        "results": results,
+        "all_won": all_won,
+        "is_correct": all_won,
         "actual": f"{home}-{away}",
-        "message": f"{'✅' if is_correct else '❌'} {pred} vs {home}-{away}",
-        "correct_count": correct_count,
-        "total_bets": total_bets
+        "summary": "✅ ALL WON" if all_won else "⚠️ ONE OR MORE LOST"
     }
 
 
@@ -1231,11 +1314,12 @@ def backtest(results: list) -> list:
         actual_away = r.get('actual_away_goals')
         
         if actual_home is not None and actual_away is not None:
-            primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-            evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-            result_text = "WIN" if evaluation["is_correct"] else "LOSS"
+            evaluation = evaluate_bet(pred, actual_home, actual_away)
+            result_text = "WIN" if evaluation["all_won"] else "LOSS"
+            details = " | ".join([f"{b['bet']}: {b['result']}" for b in evaluation["results"]])
         else:
             result_text = "PENDING"
+            details = ""
         
         backtest_results.append({
             "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
@@ -1246,6 +1330,7 @@ def backtest(results: list) -> list:
             "Bet": pred,
             "Actual": f"{actual_home}-{actual_away}" if actual_home is not None else "—",
             "Result": result_text,
+            "Details": details
         })
     
     return backtest_results
@@ -1306,7 +1391,7 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "winner_selection": analysis.get("winner_selection"),
             "winner_reason": analysis.get("winner_reason"),
             "goal_bet": analysis.get("goal_bet"),
-            "goal_accuracy": analysis.get("goal_accuracy"),
+            "goal_confidence": analysis.get("goal_confidence"),
             "warning": analysis.get("warning"),
             "warning_type": analysis.get("warning_type"),
             "score_matrix": json.dumps(data.get("score_matrix", [])),
@@ -1380,7 +1465,7 @@ def get_league_badge(league: str) -> str:
         return "unknown"
 
 
-def display_score_breakdown(factors: dict, total_score: int):
+def display_score_breakdown(factors: dict, total_score: int, raw_score: int = None):
     # Ensure score is not negative (fix display issue)
     display_score = max(0, total_score)
     
@@ -1409,12 +1494,18 @@ def display_score_breakdown(factors: dict, total_score: int):
         stake_label = "0 units"
         stake_class = "stake-0"
     
+    # Show raw score if different (for debugging)
+    raw_display = ""
+    if raw_score is not None and raw_score != display_score:
+        raw_display = f"<div style='font-size:0.7rem; color:#64748b;'>Raw: {raw_score} → Normalized: {display_score}</div>"
+    
     st.markdown(f"""
     <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1.5rem; margin: 0.5rem 0; border-left: 4px solid {color};">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <div style="font-size: 0.8rem; color: #94a3b8;">DRAW SURVIVAL SCORE</div>
+                <div style="font-size: 0.8rem; color: #94a3b8;">DRAW SURVIVAL SCORE (Normalized)</div>
                 <div style="font-size: 3rem; font-weight: 800; color: {color};">{display_score}</div>
+                {raw_display}
             </div>
             <div style="text-align: right;">
                 <div style="font-size: 1.2rem; font-weight: 700; color: {color};">{emoji} {status}</div>
@@ -1502,14 +1593,16 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     if warning:
         st.markdown(f'<div class="dead-rubber-warning">{warning}</div>', unsafe_allow_html=True)
     
+    primary = analysis.get("primary_bet", {})
+    
     display_score_breakdown(
         analysis.get("factor_breakdown", {}),
-        analysis.get("draw_survival_score", 0)
+        primary.get("score", 0),
+        primary.get("raw_score")
     )
     
     st.markdown("---")
     
-    primary = analysis.get("primary_bet", {})
     action = primary.get("action", "UNKNOWN")
     stake = primary.get("stake", "?")
     
@@ -1539,10 +1632,13 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     # Show complete bet including goal bet
     goal_bet = primary.get('goal_bet')
+    goal_confidence = primary.get('goal_confidence')
     outcome_bet = primary.get('outcome_bet', 'DOUBLE CHANCE: HOME or AWAY')
     
     if goal_bet:
-        full_bet = f"{outcome_bet} | {goal_bet}"
+        confidence_emoji = "🔵" if goal_confidence == "HIGH" else "🟡" if goal_confidence == "MEDIUM" else "🟠"
+        confidence_label = goal_confidence if goal_confidence else "LOW"
+        full_bet = f"{outcome_bet} | {goal_bet} {confidence_emoji} ({confidence_label})"
     else:
         full_bet = outcome_bet
     
@@ -1566,15 +1662,16 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     # Show goal bet separately if it exists
     if goal_bet:
+        confidence_color = "#10b981" if goal_confidence == "HIGH" else "#f59e0b" if goal_confidence == "MEDIUM" else "#ef4444"
         st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border-left: 4px solid #3b82f6;">
+        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border-left: 4px solid {confidence_color};">
             <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
                 <span style="font-size: 1.5rem;">⚽</span>
                 <span style="font-size: 1.2rem; font-weight: 700;">GOAL BET</span>
+                <span style="background: {confidence_color}; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">{goal_confidence or 'LOW'} CONFIDENCE</span>
             </div>
             <div style="font-size: 1.3rem; font-weight: 800; margin-bottom: 0.25rem;">{goal_bet}</div>
             <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem;">
-                <span>📊 Accuracy: {primary.get('goal_accuracy', 'N/A')}</span>
                 <span>📝 Reason: {primary.get('goal_reason', 'N/A')}</span>
             </div>
         </div>
@@ -1595,7 +1692,7 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
                 <span style="font-size: 1.5rem;">⚽</span>
                 <span style="font-size: 1.2rem; font-weight: 700;">GOAL BET</span>
             </div>
-            <div style="font-size: 1rem; color: #94a3b8;">None available (avg goals 1.90-3.00)</div>
+            <div style="font-size: 1rem; color: #94a3b8;">None available - {primary.get('goal_reason', 'No clear pattern')}</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1612,12 +1709,15 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     away_losing = data.get("away_losing_streak", 0)
     home_winning = data.get("home_winning_streak", 0)
     away_winning = data.get("away_winning_streak", 0)
+    home_scoring = float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1)
+    away_scoring = float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1)
+    combined_scoring = home_scoring + away_scoring
     
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_form} vs {away_form}</div><div class="metric-label">Form Points</div></div>', unsafe_allow_html=True)
     with m2:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{avg_goals:.2f}</div><div class="metric-label">Avg Goals</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{combined_scoring:.2f}</div><div class="metric-label">Combined Scoring</div></div>', unsafe_allow_html=True)
     with m3:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{home_block} vs {away_block}</div><div class="metric-label">Competitive Block</div></div>', unsafe_allow_html=True)
     with m4:
@@ -1681,10 +1781,9 @@ def display_live_dashboard():
         if pred == 'SKIP':
             continue
         
-        primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-        evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        evaluation = evaluate_bet(pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
         
-        if evaluation["is_correct"]:
+        if evaluation["all_won"]:
             correct += 1
         else:
             incorrect += 1
@@ -1693,23 +1792,23 @@ def display_live_dashboard():
         stake = r.get('stake', '')
         if stake == 'Full' or stake == '2 units':
             safe_total += 1
-            if evaluation["is_correct"]:
+            if evaluation["all_won"]:
                 safe_correct += 1
         elif stake == 'Half' or stake == '1 unit':
             cautious_total += 1
-            if evaluation["is_correct"]:
+            if evaluation["all_won"]:
                 cautious_correct += 1
         elif stake == 'Small or Skip' or stake == '0.25 unit':
             dangerous_total += 1
-            if evaluation["is_correct"]:
+            if evaluation["all_won"]:
                 dangerous_correct += 1
         
-        # Track goal bets
+        # Track goal bets (individual)
         goal_bet = r.get('goal_bet')
         if goal_bet:
             goal_total += 1
             goal_eval = evaluate_bet(goal_bet, r.get('actual_home_goals'), r.get('actual_away_goals'))
-            if goal_eval["is_correct"]:
+            if goal_eval["all_won"]:
                 goal_correct += 1
     
     overall_rate = round(correct / total * 100) if total > 0 else 0
@@ -1802,9 +1901,8 @@ def display_records_table(results: list):
         pred = r.get('bet_market', '')
         if pred == 'SKIP':
             continue
-        primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
-        evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
-        if evaluation["is_correct"]:
+        evaluation = evaluate_bet(pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        if evaluation["all_won"]:
             correct += 1
             if r.get('is_lock', False):
                 lock_correct += 1
@@ -1849,7 +1947,6 @@ def display_records_table(results: list):
         pred = r.get('bet_market', '')
         actual_home = r.get('actual_home_goals')
         actual_away = r.get('actual_away_goals')
-        primary_pred = pred.split(' | ')[0].strip() if ' | ' in pred else pred.strip()
         league = r.get('league', '')
         badge_class = get_league_badge(league)
         score = r.get('draw_survival_score', '?')
@@ -1863,8 +1960,11 @@ def display_records_table(results: list):
         warning = r.get('warning') or ''
         dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
 
-        evaluation = evaluate_bet(primary_pred, actual_home, actual_away)
-        badge = '<span class="win-badge">🟢 WIN</span>' if evaluation["is_correct"] else '<span class="loss-badge">🔴 LOSS</span>'
+        evaluation = evaluate_bet(pred, actual_home, actual_away)
+        if evaluation["all_won"]:
+            badge = '<span class="win-badge">🟢 WIN</span>'
+        else:
+            badge = '<span class="loss-badge">🔴 LOSS</span>'
         score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
 
         match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
@@ -1913,10 +2013,10 @@ def display_records_table(results: list):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V12.1")
-    st.caption("Fixed Display: Correct Stake Labels | Goal Bets Shown | Dead Rubber Indicator")
+    st.title("🎯 Match Analyzer V12.2")
+    st.caption("Fixed: Negative DSS Normalization | Database-Based Goal Logic | Proper Stake Labels")
 
-    with st.expander("📖 The Stake-Adjusted Draw System V12.1", expanded=False):
+    with st.expander("📖 The Stake-Adjusted Draw System V12.2", expanded=False):
         st.markdown("""
         **ONLY analyzes matches where Forebet predicts DRAW (X).**
         **ALWAYS bet DOUBLE CHANCE (12), but adjust stake based on risk.**
@@ -1928,14 +2028,12 @@ def main():
         | **8-9** | ❗ DANGEROUS | **0.25 unit** | N/A |
         | **≥ 10** | ⏭️ SKIP | **0 units** | N/A |
         
-        **New Features:**
-        - ✅ Dead Rubber penalty (+2)
-        - ✅ Streak factor (losing/winning streaks)
-        - ✅ Team Quality factor
-        - ✅ Adjusted Goal Lock thresholds (Over 2.5 > 3.00, Under 2.5 < 1.90)
-        - ✅ Stake sizing (2u / 1u / 0.25u)
-        - ✅ Minimum confidence filter (skip ≥ 10)
-        - ✅ Fixed display with correct labels
+        **Key Fixes in V12.2:**
+        - ✅ DSS Normalized to 0-14+ (NEVER negative)
+        - ✅ Goal bets use DATABASE data, not Forebet avg
+        - ✅ OVER patterns: Combined Scoring ≥ 2.50, Combined Conceding ≥ 2.50
+        - ✅ UNDER patterns: Low scoring + low conceding, Europe vs Europe
+        - ✅ Individual bet evaluation (not parlay)
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records", "📈 Dashboard"])
@@ -1958,7 +2056,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V12.1", type="primary"):
+        if st.button("🎯 ANALYZE V12.2", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
