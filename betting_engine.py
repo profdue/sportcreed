@@ -1,6 +1,7 @@
 """
-MATCH ANALYZER V12.3 — FINAL FIXED VERSION
-Fixed: Individual Bet Evaluation | No Parlay Logic | Clean Display
+MATCH ANALYZER V12.4 — SEPARATE BETS DISPLAY
+NEVER combine DOUBLE CHANCE and OVER/UNDER with "|"
+Each bet displayed independently
 """
 
 import streamlit as st
@@ -26,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V12.3", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V12.4", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -92,6 +93,9 @@ st.markdown("""
     .goal-confidence-low { color: #ef4444; font-weight: 700; }
     .bet-win { color: #10b981; font-weight: 700; }
     .bet-loss { color: #ef4444; font-weight: 700; }
+    .bet-separator { border: none; border-top: 1px dashed #475569; margin: 0.5rem 0; }
+    .primary-bet-card { border-left: 4px solid #f59e0b; background: linear-gradient(135deg, #1a2a1a 0%, #0a1a0a 100%); }
+    .goal-bet-card { border-left: 4px solid #3b82f6; background: linear-gradient(135deg, #0a1a2a 0%, #0a0a1a 100%); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,10 +104,6 @@ st.markdown("""
 # STAKE MAPPING
 # ============================================================================
 def get_stake_display(stake_value: str) -> tuple:
-    """
-    Map old stake labels to V12.0 unit-based labels
-    Returns: (display_label, css_class)
-    """
     stake_mapping = {
         "Full": ("2 units", "stake-2"),
         "Half": ("1 unit", "stake-1"),
@@ -666,15 +666,13 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# DRAW SURVIVAL SCORE SYSTEM — V12.3 FINAL
+# DRAW SURVIVAL SCORE SYSTEM
 # ============================================================================
 def calculate_draw_survival_score(data: dict) -> dict:
     factors = {}
     total_score = 0
     
-    # ========================================================================
-    # FACTOR 1: DRAW RATE (0-4 points) — HIGH weight
-    # ========================================================================
+    # FACTOR 1: DRAW RATE (0-4 points)
     home_draw_rate = data.get("home_draws", 0) / max(data.get("home_gp", 1), 1)
     away_draw_rate = data.get("away_draws", 0) / max(data.get("away_gp", 1), 1)
     combined_draw_rate = (home_draw_rate + away_draw_rate) / 2
@@ -697,9 +695,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f1_points
     
-    # ========================================================================
-    # FACTOR 2: POINTS DIFFERENCE (0-3 points) — HIGH weight
-    # ========================================================================
+    # FACTOR 2: POINTS DIFFERENCE (0-3 points)
     home_points = data.get("home_points", 0)
     away_points = data.get("away_points", 0)
     points_diff = abs(home_points - away_points)
@@ -722,9 +718,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f2_points
     
-    # ========================================================================
-    # FACTOR 3: GOAL EXPECTANCY (0-3 points) — HIGH weight
-    # ========================================================================
+    # FACTOR 3: GOAL EXPECTANCY (0-3 points)
     avg_goals = data.get("avg_goals", 2.0)
     
     if avg_goals < 2.00:
@@ -749,9 +743,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f3_points
     
-    # ========================================================================
-    # FACTOR 4: GD GAP (0-3 points) — MEDIUM weight
-    # ========================================================================
+    # FACTOR 4: GD GAP (0-3 points)
     home_gd = data.get("home_gd", 0)
     away_gd = data.get("away_gd", 0)
     gd_gap = abs(home_gd - away_gd)
@@ -774,9 +766,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f4_points
     
-    # ========================================================================
-    # FACTOR 5: SCORING RATE (0-3 points) — MEDIUM weight
-    # ========================================================================
+    # FACTOR 5: SCORING RATE (0-3 points)
     home_scoring = float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1)
     away_scoring = float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1)
     combined_scoring = (home_scoring + away_scoring) / 2
@@ -801,9 +791,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f5_points
     
-    # ========================================================================
-    # FACTOR 6: PROBABILITY BALANCE (0-2 points) — LOW weight
-    # ========================================================================
+    # FACTOR 6: PROBABILITY BALANCE (0-2 points)
     home_pct = data.get("home_pct", 33)
     draw_pct = data.get("draw_pct", 34)
     away_pct = data.get("away_pct", 33)
@@ -829,9 +817,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f6_points
     
-    # ========================================================================
-    # FACTOR 7: DOMINANCE GAP (0 to -4 points) — LOW weight
-    # ========================================================================
+    # FACTOR 7: DOMINANCE GAP (0 to -4 points)
     home_win_rate = data.get("home_wins", 0) / max(data.get("home_gp", 1), 1)
     away_win_rate = data.get("away_wins", 0) / max(data.get("away_gp", 1), 1)
     dominance_gap = abs(home_win_rate - away_win_rate) * 100
@@ -854,9 +840,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f7_points
     
-    # ========================================================================
-    # FACTOR 8: STREAK (0 to +3 or -2 points) — NEW
-    # ========================================================================
+    # FACTOR 8: STREAK (0 to +3 or -2 points)
     streak_points = 0
     home_losing = data.get("home_losing_streak", 0)
     away_losing = data.get("away_losing_streak", 0)
@@ -882,9 +866,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += streak_points
     
-    # ========================================================================
-    # FACTOR 9: TEAM QUALITY (0 to +2 or -1 points) — NEW
-    # ========================================================================
+    # FACTOR 9: TEAM QUALITY (0 to +2 or -1 points)
     home_quality = (float(data.get("home_gf", 0)) / max(data.get("home_gp", 1), 1) + 
                    float(data.get("home_ga", 0)) / max(data.get("home_gp", 1), 1))
     away_quality = (float(data.get("away_gf", 0)) / max(data.get("away_gp", 1), 1) + 
@@ -911,9 +893,7 @@ def calculate_draw_survival_score(data: dict) -> dict:
     }
     total_score += f9_points
     
-    # ========================================================================
-    # FACTOR 10: DEAD RUBBER (0 or +2 points) — NEW
-    # ========================================================================
+    # FACTOR 10: DEAD RUBBER (0 or +2 points)
     home_block = data.get("home_block")
     away_block = data.get("away_block")
     is_relegation_fight = data.get("is_relegation_fight", False)
@@ -935,24 +915,19 @@ def calculate_draw_survival_score(data: dict) -> dict:
             "weight": "NEW"
         }
     
-    # ========================================================================
     # NORMALIZE: Ensure DSS is NEVER negative
-    # ========================================================================
     MIN_OFFSET = 15
     normalized_score = total_score + MIN_OFFSET
     if normalized_score < 0:
         normalized_score = 0
     
-    # ========================================================================
     # DECISION RULES
-    # ========================================================================
     if normalized_score <= 4:
         action = "SAFE"
         stake = "2 units"
         color = "#10b981"
         emoji = "✅"
         explanation = f"Draw unlikely to survive (Score: {normalized_score}) → 2 units"
-        recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "83%"
     elif normalized_score <= 7:
         action = "CAUTIOUS"
@@ -960,7 +935,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
         color = "#f59e0b"
         emoji = "⚠️"
         explanation = f"Draw might survive (Score: {normalized_score}) → 1 unit"
-        recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "70-80%"
     elif normalized_score <= 9:
         action = "DANGEROUS"
@@ -968,7 +942,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
         color = "#ef4444"
         emoji = "❗"
         explanation = f"Draw likely to survive (Score: {normalized_score}) → 0.25 unit"
-        recommended_bet = "DOUBLE CHANCE: HOME or AWAY"
         accuracy = "N/A"
     else:
         action = "SKIP"
@@ -976,12 +949,9 @@ def calculate_draw_survival_score(data: dict) -> dict:
         color = "#64748b"
         emoji = "⏭️"
         explanation = f"Score {normalized_score} ≥ 10 → SKIP (too dangerous)"
-        recommended_bet = "SKIP"
         accuracy = "N/A"
     
-    # ========================================================================
-    # GOAL LOCK RULES — USING DATABASE DATA
-    # ========================================================================
+    # GOAL LOCK RULES — Using DATABASE DATA
     goal_bet = None
     goal_confidence = None
     goal_reason = None
@@ -1037,7 +1007,6 @@ def calculate_draw_survival_score(data: dict) -> dict:
         "color": color,
         "emoji": emoji,
         "explanation": explanation,
-        "recommended_bet": recommended_bet,
         "accuracy": accuracy,
         "goal_bet": goal_bet,
         "goal_confidence": goal_confidence,
@@ -1100,13 +1069,13 @@ def analyze_draw_match(data: dict) -> dict:
     result["factor_breakdown"] = score_result["factors"]
     result["action"] = score_result["action"]
     result["stake"] = score_result["stake"]
-    result["recommended_bet"] = score_result["recommended_bet"]
     
     is_dead_rubber = score_result.get("is_dead_rubber", False)
     if is_dead_rubber:
         result["warning"] = "⚠️ DEAD RUBBER: Both teams have nothing to play for (+2 penalty)"
         result["warning_type"] = "dead_rubber"
     
+    # PRIMARY BET: DOUBLE CHANCE (ALWAYS)
     outcome_bet = "DOUBLE CHANCE: HOME or AWAY"
     outcome_accuracy = score_result["accuracy"]
     outcome_reason = score_result["explanation"]
@@ -1140,6 +1109,7 @@ def analyze_draw_match(data: dict) -> dict:
     result["is_lock"] = is_lock
     result["lock_reason"] = lock_reason
     
+    # GOAL BET: SEPARATE (Optional)
     goal_bet = score_result.get("goal_bet")
     goal_confidence = score_result.get("goal_confidence")
     goal_reason = score_result.get("goal_reason")
@@ -1149,13 +1119,11 @@ def analyze_draw_match(data: dict) -> dict:
     result["goal_confidence"] = goal_confidence
     result["goal_is_lock"] = goal_bet is not None
     
+    # BUILD SEPARATE BETS - NEVER COMBINED
     result["primary_bet"] = {
         "outcome_bet": outcome_bet,
         "outcome_accuracy": outcome_accuracy,
         "outcome_reason": outcome_reason,
-        "goal_bet": goal_bet,
-        "goal_confidence": goal_confidence,
-        "goal_reason": goal_reason,
         "is_lock": is_lock,
         "lock_reason": lock_reason,
         "score": score_result["total_score"],
@@ -1165,22 +1133,25 @@ def analyze_draw_match(data: dict) -> dict:
         "stake": score_result["stake"]
     }
     
+    # GOAL BET STORED SEPARATELY
+    result["primary_bet"]["goal_bet"] = goal_bet
+    result["primary_bet"]["goal_confidence"] = goal_confidence
+    result["primary_bet"]["goal_reason"] = goal_reason
+    
+    # Classification: PRIMARY BET only
     classification = outcome_bet
-    if goal_bet:
-        confidence_emoji = "🔵" if goal_confidence == "HIGH" else "🟡" if goal_confidence == "MEDIUM" else "🟠"
-        classification += f" | {goal_bet} {confidence_emoji}"
     result["classification"] = classification
     
     return result
 
 
 # ============================================================================
-# EVALUATION ENGINE — FIXED: NO PARLAY
+# EVALUATION ENGINE — SEPARATE BET EVALUATION
 # ============================================================================
 def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
     """
-    Evaluate each bet INDIVIDUALLY. NO PARLAY LOGIC.
-    Each bet is evaluated separately and results are shown independently.
+    Evaluate bets SEPARATELY.
+    If multiple bets, return each result individually.
     """
     try:
         home = int(home_goals) if home_goals is not None else 0
@@ -1197,7 +1168,7 @@ def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
     total = home + away
     pred = prediction.strip().upper()
     
-    # Split bets
+    # If combined with "|", split them
     if ' | ' in pred:
         bets = pred.split(' | ')
     else:
@@ -1214,11 +1185,11 @@ def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
         if 'DOUBLE CHANCE' in bet:
             bet_type = "DOUBLE CHANCE"
             if 'HOME' in bet:
-                is_win = home != away  # Home or Draw
+                is_win = home != away
             elif 'AWAY' in bet:
-                is_win = away != home  # Away or Draw
+                is_win = away != home
             else:
-                is_win = home != away  # Either wins
+                is_win = home != away
         
         # OVER/UNDER
         elif 'OVER 2.5' in bet:
@@ -1229,35 +1200,7 @@ def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
             bet_type = "UNDER 2.5"
             is_win = total <= 2
         
-        elif 'OVER 3.5' in bet:
-            bet_type = "OVER 3.5"
-            is_win = total > 3
-        
-        elif 'UNDER 3.5' in bet:
-            bet_type = "UNDER 3.5"
-            is_win = total <= 3
-        
-        # BTTS
-        elif 'BTTS' in bet:
-            bet_type = "BTTS"
-            is_win = home > 0 and away > 0
-        
-        # DRAW
-        elif 'DRAW' in bet and 'DOUBLE' not in bet:
-            bet_type = "DRAW"
-            is_win = home == away
-        
-        # HOME WIN
-        elif 'HOME WIN' in bet or ('HOME' in bet and 'DOUBLE' not in bet):
-            bet_type = "HOME WIN"
-            is_win = home > away
-        
-        # AWAY WIN
-        elif 'AWAY WIN' in bet or ('AWAY' in bet and 'DOUBLE' not in bet):
-            bet_type = "AWAY WIN"
-            is_win = away > home
-        
-        # REDUCE STAKE or SKIP - this is an old label, treat as DOUBLE CHANCE
+        # REDUCE STAKE or SKIP - old label, treat as DOUBLE CHANCE
         elif 'REDUCE STAKE' in bet or 'SKIP' in bet:
             bet_type = "DOUBLE CHANCE"
             is_win = home != away
@@ -1269,7 +1212,6 @@ def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
             "result": "WIN" if is_win else "LOSS"
         })
     
-    # Check if any bet was evaluated
     if not results:
         return {
             "results": [],
@@ -1279,7 +1221,6 @@ def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
             "summary": "NO BETS EVALUATED"
         }
     
-    # All won check - EACH BET INDEPENDENTLY
     all_won = all(r["win"] for r in results)
     
     return {
@@ -1295,7 +1236,6 @@ def evaluate_bet(prediction: str, home_goals, away_goals) -> dict:
 # BACKTEST FUNCTION
 # ============================================================================
 def backtest(results: list) -> list:
-    """Generate backtest results from recorded matches"""
     backtest_results = []
     for r in results:
         pred = r.get('bet_market', '')
@@ -1360,6 +1300,12 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         
         match_date = data.get("date", str(date.today()))
         
+        # Build bet_market WITHOUT combining with "|"
+        bet_market = "DOUBLE CHANCE: HOME or AWAY"
+        goal_bet = analysis.get("goal_bet")
+        if goal_bet:
+            bet_market = f"DOUBLE CHANCE: HOME or AWAY + {goal_bet}"
+        
         record = {
             "home_team": data.get("home_team", "Unknown"),
             "away_team": data.get("away_team", "Unknown"),
@@ -1388,11 +1334,10 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
             "draw_survival_score": score_result,
             "action": analysis.get("action"),
             "stake": analysis.get("stake"),
-            "recommended_bet": analysis.get("recommended_bet"),
             "factor_breakdown": json.dumps(analysis.get("factor_breakdown", {})),
-            "bet_market": analysis.get("classification", "SKIP"),
+            "bet_market": bet_market,
             "classification": analysis.get("classification", "SKIP"),
-            "pattern": "DRAW" if "DRAW" in analysis.get("classification", "") else "DOUBLE_CHANCE" if "DOUBLE" in analysis.get("classification", "") else "WIN" if "WIN" in analysis.get("classification", "") else "SKIP",
+            "pattern": "DOUBLE_CHANCE",
             "verdict": analysis.get("verdict", "SKIP"),
             "is_lock": analysis.get("is_lock", False),
             "lock_reason": analysis.get("lock_reason"),
@@ -1609,7 +1554,6 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     action = primary.get("action", "UNKNOWN")
     stake = primary.get("stake", "?")
-    
     stake_display, stake_class = get_stake_display(stake)
     
     if action == "SAFE":
@@ -1633,24 +1577,16 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
         lock_text = f"SKIP — {stake_display}"
         border_color = "#64748b"
     
-    goal_bet = primary.get('goal_bet')
-    goal_confidence = primary.get('goal_confidence')
-    outcome_bet = primary.get('outcome_bet', 'DOUBLE CHANCE: HOME or AWAY')
-    
-    if goal_bet:
-        confidence_emoji = "🔵" if goal_confidence == "HIGH" else "🟡" if goal_confidence == "MEDIUM" else "🟠"
-        confidence_label = goal_confidence if goal_confidence else "LOW"
-        full_bet = f"{outcome_bet} | {goal_bet} {confidence_emoji} ({confidence_label})"
-    else:
-        full_bet = outcome_bet
-    
+    # ========================================================================
+    # PRIMARY BET: DOUBLE CHANCE — ALWAYS DISPLAYED SEPARATELY
+    # ========================================================================
     st.markdown(f"""
-    <div class="output-card {card_class}" style="border-left: 4px solid {border_color};">
+    <div class="output-card {card_class} primary-bet-card" style="border-left: 4px solid {border_color};">
         <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
             <span style="font-size: 1.5rem;">{lock_icon}</span>
-            <span style="font-size: 1.2rem; font-weight: 700;">OUTCOME BET — {lock_text}</span>
+            <span style="font-size: 1.2rem; font-weight: 700;">PRIMARY BET — {lock_text}</span>
         </div>
-        <div style="font-size: 1.3rem; font-weight: 800; margin-bottom: 0.25rem;">{full_bet}</div>
+        <div style="font-size: 1.5rem; font-weight: 800; margin-bottom: 0.25rem; color: #10b981;">DOUBLE CHANCE: HOME or AWAY</div>
         <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem;">
             <span>📊 Accuracy: {primary.get('outcome_accuracy', 'N/A')}</span>
             <span>📝 Reason: {primary.get('outcome_reason', 'N/A')}</span>
@@ -1662,41 +1598,50 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     </div>
     """, unsafe_allow_html=True)
     
+    # ========================================================================
+    # SEPARATOR
+    # ========================================================================
+    st.markdown('<hr class="bet-separator">', unsafe_allow_html=True)
+    
+    # ========================================================================
+    # GOAL BET: SEPARATE DISPLAY (if exists)
+    # ========================================================================
+    goal_bet = primary.get('goal_bet')
+    goal_confidence = primary.get('goal_confidence')
+    goal_reason = primary.get('goal_reason')
+    
     if goal_bet:
         confidence_color = "#10b981" if goal_confidence == "HIGH" else "#f59e0b" if goal_confidence == "MEDIUM" else "#ef4444"
         st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border-left: 4px solid {confidence_color};">
+        <div class="output-card goal-bet-card" style="border-left: 4px solid {confidence_color};">
             <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
                 <span style="font-size: 1.5rem;">⚽</span>
-                <span style="font-size: 1.2rem; font-weight: 700;">GOAL BET</span>
+                <span style="font-size: 1.2rem; font-weight: 700;">GOAL BET — SEPARATE BET</span>
                 <span style="background: {confidence_color}; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700;">{goal_confidence or 'LOW'} CONFIDENCE</span>
             </div>
-            <div style="font-size: 1.3rem; font-weight: 800; margin-bottom: 0.25rem;">{goal_bet}</div>
+            <div style="font-size: 1.5rem; font-weight: 800; margin-bottom: 0.25rem; color: {confidence_color};">{goal_bet}</div>
             <div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.9rem;">
-                <span>📝 Reason: {primary.get('goal_reason', 'N/A')}</span>
+                <span>📝 Reason: {goal_reason}</span>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <hr style="border: none; border-top: 1px dashed #475569; margin: 0.5rem 0;">
-        <div style="background: #1a2a1a; padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid #2a4a2a; text-align: center;">
-            <span style="color: #94a3b8; font-size: 0.9rem;">📌 These are </span>
-            <span style="color: #fbbf24; font-weight: 700; font-size: 0.9rem;">SEPARATE</span>
-            <span style="color: #94a3b8; font-size: 0.9rem;"> bets. Place them individually.</span>
+            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #fbbf24;">
+                ⚠️ This is a SEPARATE bet from the PRIMARY BET above. Place it independently.
+            </div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 1rem; margin: 0.5rem 0; border-left: 4px solid #64748b;">
+        <div class="output-card" style="border-left: 4px solid #64748b; background: linear-gradient(135deg, #1a1a1a 0%, #0f0f0f 100%);">
             <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
                 <span style="font-size: 1.5rem;">⚽</span>
                 <span style="font-size: 1.2rem; font-weight: 700;">GOAL BET</span>
             </div>
-            <div style="font-size: 1rem; color: #94a3b8;">None available - {primary.get('goal_reason', 'No clear pattern')}</div>
+            <div style="font-size: 1rem; color: #94a3b8;">None available — {goal_reason or 'No clear pattern'}</div>
         </div>
         """, unsafe_allow_html=True)
     
+    # ========================================================================
+    # KEY METRICS
+    # ========================================================================
     st.markdown("### 📊 Key Metrics")
     
     avg_goals = data.get("avg_goals", 2.0)
@@ -1781,7 +1726,11 @@ def display_live_dashboard():
         if pred == 'SKIP':
             continue
         
-        evaluation = evaluate_bet(pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        # Extract just the PRIMARY BET (DOUBLE CHANCE) for evaluation
+        # Remove any goal bet part
+        primary_pred = "DOUBLE CHANCE: HOME or AWAY"
+        
+        evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
         
         if evaluation["all_won"]:
             correct += 1
@@ -1802,6 +1751,7 @@ def display_live_dashboard():
             if evaluation["all_won"]:
                 dangerous_correct += 1
         
+        # Track goal bets separately
         goal_bet = r.get('goal_bet')
         if goal_bet:
             goal_total += 1
@@ -1827,18 +1777,18 @@ def display_live_dashboard():
         st.markdown(f"""
         <div class="stat-box">
             <div class="stat-number">{overall_rate}%</div>
-            <div class="stat-label">Overall Win Rate ({correct}/{total})</div>
+            <div class="stat-label">PRIMARY BET Win Rate ({correct}/{total})</div>
         </div>
         """, unsafe_allow_html=True)
     with col3:
         st.markdown(f"""
         <div class="stat-box">
             <div class="stat-number">{goal_rate}%</div>
-            <div class="stat-label">Goal Lock Win Rate ({goal_correct}/{goal_total})</div>
+            <div class="stat-label">GOAL BET Win Rate ({goal_correct}/{goal_total})</div>
         </div>
         """, unsafe_allow_html=True)
     
-    st.markdown("#### By Stake Level")
+    st.markdown("#### By Stake Level (PRIMARY BET)")
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(f"""
@@ -1897,7 +1847,11 @@ def display_records_table(results: list):
         pred = r.get('bet_market', '')
         if pred == 'SKIP':
             continue
-        evaluation = evaluate_bet(pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        
+        # Evaluate PRIMARY BET only (DOUBLE CHANCE)
+        primary_pred = "DOUBLE CHANCE: HOME or AWAY"
+        evaluation = evaluate_bet(primary_pred, r.get('actual_home_goals'), r.get('actual_away_goals'))
+        
         if evaluation["all_won"]:
             correct += 1
             if r.get('is_lock', False):
@@ -1912,7 +1866,7 @@ def display_records_table(results: list):
         st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Draws Tracked</div></div>', unsafe_allow_html=True)
     with col2:
         win_rate = round(correct / total * 100) if total > 0 else 0
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">PRIMARY BET Win Rate</div></div>', unsafe_allow_html=True)
     with col3:
         st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
     with col4:
@@ -1937,6 +1891,7 @@ def display_records_table(results: list):
 
     st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
 
+    # Build the records table with SEPARATE columns for PRIMARY and GOAL bets
     rows = []
     for r in results:
         pred = r.get('bet_market', '')
@@ -1952,14 +1907,22 @@ def display_records_table(results: list):
         
         warning = r.get('warning') or ''
         dead_rubber_badge = ' ⚠️DR' if warning and 'DEAD RUBBER' in warning else ''
-
-        evaluation = evaluate_bet(pred, actual_home, actual_away)
-        if evaluation["all_won"]:
-            badge = '<span class="win-badge">🟢 WIN</span>'
+        
+        # PRIMARY BET result
+        primary_pred = "DOUBLE CHANCE: HOME or AWAY"
+        primary_eval = evaluate_bet(primary_pred, actual_home, actual_away)
+        primary_result = "🟢 WIN" if primary_eval["all_won"] else "🔴 LOSS"
+        
+        # GOAL BET result (if exists)
+        goal_bet = r.get('goal_bet')
+        if goal_bet and actual_home is not None and actual_away is not None:
+            goal_eval = evaluate_bet(goal_bet, actual_home, actual_away)
+            goal_result = "🟢 WIN" if goal_eval["all_won"] else "🔴 LOSS"
+            goal_display = f"{goal_bet} → {goal_result}"
         else:
-            badge = '<span class="loss-badge">🔴 LOSS</span>'
+            goal_display = "—"
+        
         score_display = f"{actual_home}-{actual_away}" if actual_home is not None else "—"
-
         match_display = f"{r.get('home_team', '')} vs {r.get('away_team', '')}"
         score_label = f"{display_score} ({action}) — {stake_display}{dead_rubber_badge}" if score != '?' else '?'
 
@@ -1968,9 +1931,10 @@ def display_records_table(results: list):
             "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
             "Match": match_display,
             "Score": score_label,
-            "Bet": pred,
+            "PRIMARY BET": "DOUBLE CHANCE: HOME or AWAY",
+            "PRIMARY Result": primary_result,
+            "GOAL BET": goal_display,
             "Actual": score_display,
-            "Result": badge,
         })
 
     df = pd.DataFrame(rows)
@@ -2004,27 +1968,30 @@ def display_records_table(results: list):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V12.3")
-    st.caption("FINAL: Individual Bet Evaluation | No Parlay Logic | Clean Display")
+    st.title("🎯 Match Analyzer V12.4")
+    st.caption("SEPARATE BETS: PRIMARY = DOUBLE CHANCE | OPTIONAL = OVER/UNDER (NEVER COMBINED)")
 
-    with st.expander("📖 The Stake-Adjusted Draw System V12.3", expanded=False):
+    with st.expander("📖 The Stake-Adjusted Draw System V12.4", expanded=False):
         st.markdown("""
         **ONLY analyzes matches where Forebet predicts DRAW (X).**
-        **ALWAYS bet DOUBLE CHANCE (12), but adjust stake based on risk.**
         
-        | Score | Action | Stake | Accuracy |
-        |-------|--------|-------|----------|
-        | **≤ 4** | ✅ SAFE | **2 units** | 83% |
-        | **5-7** | ⚠️ CAUTIOUS | **1 unit** | 70-80% |
-        | **8-9** | ❗ DANGEROUS | **0.25 unit** | N/A |
-        | **≥ 10** | ⏭️ SKIP | **0 units** | N/A |
+        ### TWO SEPARATE BETS — NEVER COMBINED
         
-        **FINAL FIXES in V12.3:**
-        - ✅ DSS Normalized to 0-14+ (NEVER negative)
-        - ✅ Goal bets use DATABASE data (not Forebet avg)
-        - ✅ **NO PARLAY** - Each bet evaluated individually
-        - ✅ Individual bet results shown in records
-        - ✅ Clean display with no confusion
+        | Bet Type | What | When |
+        |----------|------|------|
+        | **PRIMARY BET** | DOUBLE CHANCE: HOME or AWAY | **ALWAYS** |
+        | **GOAL BET** | OVER 2.5 or UNDER 2.5 | **ONLY when pattern exists** |
+        
+        ### STAKE SIZING (Based on Draw Survival Score)
+        
+        | Score | Action | PRIMARY STAKE |
+        |-------|--------|---------------|
+        | **≤ 4** | ✅ SAFE | **2 units** |
+        | **5-7** | ⚠️ CAUTIOUS | **1 unit** |
+        | **8-9** | ❗ DANGEROUS | **0.25 unit** |
+        | **≥ 10** | ⏭️ SKIP | **0 units** |
+        
+        **CRITICAL:** PRIMARY BET and GOAL BET are SEPARATE. Never combine them with "|".
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records", "📈 Dashboard"])
@@ -2047,7 +2014,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V12.3", type="primary"):
+        if st.button("🎯 ANALYZE V12.4", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
