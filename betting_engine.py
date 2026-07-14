@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V12.4 — COMPLETE FIXED VERSION
-Fixed: save_to_db saves ALL fields | Separate Bets Display | No Parlay
+MATCH ANALYZER V12.5 — COMPLETE FIXED VERSION
+Fixed: Show predictions even if already stored | Sort by date | No duplicate saves
 """
 
 import streamlit as st
@@ -11,6 +11,7 @@ import re
 import json
 import time
 import traceback
+from datetime import datetime
 
 # ============================================================================
 # SUPABASE SETUP
@@ -26,7 +27,7 @@ except Exception as e:
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V12.4", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V12.5", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -95,6 +96,8 @@ st.markdown("""
     .bet-separator { border: none; border-top: 1px dashed #475569; margin: 0.5rem 0; }
     .primary-bet-card { border-left: 4px solid #f59e0b; background: linear-gradient(135deg, #1a2a1a 0%, #0a1a0a 100%); }
     .goal-bet-card { border-left: 4px solid #3b82f6; background: linear-gradient(135deg, #0a1a2a 0%, #0a0a1a 100%); }
+    .already-stored { background: #1a2a2a; border: 1px solid #f59e0b; border-radius: 4px; padding: 0.2rem 0.6rem; color: #fbbf24; font-size: 0.7rem; font-weight: 700; display: inline-block; }
+    .sort-badge { background: #1e293b; border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.65rem; color: #94a3b8; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -118,6 +121,71 @@ def get_stake_display(stake_value: str) -> tuple:
         return stake_mapping[stake_value]
     else:
         return (stake_value, "stake-0")
+
+
+# ============================================================================
+# DATE PARSING
+# ============================================================================
+def parse_match_date(date_str: str) -> datetime:
+    """Parse date string to datetime object for sorting"""
+    if not date_str:
+        return datetime(1900, 1, 1)
+    
+    # Try different formats
+    try:
+        # Format: "16/07/2026 23:30"
+        return datetime.strptime(date_str.strip(), "%d/%m/%Y %H:%M")
+    except:
+        pass
+    
+    try:
+        # Format: "2026-07-04"
+        return datetime.strptime(date_str.strip(), "%Y-%m-%d")
+    except:
+        pass
+    
+    try:
+        # Format: "04/07/2026 20:00"
+        return datetime.strptime(date_str.strip(), "%d/%m/%Y %H:%M")
+    except:
+        pass
+    
+    try:
+        # Format: "13/07/2026 15:00"
+        return datetime.strptime(date_str.strip(), "%d/%m/%Y %H:%M")
+    except:
+        pass
+    
+    # Default
+    return datetime(1900, 1, 1)
+
+
+def format_date_display(date_str: str) -> str:
+    """Format date for display"""
+    dt = parse_match_date(date_str)
+    if dt.year == 1900:
+        return date_str
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
+    """Check if a match already exists in the database"""
+    try:
+        response = supabase.table("match_analyses").select("id").eq("home_team", home_team).eq("away_team", away_team).eq("match_date", match_date).execute()
+        return len(response.data) > 0
+    except:
+        return False
+
+
+def get_existing_match(home_team: str, away_team: str, match_date: str) -> dict:
+    """Get existing match from database"""
+    try:
+        response = supabase.table("match_analyses").select("*").eq("home_team", home_team).eq("away_team", away_team).eq("match_date", match_date).execute()
+        if response.data:
+            return response.data[0]
+        return None
+    except:
+        return None
 
 
 # ============================================================================
@@ -1286,10 +1354,17 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         return None
     
     try:
+        # Check if match already exists
+        home_team = data.get("home_team", "Unknown")
+        away_team = data.get("away_team", "Unknown")
+        match_date = data.get("date", str(date.today()))
+        
+        exists = check_match_exists(home_team, away_team, match_date)
+        if exists:
+            return "ALREADY_EXISTS"
+        
         primary = analysis.get("primary_bet", {})
         score_result = analysis.get("draw_survival_score", 0)
-        
-        match_date = data.get("date", str(date.today()))
         
         # Calculate desperate flags
         home_losing_streak = data.get("home_losing_streak", 0)
@@ -1308,8 +1383,8 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         
         record = {
             # ===== BASIC INFO =====
-            "home_team": data.get("home_team", "Unknown"),
-            "away_team": data.get("away_team", "Unknown"),
+            "home_team": home_team,
+            "away_team": away_team,
             "match_date": match_date,
             "league": league,
             
@@ -1407,7 +1482,9 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
 def get_pending():
     try:
         response = supabase.table("match_analyses").select("*").eq("result_entered", False).execute()
-        return response.data if response.data else []
+        # Sort by match_date
+        data = response.data if response.data else []
+        return sorted(data, key=lambda x: parse_match_date(x.get("match_date", "")))
     except Exception as e:
         st.error(f"Error fetching pending: {e}")
         return []
@@ -1433,8 +1510,9 @@ def submit_result(analysis_id, home_goals, away_goals):
 
 def get_results():
     try:
-        response = supabase.table("match_analyses").select("*").eq("result_entered", True).order("match_date", desc=True).execute()
-        return response.data if response.data else []
+        response = supabase.table("match_analyses").select("*").eq("result_entered", True).execute()
+        data = response.data if response.data else []
+        return sorted(data, key=lambda x: parse_match_date(x.get("match_date", "")), reverse=True)
     except: return []
 
 
@@ -1537,7 +1615,7 @@ def display_score_breakdown(factors: dict, total_score: int, raw_score: int = No
         """, unsafe_allow_html=True)
 
 
-def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
+def display_analysis(data: dict, analysis: dict, league: str = "Unknown", already_stored: bool = False):
     if analysis.get("verdict") == "SKIP":
         skip_reason = analysis.get("skip_reason") or "Not a draw prediction"
         is_ft = "Already played" in skip_reason or "FT" in skip_reason
@@ -1579,6 +1657,10 @@ def display_analysis(data: dict, analysis: dict, league: str = "Unknown"):
     
     badge_class = get_league_badge(league)
     st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
+    
+    # Show "Already Stored" badge if applicable
+    if already_stored:
+        st.markdown('<span class="already-stored">📌 ALREADY STORED — Displaying prediction only</span>', unsafe_allow_html=True)
     
     warning = analysis.get("warning") or ''
     if warning:
@@ -1988,10 +2070,10 @@ def display_records_table(results: list):
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V12.4")
-    st.caption("SEPARATE BETS: PRIMARY = DOUBLE CHANCE | OPTIONAL = OVER/UNDER (NEVER COMBINED)")
+    st.title("🎯 Match Analyzer V12.5")
+    st.caption("SEPARATE BETS: PRIMARY = DOUBLE CHANCE | OPTIONAL = OVER/UNDER | Sorted by Date")
 
-    with st.expander("📖 The Stake-Adjusted Draw System V12.4", expanded=False):
+    with st.expander("📖 The Stake-Adjusted Draw System V12.5", expanded=False):
         st.markdown("""
         **ONLY analyzes matches where Forebet predicts DRAW (X).**
         
@@ -2011,14 +2093,17 @@ def main():
         | **8-9** | ❗ DANGEROUS | **0.25 unit** |
         | **≥ 10** | ⏭️ SKIP | **0 units** |
         
-        **CRITICAL:** PRIMARY BET and GOAL BET are SEPARATE. Never combine them with "|".
+        **NEW in V12.5:**
+        - ✅ Shows predictions even if already stored (no duplicate saves)
+        - ✅ All matches sorted by date (earliest first)
+        - ✅ "Already Stored" badge for existing matches
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records", "📈 Dashboard"])
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 ALL draw predictions are analyzed. Stake adjusts based on Draw Survival Score.")
+        st.info("🎯 ALL draw predictions are analyzed. Already stored matches are shown but not saved again.")
 
         st.markdown("""
         <div class="upload-container">
@@ -2034,7 +2119,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V12.4", type="primary"):
+        if st.button("🎯 ANALYZE V12.5", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -2060,35 +2145,53 @@ def main():
                         if ft_matches:
                             st.info(f"⏭️ {len(ft_matches)} matches already played (FT) — skipped")
                         
+                        # Sort draw matches by date
+                        draw_matches_sorted = sorted(draw_matches, key=lambda x: parse_match_date(x.get("date", "")))
+                        
                         analyzed_results = []
                         skipped_results = []
                         stored_count = 0
+                        already_stored_count = 0
                         
-                        for match in matches:
+                        for match in draw_matches_sorted:
                             match_with_config = dict(match)
                             match_with_config["league_config"] = league_config
                             data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
                             analysis = analyze_draw_match(data)
                             
                             if analysis.get("verdict") != "SKIP":
-                                saved_id = save_to_db(data, analysis, league)
-                                if saved_id:
-                                    stored_count += 1
-                                analyzed_results.append((match, data, analysis))
+                                # Check if already exists
+                                exists = check_match_exists(data.get("home_team"), data.get("away_team"), data.get("date"))
+                                
+                                if exists:
+                                    already_stored_count += 1
+                                    analyzed_results.append((match, data, analysis, True))
+                                else:
+                                    saved_id = save_to_db(data, analysis, league)
+                                    if saved_id == "ALREADY_EXISTS":
+                                        already_stored_count += 1
+                                        analyzed_results.append((match, data, analysis, True))
+                                    elif saved_id:
+                                        stored_count += 1
+                                        analyzed_results.append((match, data, analysis, False))
+                                    else:
+                                        analyzed_results.append((match, data, analysis, False))
                             else:
                                 skipped_results.append((match, data, analysis))
 
-                        st.info(f"💾 {stored_count} draw predictions stored in Supabase")
+                        st.info(f"💾 {stored_count} new draw predictions stored | {already_stored_count} already existed (shown below)")
 
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🎯 DRAW PREDICTIONS (Stored)")
-                            st.caption(f"{len(analyzed_results)} draw predictions analyzed with stake adjustment")
+                            st.markdown("### 🎯 DRAW PREDICTIONS")
+                            st.caption(f"{len(analyzed_results)} draw predictions analyzed (sorted by date)")
                             
-                            for idx, (match, data, analysis) in enumerate(analyzed_results, 1):
+                            for idx, (match, data, analysis, already_stored) in enumerate(analyzed_results, 1):
                                 action = analysis.get("action", "UNKNOWN")
                                 stake = analysis.get("stake", "?")
                                 stake_display, _ = get_stake_display(stake)
+                                
+                                stored_badge = " 📌 ALREADY STORED" if already_stored else " ✅ NEW"
                                 
                                 if action == "SAFE":
                                     emoji = "✅"
@@ -2103,7 +2206,9 @@ def main():
                                     emoji = "⏭️"
                                     label = "SKIP"
                                 
-                                st.markdown(f"#### {emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({label} — {stake_display})")
+                                date_display = format_date_display(match.get('date', ''))
+                                st.markdown(f"#### {emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} ({label} — {stake_display}) {stored_badge}")
+                                st.caption(f"📅 {date_display}")
                                 
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -2113,7 +2218,7 @@ def main():
                                 with col3:
                                     st.metric("Avg Goals", f"{match.get('avg_goals', 0):.2f}")
                                 
-                                display_analysis(data, analysis, league)
+                                display_analysis(data, analysis, league, already_stored)
                                 
                                 if idx < len(analyzed_results):
                                     st.markdown("---")
@@ -2149,13 +2254,13 @@ def main():
                         with col1:
                             st.metric("Total Matches", total_matches)
                         with col2:
-                            st.metric("🎯 Draws Stored", stored_count)
-                        with col3:
-                            st.metric("⏭️ FT (Played)", len(ft_matches))
-                        with col4:
-                            st.metric("⏭️ Non-Draws", len(non_draw_matches))
-                        with col5:
                             st.metric("🎯 Draws Found", len(draw_matches))
+                        with col3:
+                            st.metric("💾 New Stored", stored_count)
+                        with col4:
+                            st.metric("📌 Already Stored", already_stored_count)
+                        with col5:
+                            st.metric("⏭️ Skipped", len(skipped_results) + len(ft_matches) + len(non_draw_matches))
                             
                     else:
                         st.error("No matches found in the data. Please make sure you're pasting valid data.")
@@ -2166,6 +2271,7 @@ def main():
 
     with tab2:
         st.subheader("📝 Enter Match Results")
+        st.caption("📅 Matches sorted by date (earliest first)")
         pending = get_pending()
         if pending:
             st.write(f"**{len(pending)} pending result(s)**")
@@ -2178,6 +2284,7 @@ def main():
                 stake = a.get('stake', '?')
                 match_date = a.get('match_date', 'Date unknown')
                 stake_display, _ = get_stake_display(stake)
+                date_display = format_date_display(match_date)
 
                 if action == "SAFE":
                     badge = f"✅ SAFE (Score: {score}) — {stake_display}"
@@ -2188,7 +2295,7 @@ def main():
                 else:
                     badge = f"⏭️ SKIP (Score: {score}) — {stake_display}"
 
-                with st.expander(f"📅 {match_date} | {badge} | {ht} vs {at}"):
+                with st.expander(f"📅 {date_display} | {badge} | {ht} vs {at}"):
                     st.info(f"📊 Draw Survival Score: {score} ({action}) — Stake: {stake_display}")
                     st.caption(f"📅 Match Date: {match_date}")
                     c1, c2 = st.columns(2)
@@ -2207,6 +2314,7 @@ def main():
 
     with tab3:
         st.subheader("📊 Performance Records")
+        st.caption("📅 Matches sorted by date (latest first)")
         results = get_results()
         display_records_table(results)
 
