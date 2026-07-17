@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V15.6 — FINAL FIXED VERSION
-Fixed: Supabase NULL query | Pending Matches Display | Table: match_predictions
+MATCH ANALYZER V15.7 — CRITICAL FIXES
+Fixed: League Config | Parser Bug | Derby Detection | Table: match_predictions
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ TABLE_NAME = "match_predictions"
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V15.6", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V15.7", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -209,51 +209,77 @@ def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
         return False
 
 
+# ============================================================================
+# FIXED: LEAGUE CONFIGURATION
+# ============================================================================
 def get_league_config(league: str) -> dict:
+    # DEFAULT: Assume 20-team league with relegation at 18
     config = {
-        "relegation_threshold": 15,
+        "relegation_threshold": 18,
         "league_size": 20,
         "europe_threshold": 4,
         "goals_fallback": 2.50
     }
     
+    # Add explicit rules for each league
     if "Norway" in league or "Eliteserien" in league:
-        config["relegation_threshold"] = 15
+        config["relegation_threshold"] = 15  # 16 teams
         config["league_size"] = 16
         config["goals_fallback"] = 2.75
-    elif "Brazil" in league or "Serie A" in league or "Br1" in league:
+    elif "Brazil" in league or "Br1" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
-        config["europe_threshold"] = 4
         config["goals_fallback"] = 2.66
     elif "Premier" in league or "EPL" in league:
         config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["goals_fallback"] = 2.75
+    elif "Italy" in league or "Serie A" in league or "It1" in league:
+        config["relegation_threshold"] = 18
+        config["league_size"] = 20
+        config["goals_fallback"] = 2.60
+    elif "Spain" in league or "La Liga" in league or "Es1" in league:
+        config["relegation_threshold"] = 18
+        config["league_size"] = 20
+        config["goals_fallback"] = 2.60
+    elif "Bundesliga" in league:
+        config["relegation_threshold"] = 16  # 18 teams, 16th is playoff
+        config["league_size"] = 18
+        config["goals_fallback"] = 2.80
     elif "AuV" in league or "NPL" in league or "Australia" in league:
         config["relegation_threshold"] = 11
         config["league_size"] = 14
-        config["europe_threshold"] = 3
         config["goals_fallback"] = 2.80
     else:
-        config["relegation_threshold"] = 15
+        # Default to 20-team league threshold 18
+        config["relegation_threshold"] = 18
         config["league_size"] = 20
         config["goals_fallback"] = 2.50
     
     return config
 
 
+# ============================================================================
+# FIXED: LEAGUE DETECTION
+# ============================================================================
 def detect_league(text: str) -> str:
-    if "Brasileiro Serie A" in text or "Brazil" in text or "Br1" in text:
+    # Priority: Check for known league codes first
+    if "It1" in text or ("Serie A" in text and "Italy" in text):
+        return "Italy Serie A"
+    if "Es1" in text or ("LaLiga" in text or "Spain" in text):
+        return "Spain La Liga"
+    if "Br1" in text or "Brasileiro" in text:
         return "Brazil Serie A"
-    elif "Premier League" in text or "England" in text or "EPL" in text:
+    if "EPL" in text or "Premier League" in text:
         return "Premier League"
-    elif "Eliteserien" in text or "Norway" in text:
+    
+    # Fallback to other leagues
+    if "Eliteserien" in text or "Norway" in text:
         return "Norway Eliteserien"
     elif "LaLiga" in text or "Spain" in text:
-        return "La Liga"
+        return "Spain La Liga"
     elif "Serie A" in text and "Italy" in text:
-        return "Serie A"
+        return "Italy Serie A"
     elif "Bundesliga" in text or "Germany" in text:
         return "Bundesliga"
     elif "AuV" in text or "NPL Victoria" in text:
@@ -265,13 +291,13 @@ def detect_league(text: str) -> str:
 def get_league_badge(league: str) -> str:
     if "Norway" in league or "Eliteserien" in league:
         return "no"
-    elif "Brazil" in league or "Serie A" in league:
+    elif "Brazil" in league or "Br1" in league:
         return "br"
     elif "Premier" in league or "EPL" in league:
         return "uk"
-    elif "La Liga" in league:
+    elif "Spain" in league or "La Liga" in league:
         return "es"
-    elif "Serie A" in league and "Italy" in league:
+    elif "Italy" in league or "Serie A" in league:
         return "it"
     elif "Bundesliga" in league:
         return "de"
@@ -459,7 +485,7 @@ def predict_1x2_v41(data: dict) -> dict:
 
 
 # ============================================================================
-# PARSER - COMPLETE
+# PARSER - COMPLETE WITH FIXED AVG_GOALS PARSING
 # ============================================================================
 def parse_text_data(text: str) -> dict:
     league = detect_league(text)
@@ -652,25 +678,28 @@ def parse_predictions(text: str) -> list:
                 else:
                     away_goals = 0
         
-        avg_match = re.search(r'(\d+\.\d+)°', avg_part)
+        # ====================================================================
+        # FIXED: AVG_GOALS AND TEMPERATURE PARSING
+        # ====================================================================
+        avg_match = re.search(r'(\d+)\.(\d{2})(\d*)°', avg_part)
         if not avg_match:
-            i += 1
-            continue
-        
-        raw = avg_match.group(1)
-        raw = raw[1:]
-        
-        match = re.search(r'(\d+)\.(\d{2})(\d*)', raw)
-        if match:
-            int_part = int(match.group(1))
-            dec_part = int(match.group(2))
-            temp_str = match.group(3)
+            # Try fallback pattern
+            avg_match_fallback = re.search(r'(\d+)\.(\d{2})°', avg_part)
+            if avg_match_fallback:
+                int_part = int(avg_match_fallback.group(1))
+                dec_part = int(avg_match_fallback.group(2))
+                avg_goals = float(f"{int_part}.{dec_part:02d}")
+                temperature = 0
+            else:
+                i += 1
+                continue
+        else:
+            int_part = int(avg_match.group(1))
+            dec_part = int(avg_match.group(2))
+            temp_str = avg_match.group(3)
             
             avg_goals = float(f"{int_part}.{dec_part:02d}")
             temperature = int(temp_str) if temp_str else 0
-        else:
-            i += 1
-            continue
         
         coeff_match = re.search(r'°(\d+\.\d+)', avg_part)
         coefficient = float(coeff_match.group(1)) if coeff_match else None
@@ -862,6 +891,9 @@ def parse_form(text: str) -> dict:
     return form_data
 
 
+# ============================================================================
+# CONVERT MATCH TO DATA - WITH FIXED DERBY DETECTION
+# ============================================================================
 def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_data: dict, 
                           league: str = "Unknown") -> dict:
     league_config = get_league_config(league)
@@ -1036,8 +1068,60 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
     data["home_desperate"] = data.get("home_losing_streak", 0) >= 3 or data.get("is_relegation_fight_home", False)
     data["away_desperate"] = data.get("away_losing_streak", 0) >= 3 or data.get("is_relegation_fight_away", False)
     
-    # Derby detection - check if teams are from same city
-    data["is_derby"] = False
+    # ========================================================================
+    # FIXED: DERBY DETECTION
+    # ========================================================================
+    derby_pairs = [
+        # Italy
+        ("Torino", "Juventus"),      # Derby della Mole
+        ("Juventus", "Torino"),
+        ("Milan", "Inter"),          # Derby della Madonnina
+        ("Inter", "Milan"),
+        ("Roma", "Lazio"),           # Derby della Capitale
+        ("Lazio", "Roma"),
+        ("Genoa", "Sampdoria"),      # Derby della Lanterna
+        ("Sampdoria", "Genoa"),
+        ("Verona", "Chievo"),        # Derby della Scala
+        ("Chievo", "Verona"),
+        # England
+        ("Liverpool", "Everton"),    # Merseyside Derby
+        ("Everton", "Liverpool"),
+        ("Manchester United", "Manchester City"),  # Manchester Derby
+        ("Manchester City", "Manchester United"),
+        ("Arsenal", "Tottenham"),    # North London Derby
+        ("Tottenham", "Arsenal"),
+        ("Chelsea", "Fulham"),       # West London Derby
+        ("Fulham", "Chelsea"),
+        # Spain
+        ("Real Madrid", "Atletico Madrid"),  # Madrid Derby
+        ("Atletico Madrid", "Real Madrid"),
+        ("Barcelona", "Espanyol"),   # Barcelona Derby
+        ("Espanyol", "Barcelona"),
+        ("Sevilla", "Real Betis"),   # Seville Derby
+        ("Real Betis", "Sevilla"),
+        # Brazil
+        ("Flamengo", "Fluminense"),  # Fla-Flu
+        ("Fluminense", "Flamengo"),
+        ("Corinthians", "Palmeiras"), # Paulista Derby
+        ("Palmeiras", "Corinthians"),
+        ("Gremio", "Internacional"), # Gre-Nal
+        ("Internacional", "Gremio"),
+    ]
+    
+    is_derby_flag = False
+    home_team_clean = data.get("home_team", "")
+    away_team_clean = data.get("away_team", "")
+    
+    # Check for partial matches (e.g., "AC Milan" vs "Inter Milan")
+    for pair in derby_pairs:
+        if pair[0] in home_team_clean and pair[1] in away_team_clean:
+            is_derby_flag = True
+            break
+        if pair[0] in away_team_clean and pair[1] in home_team_clean:
+            is_derby_flag = True
+            break
+    
+    data["is_derby"] = is_derby_flag
     data["is_playoff"] = False
     data["aggregate_lead"] = 0
     data["is_second_leg"] = False
@@ -1055,11 +1139,11 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# ANALYSIS ENGINE - V15.6
+# ANALYSIS ENGINE - V15.7
 # ============================================================================
 def analyze_match_v15(data: dict) -> dict:
     """
-    V15.6 ANALYSIS ENGINE
+    V15.7 ANALYSIS ENGINE
     Uses corrected v4.1 prediction logic with Derby Draw at Priority #2
     """
     
@@ -1417,7 +1501,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
 def get_pending():
     """Get all matches without results (actual_1x2 IS NULL)"""
     try:
-        # Use .is_() for NULL check in Supabase
         response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
         data = response.data if response.data else []
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")))
@@ -1453,7 +1536,6 @@ def submit_result(analysis_id, home_goals, away_goals):
 
 def get_results():
     try:
-        # Use .not_.is_() for NOT NULL
         response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
         data = response.data if response.data else []
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")), reverse=True)
@@ -1465,18 +1547,19 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V15.6")
-    st.caption(f"FIXED: Supabase NULL Query | Pending Matches Display | Table: {TABLE_NAME}")
+    st.title("🎯 Match Analyzer V15.7")
+    st.caption(f"CRITICAL FIXES: League Config | Parser Bug | Derby Detection | Table: {TABLE_NAME}")
 
-    with st.expander("📖 V15.6 — Final Fixed Version", expanded=False):
+    with st.expander("📖 V15.7 — Critical Fixes Applied", expanded=False):
         st.markdown("""
-        **V15.6 FIXES THE PENDING MATCHES QUERY**
+        **V15.7 FIXES 4 CRITICAL ISSUES**
         
         ### Fixes Applied:
         
-        1. ✅ **Supabase NULL Query** - Changed from `.eq("actual_1x2", None)` to `.is_("actual_1x2", "null")`
-        2. ✅ **Date Parsing** - Handles date objects from database
-        3. ✅ **Pending Matches Display** - Now shows correctly in Pending Matches tab
+        1. ✅ **League Configuration** - Serie A (It1) and La Liga (Es1) now use correct relegation threshold (18)
+        2. ✅ **Parser Bug** - `avg_goals` and `temperature` now parse correctly (removed `raw[1:]`)
+        3. ✅ **Derby Detection** - Added manual derby list (Torino/Juventus, Milan/Inter, etc.)
+        4. ✅ **Default Threshold** - Unknown leagues default to 18 (was 15)
         
         ### 7 Rules in Priority Order:
         
@@ -1495,7 +1578,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 V15.6: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
+        st.info("🎯 V15.7: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
 
         st.markdown("""
         <div class="upload-container">
@@ -1511,7 +1594,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V15.6", type="primary"):
+        if st.button("🎯 ANALYZE V15.7", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1571,7 +1654,7 @@ def main():
 
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.6 - Corrected v4.1 Logic)")
+                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.7 - Corrected v4.1 Logic)")
                             
                             for idx, (match, data, analysis, already_stored) in enumerate(analyzed_results, 1):
                                 prediction = analysis.get("prediction", "?")
