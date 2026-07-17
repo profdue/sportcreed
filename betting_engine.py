@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V15.3 — FINAL FIXED VERSION
-Fixed: Date Format | Stake Column | All Matches Analyzed | Table: match_predictions
+MATCH ANALYZER V15.4 — COMPLETE FIXED VERSION
+Fixed: Date Parsing | Pending Matches Display | All Matches Analyzed | Table: match_predictions
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ TABLE_NAME = "match_predictions"
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V15.3", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V15.4", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -144,75 +144,65 @@ def get_stake_display(stake_value: str) -> tuple:
         return (stake_value, "stake-zero")
 
 
-def parse_date_string(date_str: str) -> Tuple[str, str]:
-    """
-    Parse date string and return formatted date and time
-    Input: "22/05/2026 19:45" or "2026-05-22"
-    Returns: ("2026-05-22", "19:45") or ("2026-05-22", "")
-    """
-    if not date_str:
-        return (date.today().strftime("%Y-%m-%d"), "")
-    
-    # Try formats
-    formats = [
-        ("%d/%m/%Y %H:%M", "%H:%M"),
-        ("%d/%m/%Y %H:%M", "%H:%M"),
-        ("%Y-%m-%d", ""),
-        ("%d/%m/%Y", ""),
-    ]
-    
-    for fmt, time_fmt in formats:
-        try:
-            dt = datetime.strptime(date_str.strip(), fmt)
-            date_part = dt.strftime("%Y-%m-%d")
-            time_part = dt.strftime("%H:%M") if time_fmt else ""
-            return (date_part, time_part)
-        except:
-            continue
-    
-    # Fallback: just use today
-    return (date.today().strftime("%Y-%m-%d"), "")
-
-
 def parse_match_date(date_str: str) -> datetime:
+    """
+    Parse date string in any format and return datetime object
+    Handles: YYYY-MM-DD, YYYY-MM-DD HH:MM, DD/MM/YYYY HH:MM, DD/MM/YYYY
+    """
     if not date_str:
         return datetime(1900, 1, 1)
     
-    # Try parsing with time
+    # Clean the string
+    date_str = date_str.strip()
+    
+    # Try YYYY-MM-DD (database format)
     try:
-        return datetime.strptime(date_str.strip(), "%d/%m/%Y %H:%M")
+        return datetime.strptime(date_str, "%Y-%m-%d")
     except:
         pass
     
-    # Try parsing without time
+    # Try YYYY-MM-DD HH:MM (database format with time)
     try:
-        return datetime.strptime(date_str.strip(), "%Y-%m-%d")
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
     except:
         pass
     
+    # Try DD/MM/YYYY HH:MM (original format)
     try:
-        return datetime.strptime(date_str.strip(), "%d/%m/%Y")
+        return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
     except:
         pass
     
+    # Try DD/MM/YYYY (original format without time)
+    try:
+        return datetime.strptime(date_str, "%d/%m/%Y")
+    except:
+        pass
+    
+    # Try MM/DD/YYYY
+    try:
+        return datetime.strptime(date_str, "%m/%d/%Y")
+    except:
+        pass
+    
+    # Default
     return datetime(1900, 1, 1)
 
 
 def format_date_display(date_str: str) -> str:
-    if not date_str:
-        return ""
-    
-    date_part, time_part = parse_date_string(date_str)
-    if time_part:
-        return f"{date_part} {time_part}"
-    return date_part
+    """Format date for display"""
+    dt = parse_match_date(date_str)
+    if dt.year == 1900:
+        return date_str
+    return dt.strftime("%Y-%m-%d")
 
 
 def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
     """Check if a match already exists in the database"""
     try:
         # Parse date to match database format
-        date_part, _ = parse_date_string(match_date)
+        dt = parse_match_date(match_date)
+        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
         
         response = supabase.table(TABLE_NAME).select("id").eq("home_team", home_team).eq("away_team", away_team).eq("match_date", date_part).execute()
         return len(response.data) > 0
@@ -1067,11 +1057,11 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# ANALYSIS ENGINE - V15.3
+# ANALYSIS ENGINE - V15.4
 # ============================================================================
 def analyze_match_v15(data: dict) -> dict:
     """
-    V15.3 ANALYSIS ENGINE
+    V15.4 ANALYSIS ENGINE
     Uses corrected v4.1 prediction logic with Derby Draw at Priority #2
     """
     
@@ -1368,14 +1358,15 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         match_date = data.get("date", "")
         
         # Parse date to YYYY-MM-DD format
-        date_part, time_part = parse_date_string(match_date)
+        dt = parse_match_date(match_date)
+        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
         
         exists = check_match_exists(home_team, away_team, match_date)
         if exists:
             return "ALREADY_EXISTS"
         
         record = {
-            "match_date": date_part,  # Just the date part
+            "match_date": date_part,
             "league_name": league,
             "home_team": home_team,
             "away_team": away_team,
@@ -1473,18 +1464,18 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V15.3")
-    st.caption(f"FINAL FIXED: Date Format | Stake Column | Table: {TABLE_NAME}")
+    st.title("🎯 Match Analyzer V15.4")
+    st.caption(f"FIXED: Date Parsing | Pending Matches Display | Table: {TABLE_NAME}")
 
-    with st.expander("📖 V15.3 — Final Fixed Version", expanded=False):
+    with st.expander("📖 V15.4 — Final Fixed Version", expanded=False):
         st.markdown("""
-        **V15.3 FIXES ALL SAVE ISSUES**
+        **V15.4 FIXES ALL DATE PARSING ISSUES**
         
         ### Fixes Applied:
         
-        1. ✅ **Date Format Fixed** - Converts "22/05/2026 19:45" to "2026-05-22"
-        2. ✅ **Stake Column Added** - Saves stake value correctly
-        3. ✅ **Match Exists Check Fixed** - Uses proper date format
+        1. ✅ **Date Parsing Fixed** - Handles YYYY-MM-DD, DD/MM/YYYY, and more
+        2. ✅ **Pending Matches Display** - Now shows correctly in Post-Match tab
+        3. ✅ **Sorting Fixed** - Matches sorted by date properly
         
         ### 7 Rules in Priority Order:
         
@@ -1503,7 +1494,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 V15.3: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
+        st.info("🎯 V15.4: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
 
         st.markdown("""
         <div class="upload-container">
@@ -1519,7 +1510,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V15.3", type="primary"):
+        if st.button("🎯 ANALYZE V15.4", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1579,7 +1570,7 @@ def main():
 
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.3 - Corrected v4.1 Logic)")
+                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.4 - Corrected v4.1 Logic)")
                             
                             for idx, (match, data, analysis, already_stored) in enumerate(analyzed_results, 1):
                                 prediction = analysis.get("prediction", "?")
