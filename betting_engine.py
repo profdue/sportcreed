@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V15.5 — FINAL FIXED VERSION
-Fixed: Date Parsing | Pending Matches Display | Tab Name: Pending Matches | Table: match_predictions
+MATCH ANALYZER V15.6 — FINAL FIXED VERSION
+Fixed: Supabase NULL query | Pending Matches Display | Table: match_predictions
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ TABLE_NAME = "match_predictions"
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V15.5", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V15.6", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -1055,11 +1055,11 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# ANALYSIS ENGINE - V15.5
+# ANALYSIS ENGINE - V15.6
 # ============================================================================
 def analyze_match_v15(data: dict) -> dict:
     """
-    V15.5 ANALYSIS ENGINE
+    V15.6 ANALYSIS ENGINE
     Uses corrected v4.1 prediction logic with Derby Draw at Priority #2
     """
     
@@ -1415,8 +1415,10 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
 
 
 def get_pending():
+    """Get all matches without results (actual_1x2 IS NULL)"""
     try:
-        response = supabase.table(TABLE_NAME).select("*").eq("actual_1x2", None).execute()
+        # Use .is_() for NULL check in Supabase
+        response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
         data = response.data if response.data else []
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")))
     except Exception as e:
@@ -1451,6 +1453,7 @@ def submit_result(analysis_id, home_goals, away_goals):
 
 def get_results():
     try:
+        # Use .not_.is_() for NOT NULL
         response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
         data = response.data if response.data else []
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")), reverse=True)
@@ -1462,18 +1465,18 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V15.5")
-    st.caption(f"FIXED: Date Parsing | Pending Matches Display | Table: {TABLE_NAME}")
+    st.title("🎯 Match Analyzer V15.6")
+    st.caption(f"FIXED: Supabase NULL Query | Pending Matches Display | Table: {TABLE_NAME}")
 
-    with st.expander("📖 V15.5 — Final Fixed Version", expanded=False):
+    with st.expander("📖 V15.6 — Final Fixed Version", expanded=False):
         st.markdown("""
-        **V15.5 FIXES ALL DATE PARSING ISSUES**
+        **V15.6 FIXES THE PENDING MATCHES QUERY**
         
         ### Fixes Applied:
         
-        1. ✅ **Date Parsing Fixed** - Handles date objects from database
-        2. ✅ **Pending Matches Display** - Now shows correctly in Pending Matches tab
-        3. ✅ **Sorting Fixed** - Matches sorted by date properly
+        1. ✅ **Supabase NULL Query** - Changed from `.eq("actual_1x2", None)` to `.is_("actual_1x2", "null")`
+        2. ✅ **Date Parsing** - Handles date objects from database
+        3. ✅ **Pending Matches Display** - Now shows correctly in Pending Matches tab
         
         ### 7 Rules in Priority Order:
         
@@ -1492,7 +1495,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 V15.5: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
+        st.info("🎯 V15.6: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
 
         st.markdown("""
         <div class="upload-container">
@@ -1508,7 +1511,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V15.5", type="primary"):
+        if st.button("🎯 ANALYZE V15.6", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1568,7 +1571,7 @@ def main():
 
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.5 - Corrected v4.1 Logic)")
+                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.6 - Corrected v4.1 Logic)")
                             
                             for idx, (match, data, analysis, already_stored) in enumerate(analyzed_results, 1):
                                 prediction = analysis.get("prediction", "?")
