@@ -1,6 +1,6 @@
 """
-MATCH ANALYZER V15.4 — COMPLETE FIXED VERSION
-Fixed: Date Parsing | Pending Matches Display | All Matches Analyzed | Table: match_predictions
+MATCH ANALYZER V15.5 — FINAL FIXED VERSION
+Fixed: Date Parsing | Pending Matches Display | Tab Name: Pending Matches | Table: match_predictions
 """
 
 import streamlit as st
@@ -32,7 +32,7 @@ TABLE_NAME = "match_predictions"
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V15.4", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Match Analyzer V15.5", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -144,16 +144,20 @@ def get_stake_display(stake_value: str) -> tuple:
         return (stake_value, "stake-zero")
 
 
-def parse_match_date(date_str: str) -> datetime:
+def parse_match_date(date_val) -> datetime:
     """
-    Parse date string in any format and return datetime object
-    Handles: YYYY-MM-DD, YYYY-MM-DD HH:MM, DD/MM/YYYY HH:MM, DD/MM/YYYY
+    Parse date from string OR date object
+    Handles: date objects, YYYY-MM-DD, DD/MM/YYYY, etc.
     """
-    if not date_str:
+    if not date_val:
         return datetime(1900, 1, 1)
     
-    # Clean the string
-    date_str = date_str.strip()
+    # If it's already a date object (from database)
+    if isinstance(date_val, (date, datetime)):
+        return datetime(date_val.year, date_val.month, date_val.day)
+    
+    # Convert to string
+    date_str = str(date_val).strip()
     
     # Try YYYY-MM-DD (database format)
     try:
@@ -161,27 +165,21 @@ def parse_match_date(date_str: str) -> datetime:
     except:
         pass
     
-    # Try YYYY-MM-DD HH:MM (database format with time)
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-    except:
-        pass
-    
-    # Try DD/MM/YYYY HH:MM (original format)
-    try:
-        return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
-    except:
-        pass
-    
-    # Try DD/MM/YYYY (original format without time)
+    # Try DD/MM/YYYY (original format)
     try:
         return datetime.strptime(date_str, "%d/%m/%Y")
     except:
         pass
     
-    # Try MM/DD/YYYY
+    # Try YYYY-MM-DD HH:MM:SS
     try:
-        return datetime.strptime(date_str, "%m/%d/%Y")
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    except:
+        pass
+    
+    # Try DD/MM/YYYY HH:MM
+    try:
+        return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
     except:
         pass
     
@@ -189,11 +187,11 @@ def parse_match_date(date_str: str) -> datetime:
     return datetime(1900, 1, 1)
 
 
-def format_date_display(date_str: str) -> str:
+def format_date_display(date_val) -> str:
     """Format date for display"""
-    dt = parse_match_date(date_str)
+    dt = parse_match_date(date_val)
     if dt.year == 1900:
-        return date_str
+        return str(date_val)
     return dt.strftime("%Y-%m-%d")
 
 
@@ -1057,11 +1055,11 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 
 
 # ============================================================================
-# ANALYSIS ENGINE - V15.4
+# ANALYSIS ENGINE - V15.5
 # ============================================================================
 def analyze_match_v15(data: dict) -> dict:
     """
-    V15.4 ANALYSIS ENGINE
+    V15.5 ANALYSIS ENGINE
     Uses corrected v4.1 prediction logic with Derby Draw at Priority #2
     """
     
@@ -1420,7 +1418,7 @@ def get_pending():
     try:
         response = supabase.table(TABLE_NAME).select("*").eq("actual_1x2", None).execute()
         data = response.data if response.data else []
-        return sorted(data, key=lambda x: parse_match_date(x.get("match_date", "")))
+        return sorted(data, key=lambda x: parse_match_date(x.get("match_date")))
     except Exception as e:
         st.error(f"Error fetching pending: {e}")
         return []
@@ -1455,7 +1453,7 @@ def get_results():
     try:
         response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
         data = response.data if response.data else []
-        return sorted(data, key=lambda x: parse_match_date(x.get("match_date", "")), reverse=True)
+        return sorted(data, key=lambda x: parse_match_date(x.get("match_date")), reverse=True)
     except:
         return []
 
@@ -1464,17 +1462,17 @@ def get_results():
 # MAIN APP
 # ============================================================================
 def main():
-    st.title("🎯 Match Analyzer V15.4")
+    st.title("🎯 Match Analyzer V15.5")
     st.caption(f"FIXED: Date Parsing | Pending Matches Display | Table: {TABLE_NAME}")
 
-    with st.expander("📖 V15.4 — Final Fixed Version", expanded=False):
+    with st.expander("📖 V15.5 — Final Fixed Version", expanded=False):
         st.markdown("""
-        **V15.4 FIXES ALL DATE PARSING ISSUES**
+        **V15.5 FIXES ALL DATE PARSING ISSUES**
         
         ### Fixes Applied:
         
-        1. ✅ **Date Parsing Fixed** - Handles YYYY-MM-DD, DD/MM/YYYY, and more
-        2. ✅ **Pending Matches Display** - Now shows correctly in Post-Match tab
+        1. ✅ **Date Parsing Fixed** - Handles date objects from database
+        2. ✅ **Pending Matches Display** - Now shows correctly in Pending Matches tab
         3. ✅ **Sorting Fixed** - Matches sorted by date properly
         
         ### 7 Rules in Priority Order:
@@ -1490,11 +1488,11 @@ def main():
         | **7** | Default | No Rules Triggered | HOME (1) |
         """)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Post-Match", "📊 Records", "📈 Dashboard"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending Matches", "📊 Records", "📈 Dashboard"])
 
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 V15.4: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
+        st.info("🎯 V15.5: All matches analyzed with corrected v4.1 logic. Saving to `{}`".format(TABLE_NAME))
 
         st.markdown("""
         <div class="upload-container">
@@ -1510,7 +1508,7 @@ def main():
             placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
         )
 
-        if st.button("🎯 ANALYZE V15.4", type="primary"):
+        if st.button("🎯 ANALYZE V15.5", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
@@ -1570,7 +1568,7 @@ def main():
 
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.4 - Corrected v4.1 Logic)")
+                            st.markdown("### 🎯 MATCH PREDICTIONS (V15.5 - Corrected v4.1 Logic)")
                             
                             for idx, (match, data, analysis, already_stored) in enumerate(analyzed_results, 1):
                                 prediction = analysis.get("prediction", "?")
@@ -1621,7 +1619,8 @@ def main():
                     st.code(traceback.format_exc())
 
     with tab2:
-        st.subheader("📝 Enter Match Results")
+        st.subheader("📝 Pending Matches")
+        st.caption("Matches waiting for results. Enter the actual scores once matches are played.")
         pending = get_pending()
         if pending:
             st.write(f"**{len(pending)} pending result(s)**")
@@ -1652,10 +1651,11 @@ def main():
                             st.success("Result submitted!")
                             st.rerun()
         else:
-            st.info("No pending analyses.")
+            st.info("No pending matches. All predictions have results recorded.")
 
     with tab3:
         st.subheader("📊 Performance Records")
+        st.caption("Completed matches with results recorded.")
         results = get_results()
         display_records_table_v15(results)
 
