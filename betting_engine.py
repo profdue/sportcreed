@@ -1,7 +1,6 @@
-```python
 """
-MATCH ANALYZER V15.9 — COMPLETE FIXED VERSION
-Fixed: Parser | Rule 3 (+4 gap) | Turkish League | Title Race Dead Rubber | avg_goals Regex
+MATCH ANALYZER V15.9 — COMPLETE SOLUTION
+Fixed: Parser | League Detection | Rule 3 Threshold | Rule 7 Rewrite | Rule 2.5 Added
 """
 
 import streamlit as st
@@ -74,7 +73,6 @@ st.markdown("""
     .league-badge.es { background: #f59e0b; color: #000; }
     .league-badge.it { background: #8b5cf6; color: #fff; }
     .league-badge.de { background: #ec4899; color: #fff; }
-    .league-badge.tr { background: #e11d48; color: #fff; }
     .league-badge.au { background: #f59e0b; color: #000; }
     .league-badge.unknown { background: #64748b; color: #fff; }
     .score-container { background: #0f172a; border-radius: 12px; padding: 1rem; margin: 0.5rem 0; }
@@ -147,50 +145,38 @@ def get_stake_display(stake_value: str) -> tuple:
 
 
 def parse_match_date(date_val) -> datetime:
-    """
-    Parse date from string OR date object
-    Handles: date objects, YYYY-MM-DD, DD/MM/YYYY, etc.
-    """
     if not date_val:
         return datetime(1900, 1, 1)
     
-    # If it's already a date object (from database)
     if isinstance(date_val, (date, datetime)):
         return datetime(date_val.year, date_val.month, date_val.day)
     
-    # Convert to string
     date_str = str(date_val).strip()
     
-    # Try YYYY-MM-DD (database format)
     try:
         return datetime.strptime(date_str, "%Y-%m-%d")
     except:
         pass
     
-    # Try DD/MM/YYYY (original format)
     try:
         return datetime.strptime(date_str, "%d/%m/%Y")
     except:
         pass
     
-    # Try YYYY-MM-DD HH:MM:SS
     try:
         return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
     except:
         pass
     
-    # Try DD/MM/YYYY HH:MM
     try:
         return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
     except:
         pass
     
-    # Default
     return datetime(1900, 1, 1)
 
 
 def format_date_display(date_val) -> str:
-    """Format date for display"""
     dt = parse_match_date(date_val)
     if dt.year == 1900:
         return str(date_val)
@@ -198,9 +184,7 @@ def format_date_display(date_val) -> str:
 
 
 def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
-    """Check if a match already exists in the database"""
     try:
-        # Parse date to match database format
         dt = parse_match_date(match_date)
         date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
         
@@ -212,7 +196,7 @@ def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
 
 
 # ============================================================================
-# LEAGUE CONFIGURATION - COMPLETE WITH TURKISH LEAGUE
+# LEAGUE CONFIGURATION - COMPLETE
 # ============================================================================
 def get_league_config(league: str) -> dict:
     # DEFAULT: 20-team league with relegation at 18
@@ -223,9 +207,8 @@ def get_league_config(league: str) -> dict:
         "goals_fallback": 2.50
     }
     
-    # Override for specific leagues
     if "Norway" in league or "Eliteserien" in league:
-        config["relegation_threshold"] = 15  # 16 teams
+        config["relegation_threshold"] = 15
         config["league_size"] = 16
         config["goals_fallback"] = 2.75
     elif "Brazil" in league or "Br1" in league:
@@ -245,52 +228,94 @@ def get_league_config(league: str) -> dict:
         config["league_size"] = 20
         config["goals_fallback"] = 2.60
     elif "Turkey" in league or "Super Lig" in league or "Su1" in league:
-        config["relegation_threshold"] = 18  # 20 teams, 18-20 relegation
-        config["league_size"] = 20
-        config["goals_fallback"] = 2.70
-    elif "Bundesliga" in league:
-        config["relegation_threshold"] = 16  # 18 teams, 16th is playoff
+        config["relegation_threshold"] = 17  # 19 teams, bottom 3
+        config["league_size"] = 19
+        config["europe_threshold"] = 4
+        config["goals_fallback"] = 2.60
+    elif "Bundesliga" in league or "De1" in league:
+        config["relegation_threshold"] = 16
         config["league_size"] = 18
         config["goals_fallback"] = 2.80
-    elif "AuV" in league or "NPL" in league or "Australia" in league:
+    elif "France" in league or "Ligue" in league or "Fr1" in league:
+        config["relegation_threshold"] = 17  # 18 teams, bottom 2
+        config["league_size"] = 18
+        config["goals_fallback"] = 2.60
+    elif "Australia" in league or "A-League" in league or "Au1" in league:
         config["relegation_threshold"] = 11
         config["league_size"] = 14
         config["goals_fallback"] = 2.80
     else:
-        # Default: 20-team league threshold 18
-        config["relegation_threshold"] = 18
-        config["league_size"] = 20
-        config["goals_fallback"] = 2.50
+        # Try to extract league code from name
+        code_match = re.search(r'League\s*([A-Z][a-z]?\d)', league)
+        if code_match:
+            code = code_match.group(1)
+            # Map codes if possible
+            code_map = {
+                "It1": 18,
+                "Es1": 18,
+                "Br1": 18,
+                "EPL": 18,
+                "Su1": 17,
+                "De1": 16,
+                "Fr1": 17,
+                "Au1": 11,
+                "No1": 15,
+            }
+            if code in code_map:
+                config["relegation_threshold"] = code_map[code]
     
     return config
 
 
+# ============================================================================
+# LEAGUE DETECTION - COMPLETE WITH CODE EXTRACTION
+# ============================================================================
 def detect_league(text: str) -> str:
-    # Priority: Check for known league codes first
-    if "It1" in text or ("Serie A" in text and "Italy" in text):
-        return "Italy Serie A"
-    if "Es1" in text or ("LaLiga" in text or "Spain" in text):
-        return "Spain La Liga"
-    if "Br1" in text or "Brasileiro" in text:
-        return "Brazil Serie A"
-    if "EPL" in text or "Premier League" in text:
-        return "Premier League"
-    if "Su1" in text or "Super Lig" in text or "Turkey" in text:
-        return "Turkey Super Lig"
+    # Extract league code if present
+    league_code = None
+    code_match = re.search(r'(?:Round\s*\d+,\s*)?([A-Z][a-z]?\d)', text)
+    if code_match:
+        league_code = code_match.group(1)
     
-    # Fallback to other leagues
-    if "Eliteserien" in text or "Norway" in text:
-        return "Norway Eliteserien"
-    elif "LaLiga" in text or "Spain" in text:
-        return "Spain La Liga"
-    elif "Serie A" in text and "Italy" in text:
+    # Check known leagues using the code or text
+    if league_code == "It1" or "Serie A" in text and "Italy" in text:
         return "Italy Serie A"
-    elif "Bundesliga" in text or "Germany" in text:
-        return "Bundesliga"
-    elif "AuV" in text or "NPL Victoria" in text:
-        return "Australia NPL Victoria"
-    else:
-        return "Unknown League"
+    if league_code == "Es1" or "LaLiga" in text or "Spain" in text:
+        return "Spain La Liga"
+    if league_code == "Br1" or "Brasileiro" in text:
+        return "Brazil Serie A"
+    if league_code == "EPL" or "Premier League" in text:
+        return "Premier League"
+    if league_code == "Su1" or "Super Lig" in text or "Turkey" in text:
+        return "Turkey Super Lig"
+    if league_code == "De1" or "Bundesliga" in text:
+        return "Germany Bundesliga"
+    if league_code == "Fr1" or "Ligue" in text or "France" in text:
+        return "France Ligue 1"
+    if league_code == "Au1" or "A-League" in text or "Australia" in text:
+        return "Australia A-League"
+    if league_code == "No1" or "Eliteserien" in text:
+        return "Norway Eliteserien"
+    
+    # If we have a code but don't recognize it, use the code
+    if league_code:
+        code_map = {
+            "It1": "Italy Serie A",
+            "Es1": "Spain La Liga",
+            "Br1": "Brazil Serie A",
+            "EPL": "Premier League",
+            "Su1": "Turkey Super Lig",
+            "De1": "Germany Bundesliga",
+            "Fr1": "France Ligue 1",
+            "Au1": "Australia A-League",
+            "No1": "Norway Eliteserien",
+        }
+        if league_code in code_map:
+            return code_map[league_code]
+        else:
+            return f"League {league_code}"
+    
+    return "Unknown League"
 
 
 def get_league_badge(league: str) -> str:
@@ -308,7 +333,9 @@ def get_league_badge(league: str) -> str:
         return "tr"
     elif "Bundesliga" in league:
         return "de"
-    elif "Australia" in league or "NPL" in league:
+    elif "France" in league or "Ligue" in league:
+        return "fr"
+    elif "Australia" in league or "A-League" in league:
         return "au"
     else:
         return "unknown"
@@ -318,6 +345,8 @@ def get_rule_badge(rule: str) -> str:
     if "Rule 1" in rule:
         return "rule-badge-1"
     elif "Rule 2" in rule:
+        return "rule-badge-2"
+    elif "Rule 2.5" in rule:
         return "rule-badge-2"
     elif "Rule 3" in rule:
         return "rule-badge-3"
@@ -332,12 +361,12 @@ def get_rule_badge(rule: str) -> str:
 
 
 # ============================================================================
-# V4.1 PREDICTION LOGIC - COMPLETE WITH TITLE RACE DEAD RUBBER
+# V4.1 PREDICTION LOGIC - FULLY FIXED V15.9
 # ============================================================================
 def predict_1x2_v41(data: dict) -> dict:
     """
-    V4.1 PREDICTION LOGIC - COMPLETE SOLUTION
-    7 Rules in Priority Order | +4 Form Gap | Title Race Dead Rubber
+    V4.1 PREDICTION LOGIC - V15.9 COMPLETE SOLUTION
+    7 Rules (plus 2.5) in Priority Order
     """
     
     # Extract data
@@ -393,6 +422,22 @@ def predict_1x2_v41(data: dict) -> dict:
             "bet": "Draw",
             "stake": "2 units",
             "reason": "Derby matches are unpredictable - form goes out the window"
+        }
+    
+    # ========================================================================
+    # RULE 2.5: TITLE RACE DEAD RUBBER (NEW)
+    # Priority: HIGH
+    # ========================================================================
+    if (is_dead_rubber_home and 
+        is_title_race_away and 
+        away_last6_points >= home_last6_points):
+        return {
+            "prediction": "2",
+            "rule": "Rule 2.5 - Away Motivation Override",
+            "confidence": "HIGH",
+            "bet": "Away Win",
+            "stake": "2 units",
+            "reason": "Away team fighting for title/Top 4, home team has nothing to play for"
         }
     
     # ========================================================================
@@ -480,31 +525,79 @@ def predict_1x2_v41(data: dict) -> dict:
         }
     
     # ========================================================================
-    # RULE 7: DEFAULT - FIXED: DRAW WHEN FORM IS EQUAL, HOME WHEN FORM EDGE
+    # RULE 7: DEFAULT - COMPLETELY REWRITTEN
     # Priority: LOWEST
     # ========================================================================
-    if home_last6_points >= away_last6_points:
-        return {
-            "prediction": "1",
-            "rule": "Rule 7 - Home Default (Form Edge)",
-            "confidence": "LOW",
-            "bet": "Home Win",
-            "stake": "0.25 unit",
-            "reason": f"Home form {home_last6_points} vs {away_last6_points}"
-        }
-    else:
+    
+    # Step 1: Check form equality
+    if home_last6_points == away_last6_points:
         return {
             "prediction": "X",
-            "rule": "Rule 7 - No Clear Advantage",
+            "rule": "Rule 7 - Equal Form (Default Draw)",
             "confidence": "LOW",
             "bet": "Draw",
             "stake": "0.25 unit",
-            "reason": "No clear advantage, defaulting to draw"
+            "reason": f"Form exactly tied at {home_last6_points} pts"
         }
+    
+    # Step 2: Check home form better
+    if home_last6_points > away_last6_points:
+        gap = home_last6_points - away_last6_points
+        if gap <= 2:
+            return {
+                "prediction": "1",
+                "rule": "Rule 7 - Marginal Home Edge",
+                "confidence": "LOW",
+                "bet": "Home Win",
+                "stake": "0.25 unit",
+                "reason": f"Marginal home edge ({gap} pts)"
+            }
+        else:
+            # Gap of 3+ but <4 (Rule 4 didn't trigger)
+            return {
+                "prediction": "1",
+                "rule": "Rule 7 - Moderate Home Edge",
+                "confidence": "LOW",
+                "bet": "Home Win",
+                "stake": "0.5 unit",
+                "reason": f"Moderate home edge ({gap} pts)"
+            }
+    
+    # Step 3: Check away form better
+    if away_last6_points > home_last6_points:
+        gap = away_last6_points - home_last6_points
+        if gap <= 2:
+            return {
+                "prediction": "2",
+                "rule": "Rule 7 - Marginal Away Edge",
+                "confidence": "LOW",
+                "bet": "Away Win",
+                "stake": "0.25 unit",
+                "reason": f"Marginal away edge ({gap} pts)"
+            }
+        else:
+            return {
+                "prediction": "2",
+                "rule": "Rule 7 - Moderate Away Edge",
+                "confidence": "LOW",
+                "bet": "Away Win",
+                "stake": "0.5 unit",
+                "reason": f"Moderate away edge ({gap} pts)"
+            }
+    
+    # Ultimate fallback (should never reach here)
+    return {
+        "prediction": "X",
+        "rule": "Rule 7 - Ultimate Fallback",
+        "confidence": "LOW",
+        "bet": "Draw",
+        "stake": "0.25 unit",
+        "reason": "Complete uncertainty"
+    }
 
 
 # ============================================================================
-# PARSER - FIXED: CORRECT AVG_GOALS REGEX
+# PARSER - COMPLETE WITH FIXED AVG_GOALS PARSING
 # ============================================================================
 def parse_text_data(text: str) -> dict:
     league = detect_league(text)
@@ -698,24 +791,27 @@ def parse_predictions(text: str) -> list:
                     away_goals = 0
         
         # ====================================================================
-        # FIXED: AVG_GOALS AND TEMPERATURE PARSING - CORRECT REGEX
+        # FIXED: AVG_GOALS AND TEMPERATURE PARSING - DIRECT CAPTURE
         # ====================================================================
-        # Pattern: "3.22°20" or "2.20°28" or "1.63°27"
-        # Groups: (3.22)(20) or (2.20)(28)
-        avg_match = re.search(r'(\d+\.\d+)°(\d*)', avg_part)
-        if avg_match:
-            avg_goals = float(avg_match.group(1))
-            temp_str = avg_match.group(2)
-            temperature = int(temp_str) if temp_str else 0
-        else:
-            # Try fallback pattern without temperature
-            avg_match_fallback = re.search(r'(\d+\.\d+)', avg_part)
+        avg_match = re.search(r'(\d+)\.(\d{2})(\d*)°', avg_part)
+        if not avg_match:
+            # Try fallback pattern
+            avg_match_fallback = re.search(r'(\d+)\.(\d{2})°', avg_part)
             if avg_match_fallback:
-                avg_goals = float(avg_match_fallback.group(1))
+                int_part = int(avg_match_fallback.group(1))
+                dec_part = int(avg_match_fallback.group(2))
+                avg_goals = float(f"{int_part}.{dec_part:02d}")
                 temperature = 0
             else:
                 i += 1
                 continue
+        else:
+            int_part = int(avg_match.group(1))
+            dec_part = int(avg_match.group(2))
+            temp_str = avg_match.group(3)
+            
+            avg_goals = float(f"{int_part}.{dec_part:02d}")
+            temperature = int(temp_str) if temp_str else 0
         
         # Sanity check for avg_goals
         if avg_goals > 6.0 or avg_goals < 0.5:
@@ -1093,44 +1189,44 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
     # ========================================================================
     derby_pairs = [
         # Italian derbies
-        ("Juventus", "Torino"), ("Torino", "Juventus"),      # Derby della Mole
-        ("Milan", "Inter"), ("Inter", "Milan"),              # Derby della Madonnina
-        ("Roma", "Lazio"), ("Lazio", "Roma"),                # Derby della Capitale
-        ("Genoa", "Sampdoria"), ("Sampdoria", "Genoa"),      # Derby della Lanterna
-        ("Verona", "Chievo"), ("Chievo", "Verona"),          # Derby della Scala
+        ("Juventus", "Torino"), ("Torino", "Juventus"),
+        ("Milan", "Inter"), ("Inter", "Milan"),
+        ("Roma", "Lazio"), ("Lazio", "Roma"),
+        ("Genoa", "Sampdoria"), ("Sampdoria", "Genoa"),
+        ("Verona", "Chievo"), ("Chievo", "Verona"),
         # English derbies
-        ("Liverpool", "Everton"), ("Everton", "Liverpool"),  # Merseyside Derby
-        ("Manchester United", "Manchester City"), ("Manchester City", "Manchester United"),  # Manchester Derby
-        ("Arsenal", "Tottenham"), ("Tottenham", "Arsenal"),  # North London Derby
-        ("Newcastle", "Sunderland"), ("Sunderland", "Newcastle"),  # Tyne-Wear Derby
-        ("Chelsea", "Fulham"), ("Fulham", "Chelsea"),        # West London Derby
+        ("Liverpool", "Everton"), ("Everton", "Liverpool"),
+        ("Manchester United", "Manchester City"), ("Manchester City", "Manchester United"),
+        ("Arsenal", "Tottenham"), ("Tottenham", "Arsenal"),
+        ("Newcastle", "Sunderland"), ("Sunderland", "Newcastle"),
+        ("Chelsea", "Fulham"), ("Fulham", "Chelsea"),
         # Spanish derbies
-        ("Real Madrid", "Atletico Madrid"), ("Atletico Madrid", "Real Madrid"),  # Madrid Derby
-        ("Barcelona", "Espanyol"), ("Espanyol", "Barcelona"),  # Barcelona Derby
-        ("Sevilla", "Real Betis"), ("Real Betis", "Sevilla"),  # Seville Derby
-        ("Valencia", "Levante"), ("Levante", "Valencia"),    # Valencia Derby
+        ("Real Madrid", "Atletico Madrid"), ("Atletico Madrid", "Real Madrid"),
+        ("Barcelona", "Espanyol"), ("Espanyol", "Barcelona"),
+        ("Sevilla", "Real Betis"), ("Real Betis", "Sevilla"),
+        ("Valencia", "Levante"), ("Levante", "Valencia"),
         # German derbies
-        ("Bayern Munich", "1860 Munich"), ("1860 Munich", "Bayern Munich"),  # Munich Derby
-        ("Schalke", "Borussia Dortmund"), ("Borussia Dortmund", "Schalke"),  # Revierderby
-        ("Borussia Monchengladbach", "Koln"), ("Koln", "Borussia Monchengladbach"),  # Rhine Derby
+        ("Bayern Munich", "1860 Munich"), ("1860 Munich", "Bayern Munich"),
+        ("Schalke", "Borussia Dortmund"), ("Borussia Dortmund", "Schalke"),
+        ("Borussia Monchengladbach", "Koln"), ("Koln", "Borussia Monchengladbach"),
         # Brazilian derbies
-        ("Flamengo", "Fluminense"), ("Fluminense", "Flamengo"),  # Fla-Flu
-        ("Corinthians", "Palmeiras"), ("Palmeiras", "Corinthians"),  # Paulista Derby
-        ("Gremio", "Internacional"), ("Internacional", "Gremio"),  # Gre-Nal
-        ("Santos", "Corinthians"), ("Corinthians", "Santos"),  # Clássico Alvinegro
-        ("Sao Paulo", "Corinthians"), ("Corinthians", "Sao Paulo"),  # Choque Rei
-        ("Atletico Mineiro", "Cruzeiro"), ("Cruzeiro", "Atletico Mineiro"),  # Clássico Mineiro
+        ("Flamengo", "Fluminense"), ("Fluminense", "Flamengo"),
+        ("Corinthians", "Palmeiras"), ("Palmeiras", "Corinthians"),
+        ("Gremio", "Internacional"), ("Internacional", "Gremio"),
+        ("Santos", "Corinthians"), ("Corinthians", "Santos"),
+        ("Sao Paulo", "Corinthians"), ("Corinthians", "Sao Paulo"),
+        ("Atletico Mineiro", "Cruzeiro"), ("Cruzeiro", "Atletico Mineiro"),
         # Turkish derbies
-        ("Galatasaray", "Fenerbahçe"), ("Fenerbahçe", "Galatasaray"),  # Intercontinental Derby
-        ("Besiktas", "Galatasaray"), ("Galatasaray", "Besiktas"),  # Turkish Derby
-        ("Fenerbahçe", "Besiktas"), ("Besiktas", "Fenerbahçe"),  # Turkish Derby
+        ("Galatasaray", "Fenerbahçe"), ("Fenerbahçe", "Galatasaray"),
+        ("Besiktas", "Galatasaray"), ("Galatasaray", "Besiktas"),
+        ("Besiktas", "Fenerbahçe"), ("Fenerbahçe", "Besiktas"),
+        ("Trabzonspor", "Fenerbahçe"), ("Fenerbahçe", "Trabzonspor"),
     ]
     
     is_derby_flag = False
     home_team_clean = data.get("home_team", "")
     away_team_clean = data.get("away_team", "")
     
-    # Check for partial matches
     for pair in derby_pairs:
         if pair[0] in home_team_clean and pair[1] in away_team_clean:
             is_derby_flag = True
@@ -1160,10 +1256,6 @@ def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_
 # ANALYSIS ENGINE - V15.9
 # ============================================================================
 def analyze_match_v15(data: dict) -> dict:
-    """
-    V15.9 ANALYSIS ENGINE - COMPLETE SOLUTION
-    """
-    
     result = {
         "prediction": None,
         "rule": None,
@@ -1189,13 +1281,11 @@ def analyze_match_v15(data: dict) -> dict:
         "is_derby": False
     }
     
-    # Check if match is already finished
     if data.get("is_finished"):
         result["verdict"] = "SKIP"
         result["skip_reason"] = "Already played (FT)"
         return result
     
-    # ==== Corrected v4.1 Prediction Logic ====
     prediction_result = predict_1x2_v41(data)
     
     result["prediction"] = prediction_result["prediction"]
@@ -1205,7 +1295,6 @@ def analyze_match_v15(data: dict) -> dict:
     result["stake"] = prediction_result["stake"]
     result["reason"] = prediction_result["reason"]
     
-    # Store additional data for display
     result["home_draw_rate"] = data.get("home_draw_rate", 0)
     result["away_draw_rate"] = data.get("away_draw_rate", 0)
     result["home_scoring_rate"] = data.get("home_scoring_rate", 0)
@@ -1280,14 +1369,11 @@ def display_analysis_v15(data: dict, analysis: dict, league: str = "Unknown", al
     if already_stored:
         st.markdown('<span class="already-stored">📌 ALREADY STORED — Displaying prediction only</span>', unsafe_allow_html=True)
     
-    # ========================================================================
-    # Prediction Display
-    # ========================================================================
     prediction = analysis.get("prediction", "1")
-    rule = analysis.get("rule", "Rule 7 - Home Default (Form Edge)")
+    rule = analysis.get("rule", "Rule 7 - Default")
     confidence = analysis.get("confidence", "LOW")
     stake = analysis.get("stake", "0.25 unit")
-    reason = analysis.get("reason", "Default home advantage")
+    reason = analysis.get("reason", "Default")
     
     rule_badge_class = get_rule_badge(rule)
     
@@ -1325,9 +1411,6 @@ def display_analysis_v15(data: dict, analysis: dict, league: str = "Unknown", al
     
     st.markdown("---")
     
-    # ========================================================================
-    # Key Metrics
-    # ========================================================================
     st.markdown("### 📊 Key Metrics")
     
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -1350,9 +1433,6 @@ def display_analysis_v15(data: dict, analysis: dict, league: str = "Unknown", al
         desperate = "Yes" if (analysis.get("is_relegation_fight_home", False) or analysis.get("is_relegation_fight_away", False)) else "No"
         st.markdown(f'<div class="metric-card"><div class="metric-value">{desperate}</div><div class="metric-label">Desperation</div></div>', unsafe_allow_html=True)
     
-    # ========================================================================
-    # Context Flags
-    # ========================================================================
     st.markdown("### 🚩 Context Flags")
     
     flags = []
@@ -1374,9 +1454,6 @@ def display_analysis_v15(data: dict, analysis: dict, league: str = "Unknown", al
     else:
         st.markdown("No special context flags")
     
-    # ========================================================================
-    # Score Matrix
-    # ========================================================================
     if data.get("score_matrix"):
         st.markdown("### 🎯 Score Matrix")
         sorted_scores = sorted(data["score_matrix"], key=lambda x: x.get("probability", 0), reverse=True)[:5]
@@ -1448,7 +1525,7 @@ def display_records_table_v15(results: list):
 
 
 # ============================================================================
-# SUPABASE OPERATIONS - USING match_predictions
+# SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
     try:
@@ -1456,7 +1533,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
         away_team = data.get("away_team", "Unknown")
         match_date = data.get("date", "")
         
-        # Parse date to YYYY-MM-DD format
         dt = parse_match_date(match_date)
         date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
         
@@ -1516,7 +1592,6 @@ def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
 
 
 def get_pending():
-    """Get all matches without results (actual_1x2 IS NULL)"""
     try:
         response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
         data = response.data if response.data else []
@@ -1531,7 +1606,6 @@ def submit_result(analysis_id, home_goals, away_goals):
         total = home_goals + away_goals
         actual_1x2 = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
         
-        # Check if prediction was correct
         response = supabase.table(TABLE_NAME).select("predicted_1x2").eq("id", analysis_id).execute()
         if response.data:
             predicted = response.data[0].get("predicted_1x2")
@@ -1565,31 +1639,35 @@ def get_results():
 # ============================================================================
 def main():
     st.title("🎯 Match Analyzer V15.9")
-    st.caption(f"COMPLETE FIX: Parser | Rule 3 (+4 gap) | Turkish League | avg_goals Regex | Table: {TABLE_NAME}")
+    st.caption(f"COMPLETE SOLUTION: Parser | League Detection | Rule 7 Rewrite | Rule 2.5 Added | Table: {TABLE_NAME}")
 
-    with st.expander("📖 V15.9 — Complete Fixed Version", expanded=False):
+    with st.expander("📖 V15.9 — Complete Solution", expanded=False):
         st.markdown("""
         **V15.9 APPLIES ALL CRITICAL FIXES**
         
-        ### 5 Changes Applied:
+        ### 8 Changes Applied:
         
-        1. ✅ **Parser Regex Fixed** - `(\d+\.\d+)°(\d*)` correctly captures avg_goals and temperature
-        2. ✅ **Rule 3 Adjusted** - Desperation Override requires +4 form gap (was +2)
-        3. ✅ **Turkish League Added** - `Su1` / `Super Lig` / `Turkey` now recognized
-        4. ✅ **avg_goals Sanity Check** - Falls back to 2.5 if out of range
-        5. ✅ **Expanded Derby List** - Added Turkish derbies
+        1. ✅ **Parser Fix** - `avg_goals` now parsed correctly with direct capture
+        2. ✅ **League Detection** - Auto-extracts league codes (It1, Es1, Su1, etc.)
+        3. ✅ **Turkish Super Lig** - Added full support (Su1)
+        4. ✅ **Rule 3 Adjustment** - Desperation Override requires +4 form gap (was +2)
+        5. ✅ **Rule 2.5 Added** - Title Race Dead Rubber motivation override
+        6. ✅ **Rule 7 Rewrite** - Respects form differentials, equal form → Draw
+        7. ✅ **Default Threshold** - Unknown leagues default to 18
+        8. ✅ **Supabase NULL Query** - Uses `.is_()` for NULL checks
         
-        ### 7 Rules in Priority Order:
+        ### Complete 7 Rules (Plus 2.5):
         
         | Priority | Rule | Trigger | Prediction |
         |----------|------|---------|------------|
-        | **1** | Playoff | `is_playoff = TRUE` | HOME (1) |
-        | **2** | Derby Draw | `is_derby = TRUE` | DRAW (X) |
-        | **3** | Desperation Override | Relegation Fight + Dead Rubber + Form Advantage ≥ +4 | DESPERATE TEAM |
-        | **4** | Form Dominance | Last 6 Points Gap ≥ 4 | DOMINANT TEAM |
-        | **5** | High-Scoring Draw | Avg Goals > 2.8 + Both Scoring > 1.2 | DRAW (X) |
-        | **6** | Low-Scoring Grinder | Home Scoring < 1.0 + Form > 8 | HOME (1) |
-        | **7** | Default | No Rules Triggered | HOME if Form Edge, else DRAW |
+        | 1 | Playoff | `is_playoff = TRUE` | HOME (1) |
+        | 2 | Derby Draw | `is_derby = TRUE` | DRAW (X) |
+        | 2.5 | Title Race Dead Rubber | Home Dead Rubber + Away Title Race + Form Edge | AWAY (2) |
+        | 3 | Desperation Override | Relegation + Dead Rubber + Form ≥ +4 | DESPERATE TEAM |
+        | 4 | Form Dominance | Last 6 Points Gap ≥ 4 | DOMINANT TEAM |
+        | 5 | High-Scoring Draw | Avg Goals > 2.8 + Both Scoring > 1.2 | DRAW (X) |
+        | 6 | Low-Scoring Grinder | Home Scoring < 1.0 + Form > 8 | HOME (1) |
+        | 7 | Default | No Rules Triggered | Depends on Form |
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending Matches", "📊 Records", "📈 Dashboard"])
@@ -1819,4 +1897,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
