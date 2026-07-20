@@ -1,5 +1,5 @@
 """
-MATCH ANALYZER V16.3 — HYBRID SYSTEM
+MATCH ANALYZER V16.3 — HYBRID SYSTEM (FIXED)
 Preserves Your Strengths | Patches Forebet's Weaknesses | Defaults to Forebet
 """
 
@@ -215,10 +215,10 @@ def get_league_config(league: str) -> dict:
         "europe_threshold": 4,
         "goals_fallback": 2.50,
         "home_advantage": 1.0,
-        "dead_rubber_threshold_top": 4,      # Positions above this = Top 4 race
-        "dead_rubber_threshold_bottom": 17,   # Positions below this = Relegation fight
-        "dead_rubber_safety_gap": 10,         # Points above relegation = safe
-        "dead_rubber_europe_gap": 10,         # Points below Top 4 = can't reach Europe
+        "dead_rubber_threshold_top": 4,
+        "dead_rubber_threshold_bottom": 17,
+        "dead_rubber_safety_gap": 10,
+        "dead_rubber_europe_gap": 10,
     }
     
     if "Norway" in league or "Eliteserien" in league or "No1" in league:
@@ -372,25 +372,13 @@ def get_rule_badge(rule: str) -> str:
 
 
 # ============================================================================
-# HYBRID PREDICTION LOGIC - V16.3
+# HYBRID PREDICTION LOGIC - V16.3 (FIXED - ALL RETURNS HAVE 'bet')
 # ============================================================================
 def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int, 
                    forebet_draw_pct: int, forebet_away_pct: int, league_config: dict) -> dict:
     """
     HYBRID PREDICTION LOGIC - V16.3
-    
-    Preserves your proven strengths:
-    - Rule 2: Derby Draw (100% accuracy)
-    - Rule 3: Home Desperation (85% accuracy)
-    
-    Patches Forebet's weaknesses:
-    - Patch 1: Relegation fighters at home (+15% Home Win)
-    - Patch 2: Relegation away vs dead rubber home (+15% Away Win)
-    - Patch 3: Title already secured = dead rubber (-15% winner, +15% opponent)
-    - Patch 4: Extreme recent form (14+ pts) (+0.20 strength)
-    - Patch 5: Both dead rubber → use last 6 form
-    
-    Defaults to Forebet when no patch applies.
+    Preserves your proven strengths + Patches Forebet's weaknesses
     """
     
     # Extract data
@@ -403,18 +391,8 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
     is_title_race_away = data.get("is_title_race_away", False)
     home_last6_points = data.get("home_last6_points", 0)
     away_last6_points = data.get("away_last6_points", 0)
-    home_scoring_rate = data.get("home_scoring_rate", 0)
-    away_scoring_rate = data.get("away_scoring_rate", 0)
-    avg_goals = data.get("avg_goals", 2.0)
     home_points = data.get("home_points", 0)
     away_points = data.get("away_points", 0)
-    home_position = data.get("home_position", 99)
-    away_position = data.get("away_position", 99)
-    league = data.get("league", "Unknown")
-    
-    league_size = league_config.get("league_size", 20)
-    relegation_threshold = league_config.get("relegation_threshold", 18)
-    europe_threshold = league_config.get("europe_threshold", 4)
     
     # ========================================================================
     # STEP 1: DERBY DRAW (YOUR SUPERPOWER - 100% ACCURACY)
@@ -424,6 +402,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
             "prediction": "X",
             "rule": "HYBRID: Derby Draw (Your Rule 2)",
             "confidence": "HIGH",
+            "bet": "Draw",
             "stake": "2 units",
             "reason": "Derby override - 100% proven accuracy on test data"
         }
@@ -438,6 +417,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
             "prediction": "1",
             "rule": "HYBRID: Home Desperation (Your Rule 3)",
             "confidence": "HIGH",
+            "bet": "Home Win",
             "stake": "2 units",
             "reason": "Home team fighting relegation, away team dead rubber - 85% proven accuracy"
         }
@@ -446,13 +426,13 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
     # STEP 3: PATCH 1 - Relegation Fighter at Home (+15% Home Win)
     # ========================================================================
     if is_relegation_fight_home:
-        home_boost = 15
         return {
             "prediction": "1",
             "rule": "HYBRID PATCH: Relegation Fighter at Home",
             "confidence": "HIGH",
+            "bet": "Home Win",
             "stake": "2 units",
-            "reason": f"Relegation fighter at home (+{home_boost}% Home Win) - 4/4 proven"
+            "reason": "Relegation fighter at home - 4/4 proven"
         }
     
     # ========================================================================
@@ -463,6 +443,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
             "prediction": "2",
             "rule": "HYBRID PATCH: Away Relegation vs Dead Rubber Home",
             "confidence": "HIGH",
+            "bet": "Away Win",
             "stake": "2 units",
             "reason": "Away team fighting relegation, home team dead rubber - 2/2 proven"
         }
@@ -471,15 +452,14 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
     # STEP 5: PATCH 3 - Title Already Secured = Dead Rubber
     # ========================================================================
     # Check if away team has already secured title
-    # Formula: If team is in title race AND their points are > 2nd place + 3
-    # We estimate 2nd place points from league config
-    if is_title_race_away and away_points > (home_points + 10):  # Rough estimate of lead
+    if is_title_race_away and away_points > (home_points + 10):
         return {
             "prediction": "1",
             "rule": "HYBRID PATCH: Title Already Secured = Dead Rubber",
             "confidence": "HIGH",
+            "bet": "Home Win",
             "stake": "2 units",
-            "reason": "Away team has already secured title - dead rubber effect (-15% Away, +15% Home)"
+            "reason": "Away team has already secured title - dead rubber effect"
         }
     
     if is_title_race_home and home_points > (away_points + 10):
@@ -487,21 +467,21 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
             "prediction": "2",
             "rule": "HYBRID PATCH: Title Already Secured = Dead Rubber",
             "confidence": "HIGH",
+            "bet": "Away Win",
             "stake": "2 units",
-            "reason": "Home team has already secured title - dead rubber effect (-15% Home, +15% Away)"
+            "reason": "Home team has already secured title - dead rubber effect"
         }
     
     # ========================================================================
     # STEP 6: PATCH 4 - Extreme Recent Form (14+ pts = +0.20 strength)
     # ========================================================================
     if home_last6_points >= 14:
-        # Boost home strength significantly
-        # If Forebet predicted draw or away, shift toward home
         if forebet_prediction in ["X", "2"]:
             return {
                 "prediction": "1",
                 "rule": "HYBRID PATCH: Extreme Home Form (14+ pts)",
                 "confidence": "HIGH",
+                "bet": "Home Win",
                 "stake": "2 units",
                 "reason": f"Home team has {home_last6_points}/18 points in last 6 - extreme form boost"
             }
@@ -512,6 +492,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
                 "prediction": "2",
                 "rule": "HYBRID PATCH: Extreme Away Form (14+ pts)",
                 "confidence": "HIGH",
+                "bet": "Away Win",
                 "stake": "2 units",
                 "reason": f"Away team has {away_last6_points}/18 points in last 6 - extreme form boost"
             }
@@ -525,6 +506,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
                 "prediction": "1",
                 "rule": "HYBRID PATCH: Both Dead Rubber (Form Wins)",
                 "confidence": "MEDIUM",
+                "bet": "Home Win",
                 "stake": "1 unit",
                 "reason": f"Both teams dead rubber - home form {home_last6_points} vs {away_last6_points}"
             }
@@ -533,6 +515,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
                 "prediction": "2",
                 "rule": "HYBRID PATCH: Both Dead Rubber (Form Wins)",
                 "confidence": "MEDIUM",
+                "bet": "Away Win",
                 "stake": "1 unit",
                 "reason": f"Both teams dead rubber - away form {away_last6_points} vs {home_last6_points}"
             }
@@ -541,6 +524,7 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
                 "prediction": "X",
                 "rule": "HYBRID PATCH: Both Dead Rubber (Form Equal)",
                 "confidence": "LOW",
+                "bet": "Draw",
                 "stake": "0.25 unit",
                 "reason": f"Both teams dead rubber - form tied at {home_last6_points} pts"
             }
@@ -548,7 +532,6 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
     # ========================================================================
     # STEP 8: DEFAULT TO FOREBET
     # ========================================================================
-    # Use Forebet's probabilities to determine confidence and stake
     max_prob = max(forebet_home_pct, forebet_draw_pct, forebet_away_pct)
     
     if max_prob >= 55:
@@ -561,10 +544,13 @@ def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int,
         confidence = "LOW"
         stake = "0.1 unit"
     
+    bet_map = {"1": "Home Win", "X": "Draw", "2": "Away Win"}
+    
     return {
         "prediction": forebet_prediction,
         "rule": "FOREBET DEFAULT (Trust Forebet)",
         "confidence": confidence,
+        "bet": bet_map.get(forebet_prediction, "Unknown"),
         "stake": stake,
         "reason": f"Trust Forebet ({max_prob}% probability) - no patch applies"
     }
@@ -1270,7 +1256,7 @@ def analyze_match_hybrid(data: dict) -> dict:
     result["prediction"] = prediction_result["prediction"]
     result["rule"] = prediction_result["rule"]
     result["confidence"] = prediction_result["confidence"]
-    result["bet"] = prediction_result["bet"]
+    result["bet"] = prediction_result.get("bet", "Unknown")
     result["stake"] = prediction_result["stake"]
     result["reason"] = prediction_result["reason"]
     
@@ -1631,31 +1617,34 @@ def main():
     st.title("🎯 Match Analyzer V16.3")
     st.caption(f"HYBRID SYSTEM: Your Strengths + Forebet Patches | Table: {TABLE_NAME}")
 
-    with st.expander("📖 V16.3 — HYBRID SYSTEM", expanded=False):
+    with st.expander("📖 V16.3 — HYBRID SYSTEM (FIXED)", expanded=False):
         st.markdown("""
-        **V16.3 — HYBRID SYSTEM (Final Production)**
-        
+        **V16.3 — HYBRID SYSTEM (Final Production - Fixed)**
+
         ### Preserves Your Strengths:
         - ✅ **Derby Draw** (Rule 2) — 100% accuracy → Overrides everything
         - ✅ **Home Desperation** (Rule 3) — 85% accuracy → Overrides Forebet
-        
+
         ### Patches Forebet's Weaknesses:
         - 🔧 **Relegation fighters at home** (+15% Home Win) — 4/4 proven
         - 🔧 **Relegation away vs dead rubber home** (+15% Away Win) — 2/2 proven
         - 🔧 **Title already secured = dead rubber** (-15% winner, +15% opponent) — 2/2 proven
         - 🔧 **Extreme recent form (14+ pts)** (+0.20 strength) — 3/3 proven
         - 🔧 **Both dead rubber → use last 6 form** — 3/3 proven
-        
+
         ### Defaults to Forebet:
         - 📊 When no patch applies, trust Forebet's statistically sound model
-        
+
         ### Removed Weak Patches:
         - ❌ Title pressure = more draws (2/5 evidence was too weak)
-        
+
         ### Expected Performance:
         - **87.2% accuracy** on the 39-match test set
         - Beats Forebet by **+15.4%**
         - Beats v4.1 by **+28.2%**
+
+        ### Bug Fix:
+        - ✅ Added 'bet' key to ALL return dictionaries
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending Matches", "📊 Records", "📈 Dashboard"])
