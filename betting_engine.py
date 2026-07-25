@@ -1,8 +1,8 @@
 """
-REFINED FORMULA V1.1 - AUTO-SAVE VERSION
-- Automatically saves predictions to Supabase after analysis
-- Fixed HTML rendering
-- Removed manual save button
+REFINED FORMULA V1.1 - NATIVE STREAMLIT UI
+- Uses Streamlit native components (no HTML rendering issues)
+- Auto-save to Supabase
+- Clean, professional look
 """
 
 import streamlit as st
@@ -10,8 +10,6 @@ from datetime import date, datetime, timedelta
 from supabase import create_client, Client
 import pandas as pd
 import re
-import json
-import time
 import traceback
 from typing import Dict, Tuple, Optional, List
 from collections import defaultdict
@@ -38,24 +36,6 @@ FORM_TABLE = "team_form_history"
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="wide")
-
-st.markdown("""
-<style>
-    .main .block-container { padding-top: 2rem; max-width: 1200px; }
-    .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
-    .rule-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-high { background: #10b981; color: #000; }
-    .rule-medium { background: #f59e0b; color: #000; }
-    .rule-low { background: #64748b; color: #fff; }
-    .stake-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .stake-2-units { background: #10b981; color: #000; }
-    .stake-1-5-units { background: #f59e0b; color: #000; }
-    .stake-1-unit { background: #f59e0b; color: #000; }
-    .stake-0-5-units { background: #64748b; color: #fff; }
-    .stake-0-25-units { background: #64748b; color: #fff; }
-    .stake-0-1-units { background: #64748b; color: #fff; }
-</style>
-""", unsafe_allow_html=True)
 
 # ============================================================================
 # DATABASE HELPERS
@@ -159,6 +139,7 @@ def parse_text_data(text: str) -> dict:
         'league': 'Unknown'
     }
     lines = text.split('\n')
+    
     # Detect league
     league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 'Ligue 1', 'Serie B', 'Championship']
     for line in lines:
@@ -172,6 +153,7 @@ def parse_text_data(text: str) -> dict:
     current_match = {}
     match_found = False
     i = 0
+    
     while i < len(lines):
         line = lines[i].strip()
         if not line:
@@ -250,7 +232,6 @@ def parse_text_data(text: str) -> dict:
 
         # If we have a complete match, save it
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
-            # Check if we have actual percentages (not defaults)
             has_data = (current_match.get('home_pct') != 33 or
                        current_match.get('draw_pct') != 33 or
                        current_match.get('away_pct') != 34)
@@ -263,8 +244,6 @@ def parse_text_data(text: str) -> dict:
                         break
                 if not already_added:
                     result['matches'].append(current_match.copy())
-                    # Don't reset match_found, we keep going for possible next matches
-                    # but we need to clear current_match to avoid duplicate
                     current_match = {}
                     match_found = False
 
@@ -334,7 +313,6 @@ def fallback_parse(text: str) -> dict:
                 'avg_goals': 2.5,
                 'h2h_data': []
             }
-            # try to get encoded percentages
             enc = re.search(r'(\d{6}[1X2])', text)
             if enc:
                 code = enc.group(1)
@@ -358,7 +336,7 @@ def fallback_parse(text: str) -> dict:
     return result
 
 # ============================================================================
-# REFINED FORMULA - RULE CHECKERS (unchanged)
+# REFINED FORMULA - RULE CHECKERS
 # ============================================================================
 
 def check_home_fortress(home_team, home_form):
@@ -436,7 +414,7 @@ def check_h2h_dominance(h2h_data):
     elif away_wins >= 3:
         return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs"
     else:
-        return None, max(home_wins, away_wins), draws, f"No dominance (H:{home_wins}, A:{away_wins}, D:{draws})"
+        return None, max(home_wins, away_wins), draws, f"No dominance"
 
 def check_h2h_draw_rate(h2h_data):
     if not h2h_data or len(h2h_data) < 6:
@@ -490,14 +468,14 @@ def check_double_chance_validation(forebet_pred, double_chance):
 
 def get_stake_display(stake: str) -> Tuple[str, str]:
     stake_map = {
-        "2 units": ("2 units", "stake-2-units"),
-        "1.5 units": ("1.5 units", "stake-1-5-units"),
-        "1 unit": ("1 unit", "stake-1-unit"),
-        "0.5 units": ("0.5 units", "stake-0-5-units"),
-        "0.25 units": ("0.25 units", "stake-0-25-units"),
-        "0.1 units": ("0.1 units", "stake-0-1-units"),
+        "2 units": ("2 units", "HIGH"),
+        "1.5 units": ("1.5 units", "MEDIUM"),
+        "1 unit": ("1 unit", "MEDIUM"),
+        "0.5 units": ("0.5 units", "LOW"),
+        "0.25 units": ("0.25 units", "LOW"),
+        "0.1 units": ("0.1 units", "LOW"),
     }
-    return stake_map.get(stake, (stake, "stake-0-25-units"))
+    return stake_map.get(stake, (stake, "LOW"))
 
 # ============================================================================
 # DECISION LOGIC
@@ -737,89 +715,78 @@ def refined_formula_decision(data: dict) -> dict:
     }
 
 # ============================================================================
-# DISPLAY FUNCTION - RENDERS HTML PROPERLY
+# DISPLAY FUNCTION - NATIVE STREAMLIT COMPONENTS (NO HTML)
 # ============================================================================
 
-def display_refined_analysis_with_context(match_data: dict, decision: dict, league: str = "Unknown"):
-    stake_display, stake_class = get_stake_display(decision.get('stake', '0.25 units'))
-    confidence_color = {
-        'HIGH': '#10b981',
-        'MEDIUM': '#f59e0b',
-        'LOW': '#64748b'
-    }.get(decision.get('confidence', 'LOW'), '#64748b')
-    pred_color = {
-        '1': '#10b981',
-        'X': '#f59e0b',
-        '2': '#ef4444'
-    }.get(decision.get('prediction', 'X'), '#3b82f6')
-
+def display_refined_analysis_native(match_data: dict, decision: dict, league: str = "Unknown"):
+    """Display analysis using native Streamlit components - NO HTML rendering issues"""
+    
     home_team = match_data.get('home_team', 'Unknown')
     away_team = match_data.get('away_team', 'Unknown')
     home_pct = match_data.get('home_pct', '?')
     draw_pct = match_data.get('draw_pct', '?')
     away_pct = match_data.get('away_pct', '?')
-
-    html = f"""
-    <div class="output-card" style="border-left: 4px solid {confidence_color};">
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-            <div>
-                <div style="font-size: 1.2rem; font-weight: 700;">
-                    🏠 {home_team} vs ✈️ {away_team}
-                </div>
-                <div style="font-size: 0.8rem; color: #94a3b8;">
-                    📅 {match_data.get('date', '')} | 🏆 {league}
-                </div>
-            </div>
-            <div style="text-align: right;">
-                <span class="rule-badge rule-{decision.get('confidence', 'LOW').lower()}">
-                    {decision.get('confidence', 'LOW')}
-                </span>
-                <div style="font-size: 0.7rem; color: #94a3b8; margin-top: 0.2rem;">
-                    <span class="stake-badge {stake_class}">Stake: {stake_display}</span>
-                </div>
-            </div>
-        </div>
-        
-        <div style="display: flex; gap: 1rem; margin: 0.75rem 0; flex-wrap: wrap;">
-            <div style="flex: 1; min-width: 80px; background: #0f172a; border-radius: 8px; padding: 0.5rem; text-align: center;">
-                <div style="font-size: 0.7rem; color: #94a3b8;">Home</div>
-                <div style="font-size: 1.2rem; font-weight: 700; color: #10b981;">{home_pct}%</div>
-            </div>
-            <div style="flex: 1; min-width: 80px; background: #0f172a; border-radius: 8px; padding: 0.5rem; text-align: center;">
-                <div style="font-size: 0.7rem; color: #94a3b8;">Draw</div>
-                <div style="font-size: 1.2rem; font-weight: 700; color: #f59e0b;">{draw_pct}%</div>
-            </div>
-            <div style="flex: 1; min-width: 80px; background: #0f172a; border-radius: 8px; padding: 0.5rem; text-align: center;">
-                <div style="font-size: 0.7rem; color: #94a3b8;">Away</div>
-                <div style="font-size: 1.2rem; font-weight: 700; color: #ef4444;">{away_pct}%</div>
-            </div>
-        </div>
-        
-        <div style="margin-top: 0.75rem; padding: 0.75rem; background: #0f172a; border-radius: 8px;">
-            <div style="font-size: 1.5rem; font-weight: 800; text-align: center; color: {pred_color};">
-                🎯 {decision.get('bet', 'Unknown')}
-            </div>
-            <div style="text-align: center; font-size: 0.9rem; color: #94a3b8; margin-top: 0.25rem;">
-                📋 {decision.get('rule', 'Unknown')}
-            </div>
-            <div style="text-align: center; font-size: 0.8rem; color: #64748b; margin-top: 0.25rem;">
-                {decision.get('reason', '')}
-            </div>
-        </div>
-        
-        <div style="margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.5rem;">
-            <div style="font-size: 0.7rem; color: #94a3b8;">Rules Passed:</div>
-            {''.join([f'<span style="font-size: 0.7rem; background: #1e293b; padding: 0.1rem 0.4rem; border-radius: 4px; margin-right: 0.3rem;">{rule}</span>' for rule in decision.get('rules_passed', ['Forebet Default'])])}
-        </div>
-        
-        <div style="margin-top: 0.5rem; font-size: 0.7rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
-            📊 Forebet Original: {match_data.get('forebet_prediction', '?')} | Avg Goals: {match_data.get('avg_goals', '?')}
-        </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
     
-    # Show H2H data if available
+    # Get stake display
+    stake_display, confidence_level = get_stake_display(decision.get('stake', '0.25 units'))
+    
+    # Confidence color mapping
+    conf_color = {
+        'HIGH': 'green',
+        'MEDIUM': 'orange',
+        'LOW': 'gray'
+    }.get(decision.get('confidence', 'LOW'), 'gray')
+    
+    # Prediction emoji
+    pred_emoji = {
+        '1': '🏠',
+        'X': '🤝',
+        '2': '✈️',
+        'Under 2.5': '⬇️',
+        'Over 2.5': '⬆️'
+    }.get(decision.get('prediction', 'X'), '🎯')
+    
+    # ----- HEADER -----
+    st.subheader(f"{pred_emoji} {home_team} vs {away_team}")
+    st.caption(f"📅 {match_data.get('date', '')} | 🏆 {league}")
+    
+    # ----- PERCENTAGES ROW -----
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("🏠 Home", f"{home_pct}%")
+    with c2:
+        st.metric("🤝 Draw", f"{draw_pct}%")
+    with c3:
+        st.metric("✈️ Away", f"{away_pct}%")
+    
+    # ----- PREDICTION CARD -----
+    st.markdown("---")
+    
+    # Main prediction display
+    pred_color = {
+        '1': 'green',
+        'X': 'orange',
+        '2': 'red',
+        'Under 2.5': 'blue',
+        'Over 2.5': 'blue'
+    }.get(decision.get('prediction', 'X'), 'gray')
+    
+    st.markdown(f"### 🎯 {decision.get('bet', 'Unknown')}")
+    st.markdown(f"**Rule:** {decision.get('rule', 'Unknown')}")
+    st.markdown(f"**Confidence:** :{conf_color}[{decision.get('confidence', 'LOW')}]")
+    st.markdown(f"**Stake:** {stake_display}")
+    st.markdown(f"**Reason:** {decision.get('reason', '')}")
+    
+    # ----- RULES PASSED -----
+    rules_passed = decision.get('rules_passed', ['Forebet Default'])
+    st.caption(f"📋 Rules Passed: {', '.join(rules_passed)}")
+    
+    # ----- FOREBET ORIGINAL -----
+    st.caption(f"📊 Forebet Original: {match_data.get('forebet_prediction', '?')} | Avg Goals: {match_data.get('avg_goals', '?')}")
+    
+    st.markdown("---")
+    
+    # ----- H2H DATA -----
     if 'h2h_data' in match_data and match_data['h2h_data']:
         with st.expander("📊 Head-to-Head History"):
             h2h_df = pd.DataFrame(match_data['h2h_data'])
@@ -901,8 +868,8 @@ def main():
                                 
                                 decision = refined_formula_decision(match)
                                 
-                                # Display the result
-                                display_refined_analysis_with_context(match, decision, league)
+                                # Display using native Streamlit components
+                                display_refined_analysis_native(match, decision, league)
                                 
                                 # Auto-save to database
                                 db_data = {
@@ -946,7 +913,7 @@ def main():
                     st.error(f"❌ Error: {str(e)}")
                     st.code(traceback.format_exc())
     
-    # Tabs 2,3,4 remain unchanged (pending, records, dashboard)
+    # PENDING MATCHES TAB
     with tab2:
         st.subheader("📝 Pending Matches")
         st.caption("Enter actual results for completed matches")
@@ -972,6 +939,7 @@ def main():
         except Exception as e:
             st.error(f"Error fetching pending matches: {e}")
 
+    # RECORDS TAB
     with tab3:
         st.subheader("📊 Performance Records")
         try:
@@ -1012,6 +980,7 @@ def main():
         except Exception as e:
             st.error(f"Error fetching results: {e}")
 
+    # DASHBOARD TAB
     with tab4:
         st.subheader("📈 Dashboard")
         try:
