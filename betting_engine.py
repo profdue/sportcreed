@@ -1,6 +1,6 @@
 """
-REFINED FORMULA V1.1 - Complete Implementation
-Fixed: Nested f-string syntax errors
+REFINED FORMULA V1.1 - COMPLETE IMPLEMENTATION
+Fixed: Nested f-strings, Enhanced Parser, Proper Team Extraction
 """
 
 import streamlit as st
@@ -52,10 +52,11 @@ st.markdown("""
     .rule-reason { font-size: 0.8rem; color: #94a3b8; }
     .stake-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
     .stake-2-units { background: #10b981; color: #000; }
-    .stake-1.5-units { background: #f59e0b; color: #000; }
+    .stake-1-5-units { background: #f59e0b; color: #000; }
     .stake-1-unit { background: #f59e0b; color: #000; }
-    .stake-0.5-units { background: #64748b; color: #fff; }
-    .stake-0.25-units { background: #64748b; color: #fff; }
+    .stake-0-5-units { background: #64748b; color: #fff; }
+    .stake-0-25-units { background: #64748b; color: #fff; }
+    .stake-0-1-units { background: #64748b; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -157,6 +158,353 @@ def submit_result(match_id: int, home_goals: int, away_goals: int):
     except Exception as e:
         st.error(f"Failed: {e}")
         return False
+
+# ============================================================================
+# ENHANCED PARSER - EXTRACTS TEAM NAMES AND LEAGUE
+# ============================================================================
+
+def clean_team_name(name: str) -> str:
+    """Clean up team names"""
+    if not name:
+        return ""
+    # Remove common suffixes and prefixes
+    name = re.sub(r'^[0-9]+\s+', '', name)
+    name = re.sub(r'\s+\([^)]*\)$', '', name)
+    name = re.sub(r'\s+Logo$', '', name)
+    name = re.sub(r'^\s+|\s+$', '', name)
+    # Remove emojis and special chars
+    name = re.sub(r'[^\w\s\-\.]', '', name)
+    return name.strip()
+
+def parse_text_data(text: str) -> dict:
+    """Parse the complete text data from Forebet with proper team extraction"""
+    result = {
+        'matches': [],
+        'home_table': {},
+        'away_table': {},
+        'form_data': {},
+        'league': 'Unknown'
+    }
+    
+    lines = text.split('\n')
+    
+    # First pass: Extract league
+    league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 'Ligue 1', 'Serie B', 'Championship']
+    for line in lines:
+        for keyword in league_keywords:
+            if keyword in line:
+                result['league'] = line.strip()
+                break
+        if result['league'] != 'Unknown':
+            break
+    
+    # Find match lines with team names
+    current_match = {}
+    in_h2h = False
+    in_table = False
+    match_found = False
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Look for VS pattern (team names)
+        if ' VS ' in line or ' - ' in line:
+            # Check if this is a match line (not H2H)
+            if not re.search(r'\d{2}/\d{2}/\d{4}', line) or 'Head' in line:
+                parts = re.split(r'\s+VS\s+|\s*-\s*', line)
+                if len(parts) >= 2:
+                    home_team = clean_team_name(parts[0])
+                    away_team = clean_team_name(parts[1])
+                    
+                    if home_team and away_team and len(home_team) > 1 and len(away_team) > 1:
+                        current_match = {
+                            'home_team': home_team,
+                            'away_team': away_team,
+                            'date': datetime.now().strftime("%Y-%m-%d"),
+                            'is_finished': False
+                        }
+                        match_found = True
+        
+        # Look for date
+        date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2})', line)
+        if date_match and match_found:
+            current_match['date'] = date_match.group(1)
+            # Try to parse date properly
+            try:
+                dt = datetime.strptime(date_match.group(1), "%d/%m/%Y")
+                current_match['date'] = dt.strftime("%Y-%m-%d")
+            except:
+                pass
+        
+        # Look for probability percentages
+        if '%' in line and match_found:
+            pcts = re.findall(r'(\d+)%', line)
+            if len(pcts) >= 3:
+                current_match['home_pct'] = int(pcts[0])
+                current_match['draw_pct'] = int(pcts[1])
+                current_match['away_pct'] = int(pcts[2])
+            elif 'Draw Probability' in line and len(pcts) >= 1:
+                current_match['draw_pct'] = int(pcts[0])
+        
+        # Look for prediction (1, X, 2) with correct score
+        if 'Pred' in line and match_found:
+            # Try to extract prediction and score
+            pred_match = re.search(r'([1X2])\s*-\s*(\d+)\s*-\s*(\d+)', line)
+            if pred_match:
+                current_match['forebet_prediction'] = pred_match.group(1)
+                current_match['prediction'] = pred_match.group(1)
+                current_match['correct_score_home'] = int(pred_match.group(2))
+                current_match['correct_score_away'] = int(pred_match.group(3))
+            else:
+                pred_simple = re.search(r'([1X2])\s*-\s*\d+', line)
+                if pred_simple:
+                    current_match['forebet_prediction'] = pred_simple.group(1)
+                    current_match['prediction'] = pred_simple.group(1)
+        
+        # Look for avg goals
+        avg_match = re.search(r'Avg\.?\s*goals?\s*([\d.]+)', line, re.IGNORECASE)
+        if avg_match and match_found:
+            current_match['avg_goals'] = float(avg_match.group(1))
+        
+        # Check for double chance
+        if '1X2' in line and match_found:
+            dc_match = re.search(r'([1X2]{2})', line)
+            if dc_match:
+                current_match['double_chance'] = dc_match.group(1)
+        
+        # Check for FT (finished)
+        if 'FT' in line and match_found:
+            current_match['is_finished'] = True
+            ft_score = re.search(r'FT\s+(\d+)\s*-\s*(\d+)', line)
+            if ft_score:
+                current_match['actual_home'] = int(ft_score.group(1))
+                current_match['actual_away'] = int(ft_score.group(2))
+        
+        # Check for H2H section
+        if 'Head to head' in line or 'H2H' in line:
+            in_h2h = True
+            if match_found and 'h2h_data' not in current_match:
+                current_match['h2h_data'] = []
+            continue
+        
+        # Parse H2H results
+        if in_h2h and re.search(r'\d{2}/\d{2}/\d{4}', line):
+            h2h_match = parse_h2h_line(line)
+            if h2h_match and match_found:
+                if 'h2h_data' not in current_match:
+                    current_match['h2h_data'] = []
+                current_match['h2h_data'].append(h2h_match)
+        
+        # Check for standings/table section
+        if 'Standings' in line or 'REGULAR SEASON' in line:
+            in_table = True
+            continue
+        
+        # Parse table data
+        if in_table and re.search(r'\d+\s+[A-Za-z]', line):
+            table_entry = parse_table_line(line)
+            if table_entry:
+                if 'home_table' not in result:
+                    result['home_table'] = {}
+                result['home_table'][table_entry['team']] = table_entry
+        
+        # If we have both teams and some data, save the match
+        if match_found and current_match.get('home_team') and current_match.get('away_team'):
+            if 'forebet_prediction' in current_match or current_match.get('draw_pct'):
+                # Check if this match already exists in results
+                match_copy = current_match.copy()
+                
+                # Ensure we have percentages
+                if 'home_pct' not in match_copy:
+                    match_copy['home_pct'] = 33
+                    match_copy['draw_pct'] = 33
+                    match_copy['away_pct'] = 34
+                
+                # Ensure we have avg goals
+                if 'avg_goals' not in match_copy:
+                    match_copy['avg_goals'] = 2.5
+                
+                # Ensure we have a prediction
+                if 'forebet_prediction' not in match_copy:
+                    match_copy['forebet_prediction'] = 'X'
+                    match_copy['prediction'] = 'X'
+                
+                result['matches'].append(match_copy)
+                current_match = {}
+                match_found = False
+                in_h2h = False
+    
+    # If we still have no matches, try the old parser as fallback
+    if not result['matches']:
+        result = fallback_parse(text)
+    
+    # If league is still unknown, try to extract from text
+    if result['league'] == 'Unknown':
+        for keyword in league_keywords:
+            if keyword in text:
+                result['league'] = keyword
+                break
+    
+    return result
+
+def parse_h2h_line(line: str) -> dict:
+    """Parse H2H line"""
+    # Format: "07/04/2021 IMT Novi Beograd 2 - 0 FK Zemun"
+    date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
+    if not date_match:
+        return None
+    
+    date_str = date_match.group(1)
+    
+    # Extract score
+    score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
+    if not score_match:
+        return None
+    
+    home_goals = int(score_match.group(1))
+    away_goals = int(score_match.group(2))
+    
+    # Determine winner
+    if home_goals > away_goals:
+        winner = 'home'
+    elif away_goals > home_goals:
+        winner = 'away'
+    else:
+        winner = 'draw'
+    
+    # Extract team names from before and after the score
+    parts = re.split(r'\d+\s*-\s*\d+', line)
+    if len(parts) >= 2:
+        left_part = parts[0].strip()
+        right_part = parts[1].strip()
+        
+        # Remove date from left part
+        left_part = re.sub(r'\d{2}/\d{2}/\d{4}', '', left_part).strip()
+        
+        # Clean team names
+        home_team = clean_team_name(left_part)
+        away_team = clean_team_name(right_part)
+    else:
+        # Fallback: try to extract from line
+        teams = re.findall(r'([A-Za-z\s]+?)\s+\d+\s*-\s*\d+\s+([A-Za-z\s]+)', line)
+        if teams:
+            home_team = clean_team_name(teams[0][0])
+            away_team = clean_team_name(teams[0][1])
+        else:
+            home_team = "Unknown"
+            away_team = "Unknown"
+    
+    return {
+        'home_team': home_team,
+        'away_team': away_team,
+        'match_date': date_str,
+        'home_goals': home_goals,
+        'away_goals': away_goals,
+        'winner': winner
+    }
+
+def parse_table_line(line: str) -> dict:
+    """Parse table/standings line"""
+    # Format: "6 IMT Novi Beograd 3 1 1 0 0 1 0 1"
+    parts = line.split()
+    if len(parts) < 10:
+        return None
+    
+    try:
+        position = int(parts[0])
+        # Team name is everything between position and first number after
+        team_parts = []
+        idx = 1
+        while idx < len(parts) and not re.match(r'^\d+$', parts[idx]):
+            team_parts.append(parts[idx])
+            idx += 1
+        
+        if not team_parts:
+            return None
+            
+        team_name = ' '.join(team_parts)
+        if idx < len(parts):
+            points = int(parts[idx])
+            gp = int(parts[idx+1]) if idx+1 < len(parts) else 0
+            wins = int(parts[idx+2]) if idx+2 < len(parts) else 0
+            draws = int(parts[idx+3]) if idx+3 < len(parts) else 0
+            losses = int(parts[idx+4]) if idx+4 < len(parts) else 0
+            gf = int(parts[idx+5]) if idx+5 < len(parts) else 0
+            ga = int(parts[idx+6]) if idx+6 < len(parts) else 0
+            gd = int(parts[idx+7]) if idx+7 < len(parts) else 0
+            
+            return {
+                'team': clean_team_name(team_name),
+                'position': position,
+                'points': points,
+                'gp': gp,
+                'wins': wins,
+                'draws': draws,
+                'losses': losses,
+                'gf': gf,
+                'ga': ga,
+                'gd': gd
+            }
+    except:
+        return None
+    
+    return None
+
+def fallback_parse(text: str) -> dict:
+    """Fallback parser using regex patterns"""
+    result = {
+        'matches': [],
+        'league': 'Unknown'
+    }
+    
+    # Try to find matches with VS pattern
+    vs_pattern = r'([A-Za-z\s]+)\s+VS\s+([A-Za-z\s]+)'
+    matches = re.findall(vs_pattern, text)
+    
+    for home, away in matches:
+        home_team = clean_team_name(home)
+        away_team = clean_team_name(away)
+        
+        if home_team and away_team:
+            match_data = {
+                'home_team': home_team,
+                'away_team': away_team,
+                'date': datetime.now().strftime("%Y-%m-%d"),
+                'is_finished': False,
+                'home_pct': 33,
+                'draw_pct': 33,
+                'away_pct': 34,
+                'forebet_prediction': 'X',
+                'prediction': 'X',
+                'avg_goals': 2.5
+            }
+            
+            # Try to find percentages
+            pct_pattern = r'(\d+)%\s*(\d+)%\s*(\d+)%'
+            pcts = re.findall(pct_pattern, text)
+            if pcts:
+                match_data['home_pct'] = int(pcts[0][0])
+                match_data['draw_pct'] = int(pcts[0][1])
+                match_data['away_pct'] = int(pcts[0][2])
+            
+            # Try to find prediction
+            pred_pattern = r'([1X2])\s*-\s*\d+'
+            pred = re.findall(pred_pattern, text)
+            if pred:
+                match_data['forebet_prediction'] = pred[0]
+                match_data['prediction'] = pred[0]
+            
+            # Try to find avg goals
+            avg_pattern = r'Avg\.?\s*goals?\s*([\d.]+)'
+            avg = re.findall(avg_pattern, text, re.IGNORECASE)
+            if avg:
+                match_data['avg_goals'] = float(avg[0])
+            
+            result['matches'].append(match_data)
+    
+    return result
 
 # ============================================================================
 # REFINED FORMULA - RULE CHECKERS
@@ -261,7 +609,7 @@ def check_h2h_dominance(h2h_data: List[dict]) -> Tuple[Optional[str], int, int, 
     Rule 6: H2H Dominance
     One team won 3+ of last 4 H2Hs (within 3 years)
     """
-    if len(h2h_data) < 4:
+    if not h2h_data or len(h2h_data) < 4:
         return None, 0, 0, "Not enough H2H data (need 4+ matches)"
     
     h2h_data = h2h_data[:6]  # Last 6
@@ -289,7 +637,7 @@ def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
     Rule 7: H2H Draw Rate
     4+ draws in last 6 H2Hs
     """
-    if len(h2h_data) < 6:
+    if not h2h_data or len(h2h_data) < 6:
         return False, 0, "Not enough H2H data (need 6+ matches)"
     
     h2h_data = h2h_data[:6]
@@ -360,12 +708,13 @@ def get_stake_display(stake: str) -> Tuple[str, str]:
     """Convert stake to display format"""
     stake_map = {
         "2 units": ("2 units", "stake-2-units"),
-        "1.5 units": ("1.5 units", "stake-1.5-units"),
+        "1.5 units": ("1.5 units", "stake-1-5-units"),
         "1 unit": ("1 unit", "stake-1-unit"),
-        "0.5 units": ("0.5 units", "stake-0.5-units"),
-        "0.25 units": ("0.25 units", "stake-0.25-units"),
+        "0.5 units": ("0.5 units", "stake-0-5-units"),
+        "0.25 units": ("0.25 units", "stake-0-25-units"),
+        "0.1 units": ("0.1 units", "stake-0-1-units"),
     }
-    return stake_map.get(stake, (stake, "stake-0.25-units"))
+    return stake_map.get(stake, (stake, "stake-0-25-units"))
 
 # ============================================================================
 # REFINED FORMULA - DECISION LOGIC
@@ -384,10 +733,6 @@ def refined_formula_decision(data: dict) -> dict:
     forebet_avg = data.get('avg_goals', 2.5)
     home_scoring = data.get('home_scoring_rate', 1.0)
     away_scoring = data.get('away_scoring_rate', 1.0)
-    
-    # Rule results storage
-    triggered_rules = []
-    results = {}
     
     # --- Rule 1: Home Fortress ---
     home_form = get_team_form(home_team, limit=6, is_home=True)
@@ -461,8 +806,12 @@ def refined_formula_decision(data: dict) -> dict:
     if (home_late or away_late) and forebet_pred == 'X':
         if home_late and away_late:
             # Determine which team has stronger late tendency
-            winner = 'Home' if ratio3 > ratio4 else 'Away'
-            pred = '1' if ratio3 > ratio4 else '2'
+            if ratio3 > ratio4:
+                winner = 'Home'
+                pred = '1'
+            else:
+                winner = 'Away'
+                pred = '2'
             return {
                 'prediction': pred,
                 'rule': 'Late Goal Tendency (Both)',
@@ -494,7 +843,10 @@ def refined_formula_decision(data: dict) -> dict:
             }
     
     # --- Rule 6: H2H Dominance ---
-    h2h_data = get_h2h_history(home_team, away_team, limit=6)
+    h2h_data = data.get('h2h_data', [])
+    if not h2h_data:
+        h2h_data = get_h2h_history(home_team, away_team, limit=6)
+    
     dominant, wins, draws, msg5 = check_h2h_dominance(h2h_data)
     if dominant:
         # Check fatigue
@@ -591,7 +943,13 @@ def refined_formula_decision(data: dict) -> dict:
     double_chance = data.get('double_chance', '')
     validated, msg8 = check_double_chance_validation(forebet_pred, double_chance)
     if validated:
-        bet_text = 'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'
+        if forebet_pred == '1':
+            bet_text = 'Home Win'
+        elif forebet_pred == 'X':
+            bet_text = 'Draw'
+        else:
+            bet_text = 'Away Win'
+        
         return {
             'prediction': forebet_pred,
             'rule': 'Double Chance Validated',
@@ -603,7 +961,13 @@ def refined_formula_decision(data: dict) -> dict:
         }
     
     # --- Default: Use Forebet ---
-    bet_text = 'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'
+    if forebet_pred == '1':
+        bet_text = 'Home Win'
+    elif forebet_pred == 'X':
+        bet_text = 'Draw'
+    else:
+        bet_text = 'Away Win'
+    
     return {
         'prediction': forebet_pred,
         'rule': 'Forebet Default',
@@ -615,99 +979,11 @@ def refined_formula_decision(data: dict) -> dict:
     }
 
 # ============================================================================
-# PARSER - MATCH DATA EXTRACTION
-# ============================================================================
-
-def parse_text_data(text: str) -> dict:
-    """Parse the complete text data from Forebet"""
-    result = {
-        'matches': [],
-        'home_table': {},
-        'away_table': {},
-        'form_data': {}
-    }
-    
-    lines = text.split('\n')
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-        
-        # Look for match data pattern
-        if re.search(r'\d{6,}.*°', line):
-            match = parse_match_line(line)
-            if match:
-                result['matches'].append(match)
-    
-    return result
-
-def parse_match_line(line: str) -> Optional[dict]:
-    """Parse a single match line from Forebet data"""
-    try:
-        cleaned = line.replace(' ', '')
-        
-        pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})', cleaned)
-        if not pct_match:
-            return None
-        
-        home_pct = int(pct_match.group(1))
-        draw_pct = int(pct_match.group(2))
-        away_pct = int(pct_match.group(3))
-        
-        rest = cleaned[6:]
-        
-        prediction_char = rest[0]
-        if prediction_char == 'X':
-            prediction = 'X'
-        elif prediction_char in ['1', '2']:
-            prediction = prediction_char
-        else:
-            return None
-        
-        rest = rest[1:]
-        
-        dash_pos = rest.find('-')
-        if dash_pos == -1:
-            return None
-        
-        score_part = rest[:dash_pos].strip()
-        avg_part = rest[dash_pos+1:].strip()
-        
-        avg_goals = 2.5
-        avg_match = re.search(r'(\d)\.(\d{2})', avg_part)
-        if avg_match:
-            goals = int(avg_match.group(1))
-            dec = int(avg_match.group(2))
-            avg_goals = float(f"{goals}.{dec:02d}")
-        
-        double_chance = ''
-        dc_match = re.search(r'([1X2]{2})', avg_part)
-        if dc_match:
-            double_chance = dc_match.group(1)
-        
-        return {
-            'home_pct': home_pct,
-            'draw_pct': draw_pct,
-            'away_pct': away_pct,
-            'forebet_prediction': prediction,
-            'prediction': prediction,
-            'avg_goals': avg_goals,
-            'double_chance': double_chance,
-            'home_team': 'Unknown',
-            'away_team': 'Unknown',
-            'date': datetime.now().strftime("%Y-%m-%d"),
-            'is_finished': 'FT' in line
-        }
-    except Exception:
-        return None
-
-# ============================================================================
 # DISPLAY FUNCTIONS
 # ============================================================================
 
-def display_refined_analysis(match_data: dict, decision: dict):
-    """Display the refined analysis results"""
+def display_refined_analysis_with_context(match_data: dict, decision: dict, league: str = "Unknown"):
+    """Display refined analysis with more context"""
     
     stake_display, stake_class = get_stake_display(decision.get('stake', '0.25 units'))
     
@@ -723,15 +999,24 @@ def display_refined_analysis(match_data: dict, decision: dict):
         '2': '#ef4444'
     }.get(decision.get('prediction', 'X'), '#3b82f6')
     
+    # Get home/away team names
+    home_team = match_data.get('home_team', 'Unknown')
+    away_team = match_data.get('away_team', 'Unknown')
+    
+    # Get percentages
+    home_pct = match_data.get('home_pct', '?')
+    draw_pct = match_data.get('draw_pct', '?')
+    away_pct = match_data.get('away_pct', '?')
+    
     st.markdown(f"""
     <div class="output-card" style="border-left: 4px solid {confidence_color};">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
                 <div style="font-size: 1.2rem; font-weight: 700;">
-                    {match_data.get('home_team', 'Home')} vs {match_data.get('away_team', 'Away')}
+                    🏠 {home_team} vs ✈️ {away_team}
                 </div>
                 <div style="font-size: 0.8rem; color: #94a3b8;">
-                    {match_data.get('date', '')}
+                    📅 {match_data.get('date', '')} | 🏆 {league}
                 </div>
             </div>
             <div style="text-align: right;">
@@ -744,9 +1029,24 @@ def display_refined_analysis(match_data: dict, decision: dict):
             </div>
         </div>
         
+        <div style="display: flex; gap: 1rem; margin: 0.75rem 0; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 80px; background: #0f172a; border-radius: 8px; padding: 0.5rem; text-align: center;">
+                <div style="font-size: 0.7rem; color: #94a3b8;">Home</div>
+                <div style="font-size: 1.2rem; font-weight: 700; color: #10b981;">{home_pct}%</div>
+            </div>
+            <div style="flex: 1; min-width: 80px; background: #0f172a; border-radius: 8px; padding: 0.5rem; text-align: center;">
+                <div style="font-size: 0.7rem; color: #94a3b8;">Draw</div>
+                <div style="font-size: 1.2rem; font-weight: 700; color: #f59e0b;">{draw_pct}%</div>
+            </div>
+            <div style="flex: 1; min-width: 80px; background: #0f172a; border-radius: 8px; padding: 0.5rem; text-align: center;">
+                <div style="font-size: 0.7rem; color: #94a3b8;">Away</div>
+                <div style="font-size: 1.2rem; font-weight: 700; color: #ef4444;">{away_pct}%</div>
+            </div>
+        </div>
+        
         <div style="margin-top: 0.75rem; padding: 0.75rem; background: #0f172a; border-radius: 8px;">
             <div style="font-size: 1.5rem; font-weight: 800; text-align: center; color: {pred_color};">
-                {decision.get('bet', 'Unknown')}
+                🎯 {decision.get('bet', 'Unknown')}
             </div>
             <div style="text-align: center; font-size: 0.9rem; color: #94a3b8; margin-top: 0.25rem;">
                 📋 {decision.get('rule', 'Unknown')}
@@ -762,6 +1062,12 @@ def display_refined_analysis(match_data: dict, decision: dict):
         </div>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show H2H data if available
+    if 'h2h_data' in match_data and match_data['h2h_data']:
+        with st.expander("📊 Head-to-Head History"):
+            h2h_df = pd.DataFrame(match_data['h2h_data'])
+            st.dataframe(h2h_df, use_container_width=True)
 
 # ============================================================================
 # MAIN APP
@@ -812,10 +1118,12 @@ def main():
                     with st.spinner("Analyzing with Refined Formula V1.1..."):
                         parsed = parse_text_data(text_data)
                         matches = parsed.get('matches', [])
+                        league = parsed.get('league', 'Unknown')
                         
                         if matches:
-                            st.success(f"✅ Found {len(matches)} matches")
+                            st.success(f"✅ Found {len(matches)} matches in {league}")
                             
+                            # Parse midweek fixtures
                             fixtures = []
                             if midweek_fixtures:
                                 for line in midweek_fixtures.strip().split('\n'):
@@ -828,14 +1136,31 @@ def main():
                                             pass
                             
                             for i, match in enumerate(matches, 1):
+                                # Add midweek fixtures to match data
                                 match['midweek_fixtures'] = fixtures
-                                decision = refined_formula_decision(match)
-                                display_refined_analysis(match, decision)
                                 
+                                # Set default scoring rates if not provided
+                                if 'home_scoring_rate' not in match:
+                                    match['home_scoring_rate'] = 0.83  # From the sample data
+                                if 'away_scoring_rate' not in match:
+                                    match['away_scoring_rate'] = 1.5   # From the sample data
+                                
+                                # Run refined formula
+                                decision = refined_formula_decision(match)
+                                
+                                # Display with context
+                                display_refined_analysis_with_context(match, decision, league)
+                                
+                                # Show Forebet's original prediction
+                                forebet_pred = match.get('forebet_prediction', '?')
+                                avg_goals = match.get('avg_goals', '?')
+                                st.caption(f"📊 Forebet Original: {forebet_pred} | Avg Goals: {avg_goals}")
+                                
+                                # Save button
                                 if st.button(f"💾 Save Match {i}", key=f"save_{i}"):
                                     db_data = {
                                         'match_date': match.get('date', datetime.now().date()),
-                                        'league_name': match.get('league', 'Unknown'),
+                                        'league_name': league,
                                         'home_team': match.get('home_team', 'Unknown'),
                                         'away_team': match.get('away_team', 'Unknown'),
                                         'forebet_home_pct': match.get('home_pct', 0),
@@ -863,7 +1188,8 @@ def main():
                                 
                                 st.markdown("---")
                         else:
-                            st.error("No matches found in the data.")
+                            st.error("No matches found in the data. Please check the format.")
+                            st.info("Expected format: 'Team VS Team' with percentages and predictions")
                             
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
