@@ -1,10 +1,6 @@
 """
 REFINED FORMULA V1.1 - Complete Implementation
-- Goal timing data (0-15, 75-90 minutes)
-- Clean sheet streaks
-- Double chance validation
-- Goal expectation discrepancy
-- Self-learning failure tracking
+Fixed: Nested f-string syntax errors
 """
 
 import streamlit as st
@@ -54,12 +50,43 @@ st.markdown("""
     .rule-low { background: #64748b; color: #fff; }
     .rule-name { font-size: 0.9rem; font-weight: 700; }
     .rule-reason { font-size: 0.8rem; color: #94a3b8; }
+    .stake-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .stake-2-units { background: #10b981; color: #000; }
+    .stake-1.5-units { background: #f59e0b; color: #000; }
+    .stake-1-unit { background: #f59e0b; color: #000; }
+    .stake-0.5-units { background: #64748b; color: #fff; }
+    .stake-0.25-units { background: #64748b; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
 # DATABASE HELPERS
 # ============================================================================
+
+def parse_match_date(date_val):
+    """Parse date from various formats"""
+    if not date_val:
+        return None
+    
+    if isinstance(date_val, (date, datetime)):
+        return date_val
+    
+    if isinstance(date_val, str):
+        try:
+            return datetime.strptime(date_val, "%Y-%m-%d").date()
+        except:
+            pass
+        try:
+            return datetime.strptime(date_val, "%d/%m/%Y").date()
+        except:
+            pass
+        try:
+            return datetime.strptime(date_val, "%d/%m/%Y %H:%M").date()
+        except:
+            pass
+    
+    return None
+
 def get_h2h_history(home_team: str, away_team: str, limit: int = 6) -> List[dict]:
     """Fetch last N H2H matches within 3 years"""
     three_years_ago = (datetime.now() - timedelta(days=3*365)).date()
@@ -272,15 +299,26 @@ def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
         return True, draws, f"{draws}/6 H2Hs were draws"
     return False, draws, f"Only {draws}/6 draws"
 
-def check_midweek_fatigue(team: str, match_date: date, fixtures: List[dict]) -> Tuple[bool, str]:
+def check_midweek_fatigue(team: str, match_date, fixtures: List[dict]) -> Tuple[bool, str]:
     """
     Rule 8: Midweek Fatigue
     Team played competitive match 3-4 days ago
     """
+    if not match_date or not fixtures:
+        return False, "No fixtures data"
+    
+    if isinstance(match_date, str):
+        try:
+            match_date = datetime.strptime(match_date, "%Y-%m-%d").date()
+        except:
+            return False, "Invalid match date"
+    
     for fixture in fixtures:
         if fixture.get('team') == team:
-            fixture_date = parse_match_date(fixture.get('date'))
-            if fixture_date and match_date:
+            fixture_date = fixture.get('date')
+            if fixture_date and isinstance(fixture_date, (date, datetime)):
+                if isinstance(fixture_date, datetime):
+                    fixture_date = fixture_date.date()
                 days_diff = (match_date - fixture_date).days
                 if 3 <= days_diff <= 4:
                     return True, f"Played {days_diff} days ago"
@@ -318,6 +356,17 @@ def check_double_chance_validation(forebet_pred: str, double_chance: str) -> Tup
     else:
         return False, f"Double chance {double_chance} contradicts {forebet_pred}"
 
+def get_stake_display(stake: str) -> Tuple[str, str]:
+    """Convert stake to display format"""
+    stake_map = {
+        "2 units": ("2 units", "stake-2-units"),
+        "1.5 units": ("1.5 units", "stake-1.5-units"),
+        "1 unit": ("1 unit", "stake-1-unit"),
+        "0.5 units": ("0.5 units", "stake-0.5-units"),
+        "0.25 units": ("0.25 units", "stake-0.25-units"),
+    }
+    return stake_map.get(stake, (stake, "stake-0.25-units"))
+
 # ============================================================================
 # REFINED FORMULA - DECISION LOGIC
 # ============================================================================
@@ -328,11 +377,11 @@ def refined_formula_decision(data: dict) -> dict:
     """
     
     # Extract data
-    home_team = data.get('home_team')
-    away_team = data.get('away_team')
-    match_date = data.get('match_date')
+    home_team = data.get('home_team', 'Unknown')
+    away_team = data.get('away_team', 'Unknown')
+    match_date = data.get('date')
     forebet_pred = data.get('forebet_prediction', 'X')
-    forebet_avg = data.get('forebet_avg_goals', 2.5)
+    forebet_avg = data.get('avg_goals', 2.5)
     home_scoring = data.get('home_scoring_rate', 1.0)
     away_scoring = data.get('away_scoring_rate', 1.0)
     
@@ -411,12 +460,15 @@ def refined_formula_decision(data: dict) -> dict:
     away_late, ratio4, msg4 = check_late_goal_tendency(away_team, away_form)
     if (home_late or away_late) and forebet_pred == 'X':
         if home_late and away_late:
+            # Determine which team has stronger late tendency
+            winner = 'Home' if ratio3 > ratio4 else 'Away'
+            pred = '1' if ratio3 > ratio4 else '2'
             return {
-                'prediction': '1' if ratio3 > ratio4 else '2',
+                'prediction': pred,
                 'rule': 'Late Goal Tendency (Both)',
                 'confidence': 'MEDIUM',
                 'stake': '1 unit',
-                'bet': f"{'Home' if ratio3 > ratio4 else 'Away'} Win',
+                'bet': f"{winner} Win",
                 'reason': f"Home: {msg3}, Away: {msg4}",
                 'rules_passed': ['Late Goal Tendency']
             }
@@ -471,12 +523,14 @@ def refined_formula_decision(data: dict) -> dict:
                 'rules_passed': ['H2H Dominance', 'Midweek Fatigue']
             }
         else:
+            pred = '1' if dominant == 'home' else '2'
+            winner = 'Home' if dominant == 'home' else 'Away'
             return {
-                'prediction': '1' if dominant == 'home' else '2',
+                'prediction': pred,
                 'rule': 'H2H Dominance',
                 'confidence': 'HIGH',
                 'stake': '2 units',
-                'bet': f"{'Home' if dominant == 'home' else 'Away'} Win",
+                'bet': f"{winner} Win",
                 'reason': msg5,
                 'rules_passed': ['H2H Dominance']
             }
@@ -534,26 +588,28 @@ def refined_formula_decision(data: dict) -> dict:
         }
     
     # --- Rule 10: Double Chance Validation ---
-    double_chance = data.get('forebet_double_chance', '')
+    double_chance = data.get('double_chance', '')
     validated, msg8 = check_double_chance_validation(forebet_pred, double_chance)
     if validated:
+        bet_text = 'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'
         return {
             'prediction': forebet_pred,
             'rule': 'Double Chance Validated',
             'confidence': 'LOW',
             'stake': '0.5 units',
-            'bet': f"{'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'}",
+            'bet': bet_text,
             'reason': msg8,
             'rules_passed': ['Double Chance']
         }
     
     # --- Default: Use Forebet ---
+    bet_text = 'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'
     return {
         'prediction': forebet_pred,
         'rule': 'Forebet Default',
         'confidence': 'LOW',
         'stake': '0.25 units',
-        'bet': f"{'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'}",
+        'bet': bet_text,
         'reason': 'No rules triggered, using Forebet prediction',
         'rules_passed': ['Forebet Default']
     }
@@ -562,36 +618,8 @@ def refined_formula_decision(data: dict) -> dict:
 # PARSER - MATCH DATA EXTRACTION
 # ============================================================================
 
-def parse_match_date(date_val) -> datetime:
-    """Parse date from various formats"""
-    if not date_val:
-        return datetime(1900, 1, 1)
-    
-    if isinstance(date_val, (date, datetime)):
-        return datetime(date_val.year, date_val.month, date_val.day)
-    
-    date_str = str(date_val).strip()
-    
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    except:
-        pass
-    
-    try:
-        return datetime.strptime(date_str, "%d/%m/%Y")
-    except:
-        pass
-    
-    try:
-        return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
-    except:
-        pass
-    
-    return datetime(1900, 1, 1)
-
 def parse_text_data(text: str) -> dict:
     """Parse the complete text data from Forebet"""
-    # This is a simplified parser - in production you'd expand this
     result = {
         'matches': [],
         'home_table': {},
@@ -599,7 +627,6 @@ def parse_text_data(text: str) -> dict:
         'form_data': {}
     }
     
-    # Basic parsing logic (you'll expand this based on your data format)
     lines = text.split('\n')
     
     for i, line in enumerate(lines):
@@ -609,7 +636,6 @@ def parse_text_data(text: str) -> dict:
         
         # Look for match data pattern
         if re.search(r'\d{6,}.*°', line):
-            # Parse match data (simplified)
             match = parse_match_line(line)
             if match:
                 result['matches'].append(match)
@@ -619,10 +645,8 @@ def parse_text_data(text: str) -> dict:
 def parse_match_line(line: str) -> Optional[dict]:
     """Parse a single match line from Forebet data"""
     try:
-        # Basic parsing (you'll expand this based on your actual data format)
         cleaned = line.replace(' ', '')
         
-        # Extract percentages
         pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})', cleaned)
         if not pct_match:
             return None
@@ -633,7 +657,6 @@ def parse_match_line(line: str) -> Optional[dict]:
         
         rest = cleaned[6:]
         
-        # Extract prediction
         prediction_char = rest[0]
         if prediction_char == 'X':
             prediction = 'X'
@@ -644,7 +667,6 @@ def parse_match_line(line: str) -> Optional[dict]:
         
         rest = rest[1:]
         
-        # Extract score
         dash_pos = rest.find('-')
         if dash_pos == -1:
             return None
@@ -652,7 +674,6 @@ def parse_match_line(line: str) -> Optional[dict]:
         score_part = rest[:dash_pos].strip()
         avg_part = rest[dash_pos+1:].strip()
         
-        # Extract avg goals
         avg_goals = 2.5
         avg_match = re.search(r'(\d)\.(\d{2})', avg_part)
         if avg_match:
@@ -660,7 +681,6 @@ def parse_match_line(line: str) -> Optional[dict]:
             dec = int(avg_match.group(2))
             avg_goals = float(f"{goals}.{dec:02d}")
         
-        # Extract double chance
         double_chance = ''
         dc_match = re.search(r'([1X2]{2})', avg_part)
         if dc_match:
@@ -670,10 +690,11 @@ def parse_match_line(line: str) -> Optional[dict]:
             'home_pct': home_pct,
             'draw_pct': draw_pct,
             'away_pct': away_pct,
+            'forebet_prediction': prediction,
             'prediction': prediction,
             'avg_goals': avg_goals,
             'double_chance': double_chance,
-            'home_team': 'Unknown',  # You'll extract this from surrounding context
+            'home_team': 'Unknown',
             'away_team': 'Unknown',
             'date': datetime.now().strftime("%Y-%m-%d"),
             'is_finished': 'FT' in line
@@ -688,9 +709,23 @@ def parse_match_line(line: str) -> Optional[dict]:
 def display_refined_analysis(match_data: dict, decision: dict):
     """Display the refined analysis results"""
     
+    stake_display, stake_class = get_stake_display(decision.get('stake', '0.25 units'))
+    
+    confidence_color = {
+        'HIGH': '#10b981',
+        'MEDIUM': '#f59e0b',
+        'LOW': '#64748b'
+    }.get(decision.get('confidence', 'LOW'), '#64748b')
+    
+    pred_color = {
+        '1': '#10b981',
+        'X': '#f59e0b',
+        '2': '#ef4444'
+    }.get(decision.get('prediction', 'X'), '#3b82f6')
+    
     st.markdown(f"""
-    <div class="output-card" style="border-left: 4px solid {'#10b981' if decision['confidence'] == 'HIGH' else '#f59e0b' if decision['confidence'] == 'MEDIUM' else '#64748b'};">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
+    <div class="output-card" style="border-left: 4px solid {confidence_color};">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
                 <div style="font-size: 1.2rem; font-weight: 700;">
                     {match_data.get('home_team', 'Home')} vs {match_data.get('away_team', 'Away')}
@@ -700,24 +735,24 @@ def display_refined_analysis(match_data: dict, decision: dict):
                 </div>
             </div>
             <div style="text-align: right;">
-                <span class="rule-badge {'rule-high' if decision['confidence'] == 'HIGH' else 'rule-medium' if decision['confidence'] == 'MEDIUM' else 'rule-low'}">
-                    {decision['confidence']}
+                <span class="rule-badge rule-{decision.get('confidence', 'LOW').lower()}">
+                    {decision.get('confidence', 'LOW')}
                 </span>
                 <div style="font-size: 0.7rem; color: #94a3b8; margin-top: 0.2rem;">
-                    Stake: {decision['stake']}
+                    <span class="stake-badge {stake_class}">Stake: {stake_display}</span>
                 </div>
             </div>
         </div>
         
         <div style="margin-top: 0.75rem; padding: 0.75rem; background: #0f172a; border-radius: 8px;">
-            <div style="font-size: 1.5rem; font-weight: 800; text-align: center; color: {'#10b981' if decision['prediction'] == '1' else '#f59e0b' if decision['prediction'] == 'X' else '#ef4444' if decision['prediction'] == '2' else '#3b82f6'};">
-                {decision['bet']}
+            <div style="font-size: 1.5rem; font-weight: 800; text-align: center; color: {pred_color};">
+                {decision.get('bet', 'Unknown')}
             </div>
             <div style="text-align: center; font-size: 0.9rem; color: #94a3b8; margin-top: 0.25rem;">
-                📋 {decision['rule']}
+                📋 {decision.get('rule', 'Unknown')}
             </div>
             <div style="text-align: center; font-size: 0.8rem; color: #64748b; margin-top: 0.25rem;">
-                {decision['reason']}
+                {decision.get('reason', '')}
             </div>
         </div>
         
@@ -775,14 +810,12 @@ def main():
             else:
                 try:
                     with st.spinner("Analyzing with Refined Formula V1.1..."):
-                        # Parse data
                         parsed = parse_text_data(text_data)
                         matches = parsed.get('matches', [])
                         
                         if matches:
                             st.success(f"✅ Found {len(matches)} matches")
                             
-                            # Parse midweek fixtures
                             fixtures = []
                             if midweek_fixtures:
                                 for line in midweek_fixtures.strip().split('\n'):
@@ -795,18 +828,11 @@ def main():
                                             pass
                             
                             for i, match in enumerate(matches, 1):
-                                # Add midweek fixtures
                                 match['midweek_fixtures'] = fixtures
-                                
-                                # Run refined formula
                                 decision = refined_formula_decision(match)
-                                
-                                # Display result
                                 display_refined_analysis(match, decision)
                                 
-                                # Option to save to database
                                 if st.button(f"💾 Save Match {i}", key=f"save_{i}"):
-                                    # Prepare data for database
                                     db_data = {
                                         'match_date': match.get('date', datetime.now().date()),
                                         'league_name': match.get('league', 'Unknown'),
@@ -815,7 +841,7 @@ def main():
                                         'forebet_home_pct': match.get('home_pct', 0),
                                         'forebet_draw_pct': match.get('draw_pct', 0),
                                         'forebet_away_pct': match.get('away_pct', 0),
-                                        'forebet_prediction': match.get('prediction', 'X'),
+                                        'forebet_prediction': match.get('forebet_prediction', 'X'),
                                         'forebet_avg_goals': match.get('avg_goals', 2.5),
                                         'forebet_double_chance': match.get('double_chance', ''),
                                         'refined_prediction': decision['prediction'],
@@ -892,7 +918,6 @@ def main():
                 with col3:
                     st.metric("Accuracy", f"{rate}%")
                 
-                # Rule performance breakdown
                 rule_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
                 for r in results:
                     rule = r.get('refined_rule_triggered', 'Unknown')
@@ -923,7 +948,6 @@ def main():
         st.subheader("📈 Dashboard")
         
         try:
-            # Get all matches
             response = supabase.table(TABLE_NAME).select("*").execute()
             all_matches = response.data if response.data else []
             
@@ -944,7 +968,6 @@ def main():
                 with col4:
                     st.metric("Accuracy", f"{rate}%")
                 
-                # Confidence breakdown
                 confidence_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
                 for m in all_matches:
                     if m.get('actual_1x2') is not None:
