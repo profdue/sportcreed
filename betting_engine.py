@@ -1,7 +1,7 @@
 """
 REFINED FORMULA - YOUR 5 RULES
 Single table: match_predictions
-No other tables needed.
+Auto-extracts from Forebet text data
 """
 
 import streamlit as st
@@ -25,9 +25,6 @@ except Exception as e:
     st.error(f"Supabase connection failed: {e}")
     st.stop()
 
-# ============================================================================
-# TABLE NAME
-# ============================================================================
 TABLE_NAME = "match_predictions"
 
 # ============================================================================
@@ -42,7 +39,6 @@ st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="
 def save_prediction_to_db(data: dict) -> str:
     """Save prediction to match_predictions table"""
     try:
-        # Check if exists
         existing = supabase.table(TABLE_NAME).select("id")\
             .eq("home_team", data['home_team'])\
             .eq("away_team", data['away_team'])\
@@ -81,7 +77,6 @@ def submit_result(match_id: int, home_goals: int, away_goals: int):
         return False
 
 def get_pending_matches():
-    """Get matches without results"""
     try:
         response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
         return response.data if response.data else []
@@ -90,7 +85,6 @@ def get_pending_matches():
         return []
 
 def get_completed_matches():
-    """Get matches with results"""
     try:
         response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
         return response.data if response.data else []
@@ -99,7 +93,6 @@ def get_completed_matches():
         return []
 
 def get_all_matches():
-    """Get all matches"""
     try:
         response = supabase.table(TABLE_NAME).select("*").execute()
         return response.data if response.data else []
@@ -114,56 +107,16 @@ def get_all_matches():
 def clean_team_name(name: str) -> str:
     if not name:
         return ""
+    # Remove common patterns
     name = re.sub(r'- Logo$|Logo$|\([^)]*\)', '', name)
     name = re.sub(r'[^\w\s\-\.]', '', name)
     name = re.sub(r'\d+$', '', name)
     name = re.sub(r'^\d+\s+', '', name)
+    # Remove suffixes
     for suffix in [' Rs1', ' Rs2', ' Rs3', ' (H)', ' (A)', ' Logo']:
         name = name.replace(suffix, '')
     name = name.strip()
-    team_pattern = re.search(r'([A-Za-z\s]+?)(?:\s+\d+%|\s+[A-Z]|$)', name)
-    if team_pattern:
-        potential = team_pattern.group(1).strip()
-        if len(potential) > 2:
-            return potential
     return name if len(name) > 2 else "Unknown"
-
-def parse_h2h_line(line: str) -> dict:
-    """Parse a single H2H line"""
-    date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
-    if not date_match:
-        return None
-    date_str = date_match.group(1)
-    score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
-    if not score_match:
-        return None
-    home_goals = int(score_match.group(1))
-    away_goals = int(score_match.group(2))
-    winner = 'home' if home_goals > away_goals else 'away' if away_goals > home_goals else 'draw'
-    
-    parts = re.split(r'\d+\s*-\s*\d+', line)
-    if len(parts) >= 2:
-        left = re.sub(r'\d{2}/\d{2}/\d{4}', '', parts[0]).strip()
-        right = parts[1].strip()
-        home_team = clean_team_name(left)
-        away_team = clean_team_name(right)
-    else:
-        teams = re.findall(r'([A-Za-z\s]+?)\s+\d+\s*-\s*\d+\s+([A-Za-z\s]+)', line)
-        if teams:
-            home_team = clean_team_name(teams[0][0])
-            away_team = clean_team_name(teams[0][1])
-        else:
-            home_team = "Unknown"
-            away_team = "Unknown"
-    
-    return {
-        'home_team': home_team,
-        'away_team': away_team,
-        'match_date': date_str,
-        'home_goals': home_goals,
-        'away_goals': away_goals,
-        'winner': winner
-    }
 
 def parse_text_data(text: str) -> dict:
     """Parse the complete text data from Forebet"""
@@ -230,7 +183,7 @@ def parse_text_data(text: str) -> dict:
                             except:
                                 pass
 
-        # ----- Look for encoded data line (e.g., "305613X1 - 11.5323°-") -----
+        # ----- Look for encoded data line (e.g., "255421X1 - 12.1526°3.80") -----
         if match_found and re.search(r'^\d{6}[1X2]', line):
             cleaned = line.replace(' ', '')
             pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
@@ -245,7 +198,7 @@ def parse_text_data(text: str) -> dict:
                 if score_match:
                     current_match['correct_score_home'] = int(score_match.group(1))
                     current_match['correct_score_away'] = int(score_match.group(2))
-                # Avg goals (e.g., "1.53")
+                # Avg goals (e.g., "2.15")
                 avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
                 if avg_match:
                     current_match['avg_goals'] = float(avg_match.group(1))
@@ -255,9 +208,9 @@ def parse_text_data(text: str) -> dict:
                     current_match['double_chance'] = dc_match.group(1)
 
         # ----- Check if match is finished (FT) -----
-        if match_found and 'FT' in line:
+        if match_found and ('FT' in line or '1 - 0' in line):
             current_match['is_finished'] = True
-            ft_score = re.search(r'FT\s+(\d+)\s*-\s*(\d+)', line)
+            ft_score = re.search(r'(\d+)\s*-\s*(\d+)', line)
             if ft_score:
                 current_match['actual_home'] = int(ft_score.group(1))
                 current_match['actual_away'] = int(ft_score.group(2))
@@ -342,6 +295,43 @@ def parse_text_data(text: str) -> dict:
                 break
 
     return result
+
+def parse_h2h_line(line: str) -> dict:
+    """Parse a single H2H line"""
+    date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
+    if not date_match:
+        return None
+    date_str = date_match.group(1)
+    score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
+    if not score_match:
+        return None
+    home_goals = int(score_match.group(1))
+    away_goals = int(score_match.group(2))
+    winner = 'home' if home_goals > away_goals else 'away' if away_goals > home_goals else 'draw'
+    
+    parts = re.split(r'\d+\s*-\s*\d+', line)
+    if len(parts) >= 2:
+        left = re.sub(r'\d{2}/\d{2}/\d{4}', '', parts[0]).strip()
+        right = parts[1].strip()
+        home_team = clean_team_name(left)
+        away_team = clean_team_name(right)
+    else:
+        teams = re.findall(r'([A-Za-z\s]+?)\s+\d+\s*-\s*\d+\s+([A-Za-z\s]+)', line)
+        if teams:
+            home_team = clean_team_name(teams[0][0])
+            away_team = clean_team_name(teams[0][1])
+        else:
+            home_team = "Unknown"
+            away_team = "Unknown"
+    
+    return {
+        'home_team': home_team,
+        'away_team': away_team,
+        'match_date': date_str,
+        'home_goals': home_goals,
+        'away_goals': away_goals,
+        'winner': winner
+    }
 
 def fallback_parse(text: str) -> dict:
     result = {'matches': [], 'league': 'Unknown'}
@@ -733,7 +723,7 @@ def main():
                                     'league_name': league,
                                     'home_team': match.get('home_team', 'Unknown'),
                                     'away_team': match.get('away_team', 'Unknown'),
-                                    'season_round': None,
+                                    'season_round': 'Round 2, Regular Season',
                                     'forebet_home_pct': match.get('home_pct', 0),
                                     'forebet_draw_pct': match.get('draw_pct', 0),
                                     'forebet_away_pct': match.get('away_pct', 0),
