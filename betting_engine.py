@@ -1,8 +1,11 @@
 """
-REFINED FORMULA V1.1 - NATIVE STREAMLIT UI
-- Uses Streamlit native components (no HTML rendering issues)
-- Auto-save to Supabase
-- Clean, professional look
+REFINED FORMULA - YOUR 5 RULES ONLY
+Rules:
+1. Home Fortress
+2. Away Form Killer
+3. H2H Dominance
+4. H2H Draw Rate
+5. Midweek Fatigue
 """
 
 import streamlit as st
@@ -141,7 +144,7 @@ def parse_text_data(text: str) -> dict:
     lines = text.split('\n')
     
     # Detect league
-    league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 'Ligue 1', 'Serie B', 'Championship']
+    league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 'Ligue 1', 'Serie B', 'Championship', 'Russia Premier League']
     for line in lines:
         for kw in league_keywords:
             if kw in line:
@@ -176,7 +179,9 @@ def parse_text_data(text: str) -> dict:
                         'away_pct': 34,
                         'forebet_prediction': 'X',
                         'avg_goals': 2.5,
-                        'h2h_data': []
+                        'h2h_data': [],
+                        'home_scoring_rate': 1.0,
+                        'away_scoring_rate': 1.0
                     }
                     match_found = True
                     # find date nearby
@@ -190,7 +195,7 @@ def parse_text_data(text: str) -> dict:
                             except:
                                 pass
 
-        # Look for encoded data: e.g., "255421X1 - 12.1526°3.80"
+        # Look for encoded data: e.g., "305613X1 - 11.5323°-"
         if match_found and re.search(r'^\d{6}[1X2]', line):
             cleaned = line.replace(' ', '')
             pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
@@ -214,6 +219,31 @@ def parse_text_data(text: str) -> dict:
                 dc_match = re.search(r'([1X2]{2})', line)
                 if dc_match:
                     current_match['double_chance'] = dc_match.group(1)
+                
+                # Extract scoring rates from statistics section
+                for j in range(i, min(len(lines), i + 30)):
+                    stat_line = lines[j].strip()
+                    if 'Scored' in stat_line and 'Avg.' in stat_line:
+                        score_match = re.search(r'Scored\s+(\d+)\s+Avg\.\s+per\s+game\s+([\d.]+)', stat_line)
+                        if score_match:
+                            current_match['home_scoring_rate'] = float(score_match.group(2))
+                        # Look for away scoring rate
+                        for k in range(j+1, min(len(lines), j+10)):
+                            away_line = lines[k].strip()
+                            if 'Scored' in away_line and 'Avg.' in away_line:
+                                away_score_match = re.search(r'Scored\s+(\d+)\s+Avg\.\s+per\s+game\s+([\d.]+)', away_line)
+                                if away_score_match:
+                                    current_match['away_scoring_rate'] = float(away_score_match.group(2))
+                                    break
+                        break
+
+        # Check if match is finished (FT)
+        if match_found and 'FT' in line:
+            current_match['is_finished'] = True
+            ft_score = re.search(r'FT\s+(\d+)\s*-\s*(\d+)', line)
+            if ft_score:
+                current_match['actual_home'] = int(ft_score.group(1))
+                current_match['actual_away'] = int(ft_score.group(2))
 
         # H2H section
         if 'Head to head' in line or 'H2H' in line:
@@ -311,7 +341,9 @@ def fallback_parse(text: str) -> dict:
                 'away_pct': 34,
                 'forebet_prediction': 'X',
                 'avg_goals': 2.5,
-                'h2h_data': []
+                'h2h_data': [],
+                'home_scoring_rate': 1.0,
+                'away_scoring_rate': 1.0
             }
             enc = re.search(r'(\d{6}[1X2])', text)
             if enc:
@@ -336,12 +368,17 @@ def fallback_parse(text: str) -> dict:
     return result
 
 # ============================================================================
-# REFINED FORMULA - RULE CHECKERS
+# YOUR 5 RULES - REFINED FORMULA
 # ============================================================================
 
-def check_home_fortress(home_team, home_form):
+def check_home_fortress(home_form: List[dict]) -> Tuple[bool, int, str]:
+    """
+    RULE 1: Home Fortress
+    If home team is unbeaten in last 5 home games → Back Home Win
+    """
     if len(home_form) < 5:
-        return False, 0, "Not enough data"
+        return False, 0, "Not enough data (need 5+ home games)"
+    
     home_form = home_form[:5]
     unbeaten = 0
     for m in home_form:
@@ -349,122 +386,94 @@ def check_home_fortress(home_team, home_form):
             unbeaten += 1
         else:
             break
+    
     if unbeaten >= 5:
         return True, unbeaten, f"Unbeaten in last {unbeaten} home games"
     return False, unbeaten, f"Only {unbeaten}/5 unbeaten"
 
-def check_away_form_killer(away_team, away_form):
+def check_away_form_killer(away_form: List[dict]) -> Tuple[bool, int, str]:
+    """
+    RULE 2: Away Form Killer
+    If away team has lost 4 of last 6 away games → Back Home Win
+    """
     if len(away_form) < 6:
-        return False, 0, "Not enough data"
+        return False, 0, "Not enough data (need 6 away games)"
+    
     away_form = away_form[:6]
     losses = sum(1 for m in away_form if m.get('result') == 'L')
+    
     if losses >= 4:
         return True, losses, f"Lost {losses}/6 away games"
     return False, losses, f"Only {losses}/6 losses"
 
-def check_clean_sheet_streak(team, form, is_home):
-    clean = 0
-    for m in form:
-        if m.get('clean_sheet', False):
-            clean += 1
-        else:
-            break
-    context = "home" if is_home else "away"
-    return clean, f"{clean} consecutive clean sheets ({context})"
-
-def check_early_goal_tendency(team, form):
-    total_goals = 0
-    early_goals = 0
-    for m in form:
-        goals = m.get('goals_for', 0)
-        early = m.get('goals_0_15', 0)
-        total_goals += goals
-        early_goals += early
-    if total_goals == 0:
-        return False, 0, "No goals"
-    ratio = early_goals / total_goals
-    if ratio >= 0.3:
-        return True, ratio, f"{ratio*100:.1f}% goals in 0-15 min"
-    return False, ratio, f"Only {ratio*100:.1f}% early goals"
-
-def check_late_goal_tendency(team, form):
-    total_goals = 0
-    late_goals = 0
-    for m in form:
-        goals = m.get('goals_for', 0)
-        late = m.get('goals_75_90', 0)
-        total_goals += goals
-        late_goals += late
-    if total_goals == 0:
-        return False, 0, "No goals"
-    ratio = late_goals / total_goals
-    if ratio >= 0.4:
-        return True, ratio, f"{ratio*100:.1f}% goals in 75-90+ min"
-    return False, ratio, f"Only {ratio*100:.1f}% late goals"
-
-def check_h2h_dominance(h2h_data):
+def check_h2h_dominance(h2h_data: List[dict], home_fatigued: bool, away_fatigued: bool) -> Tuple[Optional[str], int, int, str, Optional[str]]:
+    """
+    RULE 3: H2H Dominance (Refined)
+    If one team has won 3 of last 4 H2Hs (within 3 years) → Draw is a trap.
+    Back the dominant side only if no fatigue.
+    """
     if not h2h_data or len(h2h_data) < 4:
-        return None, 0, 0, "Not enough H2H"
-    h2h_data = h2h_data[:6]
+        return None, 0, 0, "Not enough H2H data (need 4+ matches)", None
+    
+    h2h_data = h2h_data[:4]  # Last 4 H2Hs
     home_wins = sum(1 for m in h2h_data if m.get('winner') == 'home')
     away_wins = sum(1 for m in h2h_data if m.get('winner') == 'away')
     draws = sum(1 for m in h2h_data if m.get('winner') == 'draw')
+    
     if home_wins >= 3:
-        return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs"
+        if home_fatigued:
+            return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs but fatigued → Draw", 'fatigue'
+        else:
+            return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs → Draw is a trap", 'dominant'
     elif away_wins >= 3:
-        return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs"
+        if away_fatigued:
+            return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs but fatigued → Draw", 'fatigue'
+        else:
+            return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs → Draw is a trap", 'dominant'
     else:
-        return None, max(home_wins, away_wins), draws, f"No dominance"
+        return None, max(home_wins, away_wins), draws, f"No dominance (H:{home_wins}, A:{away_wins}, D:{draws})", None
 
-def check_h2h_draw_rate(h2h_data):
+def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
+    """
+    RULE 4: H2H Draw Rate (Refined)
+    Only trust the draw if 4+ draws in last 6 H2Hs.
+    If fewer than 4 total H2Hs, ignore this rule completely.
+    """
     if not h2h_data or len(h2h_data) < 6:
-        return False, 0, "Not enough H2H"
+        return False, 0, "Not enough H2H data (need 6+ matches)"
+    
     h2h_data = h2h_data[:6]
     draws = sum(1 for m in h2h_data if m.get('winner') == 'draw')
+    
     if draws >= 4:
-        return True, draws, f"{draws}/6 H2Hs were draws"
+        return True, draws, f"{draws}/6 H2Hs were draws → Trust the Draw"
     return False, draws, f"Only {draws}/6 draws"
 
-def check_midweek_fatigue(team, match_date, fixtures):
+def check_midweek_fatigue(team: str, match_date, fixtures: List[dict]) -> Tuple[bool, str]:
+    """
+    RULE 5: Midweek Fatigue
+    If away team played a competitive match 3-4 days ago → Downgrade away team by 30%.
+    Back Home Win or Draw.
+    """
     if not match_date or not fixtures:
-        return False, "No fixtures"
+        return False, "No fixtures data"
+    
     if isinstance(match_date, str):
         try:
             match_date = datetime.strptime(match_date, "%Y-%m-%d").date()
         except:
-            return False, "Invalid date"
-    for f in fixtures:
-        if f.get('team') == team:
-            f_date = f.get('date')
-            if f_date and isinstance(f_date, (date, datetime)):
-                if isinstance(f_date, datetime):
-                    f_date = f_date.date()
-                days = (match_date - f_date).days
-                if 3 <= days <= 4:
-                    return True, f"Played {days} days ago"
-    return False, "No recent midweek"
-
-def check_goal_discrepancy(forebet_avg, home_scoring, away_scoring):
-    actual_avg = (home_scoring + away_scoring) / 2
-    diff = forebet_avg - actual_avg
-    if abs(diff) < 0.3:
-        return 'MATCH', diff, f"Forebet {forebet_avg:.2f} vs actual {actual_avg:.2f} (match)"
-    elif diff > 0.3:
-        return 'OVER_INFLATED', diff, f"Forebet {forebet_avg:.2f} vs actual {actual_avg:.2f} (over by {diff:.2f})"
-    else:
-        return 'UNDER_INFLATED', diff, f"Forebet {forebet_avg:.2f} vs actual {actual_avg:.2f} (under by {abs(diff):.2f})"
-
-def check_double_chance_validation(forebet_pred, double_chance):
-    if not double_chance:
-        return False, "No double chance"
-    if forebet_pred == '1' and '1' in double_chance:
-        return True, "1X supports Home Win"
-    elif forebet_pred == '2' and '2' in double_chance:
-        return True, "X2 supports Away Win"
-    elif forebet_pred == 'X' and 'X' in double_chance:
-        return True, "1X or X2 supports Draw"
-    else:
-        return False, f"Double chance {double_chance} contradicts {forebet_pred}"
+            return False, "Invalid match date"
+    
+    for fixture in fixtures:
+        if fixture.get('team') == team:
+            fixture_date = fixture.get('date')
+            if fixture_date and isinstance(fixture_date, (date, datetime)):
+                if isinstance(fixture_date, datetime):
+                    fixture_date = fixture_date.date()
+                days_diff = (match_date - fixture_date).days
+                if 3 <= days_diff <= 4:
+                    return True, f"Played {days_diff} days ago"
+    return False, "No recent midweek fixture"
 
 def get_stake_display(stake: str) -> Tuple[str, str]:
     stake_map = {
@@ -478,23 +487,32 @@ def get_stake_display(stake: str) -> Tuple[str, str]:
     return stake_map.get(stake, (stake, "LOW"))
 
 # ============================================================================
-# DECISION LOGIC
+# YOUR REFINED FORMULA DECISION LOGIC - 5 RULES ONLY
 # ============================================================================
 
 def refined_formula_decision(data: dict) -> dict:
+    """
+    YOUR REFINED FORMULA - 5 Rules Only
+    No Goal Discrepancy, no Early/Late goals, no Clean Sheets
+    """
+    
     home_team = data.get('home_team', 'Unknown')
     away_team = data.get('away_team', 'Unknown')
     match_date = data.get('date')
     forebet_pred = data.get('forebet_prediction', 'X')
-    forebet_avg = data.get('avg_goals', 2.5)
-    home_scoring = data.get('home_scoring_rate', 1.0)
-    away_scoring = data.get('away_scoring_rate', 1.0)
-
+    fixtures = data.get('midweek_fixtures', [])
+    
+    # Get data needed for your rules
     home_form = get_team_form(home_team, limit=6, is_home=True)
     away_form = get_team_form(away_team, limit=6, is_home=False)
-
-    # Rule 1: Home Fortress
-    fortress, _, msg = check_home_fortress(home_team, home_form)
+    h2h_data = data.get('h2h_data', [])
+    
+    # Check fatigue for H2H dominance rule
+    home_fatigued, home_fatigue_msg = check_midweek_fatigue(home_team, match_date, fixtures)
+    away_fatigued, away_fatigue_msg = check_midweek_fatigue(away_team, match_date, fixtures)
+    
+    # === RULE 1: HOME FORTRESS ===
+    fortress, streak, msg = check_home_fortress(home_form)
     if fortress:
         return {
             'prediction': '1',
@@ -505,9 +523,9 @@ def refined_formula_decision(data: dict) -> dict:
             'reason': msg,
             'rules_passed': ['Home Fortress']
         }
-
-    # Rule 2: Away Form Killer
-    killer, _, msg = check_away_form_killer(away_team, away_form)
+    
+    # === RULE 2: AWAY FORM KILLER ===
+    killer, losses, msg = check_away_form_killer(away_form)
     if killer:
         return {
             'prediction': '1',
@@ -518,109 +536,18 @@ def refined_formula_decision(data: dict) -> dict:
             'reason': msg,
             'rules_passed': ['Away Form Killer']
         }
-
-    # Rule 3: Clean Sheet Streak
-    home_cs, home_cs_msg = check_clean_sheet_streak(home_team, home_form, True)
-    away_cs, away_cs_msg = check_clean_sheet_streak(away_team, away_form, False)
-    if home_cs >= 3 and away_cs >= 1:
-        return {
-            'prediction': 'Under 2.5',
-            'rule': 'Clean Sheet Streak',
-            'confidence': 'HIGH',
-            'stake': '2 units',
-            'bet': 'Under 2.5 Goals',
-            'reason': f"Home: {home_cs_msg}, Away: {away_cs_msg}",
-            'rules_passed': ['Clean Sheet Streak']
-        }
-
-    # Rule 4: Early Goal Tendency
-    home_early, _, msg = check_early_goal_tendency(home_team, home_form)
-    away_early, _, msg2 = check_early_goal_tendency(away_team, away_form)
-    if home_early and not away_early:
-        return {
-            'prediction': '1',
-            'rule': 'Early Goal Tendency',
-            'confidence': 'MEDIUM',
-            'stake': '1.5 units',
-            'bet': 'Home Win',
-            'reason': f"Home: {msg}, Away: {msg2}",
-            'rules_passed': ['Early Goal Tendency']
-        }
-    elif away_early and not home_early:
-        return {
-            'prediction': '2',
-            'rule': 'Early Goal Tendency',
-            'confidence': 'MEDIUM',
-            'stake': '1.5 units',
-            'bet': 'Away Win',
-            'reason': f"Away: {msg2}, Home: {msg}",
-            'rules_passed': ['Early Goal Tendency']
-        }
-
-    # Rule 5: Late Goal Tendency
-    home_late, ratio3, msg3 = check_late_goal_tendency(home_team, home_form)
-    away_late, ratio4, msg4 = check_late_goal_tendency(away_team, away_form)
-    if (home_late or away_late) and forebet_pred == 'X':
-        if home_late and away_late:
-            winner = 'Home' if ratio3 > ratio4 else 'Away'
-            pred = '1' if ratio3 > ratio4 else '2'
-            return {
-                'prediction': pred,
-                'rule': 'Late Goal Tendency (Both)',
-                'confidence': 'MEDIUM',
-                'stake': '1 unit',
-                'bet': f"{winner} Win",
-                'reason': f"Home: {msg3}, Away: {msg4}",
-                'rules_passed': ['Late Goal Tendency']
-            }
-        elif home_late:
-            return {
-                'prediction': '1',
-                'rule': 'Late Goal Tendency (Home)',
-                'confidence': 'MEDIUM',
-                'stake': '1 unit',
-                'bet': 'Home Win',
-                'reason': msg3,
-                'rules_passed': ['Late Goal Tendency']
-            }
-        else:
-            return {
-                'prediction': '2',
-                'rule': 'Late Goal Tendency (Away)',
-                'confidence': 'MEDIUM',
-                'stake': '1 unit',
-                'bet': 'Away Win',
-                'reason': msg4,
-                'rules_passed': ['Late Goal Tendency']
-            }
-
-    # Rule 6: H2H Dominance
-    h2h_data = data.get('h2h_data', [])
-    if not h2h_data:
-        h2h_data = get_h2h_history(home_team, away_team, limit=6)
-    dominant, _, _, msg5 = check_h2h_dominance(h2h_data)
+    
+    # === RULE 3: H2H DOMINANCE ===
+    dominant, wins, draws, msg, status = check_h2h_dominance(h2h_data, home_fatigued, away_fatigued)
     if dominant:
-        fixtures = data.get('midweek_fixtures', [])
-        home_fatigued, _ = check_midweek_fatigue(home_team, match_date, fixtures)
-        away_fatigued, _ = check_midweek_fatigue(away_team, match_date, fixtures)
-        if dominant == 'home' and home_fatigued:
+        if status == 'fatigue':
             return {
                 'prediction': 'X',
-                'rule': 'H2H Dominance + Home Fatigue',
+                'rule': 'H2H Dominance + Fatigue',
                 'confidence': 'MEDIUM',
                 'stake': '1 unit',
                 'bet': 'Draw',
-                'reason': f"{msg5} but home team fatigued",
-                'rules_passed': ['H2H Dominance', 'Midweek Fatigue']
-            }
-        elif dominant == 'away' and away_fatigued:
-            return {
-                'prediction': 'X',
-                'rule': 'H2H Dominance + Away Fatigue',
-                'confidence': 'MEDIUM',
-                'stake': '1 unit',
-                'bet': 'Draw',
-                'reason': f"{msg5} but away team fatigued",
+                'reason': msg,
                 'rules_passed': ['H2H Dominance', 'Midweek Fatigue']
             }
         else:
@@ -632,27 +559,24 @@ def refined_formula_decision(data: dict) -> dict:
                 'confidence': 'HIGH',
                 'stake': '2 units',
                 'bet': f"{winner} Win",
-                'reason': msg5,
+                'reason': msg,
                 'rules_passed': ['H2H Dominance']
             }
-
-    # Rule 7: H2H Draw Rate
-    draw_rate, _, msg6 = check_h2h_draw_rate(h2h_data)
+    
+    # === RULE 4: H2H DRAW RATE ===
+    draw_rate, draws2, msg = check_h2h_draw_rate(h2h_data)
     if draw_rate:
         return {
             'prediction': 'X',
             'rule': 'H2H Draw Rate',
-            'confidence': 'MEDIUM',
-            'stake': '1 unit',
+            'confidence': 'HIGH',
+            'stake': '2 units',
             'bet': 'Draw',
-            'reason': msg6,
+            'reason': msg,
             'rules_passed': ['H2H Draw Rate']
         }
-
-    # Rule 8: Midweek Fatigue
-    fixtures = data.get('midweek_fixtures', [])
-    home_fatigued, home_fatigue_msg = check_midweek_fatigue(home_team, match_date, fixtures)
-    away_fatigued, away_fatigue_msg = check_midweek_fatigue(away_team, match_date, fixtures)
+    
+    # === RULE 5: MIDWEEK FATIGUE ===
     if away_fatigued and not home_fatigued:
         return {
             'prediction': '1',
@@ -665,44 +589,16 @@ def refined_formula_decision(data: dict) -> dict:
         }
     elif home_fatigued and not away_fatigued:
         return {
-            'prediction': '2',
+            'prediction': 'X',
             'rule': 'Midweek Fatigue (Home)',
             'confidence': 'MEDIUM',
             'stake': '1 unit',
-            'bet': 'Away Win',
+            'bet': 'Draw',
             'reason': home_fatigue_msg,
             'rules_passed': ['Midweek Fatigue']
         }
-
-    # Rule 9: Goal Discrepancy
-    discrepancy, _, msg7 = check_goal_discrepancy(forebet_avg, home_scoring, away_scoring)
-    if discrepancy == 'OVER_INFLATED' and forebet_pred == 'X':
-        return {
-            'prediction': 'X',
-            'rule': 'Goal Discrepancy (Over-inflated)',
-            'confidence': 'MEDIUM',
-            'stake': '1 unit',
-            'bet': 'Draw',
-            'reason': msg7,
-            'rules_passed': ['Goal Discrepancy']
-        }
-
-    # Rule 10: Double Chance Validation
-    double_chance = data.get('double_chance', '')
-    validated, msg8 = check_double_chance_validation(forebet_pred, double_chance)
-    if validated:
-        bet_text = 'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'
-        return {
-            'prediction': forebet_pred,
-            'rule': 'Double Chance Validated',
-            'confidence': 'LOW',
-            'stake': '0.5 units',
-            'bet': bet_text,
-            'reason': msg8,
-            'rules_passed': ['Double Chance']
-        }
-
-    # Default: Forebet
+    
+    # === DEFAULT: TRUST FOREBET ===
     bet_text = 'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'
     return {
         'prediction': forebet_pred,
@@ -710,16 +606,16 @@ def refined_formula_decision(data: dict) -> dict:
         'confidence': 'LOW',
         'stake': '0.25 units',
         'bet': bet_text,
-        'reason': 'No rules triggered, using Forebet prediction',
+        'reason': 'No rules triggered → Trust Forebet',
         'rules_passed': ['Forebet Default']
     }
 
 # ============================================================================
-# DISPLAY FUNCTION - NATIVE STREAMLIT COMPONENTS (NO HTML)
+# DISPLAY FUNCTION - NATIVE STREAMLIT COMPONENTS
 # ============================================================================
 
 def display_refined_analysis_native(match_data: dict, decision: dict, league: str = "Unknown"):
-    """Display analysis using native Streamlit components - NO HTML rendering issues"""
+    """Display analysis using native Streamlit components"""
     
     home_team = match_data.get('home_team', 'Unknown')
     away_team = match_data.get('away_team', 'Unknown')
@@ -763,14 +659,6 @@ def display_refined_analysis_native(match_data: dict, decision: dict, league: st
     st.markdown("---")
     
     # Main prediction display
-    pred_color = {
-        '1': 'green',
-        'X': 'orange',
-        '2': 'red',
-        'Under 2.5': 'blue',
-        'Over 2.5': 'blue'
-    }.get(decision.get('prediction', 'X'), 'gray')
-    
     st.markdown(f"### 🎯 {decision.get('bet', 'Unknown')}")
     st.markdown(f"**Rule:** {decision.get('rule', 'Unknown')}")
     st.markdown(f"**Confidence:** :{conf_color}[{decision.get('confidence', 'LOW')}]")
@@ -798,7 +686,7 @@ def display_refined_analysis_native(match_data: dict, decision: dict, league: st
 
 def main():
     st.title("🎯 Refined Formula V1.1")
-    st.caption("Complete implementation with goal timing, clean sheets, and self-learning - Auto-save enabled")
+    st.caption("Your 5 Rules: Home Fortress | Away Form Killer | H2H Dominance | H2H Draw Rate | Midweek Fatigue")
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending", "📊 Records", "📈 Dashboard"])
     
@@ -818,17 +706,12 @@ def main():
             )
         with col2:
             st.info("""
-            **Refined Formula Rules:**
-            1. 🏰 Home Fortress
-            2. 💀 Away Form Killer
-            3. 🧹 Clean Sheet Streak
-            4. ⏰ Early Goal Tendency
-            5. ⏰ Late Goal Tendency
-            6. 🏆 H2H Dominance
-            7. 🤝 H2H Draw Rate
-            8. 😴 Midweek Fatigue
-            9. 📊 Goal Discrepancy
-            10. ✅ Double Chance
+            **Your 5 Refined Formula Rules:**
+            1. 🏰 Home Fortress - Unbeaten in last 5 home games → Back Home Win
+            2. 💀 Away Form Killer - Lost 4 of last 6 away games → Back Home Win
+            3. 🏆 H2H Dominance - 3 of last 4 H2Hs won → Draw is a trap
+            4. 🤝 H2H Draw Rate - 4+ draws in last 6 H2Hs → Trust the Draw
+            5. 😴 Midweek Fatigue - Away played 3-4 days ago → Downgrade away
             """)
         
         if st.button("🎯 Analyze & Auto-Save", type="primary"):
@@ -836,7 +719,7 @@ def main():
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
                 try:
-                    with st.spinner("Analyzing and saving to database..."):
+                    with st.spinner("Analyzing with YOUR 5 rules..."):
                         parsed = parse_text_data(text_data)
                         matches = parsed.get('matches', [])
                         league = parsed.get('league', 'Unknown')
@@ -861,11 +744,8 @@ def main():
                             
                             for i, match in enumerate(matches, 1):
                                 match['midweek_fixtures'] = fixtures
-                                if 'home_scoring_rate' not in match:
-                                    match['home_scoring_rate'] = 0.83
-                                if 'away_scoring_rate' not in match:
-                                    match['away_scoring_rate'] = 1.5
                                 
+                                # Run YOUR refined formula (5 rules only)
                                 decision = refined_formula_decision(match)
                                 
                                 # Display using native Streamlit components
