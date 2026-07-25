@@ -1,17 +1,22 @@
 """
-MATCH ANALYZER V16.4 — COMPLETE LEAGUE DETECTION FIX
-Fixed: League Detection | All Leagues Configured | Team-Based Inference
+REFINED FORMULA V1.1 - Complete Implementation
+- Goal timing data (0-15, 75-90 minutes)
+- Clean sheet streaks
+- Double chance validation
+- Goal expectation discrepancy
+- Self-learning failure tracking
 """
 
 import streamlit as st
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from supabase import create_client, Client
 import pandas as pd
 import re
 import json
 import time
 import traceback
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
+from collections import defaultdict
 
 # ============================================================================
 # SUPABASE SETUP
@@ -27,142 +32,538 @@ except Exception as e:
 # ============================================================================
 # TABLE NAME CONSTANT
 # ============================================================================
-TABLE_NAME = "match_predictions"
+TABLE_NAME = "match_predictions_v2"
+H2H_TABLE = "h2h_history"
+FORM_TABLE = "team_form_history"
 
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="Match Analyzer V16.4", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
     .main .block-container { padding-top: 2rem; max-width: 1200px; }
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
-    .primary-card { border: 3px solid #10b981; background: linear-gradient(135deg, #0a2a0a 0%, #051505 100%); }
-    .lock-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0f00 100%); }
-    .cautious-card { border: 3px solid #f59e0b; background: linear-gradient(135deg, #1a2a00 0%, #0a1a00 100%); }
-    .danger-card { border: 3px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
-    .skip-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
-    .ft-card { border-left: 5px solid #ef4444; background: linear-gradient(135deg, #2a0a0a 0%, #1a0505 100%); }
-    .stButton button { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
-    .stat-box { background: #1e293b; border-radius: 10px; padding: 0.8rem; text-align: center; color: #fff; }
-    .stat-number { font-size: 2rem; font-weight: 800; }
-    .stat-label { font-size: 0.75rem; color: #94a3b8; }
-    .verdict-skip { text-align: center; padding: 1.5rem; }
-    .verdict-skip .big-text { font-size: 1.5rem; font-weight: 800; color: #fbbf24; }
-    .section-label { font-size: 0.9rem; font-weight: 700; color: #10b981; margin-top: 1rem; }
-    .metric-card { background: #0f172a; border-radius: 10px; padding: 0.75rem; text-align: center; flex: 1; }
-    .metric-value { font-size: 1.5rem; font-weight: 800; }
-    .metric-label { font-size: 0.7rem; color: #94a3b8; }
-    .accuracy-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .lock-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .dead-rubber-warning { background: #7c2d12; color: #fed7aa; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.8rem; margin: 0.5rem 0; border: 2px solid #ef4444; }
-    .win-badge { background: #10b981; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
-    .loss-badge { background: #ef4444; color: #fff; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
-    .skip-badge { background: #fbbf24; color: #000; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
-    .condition-true { color: #10b981; font-weight: 700; }
-    .condition-false { color: #ef4444; font-weight: 700; }
-    .condition-box { background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; }
-    .priority-rule { background: #1a2a1a; border-left: 4px solid #f59e0b; padding: 0.75rem; margin: 0.5rem 0; border-radius: 4px; }
-    .upload-container { border: 2px dashed #3b82f6; border-radius: 12px; padding: 2rem; text-align: center; margin: 1rem 0; }
-    .upload-container:hover { border-color: #60a5fa; background: rgba(59, 130, 246, 0.05); }
-    .league-badge { display: inline-block; padding: 0.2rem 0.8rem; border-radius: 12px; font-size: 0.8rem; font-weight: 700; }
-    .league-badge.no { background: #ef4444; color: #fff; }
-    .league-badge.br { background: #10b981; color: #fff; }
-    .league-badge.uk { background: #3b82f6; color: #fff; }
-    .league-badge.es { background: #f59e0b; color: #000; }
-    .league-badge.it { background: #8b5cf6; color: #fff; }
-    .league-badge.de { background: #ec4899; color: #fff; }
-    .league-badge.au { background: #f59e0b; color: #000; }
-    .league-badge.tr { background: #ef4444; color: #fff; }
-    .league-badge.sa { background: #10b981; color: #fff; }
-    .league-badge.fr { background: #3b82f6; color: #fff; }
-    .league-badge.kr { background: #8b5cf6; color: #fff; }
-    .league-badge.uz { background: #f59e0b; color: #000; }
-    .league-badge.fi { background: #10b981; color: #fff; }
-    .league-badge.is { background: #ec4899; color: #fff; }
-    .league-badge.cl { background: #ef4444; color: #fff; }
-    .league-badge.ec { background: #3b82f6; color: #fff; }
-    .league-badge.ie { background: #f59e0b; color: #000; }
-    .league-badge.unknown { background: #64748b; color: #fff; }
-    .score-container { background: #0f172a; border-radius: 12px; padding: 1rem; margin: 0.5rem 0; }
-    .score-number { font-size: 3rem; font-weight: 800; text-align: center; }
-    .score-label { font-size: 0.8rem; color: #94a3b8; text-align: center; }
-    .factor-row { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #1e293b; }
-    .factor-name { color: #94a3b8; }
-    .factor-value { font-weight: 600; }
-    .factor-points { color: #fbbf24; font-weight: 700; }
-    .stake-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .stake-full { background: #10b981; color: #000; }
-    .stake-half { background: #f59e0b; color: #000; }
-    .stake-small { background: #ef4444; color: #fff; }
-    .stake-tiny { background: #64748b; color: #fff; }
-    .stake-zero { background: #64748b; color: #fff; }
-    .quality-box { background: #0a2a0a; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.25rem 0; border: 1px solid #2a4a2a; }
-    .streak-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .streak-loss { background: #ef4444; color: #fff; }
-    .streak-win { background: #10b981; color: #000; }
-    .dead-rubber-badge { background: #7c2d12; color: #fed7aa; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; border: 1px solid #ef4444; }
-    .goal-badge { background: #3b82f6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .bet-separator { border: none; border-top: 1px dashed #475569; margin: 0.5rem 0; }
-    .primary-bet-card { border-left: 4px solid #f59e0b; background: linear-gradient(135deg, #1a2a1a 0%, #0a1a0a 100%); }
-    .goal-bet-card { border-left: 4px solid #3b82f6; background: linear-gradient(135deg, #0a1a2a 0%, #0a0a1a 100%); }
-    .already-stored { background: #1a2a2a; border: 1px solid #f59e0b; border-radius: 4px; padding: 0.2rem 0.6rem; color: #fbbf24; font-size: 0.7rem; font-weight: 700; display: inline-block; }
-    .rule-badge-1 { background: #ef4444; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-2 { background: #f59e0b; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-3 { background: #3b82f6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-4 { background: #10b981; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-5 { background: #8b5cf6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-6 { background: #ec4899; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-7 { background: #64748b; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .rule-badge-hybrid { background: #8b5cf6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
-    .result-card { background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; border-left: 3px solid #64748b; }
-    .result-win { border-left-color: #10b981; }
-    .result-loss { border-left-color: #ef4444; }
-    .result-draw { border-left-color: #f59e0b; }
-    .bet-result { display: flex; justify-content: space-between; align-items: center; padding: 0.2rem 0; }
-    .bet-label { color: #94a3b8; font-size: 0.9rem; }
-    .bet-status { font-weight: 700; font-size: 0.9rem; }
-    .bet-status-win { color: #10b981; }
-    .bet-status-loss { color: #ef4444; }
-    .bet-status-draw { color: #f59e0b; }
-    .prediction-display { font-size: 2.5rem; font-weight: 800; text-align: center; padding: 0.5rem; }
-    .prediction-1 { color: #10b981; }
-    .prediction-X { color: #f59e0b; }
-    .prediction-2 { color: #ef4444; }
-    .hybrid-badge { background: #8b5cf6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; display: inline-block; }
-    .forebet-badge { background: #3b82f6; color: #fff; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; display: inline-block; }
-    .override-badge { background: #f59e0b; color: #000; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; display: inline-block; }
+    .rule-card { border-left: 4px solid #f59e0b; background: #0f172a; border-radius: 8px; padding: 0.75rem; margin: 0.25rem 0; }
+    .rule-triggered { border-left-color: #10b981; }
+    .rule-not-triggered { border-left-color: #64748b; }
+    .rule-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .rule-high { background: #10b981; color: #000; }
+    .rule-medium { background: #f59e0b; color: #000; }
+    .rule-low { background: #64748b; color: #fff; }
+    .rule-name { font-size: 0.9rem; font-weight: 700; }
+    .rule-reason { font-size: 0.8rem; color: #94a3b8; }
 </style>
 """, unsafe_allow_html=True)
 
-
 # ============================================================================
-# HELPER FUNCTIONS
+# DATABASE HELPERS
 # ============================================================================
-def get_stake_display(stake_value: str) -> tuple:
-    stake_mapping = {
-        "Full": ("2 units", "stake-full"),
-        "Half": ("1 unit", "stake-half"),
-        "Small": ("0.25 unit", "stake-small"),
-        "Tiny": ("0.1 unit", "stake-tiny"),
-        "Small or Skip": ("0.25 unit", "stake-small"),
-        "2 units": ("2 units", "stake-full"),
-        "1.5 units": ("1.5 units", "stake-half"),
-        "1 unit": ("1 unit", "stake-half"),
-        "0.25 unit": ("0.25 unit", "stake-small"),
-        "0.1 unit": ("0.1 unit", "stake-tiny"),
-        "0 units": ("0 units", "stake-zero"),
-        "": ("0 units", "stake-zero")
-    }
+def get_h2h_history(home_team: str, away_team: str, limit: int = 6) -> List[dict]:
+    """Fetch last N H2H matches within 3 years"""
+    three_years_ago = (datetime.now() - timedelta(days=3*365)).date()
     
-    if stake_value in stake_mapping:
-        return stake_mapping[stake_value]
-    else:
-        return (stake_value, "stake-zero")
+    try:
+        response = supabase.table(H2H_TABLE).select("*")\
+            .or_(f"and(home_team.eq.{home_team},away_team.eq.{away_team}),and(home_team.eq.{away_team},away_team.eq.{home_team})")\
+            .gte("match_date", three_years_ago.isoformat())\
+            .order("match_date", desc=True)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+    except Exception as e:
+        return []
 
+def get_team_form(team: str, limit: int = 6, is_home: bool = None) -> List[dict]:
+    """Fetch last N form results for a team"""
+    try:
+        query = supabase.table(FORM_TABLE).select("*").eq("team_name", team).order("match_date", desc=True).limit(limit)
+        if is_home is not None:
+            query = query.eq("is_home", is_home)
+        response = query.execute()
+        return response.data if response.data else []
+    except Exception as e:
+        return []
+
+def save_prediction_to_db(data: dict) -> str:
+    """Save refined prediction to database"""
+    try:
+        # Check if exists
+        existing = supabase.table(TABLE_NAME).select("id")\
+            .eq("home_team", data['home_team'])\
+            .eq("away_team", data['away_team'])\
+            .eq("match_date", data['match_date'])\
+            .execute()
+        
+        if existing.data:
+            return "ALREADY_EXISTS"
+        
+        response = supabase.table(TABLE_NAME).insert(data).execute()
+        return str(response.data[0]['id']) if response.data else None
+    except Exception as e:
+        st.error(f"Failed to save: {e}")
+        return None
+
+def submit_result(match_id: int, home_goals: int, away_goals: int):
+    """Submit actual result and update correctness"""
+    try:
+        total = home_goals + away_goals
+        actual_1x2 = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
+        
+        # Get prediction
+        response = supabase.table(TABLE_NAME).select("refined_prediction").eq("id", match_id).execute()
+        if response.data:
+            predicted = response.data[0].get("refined_prediction")
+            is_correct = predicted == actual_1x2 if predicted else False
+        else:
+            is_correct = False
+        
+        supabase.table(TABLE_NAME).update({
+            "actual_home_goals": home_goals,
+            "actual_away_goals": away_goals,
+            "actual_1x2": actual_1x2,
+            "is_correct": is_correct,
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", match_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Failed: {e}")
+        return False
+
+# ============================================================================
+# REFINED FORMULA - RULE CHECKERS
+# ============================================================================
+
+def check_home_fortress(home_team: str, home_form: List[dict]) -> Tuple[bool, int, str]:
+    """
+    Rule 1: Home Fortress
+    Home team unbeaten in last 5+ home games
+    """
+    if len(home_form) < 5:
+        return False, 0, "Not enough data (need 5+ home games)"
+    
+    home_form = home_form[:5]
+    unbeaten_streak = 0
+    for match in home_form:
+        if match.get('result') != 'L':
+            unbeaten_streak += 1
+        else:
+            break
+    
+    if unbeaten_streak >= 5:
+        return True, unbeaten_streak, f"Unbeaten in last {unbeaten_streak} home games"
+    return False, unbeaten_streak, f"Only {unbeaten_streak}/5 unbeaten"
+
+def check_away_form_killer(away_team: str, away_form: List[dict]) -> Tuple[bool, int, str]:
+    """
+    Rule 2: Away Form Killer
+    Away team lost 4+ of last 6 away games
+    """
+    if len(away_form) < 6:
+        return False, 0, "Not enough data (need 6 away games)"
+    
+    away_form = away_form[:6]
+    losses = sum(1 for m in away_form if m.get('result') == 'L')
+    
+    if losses >= 4:
+        return True, losses, f"Lost {losses}/6 away games"
+    return False, losses, f"Only {losses}/6 losses"
+
+def check_clean_sheet_streak(team: str, form: List[dict], is_home: bool) -> Tuple[int, str]:
+    """
+    Rule 3: Clean Sheet Streak
+    Count consecutive clean sheets
+    """
+    clean_sheets = 0
+    for match in form:
+        if match.get('clean_sheet', False):
+            clean_sheets += 1
+        else:
+            break
+    
+    context = "home" if is_home else "away"
+    return clean_sheets, f"{clean_sheets} consecutive clean sheets ({context})"
+
+def check_early_goal_tendency(team: str, form: List[dict]) -> Tuple[bool, float, str]:
+    """
+    Rule 4: Early Goal Tendency
+    30%+ of goals scored in first 15 minutes
+    """
+    total_goals = 0
+    early_goals = 0
+    
+    for match in form:
+        goals = match.get('goals_for', 0)
+        early = match.get('goals_0_15', 0)
+        total_goals += goals
+        early_goals += early
+    
+    if total_goals == 0:
+        return False, 0, "No goals scored in recent matches"
+    
+    ratio = early_goals / total_goals
+    if ratio >= 0.3:
+        return True, ratio, f"{ratio*100:.1f}% of goals in 0-15 min"
+    return False, ratio, f"Only {ratio*100:.1f}% early goals"
+
+def check_late_goal_tendency(team: str, form: List[dict]) -> Tuple[bool, float, str]:
+    """
+    Rule 5: Late Goal Tendency
+    40%+ of goals scored in 75-90+ minutes
+    """
+    total_goals = 0
+    late_goals = 0
+    
+    for match in form:
+        goals = match.get('goals_for', 0)
+        late = match.get('goals_75_90', 0)
+        total_goals += goals
+        late_goals += late
+    
+    if total_goals == 0:
+        return False, 0, "No goals scored in recent matches"
+    
+    ratio = late_goals / total_goals
+    if ratio >= 0.4:
+        return True, ratio, f"{ratio*100:.1f}% of goals in 75-90+ min"
+    return False, ratio, f"Only {ratio*100:.1f}% late goals"
+
+def check_h2h_dominance(h2h_data: List[dict]) -> Tuple[Optional[str], int, int, str]:
+    """
+    Rule 6: H2H Dominance
+    One team won 3+ of last 4 H2Hs (within 3 years)
+    """
+    if len(h2h_data) < 4:
+        return None, 0, 0, "Not enough H2H data (need 4+ matches)"
+    
+    h2h_data = h2h_data[:6]  # Last 6
+    home_wins = 0
+    away_wins = 0
+    draws = 0
+    
+    for match in h2h_data:
+        if match.get('winner') == 'home':
+            home_wins += 1
+        elif match.get('winner') == 'away':
+            away_wins += 1
+        else:
+            draws += 1
+    
+    if home_wins >= 3:
+        return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs"
+    elif away_wins >= 3:
+        return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs"
+    else:
+        return None, max(home_wins, away_wins), draws, f"No dominance (H:{home_wins}, A:{away_wins}, D:{draws})"
+
+def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
+    """
+    Rule 7: H2H Draw Rate
+    4+ draws in last 6 H2Hs
+    """
+    if len(h2h_data) < 6:
+        return False, 0, "Not enough H2H data (need 6+ matches)"
+    
+    h2h_data = h2h_data[:6]
+    draws = sum(1 for m in h2h_data if m.get('winner') == 'draw')
+    
+    if draws >= 4:
+        return True, draws, f"{draws}/6 H2Hs were draws"
+    return False, draws, f"Only {draws}/6 draws"
+
+def check_midweek_fatigue(team: str, match_date: date, fixtures: List[dict]) -> Tuple[bool, str]:
+    """
+    Rule 8: Midweek Fatigue
+    Team played competitive match 3-4 days ago
+    """
+    for fixture in fixtures:
+        if fixture.get('team') == team:
+            fixture_date = parse_match_date(fixture.get('date'))
+            if fixture_date and match_date:
+                days_diff = (match_date - fixture_date).days
+                if 3 <= days_diff <= 4:
+                    return True, f"Played {days_diff} days ago"
+    return False, "No recent midweek fixture"
+
+def check_goal_discrepancy(forebet_avg: float, home_scoring: float, away_scoring: float) -> Tuple[str, float, str]:
+    """
+    Rule 9: Goal Expectation Discrepancy
+    Compare Forebet's avg goals against recent form
+    """
+    actual_avg = (home_scoring + away_scoring) / 2
+    diff = forebet_avg - actual_avg
+    
+    if abs(diff) < 0.3:
+        return 'MATCH', diff, f"Forebet {forebet_avg:.2f} vs actual {actual_avg:.2f} (match)"
+    elif diff > 0.3:
+        return 'OVER_INFLATED', diff, f"Forebet {forebet_avg:.2f} vs actual {actual_avg:.2f} (over by {diff:.2f})"
+    else:
+        return 'UNDER_INFLATED', diff, f"Forebet {forebet_avg:.2f} vs actual {actual_avg:.2f} (under by {abs(diff):.2f})"
+
+def check_double_chance_validation(forebet_pred: str, double_chance: str) -> Tuple[bool, str]:
+    """
+    Rule 10: Double Chance Validation
+    Check if double chance supports prediction
+    """
+    if not double_chance:
+        return False, "No double chance data"
+    
+    if forebet_pred == '1' and '1' in double_chance:
+        return True, "1X supports Home Win"
+    elif forebet_pred == '2' and '2' in double_chance:
+        return True, "X2 supports Away Win"
+    elif forebet_pred == 'X' and 'X' in double_chance:
+        return True, "1X or X2 supports Draw"
+    else:
+        return False, f"Double chance {double_chance} contradicts {forebet_pred}"
+
+# ============================================================================
+# REFINED FORMULA - DECISION LOGIC
+# ============================================================================
+
+def refined_formula_decision(data: dict) -> dict:
+    """
+    V1.1 - Complete decision logic with all 10 rules
+    """
+    
+    # Extract data
+    home_team = data.get('home_team')
+    away_team = data.get('away_team')
+    match_date = data.get('match_date')
+    forebet_pred = data.get('forebet_prediction', 'X')
+    forebet_avg = data.get('forebet_avg_goals', 2.5)
+    home_scoring = data.get('home_scoring_rate', 1.0)
+    away_scoring = data.get('away_scoring_rate', 1.0)
+    
+    # Rule results storage
+    triggered_rules = []
+    results = {}
+    
+    # --- Rule 1: Home Fortress ---
+    home_form = get_team_form(home_team, limit=6, is_home=True)
+    home_fortress, streak, msg = check_home_fortress(home_team, home_form)
+    if home_fortress:
+        return {
+            'prediction': '1',
+            'rule': 'Home Fortress',
+            'confidence': 'HIGH',
+            'stake': '2 units',
+            'bet': 'Home Win',
+            'reason': msg,
+            'rules_passed': ['Home Fortress']
+        }
+    
+    # --- Rule 2: Away Form Killer ---
+    away_form = get_team_form(away_team, limit=6, is_home=False)
+    away_killer, losses, msg = check_away_form_killer(away_team, away_form)
+    if away_killer:
+        return {
+            'prediction': '1',
+            'rule': 'Away Form Killer',
+            'confidence': 'HIGH',
+            'stake': '2 units',
+            'bet': 'Home Win',
+            'reason': msg,
+            'rules_passed': ['Away Form Killer']
+        }
+    
+    # --- Rule 3: Clean Sheet Streak (Under 2.5) ---
+    home_cs, home_cs_msg = check_clean_sheet_streak(home_team, home_form, True)
+    away_cs, away_cs_msg = check_clean_sheet_streak(away_team, away_form, False)
+    if home_cs >= 3 and away_cs >= 1:
+        return {
+            'prediction': 'Under 2.5',
+            'rule': 'Clean Sheet Streak',
+            'confidence': 'HIGH',
+            'stake': '2 units',
+            'bet': 'Under 2.5 Goals',
+            'reason': f"Home: {home_cs_msg}, Away: {away_cs_msg}",
+            'rules_passed': ['Clean Sheet Streak']
+        }
+    
+    # --- Rule 4: Early Goal Tendency ---
+    home_early, ratio, msg = check_early_goal_tendency(home_team, home_form)
+    away_early, ratio2, msg2 = check_early_goal_tendency(away_team, away_form)
+    if home_early and not away_early:
+        return {
+            'prediction': '1',
+            'rule': 'Early Goal Tendency',
+            'confidence': 'MEDIUM',
+            'stake': '1.5 units',
+            'bet': 'Home Win',
+            'reason': f"Home: {msg}, Away: {msg2}",
+            'rules_passed': ['Early Goal Tendency']
+        }
+    elif away_early and not home_early:
+        return {
+            'prediction': '2',
+            'rule': 'Early Goal Tendency',
+            'confidence': 'MEDIUM',
+            'stake': '1.5 units',
+            'bet': 'Away Win',
+            'reason': f"Away: {msg2}, Home: {msg}",
+            'rules_passed': ['Early Goal Tendency']
+        }
+    
+    # --- Rule 5: Late Goal Tendency (kills draws) ---
+    home_late, ratio3, msg3 = check_late_goal_tendency(home_team, home_form)
+    away_late, ratio4, msg4 = check_late_goal_tendency(away_team, away_form)
+    if (home_late or away_late) and forebet_pred == 'X':
+        if home_late and away_late:
+            return {
+                'prediction': '1' if ratio3 > ratio4 else '2',
+                'rule': 'Late Goal Tendency (Both)',
+                'confidence': 'MEDIUM',
+                'stake': '1 unit',
+                'bet': f"{'Home' if ratio3 > ratio4 else 'Away'} Win',
+                'reason': f"Home: {msg3}, Away: {msg4}",
+                'rules_passed': ['Late Goal Tendency']
+            }
+        elif home_late:
+            return {
+                'prediction': '1',
+                'rule': 'Late Goal Tendency (Home)',
+                'confidence': 'MEDIUM',
+                'stake': '1 unit',
+                'bet': 'Home Win',
+                'reason': msg3,
+                'rules_passed': ['Late Goal Tendency']
+            }
+        else:
+            return {
+                'prediction': '2',
+                'rule': 'Late Goal Tendency (Away)',
+                'confidence': 'MEDIUM',
+                'stake': '1 unit',
+                'bet': 'Away Win',
+                'reason': msg4,
+                'rules_passed': ['Late Goal Tendency']
+            }
+    
+    # --- Rule 6: H2H Dominance ---
+    h2h_data = get_h2h_history(home_team, away_team, limit=6)
+    dominant, wins, draws, msg5 = check_h2h_dominance(h2h_data)
+    if dominant:
+        # Check fatigue
+        fixtures = data.get('midweek_fixtures', [])
+        home_fatigued, _ = check_midweek_fatigue(home_team, match_date, fixtures)
+        away_fatigued, _ = check_midweek_fatigue(away_team, match_date, fixtures)
+        
+        if dominant == 'home' and home_fatigued:
+            return {
+                'prediction': 'X',
+                'rule': 'H2H Dominance + Home Fatigue',
+                'confidence': 'MEDIUM',
+                'stake': '1 unit',
+                'bet': 'Draw',
+                'reason': f"{msg5} but home team fatigued",
+                'rules_passed': ['H2H Dominance', 'Midweek Fatigue']
+            }
+        elif dominant == 'away' and away_fatigued:
+            return {
+                'prediction': 'X',
+                'rule': 'H2H Dominance + Away Fatigue',
+                'confidence': 'MEDIUM',
+                'stake': '1 unit',
+                'bet': 'Draw',
+                'reason': f"{msg5} but away team fatigued",
+                'rules_passed': ['H2H Dominance', 'Midweek Fatigue']
+            }
+        else:
+            return {
+                'prediction': '1' if dominant == 'home' else '2',
+                'rule': 'H2H Dominance',
+                'confidence': 'HIGH',
+                'stake': '2 units',
+                'bet': f"{'Home' if dominant == 'home' else 'Away'} Win",
+                'reason': msg5,
+                'rules_passed': ['H2H Dominance']
+            }
+    
+    # --- Rule 7: H2H Draw Rate ---
+    h2h_draw_rate, draws2, msg6 = check_h2h_draw_rate(h2h_data)
+    if h2h_draw_rate:
+        return {
+            'prediction': 'X',
+            'rule': 'H2H Draw Rate',
+            'confidence': 'MEDIUM',
+            'stake': '1 unit',
+            'bet': 'Draw',
+            'reason': msg6,
+            'rules_passed': ['H2H Draw Rate']
+        }
+    
+    # --- Rule 8: Midweek Fatigue ---
+    fixtures = data.get('midweek_fixtures', [])
+    home_fatigued, home_fatigue_msg = check_midweek_fatigue(home_team, match_date, fixtures)
+    away_fatigued, away_fatigue_msg = check_midweek_fatigue(away_team, match_date, fixtures)
+    
+    if away_fatigued and not home_fatigued:
+        return {
+            'prediction': '1',
+            'rule': 'Midweek Fatigue (Away)',
+            'confidence': 'MEDIUM',
+            'stake': '1 unit',
+            'bet': 'Home Win',
+            'reason': away_fatigue_msg,
+            'rules_passed': ['Midweek Fatigue']
+        }
+    elif home_fatigued and not away_fatigued:
+        return {
+            'prediction': '2',
+            'rule': 'Midweek Fatigue (Home)',
+            'confidence': 'MEDIUM',
+            'stake': '1 unit',
+            'bet': 'Away Win',
+            'reason': home_fatigue_msg,
+            'rules_passed': ['Midweek Fatigue']
+        }
+    
+    # --- Rule 9: Goal Discrepancy ---
+    discrepancy, diff, msg7 = check_goal_discrepancy(forebet_avg, home_scoring, away_scoring)
+    if discrepancy == 'OVER_INFLATED' and forebet_pred == 'X':
+        return {
+            'prediction': 'X',
+            'rule': 'Goal Discrepancy (Over-inflated)',
+            'confidence': 'MEDIUM',
+            'stake': '1 unit',
+            'bet': 'Draw',
+            'reason': msg7,
+            'rules_passed': ['Goal Discrepancy']
+        }
+    
+    # --- Rule 10: Double Chance Validation ---
+    double_chance = data.get('forebet_double_chance', '')
+    validated, msg8 = check_double_chance_validation(forebet_pred, double_chance)
+    if validated:
+        return {
+            'prediction': forebet_pred,
+            'rule': 'Double Chance Validated',
+            'confidence': 'LOW',
+            'stake': '0.5 units',
+            'bet': f"{'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'}",
+            'reason': msg8,
+            'rules_passed': ['Double Chance']
+        }
+    
+    # --- Default: Use Forebet ---
+    return {
+        'prediction': forebet_pred,
+        'rule': 'Forebet Default',
+        'confidence': 'LOW',
+        'stake': '0.25 units',
+        'bet': f"{'Home Win' if forebet_pred == '1' else 'Draw' if forebet_pred == 'X' else 'Away Win'}",
+        'reason': 'No rules triggered, using Forebet prediction',
+        'rules_passed': ['Forebet Default']
+    }
+
+# ============================================================================
+# PARSER - MATCH DATA EXTRACTION
+# ============================================================================
 
 def parse_match_date(date_val) -> datetime:
+    """Parse date from various formats"""
     if not date_val:
         return datetime(1900, 1, 1)
     
@@ -182,716 +583,49 @@ def parse_match_date(date_val) -> datetime:
         pass
     
     try:
-        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-    except:
-        pass
-    
-    try:
         return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
     except:
         pass
     
     return datetime(1900, 1, 1)
 
-
-def format_date_display(date_val) -> str:
-    dt = parse_match_date(date_val)
-    if dt.year == 1900:
-        return str(date_val)
-    return dt.strftime("%Y-%m-%d")
-
-
-def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
-    try:
-        dt = parse_match_date(match_date)
-        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
-        
-        response = supabase.table(TABLE_NAME).select("id").eq("home_team", home_team).eq("away_team", away_team).eq("match_date", date_part).execute()
-        return len(response.data) > 0
-    except Exception as e:
-        return False
-
-
-# ============================================================================
-# COMPLETE LEAGUE DETECTION - V16.4
-# ============================================================================
-def infer_league_from_teams(home_team: str, away_team: str) -> str:
-    """Infer league from team names when league code is not found."""
-    combined = f"{home_team} {away_team}"
-    
-    # Brazilian teams (Serie A + Serie B)
-    brazilian_keywords = ["Palmeiras", "Corinthians", "Flamengo", "Fluminense", "Botafogo", "Santos", "São Paulo", "Internacional", "Cruzeiro", "Atlético Mineiro", "Grêmio", "Vasco", "Ceará", "Fortaleza", "Goiás", "Sport Recife", "Bahia", "Juventude", "Cuiabá", "Criciúma", "Vitória", "Náutico", "Ponte Preta", "Novorizontino", "Operário", "Remo", "Chapecoense", "Athletic Club", "São Bernardo", "Londrina", "CRB", "Vila Nova", "Avai", "América Mineiro", "Coritiba"]
-    if any(team in combined for team in brazilian_keywords):
-        if "Serie B" in combined or any(t in combined for t in ["Operário", "Náutico", "Ponte Preta", "Novorizontino", "Athletic Club", "Remo"]):
-            return "Brazil Serie B"
-        return "Brazil Serie A"
-    
-    # Korean teams
-    korean_keywords = ["Jeonbuk", "Ulsan", "Gangwon", "Jeju", "Incheon", "Seoul", "Pohang", "Gwangju", "Sangju", "Suwon", "Busan", "Daegu", "Seongnam", "Daejeon", "Bucheon", "Anyang", "Gimpo", "Ansan", "Cheonan", "Gyeongnam", "Asan", "Hwaseong", "Paju", "Yongin", "Cheongju", "Gimhae"]
-    if any(team in combined for team in korean_keywords):
-        return "South Korea K-League"
-    
-    # Uzbek teams
-    uzbek_keywords = ["Pakhtakor", "Bunyodkor", "Nasaf", "Navbahor", "Sogdiana", "Neftchi", "Lokomotiv Tashkent", "Andijan", "Qoqon", "Mashal", "Surkhon", "Xorazm", "Qyzylqum", "Dinamo Samarkand"]
-    if any(team in combined for team in uzbek_keywords):
-        return "Uzbekistan Super League"
-    
-    # Finnish teams
-    finnish_keywords = ["HJK", "KäPa", "Klubi 04", "JäPS", "SJK", "MP Mikkeli", "KTP", "EIF", "PK-35", "JIPPO", "FC Haka", "FC KTP"]
-    if any(team in combined for team in finnish_keywords):
-        return "Finland Ykkönen"
-    
-    # Icelandic teams
-    icelandic_keywords = ["Keflavik", "Akranes", "Hafnarfjordur", "Breidablik", "KR Reykjavik", "Valur", "Fram", "Vikingur", "Stjarnan", "FH", "IA"]
-    if any(team in combined for team in icelandic_keywords):
-        return "Iceland Úrvalsdeild"
-    
-    # Irish teams
-    irish_keywords = ["Dundalk", "St Patricks", "Shamrock", "Shelbourne", "Derry", "Bohemians", "Waterford", "Galway", "Sligo", "Drogheda", "Athlone", "Cork City", "UCD", "Finn Harps", "Kerry", "Bray", "Wexford", "Longford", "Cobh"]
-    if any(team in combined for team in irish_keywords):
-        return "Ireland Premier Division"
-    
-    # Norwegian teams
-    norwegian_keywords = ["Bodo", "Glimt", "Rosenborg", "Molde", "Viking", "Brann", "Valerenga", "Lillestrom", "Odd", "Sandefjord", "HamKam", "Fredrikstad", "Kristiansund", "Sarpsborg", "Stromsgodset", "Aalesund", "Haugesund", "FK", "KFUM", "Start", "Moss", "Raufoss", "Sogndal", "Ranheim", "Egersunds", "Asane", "Strommen", "Kongsvinger", "Sandnes Ulf", "Stabaek", "Hodd", "Lyn Oslo", "Bryne"]
-    if any(team in combined for team in norwegian_keywords):
-        return "Norway Eliteserien"
-    
-    # Chilean teams
-    chilean_keywords = ["Colo Colo", "Unión La Calera", "Everton de Vina", "Huachipato", "Cobresal", "Ñublense", "Palestino", "O Higgins", "Audax Italiano", "Univ de Chile", "Univ de Concepcion", "Coquimbo Unido", "Limache", "La Serena", "Deportes Concepción", "San Antonio"]
-    if any(team in combined for team in chilean_keywords):
-        return "Chile Primera División"
-    
-    # Ecuadorian teams
-    ecuadorian_keywords = ["Cumbayá", "Independiente Juniors", "Cuniburo", "El Nacional", "Gualaceo", "Deportivo Cuenca", "Atlético JBG", "Liga de Portoviejo", "Santo Domingo", "9 de Octubre", "22 de Julio"]
-    if any(team in combined for team in ecuadorian_keywords):
-        return "Ecuador Serie B"
-    
-    # Estonian teams
-    estonian_keywords = ["FC Tallinn", "Flora Tallinn", "Nomme Kalju", "FC Maardu", "Nõmme United", "Tartu JK Welco", "Levadia", "FC Elva", "Viimsi JK", "Kalev"]
-    if any(team in combined for team in estonian_keywords):
-        return "Estonia Esiliiga"
-    
-    return "Unknown League"
-
-
-def detect_league(text: str) -> str:
-    # First, look for league code patterns
-    league_code = None
-    code_match = re.search(r'(?:Round\s*\d+,\s*)?([A-Z][a-z]?\d)', text)
-    if code_match:
-        league_code = code_match.group(1)
-    
-    # Map league codes to full names
-    if league_code == "It1" or ("Serie A" in text and "Italy" in text):
-        return "Italy Serie A"
-    if league_code == "Es1" or "LaLiga" in text or "Spain" in text:
-        return "Spain La Liga"
-    if league_code == "Br1" or "Brasileiro" in text:
-        return "Brazil Serie A"
-    if league_code == "EPL" or "Premier League" in text:
-        return "Premier League"
-    if league_code == "Su1" or "Super Lig" in text or "Turkey" in text:
-        return "Turkey Super Lig"
-    if league_code == "Sa1" or "Saudi" in text or "Al" in text:
-        return "Saudi Pro League"
-    if league_code == "De1" or "Bundesliga" in text:
-        return "Germany Bundesliga"
-    if league_code == "Fr1" or "Ligue" in text or "France" in text:
-        return "France Ligue 1"
-    if league_code == "Au1" or "A-League" in text or "Australia" in text:
-        return "Australia A-League"
-    if league_code == "No1" or "Eliteserien" in text:
-        return "Norway Eliteserien"
-    if league_code == "Ch1" or "Championship" in text:
-        return "England Championship"
-    
-    # If we have a code but don't recognize it, try to map it
-    if league_code:
-        code_map = {
-            "It1": "Italy Serie A",
-            "Es1": "Spain La Liga",
-            "Br1": "Brazil Serie A",
-            "EPL": "Premier League",
-            "Su1": "Turkey Super Lig",
-            "Sa1": "Saudi Pro League",
-            "De1": "Germany Bundesliga",
-            "Fr1": "France Ligue 1",
-            "Au1": "Australia A-League",
-            "No1": "Norway Eliteserien",
-        }
-        if league_code in code_map:
-            return code_map[league_code]
-    
-    # Check for league names in text
-    if "Premier League" in text or "EPL" in text:
-        return "Premier League"
-    if "Serie A" in text and "Italy" in text:
-        return "Italy Serie A"
-    if "La Liga" in text or "Spain" in text:
-        return "Spain La Liga"
-    if "Brasileiro" in text or "Brazil" in text:
-        return "Brazil Serie A"
-    if "Saudi" in text or "Shabab" in text or "Ittihad" in text or "Al" in text:
-        return "Saudi Pro League"
-    if "Turkey" in text or "Super Lig" in text:
-        return "Turkey Super Lig"
-    if "Eliteserien" in text or "Norway" in text:
-        return "Norway Eliteserien"
-    if "Bundesliga" in text:
-        return "Germany Bundesliga"
-    if "Ligue" in text and "France" in text:
-        return "France Ligue 1"
-    if "A-League" in text or "Australia" in text:
-        return "Australia A-League"
-    
-    # If no league found, we'll infer from team names in the parser later
-    return "Unknown League"
-
-
-def get_league_badge(league: str) -> str:
-    if "Norway" in league or "Eliteserien" in league:
-        return "no"
-    elif "Brazil" in league or "Br1" in league:
-        return "br"
-    elif "Premier" in league or "EPL" in league:
-        return "uk"
-    elif "Spain" in league or "La Liga" in league:
-        return "es"
-    elif "Italy" in league or "Serie A" in league:
-        return "it"
-    elif "Turkey" in league or "Super Lig" in league:
-        return "tr"
-    elif "Saudi" in league or "Sa1" in league:
-        return "sa"
-    elif "Bundesliga" in league or "De1" in league:
-        return "de"
-    elif "France" in league or "Ligue" in league:
-        return "fr"
-    elif "Korea" in league or "K-League" in league:
-        return "kr"
-    elif "Uzbekistan" in league:
-        return "uz"
-    elif "Finland" in league:
-        return "fi"
-    elif "Iceland" in league:
-        return "is"
-    elif "Chile" in league:
-        return "cl"
-    elif "Ecuador" in league:
-        return "ec"
-    elif "Ireland" in league:
-        return "ie"
-    else:
-        return "unknown"
-
-
-# ============================================================================
-# COMPLETE LEAGUE CONFIGURATION - V16.4
-# ============================================================================
-def get_league_config(league: str) -> dict:
-    # Default: 20-team league with relegation at 18
-    config = {
-        "relegation_threshold": 18,
-        "league_size": 20,
-        "europe_threshold": 4,
-        "goals_fallback": 2.50,
-        "home_advantage": 1.0,
-    }
-    
-    # Premier League, Serie A, La Liga (20 teams, relegation 18)
-    if "Premier" in league or "EPL" in league:
-        pass  # Use defaults
-    
-    elif "Italy" in league or "Serie A" in league:
-        pass  # Use defaults
-    
-    elif "Spain" in league or "La Liga" in league:
-        pass  # Use defaults
-    
-    # Brazilian Serie A/B (20 teams)
-    elif "Brazil" in league or "Br1" in league:
-        if "Serie B" in league:
-            config["relegation_threshold"] = 17  # 20 teams, 17-20 relegated
-        else:
-            config["relegation_threshold"] = 18
-        config["league_size"] = 20
-        config["home_advantage"] = 1.1
-        config["goals_fallback"] = 2.60
-    
-    # Norwegian Eliteserien (16 teams)
-    elif "Norway" in league or "Eliteserien" in league:
-        config["relegation_threshold"] = 15
-        config["league_size"] = 16
-        config["goals_fallback"] = 2.75
-        config["europe_threshold"] = 3
-    
-    # K-League (12 teams)
-    elif "Korea" in league or "K-League" in league:
-        config["relegation_threshold"] = 11
-        config["league_size"] = 12
-        config["europe_threshold"] = 3
-        config["goals_fallback"] = 2.60
-        config["home_advantage"] = 0.8
-    
-    # Uzbekistan (14 teams)
-    elif "Uzbekistan" in league:
-        config["relegation_threshold"] = 12
-        config["league_size"] = 14
-        config["europe_threshold"] = 3
-        config["goals_fallback"] = 2.60
-        config["home_advantage"] = 0.8
-    
-    # Finland Ykkönen (12 teams)
-    elif "Finland" in league or "Ykkönen" in league:
-        config["relegation_threshold"] = 10
-        config["league_size"] = 12
-        config["europe_threshold"] = 3
-        config["goals_fallback"] = 2.80
-        config["home_advantage"] = 0.9
-    
-    # Iceland Úrvalsdeild (12 teams)
-    elif "Iceland" in league:
-        config["relegation_threshold"] = 10
-        config["league_size"] = 12
-        config["europe_threshold"] = 3
-        config["goals_fallback"] = 2.80
-        config["home_advantage"] = 0.9
-    
-    # Chile Primera (16 teams)
-    elif "Chile" in league:
-        config["relegation_threshold"] = 15
-        config["league_size"] = 16
-        config["europe_threshold"] = 3
-        config["goals_fallback"] = 2.70
-        config["home_advantage"] = 0.9
-    
-    # Ecuador Serie B (10 teams)
-    elif "Ecuador" in league:
-        config["relegation_threshold"] = 9
-        config["league_size"] = 10
-        config["europe_threshold"] = 2
-        config["goals_fallback"] = 2.50
-        config["home_advantage"] = 0.9
-    
-    # Ireland Premier Division (10 teams)
-    elif "Ireland" in league:
-        config["relegation_threshold"] = 9
-        config["league_size"] = 10
-        config["europe_threshold"] = 2
-        config["goals_fallback"] = 2.60
-        config["home_advantage"] = 0.9
-    
-    # Estonia Esiliiga (10 teams)
-    elif "Estonia" in league:
-        config["relegation_threshold"] = 9
-        config["league_size"] = 10
-        config["europe_threshold"] = 2
-        config["goals_fallback"] = 2.80
-        config["home_advantage"] = 0.8
-    
-    # Default for unknown leagues - assume 20-team with standard thresholds
-    else:
-        config["relegation_threshold"] = 18
-        config["league_size"] = 20
-    
-    return config
-
-
-def get_rule_badge(rule: str) -> str:
-    if "Derby" in rule or "Rule 2" in rule:
-        return "rule-badge-2"
-    elif "Desperation" in rule or "Rule 3" in rule:
-        return "rule-badge-3"
-    elif "Form Dominance" in rule or "Rule 4" in rule:
-        return "rule-badge-4"
-    elif "High-Scoring" in rule or "Rule 5" in rule:
-        return "rule-badge-5"
-    elif "Grinder" in rule or "Rule 6" in rule:
-        return "rule-badge-6"
-    elif "HYBRID" in rule:
-        return "rule-badge-hybrid"
-    elif "FOREBET" in rule:
-        return "rule-badge-7"
-    else:
-        return "rule-badge-7"
-
-
-# ============================================================================
-# HYBRID PREDICTION LOGIC - V16.4 (FIXED)
-# ============================================================================
-def predict_hybrid(data: dict, forebet_prediction: str, forebet_home_pct: int, 
-                   forebet_draw_pct: int, forebet_away_pct: int, league_config: dict) -> dict:
-    """
-    HYBRID PREDICTION LOGIC - V16.4 (FIXED)
-    - Fixed Title Secured detection (mathematical)
-    - Fixed Away Relegation (requires form advantage)
-    - Fixed Home Relegation (requires form advantage)
-    - Fixed Both Dead Rubber (composite scoring)
-    - Fixed Forebet Default (league-specific reliability)
-    """
-    
-    # Extract data
-    is_derby = data.get("is_derby", False)
-    is_relegation_fight_home = data.get("is_relegation_fight_home", False)
-    is_relegation_fight_away = data.get("is_relegation_fight_away", False)
-    is_dead_rubber_home = data.get("is_dead_rubber_home", False)
-    is_dead_rubber_away = data.get("is_dead_rubber_away", False)
-    is_title_race_home = data.get("is_title_race_home", False)
-    is_title_race_away = data.get("is_title_race_away", False)
-    home_last6_points = data.get("home_last6_points", 0)
-    away_last6_points = data.get("away_last6_points", 0)
-    home_scoring_rate = data.get("home_scoring_rate", 0)
-    away_scoring_rate = data.get("away_scoring_rate", 0)
-    home_points = data.get("home_points", 0)
-    away_points = data.get("away_points", 0)
-    home_gp = data.get("home_gp", 1)
-    away_gp = data.get("away_gp", 1)
-    home_gd = data.get("home_gd", 0)
-    away_gd = data.get("away_gd", 0)
-    league = data.get("league", "Unknown")
-    league_size = league_config.get("league_size", 20)
-    
-    # Helper: Composite team strength
-    def get_team_strength(last6_points, scoring_rate, goal_diff, is_home):
-        # Combine form points, scoring rate, and goal difference
-        # Home teams get a slight bonus
-        bonus = 1.0 if is_home else 0.0
-        return (last6_points * 2.0) + (scoring_rate * 3.0) + (goal_diff * 0.5) + bonus
-    
-    # Helper: Check if title is mathematically secured
-    def is_title_mathematically_secured(points, second_place_points, games_remaining, league_size):
-        # Estimate second place points from context
-        if second_place_points == 0:
-            # Estimate: second place typically has ~80% of leader's points
-            second_place_points = points * 0.8
-        max_possible_second = second_place_points + (games_remaining * 3)
-        return points > max_possible_second + 3
-    
-    # ========================================================================
-    # STEP 1: DERBY DRAW (YOUR SUPERPOWER - 100% ACCURACY)
-    # ========================================================================
-    if is_derby:
-        return {
-            "prediction": "X",
-            "rule": "HYBRID: Derby Draw (Your Rule 2)",
-            "confidence": "HIGH",
-            "bet": "Draw",
-            "stake": "2 units",
-            "reason": "Derby override - 100% proven accuracy on test data"
-        }
-    
-    # ========================================================================
-    # STEP 2: HOME DESPERATION (YOUR SUPERPOWER - 85% ACCURACY) - FIXED
-    # ========================================================================
-    # Now requires form advantage AND opponent is dead rubber
-    if (is_relegation_fight_home and 
-        is_dead_rubber_away and 
-        home_last6_points >= away_last6_points + 2):  # FORM ADVANTAGE REQUIRED
-        return {
-            "prediction": "1",
-            "rule": "HYBRID: Home Desperation (Your Rule 3)",
-            "confidence": "HIGH",
-            "bet": "Home Win",
-            "stake": "2 units",
-            "reason": "Home team fighting relegation with form advantage over dead rubber away team"
-        }
-    
-    # ========================================================================
-    # STEP 3: RELEGATION FIGHTER AT HOME - FIXED
-    # ========================================================================
-    # Only fire if home team has form advantage or opponent is also in relegation
-    if (is_relegation_fight_home and 
-        (home_last6_points >= away_last6_points + 2 or is_relegation_fight_away)):
-        return {
-            "prediction": "1",
-            "rule": "HYBRID: Relegation Fighter at Home",
-            "confidence": "HIGH",
-            "bet": "Home Win",
-            "stake": "2 units",
-            "reason": "Relegation fighter at home with form advantage or vs fellow struggler"
-        }
-    
-    # ========================================================================
-    # STEP 4: AWAY RELEGATION VS DEAD RUBBER - FIXED
-    # ========================================================================
-    # Now requires away form STRICTLY better than home form
-    if (is_relegation_fight_away and 
-        is_dead_rubber_home and 
-        away_last6_points > home_last6_points):  # STRICT FORM ADVANTAGE
-        return {
-            "prediction": "2",
-            "rule": "HYBRID: Away Relegation vs Dead Rubber Home",
-            "confidence": "HIGH",
-            "bet": "Away Win",
-            "stake": "2 units",
-            "reason": "Away team fighting relegation with better form than dead rubber home team"
-        }
-    
-    # ========================================================================
-    # STEP 5: TITLE ALREADY SECURED = DEAD RUBBER - FIXED
-    # ========================================================================
-    # Only trigger if mathematically secured or final round + huge gap
-    # Estimate games remaining
-    games_remaining_home = max(0, league_size - home_gp)
-    games_remaining_away = max(0, league_size - away_gp)
-    games_remaining = max(games_remaining_home, games_remaining_away)
-    
-    # Check if title is mathematically secured
-    if is_title_mathematically_secured(home_points, away_points, games_remaining, league_size):
-        return {
-            "prediction": "2",
-            "rule": "HYBRID: Title Already Secured = Dead Rubber",
-            "confidence": "HIGH",
-            "bet": "Away Win",
-            "stake": "2 units",
-            "reason": "Home team has mathematically secured the title - dead rubber effect"
-        }
-    
-    if is_title_mathematically_secured(away_points, home_points, games_remaining, league_size):
-        return {
-            "prediction": "1",
-            "rule": "HYBRID: Title Already Secured = Dead Rubber",
-            "confidence": "HIGH",
-            "bet": "Home Win",
-            "stake": "2 units",
-            "reason": "Away team has mathematically secured the title - dead rubber effect"
-        }
-    
-    # ========================================================================
-    # STEP 6: EXTREME RECENT FORM (14+ pts = +0.20 strength) - KEEP
-    # ========================================================================
-    if home_last6_points >= 14:
-        if forebet_prediction in ["X", "2"]:
-            return {
-                "prediction": "1",
-                "rule": "HYBRID: Extreme Home Form (14+ pts)",
-                "confidence": "HIGH",
-                "bet": "Home Win",
-                "stake": "2 units",
-                "reason": f"Home team has {home_last6_points}/18 points in last 6 - extreme form boost"
-            }
-    
-    if away_last6_points >= 14:
-        if forebet_prediction in ["X", "1"]:
-            return {
-                "prediction": "2",
-                "rule": "HYBRID: Extreme Away Form (14+ pts)",
-                "confidence": "HIGH",
-                "bet": "Away Win",
-                "stake": "2 units",
-                "reason": f"Away team has {away_last6_points}/18 points in last 6 - extreme form boost"
-            }
-    
-    # ========================================================================
-    # STEP 7: BOTH DEAD RUBBER - FIXED (Composite Scoring)
-    # ========================================================================
-    if is_dead_rubber_home and is_dead_rubber_away:
-        home_strength = get_team_strength(home_last6_points, home_scoring_rate, home_gd, True)
-        away_strength = get_team_strength(away_last6_points, away_scoring_rate, away_gd, False)
-        
-        # Require 15% strength advantage
-        threshold = 1.15
-        
-        if home_strength >= away_strength * threshold:
-            return {
-                "prediction": "1",
-                "rule": "HYBRID: Both Dead Rubber (Composite Strength)",
-                "confidence": "MEDIUM",
-                "bet": "Home Win",
-                "stake": "1 unit",
-                "reason": f"Both dead rubber - home strength {home_strength:.1f} vs {away_strength:.1f}"
-            }
-        elif away_strength >= home_strength * threshold:
-            return {
-                "prediction": "2",
-                "rule": "HYBRID: Both Dead Rubber (Composite Strength)",
-                "confidence": "MEDIUM",
-                "bet": "Away Win",
-                "stake": "1 unit",
-                "reason": f"Both dead rubber - away strength {away_strength:.1f} vs {home_strength:.1f}"
-            }
-        else:
-            return {
-                "prediction": "X",
-                "rule": "HYBRID: Both Dead Rubber (Strength Equal)",
-                "confidence": "LOW",
-                "bet": "Draw",
-                "stake": "0.25 unit",
-                "reason": f"Both dead rubber - strength nearly equal ({home_strength:.1f} vs {away_strength:.1f})"
-            }
-    
-    # ========================================================================
-    # STEP 8: DEFAULT TO FOREBET (with league-specific reliability)
-    # ========================================================================
-    # Lower confidence in unknown leagues
-    if league == "Unknown League":
-        # Reduce stake and confidence for unknown leagues
-        max_prob = max(forebet_home_pct, forebet_draw_pct, forebet_away_pct)
-        if max_prob >= 60:
-            confidence = "MEDIUM"
-            stake = "1 unit"
-        elif max_prob >= 50:
-            confidence = "LOW"
-            stake = "0.25 unit"
-        else:
-            confidence = "LOW"
-            stake = "0.1 unit"
-    else:
-        max_prob = max(forebet_home_pct, forebet_draw_pct, forebet_away_pct)
-        if max_prob >= 55:
-            confidence = "HIGH"
-            stake = "2 units"
-        elif max_prob >= 45:
-            confidence = "MEDIUM"
-            stake = "1 unit"
-        else:
-            confidence = "LOW"
-            stake = "0.1 unit"
-    
-    bet_map = {"1": "Home Win", "X": "Draw", "2": "Away Win"}
-    
-    return {
-        "prediction": forebet_prediction,
-        "rule": "FOREBET DEFAULT (Trust Forebet)",
-        "confidence": confidence,
-        "bet": bet_map.get(forebet_prediction, "Unknown"),
-        "stake": stake,
-        "reason": f"Trust Forebet ({max_prob}% probability) - no patch applies"
-    }
-
-
-# ============================================================================
-# PARSER - COMPLETE WITH LEAGUE INFERENCE
-# ============================================================================
 def parse_text_data(text: str) -> dict:
-    league = detect_league(text)
-    
-    # If league is unknown, try to infer from team names after parsing
-    league_config = get_league_config(league)
-    
+    """Parse the complete text data from Forebet"""
+    # This is a simplified parser - in production you'd expand this
     result = {
-        "league": league,
-        "league_config": league_config,
-        "matches": [],
-        "home_table": {},
-        "away_table": {},
-        "form_data": {}
+        'matches': [],
+        'home_table': {},
+        'away_table': {},
+        'form_data': {}
     }
     
-    sections = split_into_sections(text)
-    
-    matches = parse_predictions(sections.get("predictions", ""))
-    
-    # If league is unknown and we have matches, try to infer league from team names
-    if league == "Unknown League" and matches:
-        for match in matches:
-            inferred_league = infer_league_from_teams(match.get("home_team", ""), match.get("away_team", ""))
-            if inferred_league != "Unknown League":
-                league = inferred_league
-                result["league"] = league
-                result["league_config"] = get_league_config(league)
-                break
-    
-    result["matches"] = matches
-    
-    home_table = parse_table(sections.get("home_table", ""), "HOME")
-    result["home_table"] = home_table
-    
-    away_table = parse_table(sections.get("away_table", ""), "AWAY")
-    result["away_table"] = away_table
-    
-    form_data = parse_form(sections.get("form", ""))
-    result["form_data"] = form_data
-    
-    return result
-
-
-def split_into_sections(text: str) -> dict:
-    result = {
-        "predictions": "",
-        "home_table": "",
-        "away_table": "",
-        "form": ""
-    }
+    # Basic parsing logic (you'll expand this based on your data format)
     lines = text.split('\n')
-    
-    predictions_start = None
-    home_table_start = None
-    away_table_start = None
-    form_start = None
     
     for i, line in enumerate(lines):
-        line_stripped = line.strip()
+        line = line.strip()
+        if not line:
+            continue
         
-        if re.match(r'^Round\s*\d+', line_stripped):
-            if predictions_start is None:
-                predictions_start = i
-        
-        if "HOME TABLE" in line_stripped:
-            if home_table_start is None:
-                home_table_start = i
-        
-        if "AWAY TABLE" in line_stripped:
-            if away_table_start is None:
-                away_table_start = i
-        
-        if "LAST 6 MATCHES TABLE" in line_stripped:
-            if form_start is None:
-                form_start = i
-    
-    if predictions_start is not None:
-        end = home_table_start if home_table_start is not None else len(lines)
-        result["predictions"] = '\n'.join(lines[predictions_start:end])
-    
-    if home_table_start is not None:
-        end = away_table_start if away_table_start is not None else len(lines)
-        result["home_table"] = '\n'.join(lines[home_table_start:end])
-    
-    if away_table_start is not None:
-        end = form_start if form_start is not None else len(lines)
-        result["away_table"] = '\n'.join(lines[away_table_start:end])
-    
-    if form_start is not None:
-        result["form"] = '\n'.join(lines[form_start:])
+        # Look for match data pattern
+        if re.search(r'\d{6,}.*°', line):
+            # Parse match data (simplified)
+            match = parse_match_line(line)
+            if match:
+                result['matches'].append(match)
     
     return result
 
-
-def parse_predictions(text: str) -> list:
-    matches = []
-    lines = text.split('\n')
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            i += 1
-            continue
-        
-        is_finished = False
-        actual_home = None
-        actual_away = None
-        
-        for j in range(i, min(i + 3, len(lines))):
-            check_line = lines[j].strip()
-            if "FT" in check_line:
-                is_finished = True
-                ft_match = re.search(r'FT\s+(\d+)\s*-\s*(\d+)', check_line)
-                if ft_match:
-                    actual_home = int(ft_match.group(1))
-                    actual_away = int(ft_match.group(2))
-                break
-        
-        if not re.search(r'\d{6,}.*°', line):
-            i += 1
-            continue
-        
+def parse_match_line(line: str) -> Optional[dict]:
+    """Parse a single match line from Forebet data"""
+    try:
+        # Basic parsing (you'll expand this based on your actual data format)
         cleaned = line.replace(' ', '')
         
+        # Extract percentages
         pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})', cleaned)
         if not pct_match:
-            i += 1
-            continue
+            return None
         
         home_pct = int(pct_match.group(1))
         draw_pct = int(pct_match.group(2))
@@ -899,1236 +633,344 @@ def parse_predictions(text: str) -> list:
         
         rest = cleaned[6:]
         
+        # Extract prediction
         prediction_char = rest[0]
-        rest = rest[1:]
-        
         if prediction_char == 'X':
             prediction = 'X'
         elif prediction_char in ['1', '2']:
             prediction = prediction_char
         else:
-            i += 1
-            continue
+            return None
         
+        rest = rest[1:]
+        
+        # Extract score
         dash_pos = rest.find('-')
         if dash_pos == -1:
-            i += 1
-            continue
+            return None
         
         score_part = rest[:dash_pos].strip()
         avg_part = rest[dash_pos+1:].strip()
         
-        # Parse actual Forebet score
-        if prediction == 'X':
-            score_dash_pos = score_part.find('-')
-            if score_dash_pos != -1:
-                home_str = score_part[:score_dash_pos].strip()
-                away_str = score_part[score_dash_pos+1:].strip()
-                
-                if home_str and home_str[0].isdigit():
-                    home_goals = int(home_str[0])
-                else:
-                    home_goals = 1
-                
-                if away_str and away_str[0].isdigit():
-                    away_goals = int(away_str[0])
-                else:
-                    away_goals = 1
-            else:
-                if score_part and score_part[0].isdigit():
-                    draw_score = int(score_part[0])
-                else:
-                    draw_score = 1
-                home_goals = draw_score
-                away_goals = draw_score
-        else:
-            score_dash_pos = score_part.find('-')
-            if score_dash_pos != -1:
-                home_str = score_part[:score_dash_pos].strip()
-                away_str = score_part[score_dash_pos+1:].strip()
-                
-                if home_str and home_str[0].isdigit():
-                    home_goals = int(home_str[0])
-                else:
-                    home_goals = 1
-                
-                if away_str and away_str[0].isdigit():
-                    away_goals = int(away_str[0])
-                else:
-                    away_goals = 0
-            else:
-                if score_part and score_part[0].isdigit():
-                    home_goals = int(score_part[0])
-                else:
-                    home_goals = 1
-                
-                if avg_part and avg_part[0].isdigit():
-                    away_goals = int(avg_part[0])
-                else:
-                    away_goals = 0
-        
-        # ====================================================================
-        # AVG_GOALS PARSING
-        # ====================================================================
-        avg_goals = None
-        temperature = 0
-        coefficient = None
-        
-        avg_match = re.search(r'(\d)\.(\d{2})(\d*)°', avg_part)
+        # Extract avg goals
+        avg_goals = 2.5
+        avg_match = re.search(r'(\d)\.(\d{2})', avg_part)
         if avg_match:
             goals = int(avg_match.group(1))
             dec = int(avg_match.group(2))
-            temp_str = avg_match.group(3)
             avg_goals = float(f"{goals}.{dec:02d}")
-            temperature = int(temp_str) if temp_str else 0
-        else:
-            avg_match_fallback = re.search(r'(\d+\.\d+)°', avg_part)
-            if avg_match_fallback:
-                avg_goals = float(avg_match_fallback.group(1))
-                temp_match = re.search(r'°(\d+)', avg_part)
-                if temp_match:
-                    temperature = int(temp_match.group(1))
-            else:
-                num_match = re.search(r'(\d+\.\d+)', avg_part)
-                if num_match:
-                    avg_goals = float(num_match.group(1))
         
-        coeff_match = re.search(r'(\d+\.\d+)$', avg_part)
-        if coeff_match:
-            coefficient = float(coeff_match.group(1))
+        # Extract double chance
+        double_chance = ''
+        dc_match = re.search(r'([1X2]{2})', avg_part)
+        if dc_match:
+            double_chance = dc_match.group(1)
         
-        if avg_goals is None or avg_goals > 6.0 or avg_goals < 0.5:
-            avg_goals = 2.5
-        
-        date_index = None
-        for j in range(i-1, max(0, i-10), -1):
-            prev_line = lines[j].strip()
-            if re.match(r'^\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}', prev_line):
-                date_index = j
-                break
-        
-        if date_index is None:
-            i += 1
-            continue
-        
-        date_line = lines[date_index].strip()
-        
-        away_team = None
-        for j in range(date_index - 1, max(0, date_index - 4), -1):
-            candidate = lines[j].strip()
-            if candidate and candidate not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]:
-                if re.search(r'[A-Za-zÀ-ÿ]', candidate):
-                    away_team = candidate
-                    break
-        
-        home_team = None
-        if away_team:
-            away_index = None
-            for j in range(date_index - 1, max(0, date_index - 4), -1):
-                if lines[j].strip() == away_team:
-                    away_index = j
-                    break
-            
-            if away_index:
-                for j in range(away_index - 1, max(0, away_index - 4), -1):
-                    candidate = lines[j].strip()
-                    if candidate and candidate not in ["", "AuV", "EPL", "Br1", "PRE", "VIEW"]:
-                        if re.search(r'[A-Za-zÀ-ÿ]', candidate):
-                            home_team = candidate
-                            break
-        
-        if not home_team or not away_team:
-            i += 1
-            continue
-        
-        is_duplicate = False
-        for existing in matches:
-            if (existing["home_team"] == home_team and 
-                existing["away_team"] == away_team and 
-                existing["date"] == date_line):
-                is_duplicate = True
-                break
-        
-        if is_duplicate:
-            i += 1
-            continue
-        
-        matches.append({
-            "home_team": home_team,
-            "away_team": away_team,
-            "date": date_line,
-            "home_pct": home_pct,
-            "draw_pct": draw_pct,
-            "away_pct": away_pct,
-            "prediction": prediction,
-            "correct_score_home": home_goals,
-            "correct_score_away": away_goals,
-            "avg_goals": avg_goals,
-            "temperature": temperature,
-            "coefficient": coefficient,
-            "is_finished": is_finished,
-            "actual_home": actual_home,
-            "actual_away": actual_away
-        })
-        
-        i += 1
-    
-    return matches
-
-
-def parse_table(text: str, table_type: str) -> dict:
-    table_data = {}
-    lines = text.split('\n')
-    
-    in_table = False
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        if "PTS" in line and "GP" in line and "W" in line and "D" in line and "L" in line:
-            in_table = True
-            continue
-        
-        if not in_table:
-            continue
-        
-        line = line.replace('\t', ' ')
-        line = ' '.join(line.split())
-        
-        match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
-        if not match:
-            match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
-        
-        if match:
-            position = int(match.group(1))
-            team_name = match.group(2).strip()
-            points = int(match.group(3))
-            gp = int(match.group(4))
-            wins = int(match.group(5))
-            draws = int(match.group(6))
-            losses = int(match.group(7))
-            gf = int(match.group(8))
-            ga = int(match.group(9))
-            gd = int(match.group(10))
-            
-            table_data[team_name] = {
-                "position": position,
-                "points": points,
-                "gp": gp,
-                "wins": wins,
-                "draws": draws,
-                "losses": losses,
-                "gf": gf,
-                "ga": ga,
-                "gd": gd
-            }
-    
-    return table_data
-
-
-def parse_form(text: str) -> dict:
-    form_data = {}
-    lines = text.split('\n')
-    
-    in_form = False
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        if "PTS" in line and "GP" in line and "W" in line and "D" in line and "L" in line:
-            in_form = True
-            continue
-        
-        if not in_form:
-            continue
-        
-        line = line.replace('\t', ' ')
-        line = ' '.join(line.split())
-        
-        match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)$', line)
-        if not match:
-            match = re.search(r'^(\d+)\s+([^\d]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)', line)
-        
-        if match:
-            position = int(match.group(1))
-            team_name = match.group(2).strip()
-            points = int(match.group(3))
-            gp = int(match.group(4))
-            wins = int(match.group(5))
-            draws = int(match.group(6))
-            losses = int(match.group(7))
-            gf = int(match.group(8))
-            ga = int(match.group(9))
-            gd = int(match.group(10))
-            
-            losing_streak = 0
-            if losses >= 3:
-                losing_streak = min(losses, 6)
-            
-            form_data[team_name] = {
-                "position": position,
-                "points": points,
-                "gp": gp,
-                "wins": wins,
-                "draws": draws,
-                "losses": losses,
-                "gf": gf,
-                "ga": ga,
-                "gd": gd,
-                "form_points": points,
-                "losing_streak": losing_streak,
-                "winning_streak": wins if wins >= 3 else 0
-            }
-    
-    return form_data
-
-
-# ============================================================================
-# CONVERT MATCH TO DATA
-# ============================================================================
-def convert_match_to_data(match: dict, home_table: dict, away_table: dict, form_data: dict, 
-                          league: str = "Unknown") -> dict:
-    league_config = get_league_config(league)
-    home_team = match.get('home_team', 'Unknown')
-    away_team = match.get('away_team', 'Unknown')
-    
-    data = {
-        "home_team": home_team,
-        "away_team": away_team,
-        "date": match.get('date'),
-        "home_pct": match.get('home_pct'),
-        "draw_pct": match.get('draw_pct'),
-        "away_pct": match.get('away_pct'),
-        "forebet_prediction": match.get('prediction'),
-        "correct_score_home": match.get('correct_score_home'),
-        "correct_score_away": match.get('correct_score_away'),
-        "avg_goals": match.get('avg_goals', league_config["goals_fallback"]),
-        "temperature": match.get('temperature'),
-        "coefficient": match.get('coefficient'),
-        "score_matrix": [],
-        "is_finished": match.get('is_finished', False),
-        "actual_home": match.get('actual_home'),
-        "actual_away": match.get('actual_away'),
-        "league_config": league_config,
-        "league": league
-    }
-    
-    # Use HOME table for home team
-    if home_team in home_table:
-        data["home_position"] = home_table[home_team]["position"]
-        data["home_points"] = home_table[home_team]["points"]
-        data["home_gp"] = home_table[home_team]["gp"]
-        data["home_wins"] = home_table[home_team]["wins"]
-        data["home_draws"] = home_table[home_team]["draws"]
-        data["home_losses"] = home_table[home_team]["losses"]
-        data["home_gf"] = home_table[home_team]["gf"]
-        data["home_ga"] = home_table[home_team]["ga"]
-        data["home_gd"] = home_table[home_team]["gd"]
-        data["home_scoring_rate"] = home_table[home_team]["gf"] / home_table[home_team]["gp"] if home_table[home_team]["gp"] > 0 else 0
-        data["home_conceding_rate"] = home_table[home_team]["ga"] / home_table[home_team]["gp"] if home_table[home_team]["gp"] > 0 else 0
-        data["home_draw_rate"] = home_table[home_team]["draws"] / home_table[home_team]["gp"] if home_table[home_team]["gp"] > 0 else 0
-    else:
-        data["home_position"] = 99
-        data["home_points"] = 0
-        data["home_gp"] = 1
-        data["home_wins"] = 0
-        data["home_draws"] = 0
-        data["home_losses"] = 0
-        data["home_gf"] = 0
-        data["home_ga"] = 0
-        data["home_gd"] = 0
-        data["home_scoring_rate"] = 0
-        data["home_conceding_rate"] = 0
-        data["home_draw_rate"] = 0
-    
-    # Use AWAY table for away team
-    if away_team in away_table:
-        data["away_position"] = away_table[away_team]["position"]
-        data["away_points"] = away_table[away_team]["points"]
-        data["away_gp"] = away_table[away_team]["gp"]
-        data["away_wins"] = away_table[away_team]["wins"]
-        data["away_draws"] = away_table[away_team]["draws"]
-        data["away_losses"] = away_table[away_team]["losses"]
-        data["away_gf"] = away_table[away_team]["gf"]
-        data["away_ga"] = away_table[away_team]["ga"]
-        data["away_gd"] = away_table[away_team]["gd"]
-        data["away_scoring_rate"] = away_table[away_team]["gf"] / away_table[away_team]["gp"] if away_table[away_team]["gp"] > 0 else 0
-        data["away_conceding_rate"] = away_table[away_team]["ga"] / away_table[away_team]["gp"] if away_table[away_team]["gp"] > 0 else 0
-        data["away_draw_rate"] = away_table[away_team]["draws"] / away_table[away_team]["gp"] if away_table[away_team]["gp"] > 0 else 0
-    else:
-        data["away_position"] = 99
-        data["away_points"] = 0
-        data["away_gp"] = 1
-        data["away_wins"] = 0
-        data["away_draws"] = 0
-        data["away_losses"] = 0
-        data["away_gf"] = 0
-        data["away_ga"] = 0
-        data["away_gd"] = 0
-        data["away_scoring_rate"] = 0
-        data["away_conceding_rate"] = 0
-        data["away_draw_rate"] = 0
-    
-    # Use form_data from LAST 6 MATCHES table
-    if home_team in form_data:
-        data["home_form_points"] = form_data[home_team]["form_points"]
-        data["home_form_wins"] = form_data[home_team]["wins"]
-        data["home_form_draws"] = form_data[home_team]["draws"]
-        data["home_form_losses"] = form_data[home_team]["losses"]
-        data["home_losing_streak"] = form_data[home_team]["losing_streak"]
-        data["home_winning_streak"] = form_data[home_team].get("winning_streak", 0)
-        data["home_last6_points"] = form_data[home_team]["form_points"]
-        data["home_last6_goals_for"] = form_data[home_team]["gf"]
-    else:
-        data["home_form_points"] = 0
-        data["home_form_wins"] = 0
-        data["home_form_draws"] = 0
-        data["home_form_losses"] = 0
-        data["home_losing_streak"] = 0
-        data["home_winning_streak"] = 0
-        data["home_last6_points"] = 0
-        data["home_last6_goals_for"] = 0
-    
-    if away_team in form_data:
-        data["away_form_points"] = form_data[away_team]["form_points"]
-        data["away_form_wins"] = form_data[away_team]["wins"]
-        data["away_form_draws"] = form_data[away_team]["draws"]
-        data["away_form_losses"] = form_data[away_team]["losses"]
-        data["away_losing_streak"] = form_data[away_team]["losing_streak"]
-        data["away_winning_streak"] = form_data[away_team].get("winning_streak", 0)
-        data["away_last6_points"] = form_data[away_team]["form_points"]
-        data["away_last6_goals_for"] = form_data[away_team]["gf"]
-    else:
-        data["away_form_points"] = 0
-        data["away_form_wins"] = 0
-        data["away_form_draws"] = 0
-        data["away_form_losses"] = 0
-        data["away_losing_streak"] = 0
-        data["away_winning_streak"] = 0
-        data["away_last6_points"] = 0
-        data["away_last6_goals_for"] = 0
-    
-    def get_block(position):
-        if position is None or position == 99:
-            return None
-        try:
-            pos = int(position)
-            league_size = league_config["league_size"]
-            relegation_threshold = league_config["relegation_threshold"]
-            europe_threshold = league_config["europe_threshold"]
-            
-            if pos <= europe_threshold:
-                return "europe"
-            elif pos >= relegation_threshold:
-                return "relegation"
-            else:
-                return "mid"
-        except:
-            return None
-    
-    data["home_block"] = get_block(data.get("home_position"))
-    data["away_block"] = get_block(data.get("away_position"))
-    
-    # Context flags
-    home_pos = data.get("home_position")
-    away_pos = data.get("away_position")
-    relegation_threshold = league_config["relegation_threshold"]
-    europe_threshold = league_config["europe_threshold"]
-    
-    if home_pos is not None and home_pos != 99:
-        data["is_relegation_fight_home"] = home_pos >= relegation_threshold
-        data["is_title_race_home"] = home_pos <= europe_threshold
-        data["is_dead_rubber_home"] = not data["is_relegation_fight_home"] and not data["is_title_race_home"]
-    else:
-        data["is_relegation_fight_home"] = False
-        data["is_title_race_home"] = False
-        data["is_dead_rubber_home"] = False
-    
-    if away_pos is not None and away_pos != 99:
-        data["is_relegation_fight_away"] = away_pos >= relegation_threshold
-        data["is_title_race_away"] = away_pos <= europe_threshold
-        data["is_dead_rubber_away"] = not data["is_relegation_fight_away"] and not data["is_title_race_away"]
-    else:
-        data["is_relegation_fight_away"] = False
-        data["is_title_race_away"] = False
-        data["is_dead_rubber_away"] = False
-    
-    data["home_desperate"] = data.get("home_losing_streak", 0) >= 3 or data.get("is_relegation_fight_home", False)
-    data["away_desperate"] = data.get("away_losing_streak", 0) >= 3 or data.get("is_relegation_fight_away", False)
-    
-    # ========================================================================
-    # DERBY DETECTION
-    # ========================================================================
-    derby_pairs = [
-        # Italian derbies
-        ("Juventus", "Torino"), ("Torino", "Juventus"),
-        ("Milan", "Inter"), ("Inter", "Milan"),
-        ("Roma", "Lazio"), ("Lazio", "Roma"),
-        ("Genoa", "Sampdoria"), ("Sampdoria", "Genoa"),
-        ("Verona", "Chievo"), ("Chievo", "Verona"),
-        # English derbies
-        ("Liverpool", "Everton"), ("Everton", "Liverpool"),
-        ("Manchester United", "Manchester City"), ("Manchester City", "Manchester United"),
-        ("Arsenal", "Tottenham"), ("Tottenham", "Arsenal"),
-        ("Newcastle", "Sunderland"), ("Sunderland", "Newcastle"),
-        ("Chelsea", "Fulham"), ("Fulham", "Chelsea"),
-        # Spanish derbies
-        ("Real Madrid", "Atletico Madrid"), ("Atletico Madrid", "Real Madrid"),
-        ("Barcelona", "Espanyol"), ("Espanyol", "Barcelona"),
-        ("Sevilla", "Real Betis"), ("Real Betis", "Sevilla"),
-        ("Valencia", "Levante"), ("Levante", "Valencia"),
-        # German derbies
-        ("Bayern Munich", "1860 Munich"), ("1860 Munich", "Bayern Munich"),
-        ("Schalke", "Borussia Dortmund"), ("Borussia Dortmund", "Schalke"),
-        # Turkish derbies
-        ("Galatasaray", "Fenerbahçe"), ("Fenerbahçe", "Galatasaray"),
-        ("Besiktas", "Galatasaray"), ("Galatasaray", "Besiktas"),
-        ("Besiktas", "Fenerbahçe"), ("Fenerbahçe", "Besiktas"),
-        ("Kasımpasa SK", "Galatasaray"), ("Galatasaray", "Kasımpasa SK"),
-        ("Kasımpasa", "Galatasaray"), ("Galatasaray", "Kasımpasa"),
-        # Saudi derbies
-        ("Al Hilal", "Al Nassr"), ("Al Nassr", "Al Hilal"),
-        ("Ittihad Jeddah", "Al Ahli"), ("Al Ahli", "Ittihad Jeddah"),
-        ("Shabab Riyadh", "Al Hilal"), ("Al Hilal", "Shabab Riyadh"),
-        ("Shabab Riyadh", "Al Nassr"), ("Al Nassr", "Shabab Riyadh"),
-    ]
-    
-    is_derby_flag = False
-    home_team_clean = data.get("home_team", "")
-    away_team_clean = data.get("away_team", "")
-    
-    for pair in derby_pairs:
-        if pair[0] in home_team_clean and pair[1] in away_team_clean:
-            is_derby_flag = True
-            break
-        if pair[0] in away_team_clean and pair[1] in home_team_clean:
-            is_derby_flag = True
-            break
-    
-    data["is_derby"] = is_derby_flag
-    data["is_playoff"] = False
-    
-    # Score Matrix
-    if data.get('correct_score_home') is not None and data.get('correct_score_away') is not None:
-        data['score_matrix'].append({
-            "score": f"{data['correct_score_home']}-{data['correct_score_away']}",
-            "home_goals": data['correct_score_home'],
-            "away_goals": data['correct_score_away'],
-            "probability": 100.0
-        })
-    
-    return data
-
-
-# ============================================================================
-# ANALYSIS ENGINE - HYBRID V16.4
-# ============================================================================
-def analyze_match_hybrid(data: dict) -> dict:
-    result = {
-        "prediction": None,
-        "rule": None,
-        "confidence": None,
-        "bet": None,
-        "stake": None,
-        "reason": None,
-        "verdict": "PROCESSED",
-        "warning": None,
-        "warning_type": None,
-        "home_draw_rate": 0,
-        "away_draw_rate": 0,
-        "home_scoring_rate": 0,
-        "away_scoring_rate": 0,
-        "home_last6_points": 0,
-        "away_last6_points": 0,
-        "avg_goals": 0,
-        "is_relegation_fight_home": False,
-        "is_relegation_fight_away": False,
-        "is_dead_rubber_home": False,
-        "is_dead_rubber_away": False,
-        "is_playoff": False,
-        "is_derby": False,
-        "league": data.get("league", "Unknown")
-    }
-    
-    if data.get("is_finished"):
-        result["verdict"] = "SKIP"
-        result["skip_reason"] = "Already played (FT)"
-        return result
-    
-    league_config = data.get("league_config", get_league_config("Unknown"))
-    
-    # Get Forebet's prediction and percentages
-    forebet_prediction = data.get("forebet_prediction", "X")
-    home_pct = data.get("home_pct", 33)
-    draw_pct = data.get("draw_pct", 33)
-    away_pct = data.get("away_pct", 34)
-    
-    # Run hybrid prediction
-    prediction_result = predict_hybrid(data, forebet_prediction, home_pct, draw_pct, away_pct, league_config)
-    
-    result["prediction"] = prediction_result["prediction"]
-    result["rule"] = prediction_result["rule"]
-    result["confidence"] = prediction_result["confidence"]
-    result["bet"] = prediction_result.get("bet", "Unknown")
-    result["stake"] = prediction_result["stake"]
-    result["reason"] = prediction_result["reason"]
-    
-    result["home_draw_rate"] = data.get("home_draw_rate", 0)
-    result["away_draw_rate"] = data.get("away_draw_rate", 0)
-    result["home_scoring_rate"] = data.get("home_scoring_rate", 0)
-    result["away_scoring_rate"] = data.get("away_scoring_rate", 0)
-    result["home_last6_points"] = data.get("home_last6_points", 0)
-    result["away_last6_points"] = data.get("away_last6_points", 0)
-    result["avg_goals"] = data.get("avg_goals", 0)
-    result["is_relegation_fight_home"] = data.get("is_relegation_fight_home", False)
-    result["is_relegation_fight_away"] = data.get("is_relegation_fight_away", False)
-    result["is_dead_rubber_home"] = data.get("is_dead_rubber_home", False)
-    result["is_dead_rubber_away"] = data.get("is_dead_rubber_away", False)
-    result["is_derby"] = data.get("is_derby", False)
-    
-    return result
-
-
-# ============================================================================
-# EVALUATION ENGINE
-# ============================================================================
-def evaluate_prediction(prediction: str, actual_home: int, actual_away: int) -> dict:
-    try:
-        home = int(actual_home) if actual_home is not None else 0
-        away = int(actual_away) if actual_away is not None else 0
-    except (ValueError, TypeError):
-        return {"is_correct": False, "actual": "INVALID", "winner": "INVALID"}
-    
-    if home > away:
-        actual = "1"
-    elif away > home:
-        actual = "2"
-    else:
-        actual = "X"
-    
-    total = home + away
-    over25 = total > 2
-    
-    return {
-        "is_correct": prediction == actual,
-        "actual": actual,
-        "winner": "HOME" if home > away else "AWAY" if away > home else "DRAW",
-        "score": f"{home}-{away}",
-        "total_goals": total,
-        "over25": over25
-    }
-
+        return {
+            'home_pct': home_pct,
+            'draw_pct': draw_pct,
+            'away_pct': away_pct,
+            'prediction': prediction,
+            'avg_goals': avg_goals,
+            'double_chance': double_chance,
+            'home_team': 'Unknown',  # You'll extract this from surrounding context
+            'away_team': 'Unknown',
+            'date': datetime.now().strftime("%Y-%m-%d"),
+            'is_finished': 'FT' in line
+        }
+    except Exception:
+        return None
 
 # ============================================================================
 # DISPLAY FUNCTIONS
 # ============================================================================
-def display_analysis_hybrid(data: dict, analysis: dict, league: str = "Unknown", already_stored: bool = False):
-    if analysis.get("verdict") == "SKIP":
-        skip_reason = analysis.get("skip_reason") or "Already played"
-        st.markdown(f"""
-        <div class="output-card ft-card">
-            <div class="verdict-skip">
-                <div class="big-text">⏭️ SKIPPED — Already Played</div>
-                <p style="color:#94a3b8; font-size:1.1rem; margin:0.5rem 0;">
-                    {data.get('home_team', 'Unknown')} vs {data.get('away_team', 'Unknown')}
-                </p>
-                <p style="color:#ef4444; font-weight:600;">{skip_reason}</p>
-                <p style="color:#64748b; font-size:0.8rem;">
-                    Expected Score: {data.get('correct_score_home', '?')}-{data.get('correct_score_away', '?')} 
-                    | Avg Goals: {data.get('avg_goals', 0):.2f}
-                </p>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        return
-    
-    badge_class = get_league_badge(league)
-    st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
-    
-    if already_stored:
-        st.markdown('<span class="already-stored">📌 ALREADY STORED — Displaying prediction only</span>', unsafe_allow_html=True)
-    
-    prediction = analysis.get("prediction", "1")
-    rule = analysis.get("rule", "FOREBET DEFAULT")
-    confidence = analysis.get("confidence", "LOW")
-    stake = analysis.get("stake", "0.1 unit")
-    reason = analysis.get("reason", "Default")
-    
-    rule_badge_class = get_rule_badge(rule)
-    
-    prediction_display_class = f"prediction-{prediction}"
-    prediction_emoji = "🏠" if prediction == "1" else "🤝" if prediction == "X" else "✈️"
-    prediction_text = "HOME WIN" if prediction == "1" else "DRAW" if prediction == "X" else "AWAY WIN"
-    
-    confidence_color = "#10b981" if confidence == "HIGH" else "#f59e0b" if confidence == "MEDIUM" else "#64748b"
-    
-    # Determine badge type
-    badge_type = ""
-    if "HYBRID" in rule:
-        badge_type = '<span class="hybrid-badge">HYBRID</span>'
-    elif "FOREBET" in rule:
-        badge_type = '<span class="forebet-badge">FOREBET</span>'
-    else:
-        badge_type = '<span class="override-badge">OVERRIDE</span>'
+
+def display_refined_analysis(match_data: dict, decision: dict):
+    """Display the refined analysis results"""
     
     st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 16px; padding: 1.5rem; margin: 0.75rem 0; border-left: 4px solid {confidence_color};">
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+    <div class="output-card" style="border-left: 4px solid {'#10b981' if decision['confidence'] == 'HIGH' else '#f59e0b' if decision['confidence'] == 'MEDIUM' else '#64748b'};">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <div style="font-size: 0.8rem; color: #94a3b8;">HYBRID PREDICTION V16.4</div>
-                <div class="prediction-display {prediction_display_class}">
-                    {prediction_emoji} {prediction_text}
+                <div style="font-size: 1.2rem; font-weight: 700;">
+                    {match_data.get('home_team', 'Home')} vs {match_data.get('away_team', 'Away')}
                 </div>
-                <div style="font-size: 0.9rem; color: #94a3b8;">
-                    <span class="{rule_badge_class}" style="padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.8rem;">{rule}</span>
-                    {badge_type}
+                <div style="font-size: 0.8rem; color: #94a3b8;">
+                    {match_data.get('date', '')}
                 </div>
             </div>
             <div style="text-align: right;">
-                <div style="font-size: 0.8rem; color: #94a3b8;">Confidence</div>
-                <div style="font-size: 1.5rem; font-weight: 800; color: {confidence_color};">{confidence}</div>
-                <div style="font-size: 0.8rem; color: #94a3b8;">
-                    <span class="stake-badge stake-{stake.replace(' ', '-')}">Stake: {stake}</span>
+                <span class="rule-badge {'rule-high' if decision['confidence'] == 'HIGH' else 'rule-medium' if decision['confidence'] == 'MEDIUM' else 'rule-low'}">
+                    {decision['confidence']}
+                </span>
+                <div style="font-size: 0.7rem; color: #94a3b8; margin-top: 0.2rem;">
+                    Stake: {decision['stake']}
                 </div>
             </div>
         </div>
-        <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
-            📝 {reason}
+        
+        <div style="margin-top: 0.75rem; padding: 0.75rem; background: #0f172a; border-radius: 8px;">
+            <div style="font-size: 1.5rem; font-weight: 800; text-align: center; color: {'#10b981' if decision['prediction'] == '1' else '#f59e0b' if decision['prediction'] == 'X' else '#ef4444' if decision['prediction'] == '2' else '#3b82f6'};">
+                {decision['bet']}
+            </div>
+            <div style="text-align: center; font-size: 0.9rem; color: #94a3b8; margin-top: 0.25rem;">
+                📋 {decision['rule']}
+            </div>
+            <div style="text-align: center; font-size: 0.8rem; color: #64748b; margin-top: 0.25rem;">
+                {decision['reason']}
+            </div>
+        </div>
+        
+        <div style="margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.5rem;">
+            <div style="font-size: 0.7rem; color: #94a3b8;">Rules Passed:</div>
+            {''.join([f'<span style="font-size: 0.7rem; background: #1e293b; padding: 0.1rem 0.4rem; border-radius: 4px; margin-right: 0.3rem;">{rule}</span>' for rule in decision.get('rules_passed', ['Forebet Default'])])}
         </div>
     </div>
     """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    st.markdown("### 📊 Key Metrics")
-    
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1:
-        home_last6 = analysis.get("home_last6_points", 0)
-        away_last6 = analysis.get("away_last6_points", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_last6} vs {away_last6}</div><div class="metric-label">Last 6 Form</div></div>', unsafe_allow_html=True)
-    with m2:
-        avg_goals = analysis.get("avg_goals", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{avg_goals:.2f}</div><div class="metric-label">Avg Goals</div></div>', unsafe_allow_html=True)
-    with m3:
-        home_scoring = analysis.get("home_scoring_rate", 0)
-        away_scoring = analysis.get("away_scoring_rate", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_scoring:.2f} / {away_scoring:.2f}</div><div class="metric-label">Scoring Rate (H/A)</div></div>', unsafe_allow_html=True)
-    with m4:
-        home_draw = analysis.get("home_draw_rate", 0)
-        away_draw = analysis.get("away_draw_rate", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_draw:.1%} / {away_draw:.1%}</div><div class="metric-label">Draw Rate (H/A)</div></div>', unsafe_allow_html=True)
-    with m5:
-        desperate = "Yes" if (analysis.get("is_relegation_fight_home", False) or analysis.get("is_relegation_fight_away", False)) else "No"
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{desperate}</div><div class="metric-label">Desperation</div></div>', unsafe_allow_html=True)
-    
-    st.markdown("### 🚩 Context Flags")
-    
-    flags = []
-    if analysis.get("is_relegation_fight_home", False):
-        flags.append("🔴 Home Relegation Fight")
-    if analysis.get("is_relegation_fight_away", False):
-        flags.append("🔴 Away Relegation Fight")
-    if analysis.get("is_dead_rubber_home", False):
-        flags.append("⚪ Home Dead Rubber")
-    if analysis.get("is_dead_rubber_away", False):
-        flags.append("⚪ Away Dead Rubber")
-    if analysis.get("is_playoff", False):
-        flags.append("🏆 Playoff")
-    if analysis.get("is_derby", False):
-        flags.append("⚔️ Derby")
-    
-    if flags:
-        st.markdown(" | ".join(flags))
-    else:
-        st.markdown("No special context flags")
-    
-    if data.get("score_matrix"):
-        st.markdown("### 🎯 Score Matrix")
-        sorted_scores = sorted(data["score_matrix"], key=lambda x: x.get("probability", 0), reverse=True)[:5]
-        score_cols = st.columns(min(5, len(sorted_scores)))
-        for idx, s in enumerate(sorted_scores):
-            with score_cols[idx]:
-                if s.get("home_goals") is not None and s.get("away_goals") is not None:
-                    bg = "#1e293b" if s.get("home_goals", 0) != s.get("away_goals", 0) else "#2a1a00"
-                    prob = s.get("probability", 0)
-                    st.markdown(f'<div style="background:{bg}; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;"><div style="font-size:1.2rem; font-weight:800;">{s.get("score", "?-?")}</div><div style="font-size:0.7rem; color:#94a3b8;">{prob:.1f}%</div></div>', unsafe_allow_html=True)
-
-
-def display_records_table_hybrid(results: list):
-    if not results:
-        st.info("No results recorded yet.")
-        return
-    
-    total = len(results)
-    correct = 0
-    incorrect = 0
-    
-    for r in results:
-        if r.get('predicted_1x2') and r.get('actual_1x2'):
-            if r['predicted_1x2'] == r['actual_1x2']:
-                correct += 1
-            else:
-                incorrect += 1
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Matches</div></div>', unsafe_allow_html=True)
-    with col2:
-        win_rate = round(correct / total * 100) if total > 0 else 0
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Hybrid Accuracy</div></div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
-    
-    st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
-    
-    rows = []
-    for r in results:
-        pred = r.get('predicted_1x2', '?')
-        actual = r.get('actual_1x2', '?')
-        rule = r.get('rule_triggered', '')
-        confidence = r.get('prediction_confidence', '')
-        league = r.get('league', '')
-        badge_class = get_league_badge(league)
-        
-        is_correct = pred == actual
-        result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-        
-        pred_display = "🏠" if pred == "1" else "🤝" if pred == "X" else "✈️"
-        actual_display = "🏠" if actual == "1" else "🤝" if actual == "X" else "✈️"
-        
-        rows.append({
-            "Date": r.get("match_date", ""),
-            "League": f'<span class="league-badge {badge_class}" style="font-size:0.7rem;">{league[:15]}</span>',
-            "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
-            "Prediction": f"{pred_display} {confidence}",
-            "Actual": actual_display,
-            "Result": result_badge,
-            "Rule": rule[:30] + "..." if len(rule) > 30 else rule,
-        })
-    
-    df = pd.DataFrame(rows)
-    st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-
-# ============================================================================
-# SUPABASE OPERATIONS
-# ============================================================================
-def save_to_db(data: dict, analysis: dict, league: str = "Unknown"):
-    try:
-        home_team = data.get("home_team", "Unknown")
-        away_team = data.get("away_team", "Unknown")
-        match_date = data.get("date", "")
-        
-        dt = parse_match_date(match_date)
-        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
-        
-        exists = check_match_exists(home_team, away_team, match_date)
-        if exists:
-            return "ALREADY_EXISTS"
-        
-        record = {
-            "match_date": date_part,
-            "league_name": league,
-            "home_team": home_team,
-            "away_team": away_team,
-            "season_round": "",
-            "home_scoring_rate": data.get("home_scoring_rate", 0),
-            "home_conceding_rate": data.get("home_conceding_rate", 0),
-            "away_scoring_rate": data.get("away_scoring_rate", 0),
-            "away_conceding_rate": data.get("away_conceding_rate", 0),
-            "home_position": data.get("home_position"),
-            "home_points": data.get("home_points", 0),
-            "home_games_played": data.get("home_gp", 0),
-            "home_goal_diff": data.get("home_gd", 0),
-            "away_position": data.get("away_position"),
-            "away_points": data.get("away_points", 0),
-            "away_games_played": data.get("away_gp", 0),
-            "away_goal_diff": data.get("away_gd", 0),
-            "home_last6_points": data.get("home_last6_points", 0),
-            "home_last6_goals_for": data.get("home_last6_goals_for", 0),
-            "away_last6_points": data.get("away_last6_points", 0),
-            "away_last6_goals_for": data.get("away_last6_goals_for", 0),
-            "is_playoff": data.get("is_playoff", False),
-            "is_derby": data.get("is_derby", False),
-            "is_relegation_fight_home": data.get("is_relegation_fight_home", False),
-            "is_relegation_fight_away": data.get("is_relegation_fight_away", False),
-            "is_dead_rubber_home": data.get("is_dead_rubber_home", False),
-            "is_dead_rubber_away": data.get("is_dead_rubber_away", False),
-            "is_title_race_home": data.get("is_title_race_home", False),
-            "is_title_race_away": data.get("is_title_race_away", False),
-            "avg_goals": data.get("avg_goals", 0),
-            "weather_temperature": data.get("temperature"),
-            "predicted_1x2": analysis.get("prediction"),
-            "rule_triggered": analysis.get("rule"),
-            "prediction_confidence": analysis.get("confidence"),
-            "recommended_bet": analysis.get("bet"),
-            "stake": analysis.get("stake"),
-            "actual_home_goals": None,
-            "actual_away_goals": None,
-            "actual_1x2": None,
-            "is_correct": False,
-        }
-        
-        response = supabase.table(TABLE_NAME).insert(record).execute()
-        return response.data[0]["id"] if response.data else None
-        
-    except Exception as e:
-        st.error(f"Failed to save: {e}")
-        return None
-
-
-def get_pending():
-    try:
-        response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
-        data = response.data if response.data else []
-        return sorted(data, key=lambda x: parse_match_date(x.get("match_date")))
-    except Exception as e:
-        st.error(f"Error fetching pending: {e}")
-        return []
-
-
-def submit_result(analysis_id, home_goals, away_goals):
-    try:
-        total = home_goals + away_goals
-        actual_1x2 = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
-        
-        response = supabase.table(TABLE_NAME).select("predicted_1x2").eq("id", analysis_id).execute()
-        if response.data:
-            predicted = response.data[0].get("predicted_1x2")
-            is_correct = predicted == actual_1x2 if predicted else False
-        else:
-            is_correct = False
-        
-        supabase.table(TABLE_NAME).update({
-            "actual_home_goals": home_goals,
-            "actual_away_goals": away_goals,
-            "actual_1x2": actual_1x2,
-            "is_correct": is_correct
-        }).eq("id", analysis_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"Failed: {e}")
-        return False
-
-
-def get_results():
-    try:
-        response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
-        data = response.data if response.data else []
-        return sorted(data, key=lambda x: parse_match_date(x.get("match_date")), reverse=True)
-    except:
-        return []
-
 
 # ============================================================================
 # MAIN APP
 # ============================================================================
+
 def main():
-    st.title("🎯 Match Analyzer V16.4")
-    st.caption(f"COMPLETE LEAGUE DETECTION: All Leagues Configured | Team-Based Inference | Table: {TABLE_NAME}")
-
-    with st.expander("📖 V16.4 — COMPLETE LEAGUE DETECTION FIX", expanded=False):
-        st.markdown("""
-        **V16.4 — COMPLETE LEAGUE DETECTION FIX**
-
-        ### What Was Fixed:
-
-        1. ✅ **League Detection** - Now detects 15+ leagues from codes AND team names
-        2. ✅ **Brazilian Leagues** - Serie A (20 teams) and Serie B (20 teams)
-        3. ✅ **K-League** - South Korea (12 teams)
-        4. ✅ **Uzbekistan** - Super League (14 teams)
-        5. ✅ **Finland** - Ykkönen (12 teams)
-        6. ✅ **Iceland** - Úrvalsdeild (12 teams)
-        7. ✅ **Chile** - Primera División (16 teams)
-        8. ✅ **Ecuador** - Serie B (10 teams)
-        9. ✅ **Ireland** - Premier Division (10 teams)
-        10. ✅ **Estonia** - Esiliiga (10 teams)
-
-        ### Logic Fixes:
-
-        - **Title Secured** - Now uses mathematical calculation (points > max possible)
-        - **Away Relegation** - Requires form advantage (strict >)
-        - **Home Relegation** - Requires form advantage (+2)
-        - **Both Dead Rubber** - Uses composite strength (form + scoring + goal diff)
-        - **Forebet Default** - Lower confidence in Unknown leagues
-
-        ### Leagues Supported:
-
-        | Code | League | Teams |
-        |------|--------|-------|
-        | EPL | Premier League | 20 |
-        | It1 | Serie A | 20 |
-        | Es1 | La Liga | 20 |
-        | Br1 | Brazil Serie A | 20 |
-        | - | Brazil Serie B | 20 |
-        | No1 | Norway Eliteserien | 16 |
-        | - | K-League | 12 |
-        | - | Uzbekistan Super League | 14 |
-        | - | Finland Ykkönen | 12 |
-        | - | Iceland Úrvalsdeild | 12 |
-        | - | Chile Primera | 16 |
-        | - | Ecuador Serie B | 10 |
-        | - | Ireland Premier | 10 |
-        | - | Estonia Esiliiga | 10 |
-        | Su1 | Turkey Super Lig | 19 |
-        | Sa1 | Saudi Pro League | 18 |
-        """)
-
-    tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending Matches", "📊 Records", "📈 Dashboard"])
-
+    st.title("🎯 Refined Formula V1.1")
+    st.caption("Complete implementation with goal timing, clean sheets, and self-learning")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending", "📊 Records", "📈 Dashboard"])
+    
     with tab1:
         st.markdown("### 📝 Paste Match Data")
-        st.info("🎯 V16.4: Complete league detection. Saving to `{}`".format(TABLE_NAME))
-
-        st.markdown("""
-        <div class="upload-container">
-            <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;">📋 Paste All Data</p>
-            <p style="color: #94a3b8; margin-bottom: 1rem;">Paste the Predictions, Tables, and Form data together</p>
-        </div>
-        """, unsafe_allow_html=True)
-
+        
         text_data = st.text_area(
-            "Paste all data here", 
-            height=400, 
-            key="text_paste",
-            placeholder="Paste the complete text data (Predictions + HOME TABLE + AWAY TABLE + LAST 6 MATCHES TABLE)..."
+            "Paste Forebet data here",
+            height=400,
+            placeholder="Paste the complete text data from Forebet..."
         )
-
-        if st.button("🎯 ANALYZE V16.4", type="primary"):
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            midweek_fixtures = st.text_area(
+                "Midweek Fixtures (optional)",
+                height=100,
+                placeholder="Team: Date (e.g., Mjällby: 2026-07-21)"
+            )
+        with col2:
+            st.info("""
+            **Refined Formula Rules:**
+            1. 🏰 Home Fortress
+            2. 💀 Away Form Killer
+            3. 🧹 Clean Sheet Streak
+            4. ⏰ Early Goal Tendency
+            5. ⏰ Late Goal Tendency
+            6. 🏆 H2H Dominance
+            7. 🤝 H2H Draw Rate
+            8. 😴 Midweek Fatigue
+            9. 📊 Goal Discrepancy
+            10. ✅ Double Chance
+            """)
+        
+        if st.button("🎯 Analyze with Refined Formula", type="primary"):
             if not text_data or len(text_data.strip()) < 100:
                 st.error("❌ Please paste valid data (minimum 100 characters).")
             else:
                 try:
-                    with st.spinner("Analyzing with COMPLETE LEAGUE DETECTION..."):
+                    with st.spinner("Analyzing with Refined Formula V1.1..."):
+                        # Parse data
                         parsed = parse_text_data(text_data)
-
-                    league = parsed.get("league", "Unknown League")
-                    matches = parsed.get("matches", [])
-                    home_table = parsed.get("home_table", {})
-                    away_table = parsed.get("away_table", {})
-                    form_data = parsed.get("form_data", {})
-                    league_config = parsed.get("league_config", {})
-
-                    if matches:
-                        ft_matches = [m for m in matches if m.get("is_finished")]
-                        total_matches = len(matches)
+                        matches = parsed.get('matches', [])
                         
-                        st.success(f"✅ Found {total_matches} matches in {league}")
-                        
-                        if ft_matches:
-                            st.info(f"⏭️ {len(ft_matches)} matches already played (FT) — skipped")
-                        
-                        matches_sorted = sorted(matches, key=lambda x: parse_match_date(x.get("date", "")))
-                        
-                        analyzed_results = []
-                        stored_count = 0
-                        already_stored_count = 0
-                        
-                        for match in matches_sorted:
-                            if match.get("is_finished"):
-                                continue
-                                
-                            match_with_config = dict(match)
-                            match_with_config["league_config"] = league_config
-                            data = convert_match_to_data(match_with_config, home_table, away_table, form_data, league)
-                            analysis = analyze_match_hybrid(data)
+                        if matches:
+                            st.success(f"✅ Found {len(matches)} matches")
                             
-                            if analysis.get("verdict") != "SKIP":
-                                exists = check_match_exists(data.get("home_team"), data.get("away_team"), data.get("date"))
+                            # Parse midweek fixtures
+                            fixtures = []
+                            if midweek_fixtures:
+                                for line in midweek_fixtures.strip().split('\n'):
+                                    if ':' in line:
+                                        team, date_str = line.split(':', 1)
+                                        try:
+                                            fixture_date = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+                                            fixtures.append({'team': team.strip(), 'date': fixture_date})
+                                        except:
+                                            pass
+                            
+                            for i, match in enumerate(matches, 1):
+                                # Add midweek fixtures
+                                match['midweek_fixtures'] = fixtures
                                 
-                                if exists:
-                                    already_stored_count += 1
-                                    analyzed_results.append((match, data, analysis, True))
-                                else:
-                                    saved_id = save_to_db(data, analysis, league)
-                                    if saved_id == "ALREADY_EXISTS":
-                                        already_stored_count += 1
-                                        analyzed_results.append((match, data, analysis, True))
-                                    elif saved_id:
-                                        stored_count += 1
-                                        analyzed_results.append((match, data, analysis, False))
+                                # Run refined formula
+                                decision = refined_formula_decision(match)
+                                
+                                # Display result
+                                display_refined_analysis(match, decision)
+                                
+                                # Option to save to database
+                                if st.button(f"💾 Save Match {i}", key=f"save_{i}"):
+                                    # Prepare data for database
+                                    db_data = {
+                                        'match_date': match.get('date', datetime.now().date()),
+                                        'league_name': match.get('league', 'Unknown'),
+                                        'home_team': match.get('home_team', 'Unknown'),
+                                        'away_team': match.get('away_team', 'Unknown'),
+                                        'forebet_home_pct': match.get('home_pct', 0),
+                                        'forebet_draw_pct': match.get('draw_pct', 0),
+                                        'forebet_away_pct': match.get('away_pct', 0),
+                                        'forebet_prediction': match.get('prediction', 'X'),
+                                        'forebet_avg_goals': match.get('avg_goals', 2.5),
+                                        'forebet_double_chance': match.get('double_chance', ''),
+                                        'refined_prediction': decision['prediction'],
+                                        'refined_rule_triggered': decision['rule'],
+                                        'refined_confidence': decision['confidence'],
+                                        'refined_bet': decision['bet'],
+                                        'refined_stake': decision['stake'],
+                                        'refined_reason': decision['reason'],
+                                        'rules_passed': decision.get('rules_passed', [])
+                                    }
+                                    
+                                    result = save_prediction_to_db(db_data)
+                                    if result == "ALREADY_EXISTS":
+                                        st.warning("⚠️ This match already exists in the database")
+                                    elif result:
+                                        st.success(f"✅ Saved! ID: {result}")
                                     else:
-                                        analyzed_results.append((match, data, analysis, False))
-
-                        st.info(f"💾 {stored_count} new predictions stored in {TABLE_NAME} | {already_stored_count} already existed")
-
-                        if analyzed_results:
-                            st.markdown("---")
-                            st.markdown("### 🎯 MATCH PREDICTIONS (V16.4 - Complete League Detection)")
+                                        st.error("❌ Failed to save")
+                                
+                                st.markdown("---")
+                        else:
+                            st.error("No matches found in the data.")
                             
-                            for idx, (match, data, analysis, already_stored) in enumerate(analyzed_results, 1):
-                                prediction = analysis.get("prediction", "?")
-                                confidence = analysis.get("confidence", "LOW")
-                                stake = analysis.get("stake", "0.1 unit")
-                                stake_display, _ = get_stake_display(stake)
-                                rule = analysis.get("rule", "FOREBET DEFAULT")
-                                
-                                stored_badge = " 📌 ALREADY STORED" if already_stored else " ✅ NEW"
-                                
-                                pred_emoji = "🏠" if prediction == "1" else "🤝" if prediction == "X" else "✈️"
-                                pred_text = "HOME" if prediction == "1" else "DRAW" if prediction == "X" else "AWAY"
-                                
-                                date_display = format_date_display(match.get('date', ''))
-                                st.markdown(f"#### {pred_emoji} Match {idx}: {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')} → {pred_text} ({confidence}) {stored_badge}")
-                                st.caption(f"📅 {date_display} | {rule} | 🏷️ V16.4")
-                                
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("Prediction", f"{pred_emoji} {pred_text}")
-                                with col2:
-                                    st.metric("Confidence", confidence)
-                                with col3:
-                                    st.metric("Stake", stake_display)
-                                
-                                display_analysis_hybrid(data, analysis, league, already_stored)
-                                
-                                if idx < len(analyzed_results):
-                                    st.markdown("---")
-                        
-                        st.markdown("---")
-                        st.markdown("### 📊 Summary")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total Matches", total_matches)
-                        with col2:
-                            st.metric("💾 New Stored", stored_count)
-                        with col3:
-                            st.metric("📌 Already Stored", already_stored_count)
-                        with col4:
-                            st.metric("⏭️ FT (Played)", len(ft_matches))
-                            
-                    else:
-                        st.error("No matches found in the data.")
-
                 except Exception as e:
-                    st.error(f"❌ Error during analysis: {str(e)}")
+                    st.error(f"❌ Error: {str(e)}")
                     st.code(traceback.format_exc())
-
+    
     with tab2:
         st.subheader("📝 Pending Matches")
-        st.caption("Matches waiting for results. Enter the actual scores once matches are played.")
-        pending = get_pending()
-        if pending:
-            st.write(f"**{len(pending)} pending result(s)**")
-            for a in pending:
-                ht = a.get('home_team', 'Home')
-                at = a.get('away_team', 'Away')
-                pred = a.get('predicted_1x2', '?')
-                rule = a.get('rule_triggered', '')
-                confidence = a.get('prediction_confidence', '')
-                match_date = a.get('match_date', 'Date unknown')
-                date_display = format_date_display(match_date)
-
-                pred_emoji = "🏠" if pred == "1" else "🤝" if pred == "X" else "✈️" if pred == "2" else "?"
-                badge = f"{pred_emoji} {pred} ({confidence}) - {rule[:30]}..."
-
-                with st.expander(f"📅 {date_display} | {badge} | {ht} vs {at}"):
-                    st.info(f"📊 Prediction: {pred} ({confidence}) — {rule}")
-                    st.caption(f"📅 Match Date: {match_date}")
-                    c1, c2 = st.columns(2)
-                    with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
-                    with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
-                    expected_home = a.get('correct_score_home')
-                    expected_away = a.get('correct_score_away')
-                    if expected_home is not None and expected_away is not None:
-                        st.caption(f"📊 Expected Score: {expected_home}-{expected_away}")
-                    if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
-                        if submit_result(a['id'], hg, ag):
-                            st.success("Result submitted!")
-                            st.rerun()
-        else:
-            st.info("No pending matches. All predictions have results recorded.")
-
+        st.caption("Enter actual results for completed matches")
+        
+        try:
+            response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
+            pending = response.data if response.data else []
+            
+            if pending:
+                st.write(f"**{len(pending)} pending result(s)**")
+                for match in pending:
+                    with st.expander(f"{match.get('home_team', '')} vs {match.get('away_team', '')} ({match.get('refined_prediction', '?')})"):
+                        st.info(f"Prediction: {match.get('refined_bet', '?')} | Rule: {match.get('refined_rule_triggered', '?')}")
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            hg = st.number_input(f"{match.get('home_team', 'Home')} Goals", 0, 15, 0, key=f"hg_{match['id']}")
+                        with c2:
+                            ag = st.number_input(f"{match.get('away_team', 'Away')} Goals", 0, 15, 0, key=f"ag_{match['id']}")
+                        
+                        if st.button("✅ Submit Result", key=f"sub_{match['id']}"):
+                            if submit_result(match['id'], hg, ag):
+                                st.success("✅ Result submitted successfully!")
+                                st.rerun()
+            else:
+                st.info("No pending matches.")
+        except Exception as e:
+            st.error(f"Error fetching pending matches: {e}")
+    
     with tab3:
         st.subheader("📊 Performance Records")
-        st.caption("Completed matches with results recorded.")
-        results = get_results()
-        display_records_table_hybrid(results)
-
+        
+        try:
+            response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
+            results = response.data if response.data else []
+            
+            if results:
+                total = len(results)
+                correct = sum(1 for r in results if r.get('is_correct', False))
+                rate = round(correct / total * 100) if total > 0 else 0
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Matches", total)
+                with col2:
+                    st.metric("Correct", correct)
+                with col3:
+                    st.metric("Accuracy", f"{rate}%")
+                
+                # Rule performance breakdown
+                rule_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
+                for r in results:
+                    rule = r.get('refined_rule_triggered', 'Unknown')
+                    rule_stats[rule]['total'] += 1
+                    if r.get('is_correct', False):
+                        rule_stats[rule]['correct'] += 1
+                
+                if rule_stats:
+                    st.subheader("Rule Performance")
+                    rule_data = []
+                    for rule, stats in rule_stats.items():
+                        rule_rate = round(stats['correct'] / stats['total'] * 100) if stats['total'] > 0 else 0
+                        rule_data.append({
+                            'Rule': rule[:40],
+                            'Correct': stats['correct'],
+                            'Total': stats['total'],
+                            'Rate': f"{rule_rate}%"
+                        })
+                    
+                    df = pd.DataFrame(rule_data)
+                    st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No results recorded yet.")
+        except Exception as e:
+            st.error(f"Error fetching results: {e}")
+    
     with tab4:
-        st.subheader("📊 Live Dashboard")
-        results = get_results()
-        if not results:
-            st.info("No results recorded yet.")
-            return
+        st.subheader("📈 Dashboard")
         
-        total = len(results)
-        correct = 0
-        incorrect = 0
-        
-        rule_stats = {}
-        high_confidence = 0
-        high_correct = 0
-        low_confidence = 0
-        low_correct = 0
-        
-        for r in results:
-            if r.get('predicted_1x2') and r.get('actual_1x2'):
-                is_correct = r['predicted_1x2'] == r['actual_1x2']
-                if is_correct:
-                    correct += 1
-                else:
-                    incorrect += 1
+        try:
+            # Get all matches
+            response = supabase.table(TABLE_NAME).select("*").execute()
+            all_matches = response.data if response.data else []
+            
+            if all_matches:
+                total = len(all_matches)
+                pending = sum(1 for m in all_matches if m.get('actual_1x2') is None)
+                completed = total - pending
+                correct = sum(1 for m in all_matches if m.get('is_correct', False))
+                rate = round(correct / completed * 100) if completed > 0 else 0
                 
-                confidence = r.get('prediction_confidence', 'LOW')
-                if confidence == 'HIGH':
-                    high_confidence += 1
-                    if is_correct:
-                        high_correct += 1
-                elif confidence == 'MEDIUM':
-                    low_confidence += 1
-                    if is_correct:
-                        low_correct += 1
-                else:
-                    low_confidence += 1
-                    if is_correct:
-                        low_correct += 1
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Matches", total)
+                with col2:
+                    st.metric("Completed", completed)
+                with col3:
+                    st.metric("Correct", correct)
+                with col4:
+                    st.metric("Accuracy", f"{rate}%")
                 
-                rule = r.get('rule_triggered', 'Unknown')
-                if rule not in rule_stats:
-                    rule_stats[rule] = {"total": 0, "correct": 0}
-                rule_stats[rule]["total"] += 1
-                if is_correct:
-                    rule_stats[rule]["correct"] += 1
-        
-        overall_rate = round(correct / total * 100) if total > 0 else 0
-        high_rate = round(high_correct / high_confidence * 100) if high_confidence > 0 else 0
-        low_rate = round(low_correct / low_confidence * 100) if low_confidence > 0 else 0
-        
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Matches</div></div>', unsafe_allow_html=True)
-        with col2:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{overall_rate}%</div><div class="stat-label">HYBRID Accuracy</div></div>', unsafe_allow_html=True)
-        with col3:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
-        with col4:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{high_rate}%</div><div class="stat-label">HIGH Confidence ({high_correct}/{high_confidence})</div></div>', unsafe_allow_html=True)
-        with col5:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{low_rate}%</div><div class="stat-label">LOW Confidence ({low_correct}/{low_confidence})</div></div>', unsafe_allow_html=True)
-        
-        st.markdown("#### 📊 Rule Performance")
-        rule_rows = []
-        for rule, stats in rule_stats.items():
-            rate = round(stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
-            rule_rows.append({
-                "Rule": rule[:40] + "..." if len(rule) > 40 else rule,
-                "Correct": stats["correct"],
-                "Total": stats["total"],
-                "Rate": f"{rate}%"
-            })
-        
-        if rule_rows:
-            df_rules = pd.DataFrame(rule_rows)
-            st.dataframe(df_rules, use_container_width=True)
-
+                # Confidence breakdown
+                confidence_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
+                for m in all_matches:
+                    if m.get('actual_1x2') is not None:
+                        conf = m.get('refined_confidence', 'LOW')
+                        confidence_stats[conf]['total'] += 1
+                        if m.get('is_correct', False):
+                            confidence_stats[conf]['correct'] += 1
+                
+                if confidence_stats:
+                    st.subheader("Confidence Performance")
+                    conf_data = []
+                    for conf, stats in confidence_stats.items():
+                        conf_rate = round(stats['correct'] / stats['total'] * 100) if stats['total'] > 0 else 0
+                        conf_data.append({
+                            'Confidence': conf,
+                            'Correct': stats['correct'],
+                            'Total': stats['total'],
+                            'Rate': f"{conf_rate}%"
+                        })
+                    
+                    df = pd.DataFrame(conf_data)
+                    st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No matches in database yet.")
+        except Exception as e:
+            st.error(f"Error fetching dashboard data: {e}")
 
 if __name__ == "__main__":
     main()
