@@ -1,6 +1,6 @@
 """
 REFINED FORMULA V1.1 - COMPLETE IMPLEMENTATION
-Fixed: Parser now properly extracts team names, percentages, and all match data
+Fixed: Parser now correctly extracts percentages from encoded data (284726X = 28%, 47%, 26%, X)
 """
 
 import streamlit as st
@@ -160,7 +160,7 @@ def submit_result(match_id: int, home_goals: int, away_goals: int):
         return False
 
 # ============================================================================
-# ENHANCED PARSER - PROPERLY EXTRACTS TEAM NAMES
+# ENHANCED PARSER - CORRECTLY EXTRACTS ENCODED PERCENTAGES
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
@@ -184,7 +184,6 @@ def clean_team_name(name: str) -> str:
     name = name.strip()
     
     # If the name contains a common team pattern, extract it
-    # Look for patterns like "IMT Novi Beograd" or "FK Zemun"
     team_pattern = re.search(r'([A-Za-z\s]+?)(?:\s+\d+%|\s+[A-Z]|$)', name)
     if team_pattern:
         potential_name = team_pattern.group(1).strip()
@@ -194,7 +193,7 @@ def clean_team_name(name: str) -> str:
     return name if len(name) > 2 else "Unknown"
 
 def parse_text_data(text: str) -> dict:
-    """Parse the complete text data from Forebet with proper team extraction"""
+    """Parse the complete text data from Forebet"""
     result = {
         'matches': [],
         'home_table': {},
@@ -208,6 +207,7 @@ def parse_text_data(text: str) -> dict:
     # First pass: Extract league
     league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 'Ligue 1', 'Serie B', 'Championship']
     for line in lines:
+        line = line.strip()
         for keyword in league_keywords:
             if keyword in line:
                 result['league'] = line.strip()
@@ -217,21 +217,17 @@ def parse_text_data(text: str) -> dict:
     
     # Find match data
     current_match = {}
-    in_h2h = False
     match_found = False
-    line_buffer = []
+    i = 0
     
-    for i, line in enumerate(lines):
-        line = line.strip()
+    while i < len(lines):
+        line = lines[i].strip()
+        
         if not line:
+            i += 1
             continue
         
-        line_buffer.append(line)
-        if len(line_buffer) > 20:
-            line_buffer.pop(0)
-        
-        # Look for the main match line with team names
-        # Pattern: "IMT Novi Beograd VS FK Zemun"
+        # Look for VS pattern (team names)
         if ' VS ' in line:
             parts = line.split(' VS ')
             if len(parts) == 2:
@@ -268,44 +264,40 @@ def parse_text_data(text: str) -> dict:
                             except:
                                 pass
         
-        # Look for percentages - pattern: "IMT Novi Beograd 1 25% Draw 1 25% FK Zemun 2 50%"
-        if match_found and '%' in line:
-            # Try to extract all percentages
-            percentages = re.findall(r'(\d+)%', line)
-            if len(percentages) >= 3:
-                current_match['home_pct'] = int(percentages[0])
-                current_match['draw_pct'] = int(percentages[1])
-                current_match['away_pct'] = int(percentages[2])
-            elif 'Draw Probability' in line:
-                draw_pct_match = re.search(r'(\d+)%', line)
-                if draw_pct_match:
-                    current_match['draw_pct'] = int(draw_pct_match.group(1))
-        
-        # Look for prediction - pattern: "X" or "255421X1 - 12.15"
-        if match_found and ('1X2' in line or 'Pred' in line):
-            # Look for prediction pattern like "255421X"
-            pred_match = re.search(r'[1X2]\s*-\s*\d+', line)
-            if pred_match:
-                pred = pred_match.group(0).split('-')[0].strip()
-                if pred in ['1', 'X', '2']:
-                    current_match['forebet_prediction'] = pred
-                    current_match['prediction'] = pred
+        # Look for the match data row with encoded percentages
+        # Pattern: "284726X1 - 12.0034°3.00" 
+        # 28=Home%, 47=Draw%, 26=Away%, X=Prediction
+        if match_found and re.search(r'^\d{6}[1X2]', line):
+            cleaned = line.replace(' ', '')
             
-            # Look for correct score
-            score_match = re.search(r'(\d+)\s*-\s*(\d+)\s*Avg', line)
-            if score_match:
-                current_match['correct_score_home'] = int(score_match.group(1))
-                current_match['correct_score_away'] = int(score_match.group(2))
-            
-            # Look for avg goals
-            avg_match = re.search(r'Avg\.?\s*goals?\s*([\d.]+)', line, re.IGNORECASE)
-            if avg_match:
-                current_match['avg_goals'] = float(avg_match.group(1))
-            else:
-                # Try to find "2.15" pattern
-                num_match = re.search(r'(\d+\.\d{2})[°]', line)
-                if num_match:
-                    current_match['avg_goals'] = float(num_match.group(1))
+            # Extract 6 digits + prediction
+            pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
+            if pct_match:
+                current_match['home_pct'] = int(pct_match.group(1))
+                current_match['draw_pct'] = int(pct_match.group(2))
+                current_match['away_pct'] = int(pct_match.group(3))
+                current_match['forebet_prediction'] = pct_match.group(4)
+                current_match['prediction'] = pct_match.group(4)
+                
+                # Extract score (e.g., "1 - 1")
+                score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
+                if score_match:
+                    current_match['correct_score_home'] = int(score_match.group(1))
+                    current_match['correct_score_away'] = int(score_match.group(2))
+                
+                # Extract avg goals (e.g., "2.00")
+                avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
+                if avg_match:
+                    current_match['avg_goals'] = float(avg_match.group(1))
+                else:
+                    avg_match2 = re.search(r'(\d+\.\d{2})\s*[°\s]', line)
+                    if avg_match2:
+                        current_match['avg_goals'] = float(avg_match2.group(1))
+                
+                # Extract double chance (e.g., "1X2")
+                dc_match = re.search(r'([1X2]{2})', line)
+                if dc_match:
+                    current_match['double_chance'] = dc_match.group(1)
         
         # Check for FT (finished)
         if match_found and 'FT' in line:
@@ -317,28 +309,29 @@ def parse_text_data(text: str) -> dict:
         
         # Check for H2H section
         if 'Head to head' in line or 'H2H' in line:
-            in_h2h = True
-            continue
+            # Parse H2H data from following lines
+            j = i + 1
+            while j < len(lines) and j < i + 20:
+                h2h_line = lines[j].strip()
+                if re.search(r'\d{2}/\d{2}/\d{4}', h2h_line):
+                    h2h_match = parse_h2h_line(h2h_line)
+                    if h2h_match and match_found:
+                        if 'h2h_data' not in current_match:
+                            current_match['h2h_data'] = []
+                        current_match['h2h_data'].append(h2h_match)
+                    j += 1
+                else:
+                    break
         
-        # Parse H2H results
-        if in_h2h and re.search(r'\d{2}/\d{2}/\d{4}', line):
-            h2h_match = parse_h2h_line(line)
-            if h2h_match and match_found:
-                current_match['h2h_data'].append(h2h_match)
-                # If we have 4+ H2H matches, stop parsing H2H
-                if len(current_match['h2h_data']) >= 6:
-                    in_h2h = False
-        
-        # Check if we've found all data for this match
+        # If we have a complete match, save it
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
-            # Check if we have at least some data
+            # Check if we have percentages (not default values)
             has_data = (current_match.get('home_pct') != 33 or 
                        current_match.get('draw_pct') != 33 or 
-                       current_match.get('away_pct') != 34 or
-                       current_match.get('avg_goals') != 2.5)
+                       current_match.get('away_pct') != 34)
             
             if has_data:
-                # Only add if we haven't already added this match
+                # Check if already added
                 already_added = False
                 for m in result['matches']:
                     if (m.get('home_team') == current_match.get('home_team') and 
@@ -347,14 +340,15 @@ def parse_text_data(text: str) -> dict:
                         break
                 
                 if not already_added:
-                    # Make a copy of the match data
+                    # Make a copy and add
                     match_copy = current_match.copy()
                     result['matches'].append(match_copy)
                     
                     # Reset for next match
                     current_match = {}
                     match_found = False
-                    in_h2h = False
+        
+        i += 1
     
     # If no matches found, try fallback parser
     if not result['matches']:
@@ -454,32 +448,22 @@ def fallback_parse(text: str) -> dict:
                 'h2h_data': []
             }
             
-            # Try to find percentages
-            pct_pattern = r'(\d+)%\s*(\d+)%\s*(\d+)%'
-            pcts = re.findall(pct_pattern, text)
-            if pcts:
-                match_data['home_pct'] = int(pcts[0][0])
-                match_data['draw_pct'] = int(pcts[0][1])
-                match_data['away_pct'] = int(pcts[0][2])
-            
-            # Try to find prediction
-            pred_pattern = r'([1X2])\s*-\s*\d+'
-            pred = re.findall(pred_pattern, text)
-            if pred:
-                match_data['forebet_prediction'] = pred[0]
-                match_data['prediction'] = pred[0]
+            # Try to find encoded percentages (6 digits)
+            encoded = re.search(r'(\d{6}[1X2])', text)
+            if encoded:
+                code = encoded.group(1)
+                if len(code) >= 7:
+                    match_data['home_pct'] = int(code[0:2])
+                    match_data['draw_pct'] = int(code[2:4])
+                    match_data['away_pct'] = int(code[4:6])
+                    match_data['forebet_prediction'] = code[6]
+                    match_data['prediction'] = code[6]
             
             # Try to find avg goals
-            avg_pattern = r'Avg\.?\s*goals?\s*([\d.]+)|(\d+\.\d{2})[°]'
-            avg = re.findall(avg_pattern, text, re.IGNORECASE)
+            avg_pattern = r'(\d+\.\d{2})\s*°'
+            avg = re.search(avg_pattern, text)
             if avg:
-                for match in avg:
-                    if match[0]:
-                        match_data['avg_goals'] = float(match[0])
-                        break
-                    elif match[1]:
-                        match_data['avg_goals'] = float(match[1])
-                        break
+                match_data['avg_goals'] = float(avg.group(1))
             
             # Try to find date
             date_pattern = r'(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2})'
@@ -1049,6 +1033,10 @@ def display_refined_analysis_with_context(match_data: dict, decision: dict, leag
             <div style="font-size: 0.7rem; color: #94a3b8;">Rules Passed:</div>
             {''.join([f'<span style="font-size: 0.7rem; background: #1e293b; padding: 0.1rem 0.4rem; border-radius: 4px; margin-right: 0.3rem;">{rule}</span>' for rule in decision.get('rules_passed', ['Forebet Default'])])}
         </div>
+        
+        <div style="margin-top: 0.5rem; font-size: 0.7rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
+            📊 Forebet Original: {match_data.get('forebet_prediction', '?')} | Avg Goals: {match_data.get('avg_goals', '?')}
+        </div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -1130,20 +1118,15 @@ def main():
                                 
                                 # Set default scoring rates if not provided
                                 if 'home_scoring_rate' not in match:
-                                    match['home_scoring_rate'] = 0.83  # From the sample data
+                                    match['home_scoring_rate'] = 0.83
                                 if 'away_scoring_rate' not in match:
-                                    match['away_scoring_rate'] = 1.5   # From the sample data
+                                    match['away_scoring_rate'] = 1.5
                                 
                                 # Run refined formula
                                 decision = refined_formula_decision(match)
                                 
                                 # Display with context
                                 display_refined_analysis_with_context(match, decision, league)
-                                
-                                # Show Forebet's original prediction
-                                forebet_pred = match.get('forebet_prediction', '?')
-                                avg_goals = match.get('avg_goals', '?')
-                                st.caption(f"📊 Forebet Original: {forebet_pred} | Avg Goals: {avg_goals}")
                                 
                                 # Save button
                                 if st.button(f"💾 Save Match {i}", key=f"save_{i}"):
@@ -1178,7 +1161,7 @@ def main():
                                 st.markdown("---")
                         else:
                             st.error("No matches found in the data. Please check the format.")
-                            st.info("Expected format: 'Team VS Team' with percentages and predictions")
+                            st.info("Expected format: 'Team VS Team' with encoded data like '284726X1 - 12.0034°3.00'")
                             
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
