@@ -1,11 +1,6 @@
 """
-REFINED FORMULA - YOUR 5 RULES ONLY
-Rules:
-1. Home Fortress
-2. Away Form Killer
-3. H2H Dominance
-4. H2H Draw Rate
-5. Midweek Fatigue
+REFINED FORMULA - YOUR 5 RULES - PARSER FIXED
+Now correctly extracts form data, H2H, and avg goals from text
 """
 
 import streamlit as st
@@ -28,12 +23,7 @@ except Exception as e:
     st.error(f"Supabase connection failed: {e}")
     st.stop()
 
-# ============================================================================
-# TABLE NAME CONSTANT
-# ============================================================================
 TABLE_NAME = "match_predictions_v2"
-H2H_TABLE = "h2h_history"
-FORM_TABLE = "team_form_history"
 
 # ============================================================================
 # PAGE CONFIG
@@ -41,44 +31,8 @@ FORM_TABLE = "team_form_history"
 st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="wide")
 
 # ============================================================================
-# DATABASE HELPERS
+# DATABASE HELPERS (for saving only)
 # ============================================================================
-
-def parse_match_date(date_val):
-    if not date_val:
-        return None
-    if isinstance(date_val, (date, datetime)):
-        return date_val
-    if isinstance(date_val, str):
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%Y %H:%M"):
-            try:
-                return datetime.strptime(date_val, fmt).date()
-            except:
-                continue
-    return None
-
-def get_h2h_history(home_team: str, away_team: str, limit: int = 6) -> List[dict]:
-    three_years_ago = (datetime.now() - timedelta(days=3*365)).date()
-    try:
-        response = supabase.table(H2H_TABLE).select("*")\
-            .or_(f"and(home_team.eq.{home_team},away_team.eq.{away_team}),and(home_team.eq.{away_team},away_team.eq.{home_team})")\
-            .gte("match_date", three_years_ago.isoformat())\
-            .order("match_date", desc=True)\
-            .limit(limit)\
-            .execute()
-        return response.data if response.data else []
-    except:
-        return []
-
-def get_team_form(team: str, limit: int = 6, is_home: bool = None) -> List[dict]:
-    try:
-        query = supabase.table(FORM_TABLE).select("*").eq("team_name", team).order("match_date", desc=True).limit(limit)
-        if is_home is not None:
-            query = query.eq("is_home", is_home)
-        response = query.execute()
-        return response.data if response.data else []
-    except:
-        return []
 
 def save_prediction_to_db(data: dict) -> str:
     try:
@@ -116,7 +70,7 @@ def submit_result(match_id: int, home_goals: int, away_goals: int):
         return False
 
 # ============================================================================
-# PARSER
+# ENHANCED PARSER - extracts everything from text
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
@@ -137,6 +91,7 @@ def clean_team_name(name: str) -> str:
     return name if len(name) > 2 else "Unknown"
 
 def parse_text_data(text: str) -> dict:
+    """Parse the complete text data from Forebet"""
     result = {
         'matches': [],
         'league': 'Unknown'
@@ -157,12 +112,17 @@ def parse_text_data(text: str) -> dict:
     match_found = False
     i = 0
     
+    # First pass: collect all team names and sections
+    team_sections = {}
+    current_section = None
+    
     while i < len(lines):
         line = lines[i].strip()
         if not line:
             i += 1
             continue
 
+        # ----- Find match header (Team VS Team) -----
         if ' VS ' in line:
             parts = line.split(' VS ')
             if len(parts) == 2:
@@ -180,8 +140,10 @@ def parse_text_data(text: str) -> dict:
                         'forebet_prediction': 'X',
                         'avg_goals': 2.5,
                         'h2h_data': [],
-                        'home_scoring_rate': 1.0,
-                        'away_scoring_rate': 1.0
+                        'home_form': [],   # store W/D/L results
+                        'away_form': [],   # store W/D/L results
+                        'home_form_raw': '',
+                        'away_form_raw': ''
                     }
                     match_found = True
                     # find date nearby
@@ -195,7 +157,7 @@ def parse_text_data(text: str) -> dict:
                             except:
                                 pass
 
-        # Look for encoded data: e.g., "305613X1 - 11.5323°-"
+        # ----- Look for encoded data line (e.g., "305613X1 - 11.5323°-") -----
         if match_found and re.search(r'^\d{6}[1X2]', line):
             cleaned = line.replace(' ', '')
             pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
@@ -206,12 +168,12 @@ def parse_text_data(text: str) -> dict:
                 current_match['forebet_prediction'] = pct_match.group(4)
                 current_match['prediction'] = pct_match.group(4)
 
-                # Score
+                # Score (e.g., "1 - 1")
                 score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
                 if score_match:
                     current_match['correct_score_home'] = int(score_match.group(1))
                     current_match['correct_score_away'] = int(score_match.group(2))
-                # Avg goals
+                # Avg goals (e.g., "1.53")
                 avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
                 if avg_match:
                     current_match['avg_goals'] = float(avg_match.group(1))
@@ -219,25 +181,8 @@ def parse_text_data(text: str) -> dict:
                 dc_match = re.search(r'([1X2]{2})', line)
                 if dc_match:
                     current_match['double_chance'] = dc_match.group(1)
-                
-                # Extract scoring rates from statistics section
-                for j in range(i, min(len(lines), i + 30)):
-                    stat_line = lines[j].strip()
-                    if 'Scored' in stat_line and 'Avg.' in stat_line:
-                        score_match = re.search(r'Scored\s+(\d+)\s+Avg\.\s+per\s+game\s+([\d.]+)', stat_line)
-                        if score_match:
-                            current_match['home_scoring_rate'] = float(score_match.group(2))
-                        # Look for away scoring rate
-                        for k in range(j+1, min(len(lines), j+10)):
-                            away_line = lines[k].strip()
-                            if 'Scored' in away_line and 'Avg.' in away_line:
-                                away_score_match = re.search(r'Scored\s+(\d+)\s+Avg\.\s+per\s+game\s+([\d.]+)', away_line)
-                                if away_score_match:
-                                    current_match['away_scoring_rate'] = float(away_score_match.group(2))
-                                    break
-                        break
 
-        # Check if match is finished (FT)
+        # ----- Check if match is finished (FT) -----
         if match_found and 'FT' in line:
             current_match['is_finished'] = True
             ft_score = re.search(r'FT\s+(\d+)\s*-\s*(\d+)', line)
@@ -245,7 +190,7 @@ def parse_text_data(text: str) -> dict:
                 current_match['actual_home'] = int(ft_score.group(1))
                 current_match['actual_away'] = int(ft_score.group(2))
 
-        # H2H section
+        # ----- H2H section -----
         if 'Head to head' in line or 'H2H' in line:
             j = i + 1
             while j < len(lines) and j < i + 20:
@@ -260,7 +205,55 @@ def parse_text_data(text: str) -> dict:
                 else:
                     break
 
-        # If we have a complete match, save it
+        # ----- Form sections: "Last 6 matches" -----
+        # We need to detect which team's form we're reading.
+        # Look for the team name followed by "Last 6 matches" or similar.
+        if match_found and ('Last 6 matches' in line or 'Last 6' in line):
+            # Determine which team this section belongs to
+            section_team = None
+            # Look back a few lines for team name
+            for k in range(max(0, i-3), i):
+                prev = lines[k].strip()
+                if current_match['home_team'] in prev:
+                    section_team = 'home'
+                    break
+                elif current_match['away_team'] in prev:
+                    section_team = 'away'
+                    break
+            if section_team:
+                # Now parse the results from subsequent lines until we hit another section or blank lines
+                j = i + 1
+                form_results = []
+                while j < len(lines) and j < i + 15:
+                    form_line = lines[j].strip()
+                    if not form_line:
+                        j += 1
+                        continue
+                    # Look for patterns like "Win 3 50% Draw 3 50% Lost 0 0%"
+                    # Or individual match lines with result
+                    # We'll capture the overall W/D/L counts
+                    win_match = re.search(r'Win\s+(\d+)\s+(\d+)%', form_line)
+                    draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%', form_line)
+                    loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%', form_line)
+                    if win_match:
+                        wins = int(win_match.group(1))
+                        draws = int(draw_match.group(1)) if draw_match else 0
+                        losses = int(loss_match.group(1)) if loss_match else 0
+                        # Create a list of W/D/L strings
+                        form_results = ['W'] * wins + ['D'] * draws + ['L'] * losses
+                        # If we have at least 6 results, use them; otherwise pad with 'D'
+                        if len(form_results) < 6:
+                            form_results = form_results + ['D'] * (6 - len(form_results))
+                        form_results = form_results[:6]  # keep only 6
+                        break
+                    j += 1
+                if form_results:
+                    if section_team == 'home':
+                        current_match['home_form'] = form_results
+                    else:
+                        current_match['away_form'] = form_results
+
+        # ----- If we have a complete match, save it -----
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
             has_data = (current_match.get('home_pct') != 33 or
                        current_match.get('draw_pct') != 33 or
@@ -274,6 +267,7 @@ def parse_text_data(text: str) -> dict:
                         break
                 if not already_added:
                     result['matches'].append(current_match.copy())
+                    # Reset for next match
                     current_match = {}
                     match_found = False
 
@@ -301,6 +295,7 @@ def parse_h2h_line(line: str) -> dict:
     home_goals = int(score_match.group(1))
     away_goals = int(score_match.group(2))
     winner = 'home' if home_goals > away_goals else 'away' if away_goals > home_goals else 'draw'
+    # Extract team names
     parts = re.split(r'\d+\s*-\s*\d+', line)
     if len(parts) >= 2:
         left = re.sub(r'\d{2}/\d{2}/\d{4}', '', parts[0]).strip()
@@ -342,8 +337,8 @@ def fallback_parse(text: str) -> dict:
                 'forebet_prediction': 'X',
                 'avg_goals': 2.5,
                 'h2h_data': [],
-                'home_scoring_rate': 1.0,
-                'away_scoring_rate': 1.0
+                'home_form': [],
+                'away_form': []
             }
             enc = re.search(r'(\d{6}[1X2])', text)
             if enc:
@@ -368,66 +363,55 @@ def fallback_parse(text: str) -> dict:
     return result
 
 # ============================================================================
-# YOUR 5 RULES - REFINED FORMULA
+# YOUR 5 RULES - using parsed data (no database queries)
 # ============================================================================
 
-def check_home_fortress(home_form: List[dict]) -> Tuple[bool, int, str]:
+def check_home_fortress(home_form: List[str]) -> Tuple[bool, int, str]:
     """
     RULE 1: Home Fortress
-    If home team is unbeaten in last 5 home games → Back Home Win
+    Home team unbeaten in last 5 home games
     """
     if len(home_form) < 5:
-        return False, 0, "Not enough data (need 5+ home games)"
-    
-    home_form = home_form[:5]
-    unbeaten = 0
-    for m in home_form:
-        if m.get('result') != 'L':
-            unbeaten += 1
-        else:
-            break
-    
+        return False, 0, "Not enough form data"
+    # home_form is list of W/D/L
+    recent = home_form[:5]
+    unbeaten = sum(1 for r in recent if r != 'L')
     if unbeaten >= 5:
         return True, unbeaten, f"Unbeaten in last {unbeaten} home games"
     return False, unbeaten, f"Only {unbeaten}/5 unbeaten"
 
-def check_away_form_killer(away_form: List[dict]) -> Tuple[bool, int, str]:
+def check_away_form_killer(away_form: List[str]) -> Tuple[bool, int, str]:
     """
     RULE 2: Away Form Killer
-    If away team has lost 4 of last 6 away games → Back Home Win
+    Away team lost 4 of last 6 away games
     """
     if len(away_form) < 6:
-        return False, 0, "Not enough data (need 6 away games)"
-    
-    away_form = away_form[:6]
-    losses = sum(1 for m in away_form if m.get('result') == 'L')
-    
+        return False, 0, "Not enough form data"
+    recent = away_form[:6]
+    losses = sum(1 for r in recent if r == 'L')
     if losses >= 4:
         return True, losses, f"Lost {losses}/6 away games"
     return False, losses, f"Only {losses}/6 losses"
 
 def check_h2h_dominance(h2h_data: List[dict], home_fatigued: bool, away_fatigued: bool) -> Tuple[Optional[str], int, int, str, Optional[str]]:
     """
-    RULE 3: H2H Dominance (Refined)
-    If one team has won 3 of last 4 H2Hs (within 3 years) → Draw is a trap.
-    Back the dominant side only if no fatigue.
+    RULE 3: H2H Dominance
+    One team won 3 of last 4 H2Hs
     """
     if not h2h_data or len(h2h_data) < 4:
-        return None, 0, 0, "Not enough H2H data (need 4+ matches)", None
-    
-    h2h_data = h2h_data[:4]  # Last 4 H2Hs
-    home_wins = sum(1 for m in h2h_data if m.get('winner') == 'home')
-    away_wins = sum(1 for m in h2h_data if m.get('winner') == 'away')
-    draws = sum(1 for m in h2h_data if m.get('winner') == 'draw')
-    
+        return None, 0, 0, "Not enough H2H data", None
+    recent = h2h_data[:4]
+    home_wins = sum(1 for m in recent if m.get('winner') == 'home')
+    away_wins = sum(1 for m in recent if m.get('winner') == 'away')
+    draws = sum(1 for m in recent if m.get('winner') == 'draw')
     if home_wins >= 3:
         if home_fatigued:
-            return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs but fatigued → Draw", 'fatigue'
+            return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs but fatigued", 'fatigue'
         else:
             return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs → Draw is a trap", 'dominant'
     elif away_wins >= 3:
         if away_fatigued:
-            return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs but fatigued → Draw", 'fatigue'
+            return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs but fatigued", 'fatigue'
         else:
             return 'away', away_wins, draws, f"Away won {away_wins}/4 H2Hs → Draw is a trap", 'dominant'
     else:
@@ -435,16 +419,13 @@ def check_h2h_dominance(h2h_data: List[dict], home_fatigued: bool, away_fatigued
 
 def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
     """
-    RULE 4: H2H Draw Rate (Refined)
-    Only trust the draw if 4+ draws in last 6 H2Hs.
-    If fewer than 4 total H2Hs, ignore this rule completely.
+    RULE 4: H2H Draw Rate
+    4+ draws in last 6 H2Hs
     """
     if not h2h_data or len(h2h_data) < 6:
-        return False, 0, "Not enough H2H data (need 6+ matches)"
-    
-    h2h_data = h2h_data[:6]
-    draws = sum(1 for m in h2h_data if m.get('winner') == 'draw')
-    
+        return False, 0, "Not enough H2H data"
+    recent = h2h_data[:6]
+    draws = sum(1 for m in recent if m.get('winner') == 'draw')
     if draws >= 4:
         return True, draws, f"{draws}/6 H2Hs were draws → Trust the Draw"
     return False, draws, f"Only {draws}/6 draws"
@@ -452,18 +433,14 @@ def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
 def check_midweek_fatigue(team: str, match_date, fixtures: List[dict]) -> Tuple[bool, str]:
     """
     RULE 5: Midweek Fatigue
-    If away team played a competitive match 3-4 days ago → Downgrade away team by 30%.
-    Back Home Win or Draw.
     """
     if not match_date or not fixtures:
         return False, "No fixtures data"
-    
     if isinstance(match_date, str):
         try:
             match_date = datetime.strptime(match_date, "%Y-%m-%d").date()
         except:
             return False, "Invalid match date"
-    
     for fixture in fixtures:
         if fixture.get('team') == team:
             fixture_date = fixture.get('date')
@@ -487,27 +464,25 @@ def get_stake_display(stake: str) -> Tuple[str, str]:
     return stake_map.get(stake, (stake, "LOW"))
 
 # ============================================================================
-# YOUR REFINED FORMULA DECISION LOGIC - 5 RULES ONLY
+# YOUR REFINED FORMULA DECISION - uses parsed data only
 # ============================================================================
 
 def refined_formula_decision(data: dict) -> dict:
     """
-    YOUR REFINED FORMULA - 5 Rules Only
-    No Goal Discrepancy, no Early/Late goals, no Clean Sheets
+    YOUR 5 RULES - uses data from parsed text, NOT database
     """
-    
     home_team = data.get('home_team', 'Unknown')
     away_team = data.get('away_team', 'Unknown')
     match_date = data.get('date')
     forebet_pred = data.get('forebet_prediction', 'X')
     fixtures = data.get('midweek_fixtures', [])
     
-    # Get data needed for your rules
-    home_form = get_team_form(home_team, limit=6, is_home=True)
-    away_form = get_team_form(away_team, limit=6, is_home=False)
-    h2h_data = data.get('h2h_data', [])
+    # Get data from parsed text (not database)
+    home_form = data.get('home_form', [])      # list of W/D/L
+    away_form = data.get('away_form', [])      # list of W/D/L
+    h2h_data = data.get('h2h_data', [])        # list of H2H match dicts
     
-    # Check fatigue for H2H dominance rule
+    # Check fatigue for H2H dominance
     home_fatigued, home_fatigue_msg = check_midweek_fatigue(home_team, match_date, fixtures)
     away_fatigued, away_fatigue_msg = check_midweek_fatigue(away_team, match_date, fixtures)
     
@@ -611,74 +586,51 @@ def refined_formula_decision(data: dict) -> dict:
     }
 
 # ============================================================================
-# DISPLAY FUNCTION - NATIVE STREAMLIT COMPONENTS
+# DISPLAY FUNCTION - Native Streamlit components
 # ============================================================================
 
 def display_refined_analysis_native(match_data: dict, decision: dict, league: str = "Unknown"):
-    """Display analysis using native Streamlit components"""
-    
     home_team = match_data.get('home_team', 'Unknown')
     away_team = match_data.get('away_team', 'Unknown')
     home_pct = match_data.get('home_pct', '?')
     draw_pct = match_data.get('draw_pct', '?')
     away_pct = match_data.get('away_pct', '?')
     
-    # Get stake display
     stake_display, confidence_level = get_stake_display(decision.get('stake', '0.25 units'))
+    conf_color = {'HIGH': 'green', 'MEDIUM': 'orange', 'LOW': 'gray'}.get(decision.get('confidence', 'LOW'), 'gray')
+    pred_emoji = {'1': '🏠', 'X': '🤝', '2': '✈️'}.get(decision.get('prediction', 'X'), '🎯')
     
-    # Confidence color mapping
-    conf_color = {
-        'HIGH': 'green',
-        'MEDIUM': 'orange',
-        'LOW': 'gray'
-    }.get(decision.get('confidence', 'LOW'), 'gray')
-    
-    # Prediction emoji
-    pred_emoji = {
-        '1': '🏠',
-        'X': '🤝',
-        '2': '✈️',
-        'Under 2.5': '⬇️',
-        'Over 2.5': '⬆️'
-    }.get(decision.get('prediction', 'X'), '🎯')
-    
-    # ----- HEADER -----
     st.subheader(f"{pred_emoji} {home_team} vs {away_team}")
     st.caption(f"📅 {match_data.get('date', '')} | 🏆 {league}")
     
-    # ----- PERCENTAGES ROW -----
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("🏠 Home", f"{home_pct}%")
-    with c2:
-        st.metric("🤝 Draw", f"{draw_pct}%")
-    with c3:
-        st.metric("✈️ Away", f"{away_pct}%")
+    c1.metric("🏠 Home", f"{home_pct}%")
+    c2.metric("🤝 Draw", f"{draw_pct}%")
+    c3.metric("✈️ Away", f"{away_pct}%")
     
-    # ----- PREDICTION CARD -----
     st.markdown("---")
-    
-    # Main prediction display
     st.markdown(f"### 🎯 {decision.get('bet', 'Unknown')}")
     st.markdown(f"**Rule:** {decision.get('rule', 'Unknown')}")
     st.markdown(f"**Confidence:** :{conf_color}[{decision.get('confidence', 'LOW')}]")
     st.markdown(f"**Stake:** {stake_display}")
     st.markdown(f"**Reason:** {decision.get('reason', '')}")
     
-    # ----- RULES PASSED -----
     rules_passed = decision.get('rules_passed', ['Forebet Default'])
     st.caption(f"📋 Rules Passed: {', '.join(rules_passed)}")
-    
-    # ----- FOREBET ORIGINAL -----
     st.caption(f"📊 Forebet Original: {match_data.get('forebet_prediction', '?')} | Avg Goals: {match_data.get('avg_goals', '?')}")
-    
     st.markdown("---")
     
-    # ----- H2H DATA -----
     if 'h2h_data' in match_data and match_data['h2h_data']:
         with st.expander("📊 Head-to-Head History"):
             h2h_df = pd.DataFrame(match_data['h2h_data'])
             st.dataframe(h2h_df, use_container_width=True)
+    
+    if match_data.get('home_form') or match_data.get('away_form'):
+        with st.expander("📈 Recent Form"):
+            if match_data.get('home_form'):
+                st.write(f"**{home_team} (last 6):** {' '.join(match_data['home_form'])}")
+            if match_data.get('away_form'):
+                st.write(f"**{away_team} (last 6):** {' '.join(match_data['away_form'])}")
 
 # ============================================================================
 # MAIN APP
@@ -727,7 +679,6 @@ def main():
                         if matches:
                             st.success(f"✅ Found {len(matches)} matches in {league}")
                             
-                            # Parse midweek fixtures
                             fixtures = []
                             if midweek_fixtures:
                                 for line in midweek_fixtures.strip().split('\n'):
@@ -745,13 +696,13 @@ def main():
                             for i, match in enumerate(matches, 1):
                                 match['midweek_fixtures'] = fixtures
                                 
-                                # Run YOUR refined formula (5 rules only)
+                                # Run YOUR refined formula
                                 decision = refined_formula_decision(match)
                                 
-                                # Display using native Streamlit components
+                                # Display
                                 display_refined_analysis_native(match, decision, league)
                                 
-                                # Auto-save to database
+                                # Auto-save
                                 db_data = {
                                     'match_date': match.get('date', datetime.now().date()),
                                     'league_name': league,
@@ -793,7 +744,7 @@ def main():
                     st.error(f"❌ Error: {str(e)}")
                     st.code(traceback.format_exc())
     
-    # PENDING MATCHES TAB
+    # PENDING, RECORDS, DASHBOARD tabs (same as before)
     with tab2:
         st.subheader("📝 Pending Matches")
         st.caption("Enter actual results for completed matches")
@@ -819,7 +770,6 @@ def main():
         except Exception as e:
             st.error(f"Error fetching pending matches: {e}")
 
-    # RECORDS TAB
     with tab3:
         st.subheader("📊 Performance Records")
         try:
@@ -830,12 +780,9 @@ def main():
                 correct = sum(1 for r in results if r.get('is_correct', False))
                 rate = round(correct / total * 100) if total > 0 else 0
                 col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Matches", total)
-                with col2:
-                    st.metric("Correct", correct)
-                with col3:
-                    st.metric("Accuracy", f"{rate}%")
+                col1.metric("Total Matches", total)
+                col2.metric("Correct", correct)
+                col3.metric("Accuracy", f"{rate}%")
                 rule_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
                 for r in results:
                     rule = r.get('refined_rule_triggered', 'Unknown')
@@ -860,7 +807,6 @@ def main():
         except Exception as e:
             st.error(f"Error fetching results: {e}")
 
-    # DASHBOARD TAB
     with tab4:
         st.subheader("📈 Dashboard")
         try:
@@ -873,14 +819,10 @@ def main():
                 correct = sum(1 for m in all_matches if m.get('is_correct', False))
                 rate = round(correct / completed * 100) if completed > 0 else 0
                 col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Matches", total)
-                with col2:
-                    st.metric("Completed", completed)
-                with col3:
-                    st.metric("Correct", correct)
-                with col4:
-                    st.metric("Accuracy", f"{rate}%")
+                col1.metric("Total Matches", total)
+                col2.metric("Completed", completed)
+                col3.metric("Correct", correct)
+                col4.metric("Accuracy", f"{rate}%")
                 confidence_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
                 for m in all_matches:
                     if m.get('actual_1x2') is not None:
