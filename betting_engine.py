@@ -1,26 +1,45 @@
 import streamlit as st
 import re
 
+# ============================================
+# DEBUG LOGGING (stored in session state)
+# ============================================
+
 def debug_log(msg):
     if 'debug_messages' not in st.session_state:
         st.session_state.debug_messages = []
     st.session_state.debug_messages.append(msg)
 
+# ============================================
+# PARSER CORE FUNCTIONS
+# ============================================
+
 def parse_encoded_line(line):
+    """
+    Parse encoded line like:
+    '284726X1 - 12.0034°3.00'
+    or '323533X0 - 01.4124°3.50'
+    or '364322X1 - 12.3818°3.50'
+    Returns dict with all essential fields or None.
+    """
     debug_log(f"🔍 parse_encoded_line INPUT: '{line}'")
     if ' - ' not in line:
         debug_log("❌ No ' - ' separator found")
         return None
+
     left_part, right_part = line.split(' - ', 1)
     left_part = left_part.replace(" ", "")
     right_part = right_part.strip()
     debug_log(f"📊 Left: '{left_part}', Right: '{right_part}'")
-    
+
+    # Extract percentages, prediction, and home score
+    # Pattern: 6 digits (2+2+2) + letter (1, X, 2) + digit (home score)
     pattern = r"(\d{2})(\d{2})(\d{2})([12X])(\d)"
     m = re.match(pattern, left_part)
     if not m:
         debug_log(f"❌ Left part did not match pattern: {left_part}")
         return None
+
     home_pct = int(m.group(1))
     draw_pct = int(m.group(2))
     away_pct = int(m.group(3))
@@ -28,17 +47,28 @@ def parse_encoded_line(line):
     score_home = int(m.group(5))
     debug_log(f"✅ Percentages: home={home_pct}, draw={draw_pct}, away={away_pct}, pred={pred}")
     debug_log(f"✅ Home score: {score_home}")
-    
+
+    # Parse right part for away score and avg goals
+    # Pattern: integer_part + '.' + ... + '°' + avg_goals
     pattern2 = r"(\d+)\.\d+°\s*([\d.]+)"
     m2 = re.search(pattern2, right_part)
     if not m2:
         debug_log(f"❌ Could not parse right part: '{right_part}'")
         return None
-    integer_part = m2.group(1)
-    avg_goals = float(m2.group(2))
+
+    integer_part = m2.group(1)          # e.g., "12" or "01"
+    avg_goals = float(m2.group(2))      # e.g., 3.00 or 3.50
+
+    # Away score = FIRST digit of the integer part
     score_away = int(integer_part[0])
     debug_log(f"✅ Integer part: {integer_part}, Away score: {score_away}")
     debug_log(f"✅ Average goals: {avg_goals}")
+
+    # Sanity check on percentages
+    total = home_pct + draw_pct + away_pct
+    if total < 95 or total > 105:
+        debug_log(f"⚠️ Percentages sum to {total}% (unusual but continuing)")
+
     return {
         'home_pct': home_pct,
         'draw_pct': draw_pct,
@@ -50,6 +80,12 @@ def parse_encoded_line(line):
     }
 
 def parse_h2h_line(line, home_team, away_team):
+    """
+    Parse H2H lines like:
+    'Nacional AM1 - 1 (0 - 0) Iguatu CE'
+    or 'FK Ogre1 - 1 (1 - 1) Grobinas SC'
+    Returns dict with scores or None.
+    """
     pattern = r"(.+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*(.+)"
     m = re.match(pattern, line)
     if not m:
@@ -62,9 +98,15 @@ def parse_h2h_line(line, home_team, away_team):
     }
 
 def parse_text_data(text):
+    """
+    Main parser for Forebet‑style match data.
+    Returns dict with league and list of matches.
+    """
     debug_log("=== 🔍 DEBUG: parse_text_data STARTED ===")
     lines = text.split('\n')
     debug_log(f"✅ DEBUG: Total lines: {len(lines)}")
+
+    # Detect league from known keywords
     league = None
     for line in lines:
         if 'Brazil Serie D' in line:
@@ -73,45 +115,79 @@ def parse_text_data(text):
         elif 'Czech Republic Chance Liga' in line:
             league = 'Czech Republic Chance Liga'
             break
+        elif 'Latvia Virsliga' in line:
+            league = 'Latvia Virsliga'
+            break
         elif 'Serie D' in line:
             league = 'Serie D'
             break
         elif 'Chance Liga' in line:
             league = 'Chance Liga'
             break
+        elif 'Virsliga' in line:
+            league = 'Virsliga'
+            break
+        # Add more leagues as needed
+
     if league:
         debug_log(f"✅ DEBUG: League found: '{league}'")
     else:
-        debug_log("❌ DEBUG: No league found")
-    
+        debug_log("❌ DEBUG: No league found – will still try to parse")
+
     matches = []
     match = None
+
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
+
+        # ---------- MATCH DETECTION (with improved validation) ----------
+        # Only treat as match if:
+        #  - Contains " VS "
+        #  - Both sides have at least 2 characters, no quotes, no parentheses,
+        #    and either contain a space or are longer than 3 characters.
         if ' VS ' in line:
-            debug_log(f"🔍 DEBUG: Found VS line at index {i}: '{line}'")
-            home, away = line.split(' VS ', 1)
-            home = home.strip()
-            away = away.strip()
-            debug_log(f"🔍 DEBUG: Home='{home}', Away='{away}'")
-            match = {
-                'home_team': home,
-                'away_team': away,
-                'league': league,
-                'home_pct': None,
-                'draw_pct': None,
-                'away_pct': None,
-                'prediction': None,
-                'score_home': None,
-                'score_away': None,
-                'avg_goals': None,
-                'date': None,
-                'h2h': []
-            }
-            debug_log("✅ DEBUG: match_found = True")
-        elif match:
+            parts = line.split(' VS ', 1)
+            left = parts[0].strip()
+            right = parts[1].strip()
+            # Check that both sides are valid (not code artifacts)
+            valid = True
+            for side in (left, right):
+                if not side:
+                    valid = False
+                    break
+                if "'" in side or '"' in side or '(' in side or ')' in side:
+                    valid = False
+                    break
+                # A team name should have at least two words or be longer than 3 chars
+                if not (' ' in side or len(side) > 3):
+                    valid = False
+                    break
+            if valid:
+                debug_log(f"🔍 DEBUG: Found valid VS line at index {i}: '{line}'")
+                home = left
+                away = right
+                debug_log(f"🔍 DEBUG: Home='{home}', Away='{away}'")
+                match = {
+                    'home_team': home,
+                    'away_team': away,
+                    'league': league,
+                    'home_pct': None,
+                    'draw_pct': None,
+                    'away_pct': None,
+                    'prediction': None,
+                    'score_home': None,
+                    'score_away': None,
+                    'avg_goals': None,
+                    'date': None,
+                    'h2h': []
+                }
+                debug_log("✅ DEBUG: match_found = True")
+                continue   # skip further processing for this line
+
+        # ---------- DATE EXTRACTION ----------
+        if match:
             date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
             if date_match:
                 date_str = date_match.group(1)
@@ -121,6 +197,9 @@ def parse_text_data(text):
                     debug_log(f"✅ DEBUG: Date found: {match['date']}")
                 except:
                     pass
+
+            # ---------- ENCODED LINE ----------
+            # Look for a line with " - " and containing six digits + a letter + a digit
             if ' - ' in line and re.search(r'\d{6}[12X]\d', line.replace(' ', '')):
                 debug_log(f"🔍 DEBUG: Found encoded line at index {i}: '{line}'")
                 result = parse_encoded_line(line)
@@ -135,6 +214,8 @@ def parse_text_data(text):
                     debug_log("✅ DEBUG: Encoded line parsed successfully!")
                 else:
                     debug_log("❌ DEBUG: parse_encoded_line FAILED")
+
+            # ---------- H2H LINES ----------
             if match and ' - ' in line and '(' in line and ')' in line:
                 if re.search(r'\d+\s*-\s*\d+\s*\(\s*\d+\s*-\s*\d+\s*\)', line):
                     debug_log(f"🔍 DEBUG: Potential H2H line at {i}: '{line}'")
@@ -142,8 +223,11 @@ def parse_text_data(text):
                     if h2h_result:
                         match['h2h'].append(h2h_result)
                         debug_log(f"✅ DEBUG: Parsed H2H: {h2h_result}")
+
+            # ---------- CHECK COMPLETENESS ----------
             if match and match['home_pct'] is not None:
-                essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away', 'avg_goals']
+                essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction',
+                             'score_home', 'score_away', 'avg_goals']
                 missing = [f for f in essential if match.get(f) is None]
                 if missing:
                     debug_log(f"❌ DEBUG: Missing essential data: {missing}")
@@ -151,7 +235,9 @@ def parse_text_data(text):
                     debug_log("✅ DEBUG: All essential data present!")
                     matches.append(match)
                     debug_log(f"✅ DEBUG: Match stored: {match['home_team']} vs {match['away_team']}")
-                    match = None
+                    match = None   # reset for next match
+
+            # ---------- PERIODIC DEBUG (every 50 lines) ----------
             if match and i % 50 == 0:
                 debug_log("🔍 DEBUG: Checking if match is complete...")
                 debug_log(f"home_pct={match.get('home_pct')}")
@@ -161,12 +247,17 @@ def parse_text_data(text):
                 debug_log(f"score_home={match.get('score_home')}")
                 debug_log(f"score_away={match.get('score_away')}")
                 debug_log(f"avg_goals={match.get('avg_goals')}")
+
     debug_log("=== 🔍 DEBUG: parse_text_data COMPLETE ===")
     debug_log(f"Total matches found: {len(matches)}")
     return {'league': league, 'matches': matches}
 
-# Streamlit UI
+# ============================================
+# STREAMLIT UI
+# ============================================
+
 st.set_page_config(page_title="Forebet Parser", layout="wide")
+
 st.title("🐛 Refined Formula V1.1 - DEBUG MODE")
 st.markdown("DEBUG MODE: Shows exactly where the parser fails")
 st.markdown("🔍 All parser steps are displayed - scroll up to see the full debug output")
@@ -180,14 +271,20 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.subheader("📝 Input Data")
     st.text_area("Data to parse", value=text_input, height=300, key="display_text")
+
 with col2:
     st.subheader("📊 Results")
     if st.button("🔍 Parse Data", type="primary"):
+        # Clear previous debug messages
         st.session_state.debug_messages = []
         result = parse_text_data(text_input)
+
+        # Show debug output
         with st.expander("🔍 DEBUG OUTPUT (scroll down for results)", expanded=True):
             debug_output = "\n".join(st.session_state.debug_messages)
             st.code(debug_output, language="")
+
+        # Show results
         st.subheader("📊 Parser Results")
         if result['matches']:
             st.success(f"✅ Found {len(result['matches'])} matches!")
@@ -219,6 +316,7 @@ with col2:
             st.error("❌ No matches found in the data.")
             st.info("Scroll up to see the DEBUG output - it will show exactly where the parser failed.")
 
+# Display parser rules
 with st.expander("📋 Parser Rules"):
     st.markdown("""
     ### Your 5 Refined Formula Rules:
