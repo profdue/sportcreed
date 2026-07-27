@@ -66,15 +66,10 @@ def parse_encoded_line(line):
         'avg_goals': avg_goals
     }
 
-def clean_match_line(line):
-    """Remove leading date (e.g., '20/07/2026 ') from a match line."""
-    return re.sub(r'^\d{2}/\d{2}/\d{4}\s+', '', line)
-
 def parse_match_line(line):
     """
     Parse a cleaned match line like:
-    'Mushuc Runa2 - 1 (1 - 1) Orense SC'
-    or 'Cluj4 - 1 (1 - 1) FC Voluntari'
+    'Sport Recife2 - 2 (1 - 1) Operário PR'
     Returns dict or None.
     """
     pattern = r"(.+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*(.+)"
@@ -121,6 +116,7 @@ def parse_text_data(text):
     league = None
     league_keywords = {
         'Brazil Serie D': 'Brazil Serie D',
+        'Brazil Serie B': 'Brazil Serie B',
         'Czech Republic Chance Liga': 'Czech Republic Chance Liga',
         'Latvia Virsliga': 'Latvia Virsliga',
         'Sweden Superettan': 'Sweden Superettan',
@@ -150,10 +146,15 @@ def parse_text_data(text):
     match = None
     current_abbrev = None
     current_section = None
+    section_lines = []  # accumulate lines for the current section
 
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
+            # Blank line: if we were accumulating, process the block now
+            if current_section and section_lines:
+                process_section_block(match, current_abbrev, current_section, section_lines)
+                section_lines = []
             continue
 
         # ---- DETECT MATCH START ----
@@ -164,6 +165,7 @@ def parse_text_data(text):
             parts = line.split(' VS ', 1)
             left = parts[0].strip()
             right = parts[1].strip()
+            # Only reject if empty or contains quotes (code artifacts)
             if left and right and "'" not in left and '"' not in left and "'" not in right and '"' not in right:
                 debug_log(f"🔍 DEBUG: Found valid VS line at index {i}: '{line}'")
                 match = {
@@ -188,6 +190,7 @@ def parse_text_data(text):
                 debug_log("✅ DEBUG: match_found = True")
                 current_abbrev = None
                 current_section = None
+                section_lines = []
                 continue
 
         # ---- DATE EXTRACTION (first date with time) ----
@@ -217,84 +220,53 @@ def parse_text_data(text):
                 debug_log("✅ DEBUG: Encoded line parsed successfully!")
             else:
                 debug_log("❌ DEBUG: parse_encoded_line FAILED")
+            continue  # don't process this line as part of a section
 
         # ---- SECTION DETECTION ----
         if match:
-            # Team abbreviation
+            # Check for team abbreviation (2-4 uppercase letters)
             if re.match(r'^[A-Z]{2,4}$', line):
+                # If we were in a section, process the accumulated lines before changing abbreviation
+                if current_section and section_lines:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
+                    section_lines = []
                 current_abbrev = line
                 debug_log(f"🔍 DEBUG: Detected team abbreviation: {current_abbrev}")
                 continue
 
             lower = line.lower()
             if 'home matches' in lower:
+                if current_section and section_lines:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
+                    section_lines = []
                 current_section = 'home'
                 debug_log(f"🔍 DEBUG: Found home matches section for {current_abbrev}")
                 continue
             elif 'away matches' in lower:
+                if current_section and section_lines:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
+                    section_lines = []
                 current_section = 'away'
                 debug_log(f"🔍 DEBUG: Found away matches section for {current_abbrev}")
                 continue
             elif 'last 6 matches' in lower:
+                if current_section and section_lines:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
+                    section_lines = []
                 current_section = 'last6'
                 debug_log(f"🔍 DEBUG: Found last 6 matches section for {current_abbrev}")
                 continue
             elif 'head to head' in lower:
+                if current_section and section_lines:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
+                    section_lines = []
                 current_section = 'h2h'
                 debug_log(f"🔍 DEBUG: Found H2H section")
                 continue
 
-            # ---- PARSE MATCH LINES WITHIN SECTIONS ----
+            # ---- ACCUMULATE LINES FOR THE CURRENT SECTION ----
             if current_section and match:
-                # Check if this line looks like a match line (has score pattern)
-                if re.search(r'\d+\s*-\s*\d+\s*\(\s*\d+\s*-\s*\d+\s*\)', line):
-                    # Clean the line by removing leading date if present
-                    cleaned = clean_match_line(line)
-                    parsed = parse_match_line(cleaned)
-                    if parsed:
-                        debug_log(f"🔍 DEBUG: Parsed match line in section {current_section}: {parsed}")
-                        # Determine which team this match is about
-                        team = None
-                        if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
-                            team = parsed['home_team']
-                        elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
-                            team = parsed['away_team']
-                        if team:
-                            result = get_result(parsed, team)
-                            if result:
-                                if current_section == 'home' and team == match['home_team']:
-                                    match['home_form'].append(result)
-                                    debug_log(f"✅ DEBUG: Added {result} to home_form for {team}")
-                                elif current_section == 'away' and team == match['away_team']:
-                                    match['away_form'].append(result)
-                                    debug_log(f"✅ DEBUG: Added {result} to away_form for {team}")
-                                elif current_section == 'last6':
-                                    if team == match['home_team']:
-                                        match['home_recent'].append(result)
-                                    elif team == match['away_team']:
-                                        match['away_recent'].append(result)
-                                    debug_log(f"✅ DEBUG: Added {result} to recent form for {team}")
-                        # H2H handling
-                        if current_section == 'h2h' and parsed:
-                            if parsed['home_team'] == match['home_team'] and parsed['away_team'] == match['away_team']:
-                                if parsed['home_score'] > parsed['away_score']:
-                                    winner = match['home_team']
-                                elif parsed['home_score'] < parsed['away_score']:
-                                    winner = match['away_team']
-                                else:
-                                    winner = 'Draw'
-                                match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
-                                debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
-                            elif parsed['home_team'] == match['away_team'] and parsed['away_team'] == match['home_team']:
-                                if parsed['home_score'] > parsed['away_score']:
-                                    winner = match['away_team']
-                                elif parsed['home_score'] < parsed['away_score']:
-                                    winner = match['home_team']
-                                else:
-                                    winner = 'Draw'
-                                match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
-                                debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
-
+                section_lines.append(line)
         # ---- PERIODIC DEBUG ----
         if match and i % 50 == 0:
             debug_log("🔍 DEBUG: Checking if match is complete...")
@@ -306,6 +278,10 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
+    # Process any remaining section lines
+    if current_section and section_lines and match:
+        process_section_block(match, current_abbrev, current_section, section_lines)
+
     # Store last match if any
     if match:
         store_current_match(match, matches)
@@ -313,6 +289,109 @@ def parse_text_data(text):
     debug_log("=== 🔍 DEBUG: parse_text_data COMPLETE ===")
     debug_log(f"Total matches found: {len(matches)}")
     return {'league': league, 'matches': matches}
+
+def process_section_block(match, abbrev, section_type, lines):
+    """
+    Process a block of lines belonging to a section (home, away, last6, h2h).
+    Join lines, extract all match patterns, and update the match object.
+    """
+    if not match or not lines:
+        return
+    # Join lines with spaces to handle multi-line matches
+    block = " ".join(lines)
+    debug_log(f"🔍 Processing {section_type} block for {abbrev}: {block[:100]}...")
+
+    # Find all match patterns in the block
+    # Pattern: TeamA score - score (HT) TeamB
+    # This regex matches across newlines because we joined with spaces.
+    pattern = re.compile(r"([A-Za-zÀ-ÿ\s.]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
+    matches = pattern.findall(block)
+    if not matches:
+        # If no matches found, the block might have the date on separate lines; try a more lenient approach
+        # Remove dates and re-try (dates are often "dd/mm" or "dd/mm/yyyy")
+        cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
+        matches = pattern.findall(cleaned)
+
+    if not matches:
+        debug_log(f"❌ No match patterns found in {section_type} block for {abbrev}")
+        return
+
+    for m in matches:
+        home_team = m[0].strip()
+        home_score = int(m[1])
+        away_score = int(m[2])
+        ht_home = int(m[3])
+        ht_away = int(m[4])
+        away_team = m[5].strip()
+        parsed = {
+            'home_team': home_team,
+            'home_score': home_score,
+            'away_score': away_score,
+            'ht_home': ht_home,
+            'ht_away': ht_away,
+            'away_team': away_team
+        }
+        debug_log(f"🔍 Parsed match: {home_team} {home_score}-{away_score} ({ht_home}-{ht_away}) {away_team}")
+
+        # Determine which team this match is about (the one matching the abbreviation)
+        # We try to map the abbreviation to a full team name from the match
+        team = None
+        if abbrev:
+            # Try to match abbreviation to home or away team (case-insensitive)
+            if abbrev.upper() in home_team.upper():
+                team = home_team
+            elif abbrev.upper() in away_team.upper():
+                team = away_team
+            # If abbreviation not found, fallback: check if home_team matches match['home_team'] or match['away_team']
+        if not team:
+            # Use full team names from the match
+            if home_team == match['home_team'] or home_team == match['away_team']:
+                team = home_team
+            elif away_team == match['home_team'] or away_team == match['away_team']:
+                team = away_team
+
+        if not team:
+            # Still could not determine; skip
+            debug_log(f"⚠️ Could not determine which team for match: {home_team} vs {away_team}")
+            continue
+
+        result = get_result(parsed, team)
+        if result:
+            if section_type == 'home' and team == match['home_team']:
+                match['home_form'].append(result)
+                debug_log(f"✅ Added {result} to home_form for {team}")
+            elif section_type == 'away' and team == match['away_team']:
+                match['away_form'].append(result)
+                debug_log(f"✅ Added {result} to away_form for {team}")
+            elif section_type == 'last6':
+                if team == match['home_team']:
+                    match['home_recent'].append(result)
+                elif team == match['away_team']:
+                    match['away_recent'].append(result)
+                debug_log(f"✅ Added {result} to recent form for {team}")
+            elif section_type == 'h2h':
+                # Determine winner relative to match's home/away
+                if parsed['home_team'] == match['home_team'] and parsed['away_team'] == match['away_team']:
+                    if parsed['home_score'] > parsed['away_score']:
+                        winner = match['home_team']
+                    elif parsed['home_score'] < parsed['away_score']:
+                        winner = match['away_team']
+                    else:
+                        winner = 'Draw'
+                elif parsed['home_team'] == match['away_team'] and parsed['away_team'] == match['home_team']:
+                    if parsed['home_score'] > parsed['away_score']:
+                        winner = match['away_team']
+                    elif parsed['home_score'] < parsed['away_score']:
+                        winner = match['home_team']
+                    else:
+                        winner = 'Draw'
+                else:
+                    winner = None
+                if winner:
+                    match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
+                    debug_log(f"✅ Added H2H winner: {winner}")
+        else:
+            debug_log(f"⚠️ Could not get result for {team} from {parsed}")
 
 # ============================================
 # STREAMLIT UI (unchanged)
