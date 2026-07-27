@@ -1,6 +1,5 @@
 import streamlit as st
 import re
-from datetime import datetime
 
 # ============================================
 # DEBUG LOGGING
@@ -16,28 +15,19 @@ def debug_log(msg):
 # ============================================
 
 def parse_encoded_line(line):
-    """
-    Parse encoded line like:
-    '405010X1 - 12.3026°3.50'
-    or '383922X2 - 22.6320°-'   (avg goals missing)
-    Returns dict with all essential fields or None.
-    """
     debug_log(f"🔍 parse_encoded_line INPUT: '{line}'")
     if ' - ' not in line:
         debug_log("❌ No ' - ' separator found")
         return None
-
     left_part, right_part = line.split(' - ', 1)
     left_part = left_part.replace(" ", "")
     right_part = right_part.strip()
     debug_log(f"📊 Left: '{left_part}', Right: '{right_part}'")
-
     pattern = r"(\d{2})(\d{2})(\d{2})([12X])(\d)"
     m = re.match(pattern, left_part)
     if not m:
         debug_log(f"❌ Left part did not match pattern: {left_part}")
         return None
-
     home_pct = int(m.group(1))
     draw_pct = int(m.group(2))
     away_pct = int(m.group(3))
@@ -46,22 +36,19 @@ def parse_encoded_line(line):
     debug_log(f"✅ Percentages: home={home_pct}, draw={draw_pct}, away={away_pct}, pred={pred}")
     debug_log(f"✅ Home score: {score_home}")
 
-    # Parse right part: integer_part + '.' + ... + '°' + avg_goals (or '-')
     pattern2 = r"(\d+)\.\d+°\s*([\d.]+|-)"
     m2 = re.search(pattern2, right_part)
     if not m2:
         debug_log(f"❌ Could not parse right part: '{right_part}'")
         return None
-
     integer_part = m2.group(1)
     avg_goals_str = m2.group(2)
     if avg_goals_str == '-':
         avg_goals = None
-        debug_log(f"⚠️ No average goals provided (set to None)")
+        debug_log("⚠️ No average goals provided (set to None)")
     else:
         avg_goals = float(avg_goals_str)
         debug_log(f"✅ Average goals: {avg_goals}")
-
     score_away = int(integer_part[0])
     debug_log(f"✅ Integer part: {integer_part}, Away score: {score_away}")
 
@@ -79,12 +66,16 @@ def parse_encoded_line(line):
         'avg_goals': avg_goals
     }
 
+def clean_match_line(line):
+    """Remove leading date (e.g., '20/07/2026 ') from a match line."""
+    return re.sub(r'^\d{2}/\d{2}/\d{4}\s+', '', line)
+
 def parse_match_line(line):
     """
-    Parse a match line like:
-    'Cluj1 - 1 (0 - 0) Arges Pitesti'
-    or 'Mushuc Runa2 - 1 (1 - 1) Orense SC'
-    Returns dict with home, away, scores, or None.
+    Parse a cleaned match line like:
+    'Mushuc Runa2 - 1 (1 - 1) Orense SC'
+    or 'Cluj4 - 1 (1 - 1) FC Voluntari'
+    Returns dict or None.
     """
     pattern = r"(.+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*(.+)"
     m = re.match(pattern, line)
@@ -100,75 +91,55 @@ def parse_match_line(line):
     }
 
 def get_result(parsed, team):
-    """Return 'W', 'D', 'L' for the given team in a parsed match."""
     if parsed['home_team'] == team:
-        if parsed['home_score'] > parsed['away_score']:
-            return 'W'
-        elif parsed['home_score'] < parsed['away_score']:
-            return 'L'
-        else:
-            return 'D'
+        if parsed['home_score'] > parsed['away_score']: return 'W'
+        elif parsed['home_score'] < parsed['away_score']: return 'L'
+        else: return 'D'
     elif parsed['away_team'] == team:
-        if parsed['away_score'] > parsed['home_score']:
-            return 'W'
-        elif parsed['away_score'] < parsed['home_score']:
-            return 'L'
-        else:
-            return 'D'
+        if parsed['away_score'] > parsed['home_score']: return 'W'
+        elif parsed['away_score'] < parsed['home_score']: return 'L'
+        else: return 'D'
     return None
 
 def store_current_match(match, matches):
-    """Finalize and store the current match if it has essential data."""
     if not match:
         return
     essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away']
     if all(match.get(f) is not None for f in essential):
-        # avg_goals can be None, that's okay
         matches.append(match)
         debug_log(f"✅ DEBUG: Match stored: {match['home_team']} vs {match['away_team']}")
     else:
-        debug_log(f"❌ DEBUG: Match incomplete, missing: {[f for f in essential if match.get(f) is None]}")
+        missing = [f for f in essential if match.get(f) is None]
+        debug_log(f"❌ DEBUG: Match incomplete, missing: {missing}")
 
 def parse_text_data(text):
     debug_log("=== 🔍 DEBUG: parse_text_data STARTED ===")
     lines = text.split('\n')
     debug_log(f"✅ DEBUG: Total lines: {len(lines)}")
 
-    # ---- LEAGUE DETECTION ----
+    # ---- LEAGUE DETECTION (extended) ----
     league = None
+    league_keywords = {
+        'Brazil Serie D': 'Brazil Serie D',
+        'Czech Republic Chance Liga': 'Czech Republic Chance Liga',
+        'Latvia Virsliga': 'Latvia Virsliga',
+        'Sweden Superettan': 'Sweden Superettan',
+        'Romania Divizia A': 'Romania Divizia A',
+        'Ecuador Serie A': 'Ecuador Serie A',
+        'Bulgaria Parva Liga': 'Bulgaria Parva Liga',
+        'Serie D': 'Serie D',
+        'Chance Liga': 'Chance Liga',
+        'Virsliga': 'Virsliga',
+        'Superettan': 'Superettan',
+        'Divizia A': 'Divizia A',
+        'Parva Liga': 'Parva Liga'
+    }
     for line in lines:
-        if 'Brazil Serie D' in line:
-            league = 'Brazil Serie D'
-            break
-        elif 'Czech Republic Chance Liga' in line:
-            league = 'Czech Republic Chance Liga'
-            break
-        elif 'Latvia Virsliga' in line:
-            league = 'Latvia Virsliga'
-            break
-        elif 'Sweden Superettan' in line:
-            league = 'Sweden Superettan'
-            break
-        elif 'Romania Divizia A' in line:
-            league = 'Romania Divizia A'
-            break
-        elif 'Ecuador Serie A' in line:
-            league = 'Ecuador Serie A'
-            break
-        elif 'Serie D' in line:
-            league = 'Serie D'
-            break
-        elif 'Chance Liga' in line:
-            league = 'Chance Liga'
-            break
-        elif 'Virsliga' in line:
-            league = 'Virsliga'
-            break
-        elif 'Superettan' in line:
-            league = 'Superettan'
-            break
-        elif 'Divizia A' in line:
-            league = 'Divizia A'
+        for key, val in league_keywords.items():
+            if key in line:
+                league = val
+                break
+        if league:
             break
     if league:
         debug_log(f"✅ DEBUG: League found: '{league}'")
@@ -185,27 +156,15 @@ def parse_text_data(text):
         if not line:
             continue
 
-        # ---- DETECT MATCH START (VS line) ----
+        # ---- DETECT MATCH START ----
         if ' VS ' in line:
-            # Store previous match if any
             if match:
                 store_current_match(match, matches)
                 match = None
-
             parts = line.split(' VS ', 1)
             left = parts[0].strip()
             right = parts[1].strip()
-            # Validation: allow parentheses, dots, dashes, etc. Only reject if empty or contains quotes (code artifacts)
-            valid = True
-            for side in (left, right):
-                if not side:
-                    valid = False
-                    break
-                # Reject lines that contain quotes (likely code)
-                if "'" in side or '"' in side:
-                    valid = False
-                    break
-            if valid:
+            if left and right and "'" not in left and '"' not in left and "'" not in right and '"' not in right:
                 debug_log(f"🔍 DEBUG: Found valid VS line at index {i}: '{line}'")
                 match = {
                     'home_team': left,
@@ -231,9 +190,8 @@ def parse_text_data(text):
                 current_section = None
                 continue
 
-        # ---- DATE EXTRACTION (only the first date with a time) ----
+        # ---- DATE EXTRACTION (first date with time) ----
         if match and match['date'] is None:
-            # Look for pattern like "27/07/2026 20:00"
             date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}', line)
             if date_match:
                 date_str = date_match.group(1)
@@ -260,16 +218,14 @@ def parse_text_data(text):
             else:
                 debug_log("❌ DEBUG: parse_encoded_line FAILED")
 
-        # ---- SECTION DETECTION (form, H2H) ----
+        # ---- SECTION DETECTION ----
         if match:
-            # Detect team abbreviations (2-4 uppercase letters) but only if it's a standalone line
-            # and not part of a longer string (like in "CFR" before sections)
+            # Team abbreviation
             if re.match(r'^[A-Z]{2,4}$', line):
                 current_abbrev = line
                 debug_log(f"🔍 DEBUG: Detected team abbreviation: {current_abbrev}")
                 continue
 
-            # Detect section headers
             lower = line.lower()
             if 'home matches' in lower:
                 current_section = 'home'
@@ -290,52 +246,54 @@ def parse_text_data(text):
 
             # ---- PARSE MATCH LINES WITHIN SECTIONS ----
             if current_section and match:
-                parsed = parse_match_line(line)
-                if parsed:
-                    debug_log(f"🔍 DEBUG: Parsed match line in section {current_section}: {parsed}")
-                    # Determine which team this match is about (the one that matches our current match's home or away)
-                    team = None
-                    if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
-                        team = parsed['home_team']
-                    elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
-                        team = parsed['away_team']
-                    if team:
-                        result = get_result(parsed, team)
-                        if result:
-                            # Store in the appropriate list based on section and which team it is
-                            if current_section == 'home' and team == match['home_team']:
-                                match['home_form'].append(result)
-                                debug_log(f"✅ DEBUG: Added {result} to home_form for {team}")
-                            elif current_section == 'away' and team == match['away_team']:
-                                match['away_form'].append(result)
-                                debug_log(f"✅ DEBUG: Added {result} to away_form for {team}")
-                            elif current_section == 'last6':
-                                if team == match['home_team']:
-                                    match['home_recent'].append(result)
-                                elif team == match['away_team']:
-                                    match['away_recent'].append(result)
-                                debug_log(f"✅ DEBUG: Added {result} to recent form for {team}")
-                    # For H2H, we handle separately
-                    if current_section == 'h2h' and parsed:
-                        # Determine winner relative to current match's home/away
-                        if parsed['home_team'] == match['home_team'] and parsed['away_team'] == match['away_team']:
-                            if parsed['home_score'] > parsed['away_score']:
-                                winner = match['home_team']
-                            elif parsed['home_score'] < parsed['away_score']:
-                                winner = match['away_team']
-                            else:
-                                winner = 'Draw'
-                            match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
-                            debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
-                        elif parsed['home_team'] == match['away_team'] and parsed['away_team'] == match['home_team']:
-                            if parsed['home_score'] > parsed['away_score']:
-                                winner = match['away_team']
-                            elif parsed['home_score'] < parsed['away_score']:
-                                winner = match['home_team']
-                            else:
-                                winner = 'Draw'
-                            match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
-                            debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
+                # Check if this line looks like a match line (has score pattern)
+                if re.search(r'\d+\s*-\s*\d+\s*\(\s*\d+\s*-\s*\d+\s*\)', line):
+                    # Clean the line by removing leading date if present
+                    cleaned = clean_match_line(line)
+                    parsed = parse_match_line(cleaned)
+                    if parsed:
+                        debug_log(f"🔍 DEBUG: Parsed match line in section {current_section}: {parsed}")
+                        # Determine which team this match is about
+                        team = None
+                        if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
+                            team = parsed['home_team']
+                        elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
+                            team = parsed['away_team']
+                        if team:
+                            result = get_result(parsed, team)
+                            if result:
+                                if current_section == 'home' and team == match['home_team']:
+                                    match['home_form'].append(result)
+                                    debug_log(f"✅ DEBUG: Added {result} to home_form for {team}")
+                                elif current_section == 'away' and team == match['away_team']:
+                                    match['away_form'].append(result)
+                                    debug_log(f"✅ DEBUG: Added {result} to away_form for {team}")
+                                elif current_section == 'last6':
+                                    if team == match['home_team']:
+                                        match['home_recent'].append(result)
+                                    elif team == match['away_team']:
+                                        match['away_recent'].append(result)
+                                    debug_log(f"✅ DEBUG: Added {result} to recent form for {team}")
+                        # H2H handling
+                        if current_section == 'h2h' and parsed:
+                            if parsed['home_team'] == match['home_team'] and parsed['away_team'] == match['away_team']:
+                                if parsed['home_score'] > parsed['away_score']:
+                                    winner = match['home_team']
+                                elif parsed['home_score'] < parsed['away_score']:
+                                    winner = match['away_team']
+                                else:
+                                    winner = 'Draw'
+                                match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
+                                debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
+                            elif parsed['home_team'] == match['away_team'] and parsed['away_team'] == match['home_team']:
+                                if parsed['home_score'] > parsed['away_score']:
+                                    winner = match['away_team']
+                                elif parsed['home_score'] < parsed['away_score']:
+                                    winner = match['home_team']
+                                else:
+                                    winner = 'Draw'
+                                match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
+                                debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
 
         # ---- PERIODIC DEBUG ----
         if match and i % 50 == 0:
@@ -348,7 +306,7 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
-    # After loop, store the last match if any
+    # Store last match if any
     if match:
         store_current_match(match, matches)
 
