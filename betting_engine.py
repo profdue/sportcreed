@@ -1,74 +1,44 @@
 import streamlit as st
 import re
 
-# ============================================
-# FIXED PARSER FUNCTIONS
-# ============================================
-
 def debug_log(msg):
-    """Append a debug message to session state."""
     if 'debug_messages' not in st.session_state:
         st.session_state.debug_messages = []
     st.session_state.debug_messages.append(msg)
 
 def parse_encoded_line(line):
-    """
-    Parse encoded line like:
-    '284726X1 - 12.0034°3.00'
-    or '323533X0 - 01.4124°3.50'
-    
-    Returns dict with all essential fields or None
-    """
     debug_log(f"🔍 parse_encoded_line INPUT: '{line}'")
-    
     if ' - ' not in line:
         debug_log("❌ No ' - ' separator found")
         return None
-    
     left_part, right_part = line.split(' - ', 1)
     left_part = left_part.replace(" ", "")
     right_part = right_part.strip()
-    
     debug_log(f"📊 Left: '{left_part}', Right: '{right_part}'")
     
-    # Extract percentages, prediction, and home score
     pattern = r"(\d{2})(\d{2})(\d{2})([12X])(\d)"
     m = re.match(pattern, left_part)
-    
     if not m:
         debug_log(f"❌ Left part did not match pattern: {left_part}")
         return None
-    
     home_pct = int(m.group(1))
     draw_pct = int(m.group(2))
     away_pct = int(m.group(3))
-    pred = m.group(4)          # '1', 'X', or '2'
-    score_home = int(m.group(5))   # Home score (single digit)
-    
+    pred = m.group(4)
+    score_home = int(m.group(5))
     debug_log(f"✅ Percentages: home={home_pct}, draw={draw_pct}, away={away_pct}, pred={pred}")
     debug_log(f"✅ Home score: {score_home}")
     
-    # Parse right part for away score and avg goals
     pattern2 = r"(\d+)\.\d+°\s*([\d.]+)"
     m2 = re.search(pattern2, right_part)
-    
     if not m2:
         debug_log(f"❌ Could not parse right part: '{right_part}'")
         return None
-    
-    integer_part = m2.group(1)   # e.g., "12" or "01"
-    avg_goals = float(m2.group(2))  # e.g., 3.00 or 3.50
-    
-    # Away score = FIRST digit of the integer part
+    integer_part = m2.group(1)
+    avg_goals = float(m2.group(2))
     score_away = int(integer_part[0])
-    
     debug_log(f"✅ Integer part: {integer_part}, Away score: {score_away}")
     debug_log(f"✅ Average goals: {avg_goals}")
-    
-    total = home_pct + draw_pct + away_pct
-    if total < 95 or total > 105:
-        debug_log(f"⚠️ Percentages sum to {total}% (unusual but continuing)")
-    
     return {
         'home_pct': home_pct,
         'draw_pct': draw_pct,
@@ -80,7 +50,6 @@ def parse_encoded_line(line):
     }
 
 def parse_h2h_line(line, home_team, away_team):
-    """Parse H2H lines like 'Nacional AM1 - 1 (0 - 0) Iguatu CE'"""
     pattern = r"(.+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*(.+)"
     m = re.match(pattern, line)
     if not m:
@@ -93,13 +62,9 @@ def parse_h2h_line(line, home_team, away_team):
     }
 
 def parse_text_data(text):
-    """Main parser for Forebet text data"""
     debug_log("=== 🔍 DEBUG: parse_text_data STARTED ===")
-    
     lines = text.split('\n')
     debug_log(f"✅ DEBUG: Total lines: {len(lines)}")
-    
-    # Extract league
     league = None
     for line in lines:
         if 'Brazil Serie D' in line:
@@ -114,7 +79,6 @@ def parse_text_data(text):
         elif 'Chance Liga' in line:
             league = 'Chance Liga'
             break
-    
     if league:
         debug_log(f"✅ DEBUG: League found: '{league}'")
     else:
@@ -122,20 +86,16 @@ def parse_text_data(text):
     
     matches = []
     match = None
-    
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
-        
-        # Look for VS line
         if ' VS ' in line:
             debug_log(f"🔍 DEBUG: Found VS line at index {i}: '{line}'")
             home, away = line.split(' VS ', 1)
             home = home.strip()
             away = away.strip()
             debug_log(f"🔍 DEBUG: Home='{home}', Away='{away}'")
-            
             match = {
                 'home_team': home,
                 'away_team': away,
@@ -151,8 +111,6 @@ def parse_text_data(text):
                 'h2h': []
             }
             debug_log("✅ DEBUG: match_found = True")
-        
-        # Extract date
         elif match:
             date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
             if date_match:
@@ -163,8 +121,6 @@ def parse_text_data(text):
                     debug_log(f"✅ DEBUG: Date found: {match['date']}")
                 except:
                     pass
-            
-            # Parse encoded line
             if ' - ' in line and re.search(r'\d{6}[12X]\d', line.replace(' ', '')):
                 debug_log(f"🔍 DEBUG: Found encoded line at index {i}: '{line}'")
                 result = parse_encoded_line(line)
@@ -179,8 +135,6 @@ def parse_text_data(text):
                     debug_log("✅ DEBUG: Encoded line parsed successfully!")
                 else:
                     debug_log("❌ DEBUG: parse_encoded_line FAILED")
-            
-            # Parse H2H lines (simplified)
             if match and ' - ' in line and '(' in line and ')' in line:
                 if re.search(r'\d+\s*-\s*\d+\s*\(\s*\d+\s*-\s*\d+\s*\)', line):
                     debug_log(f"🔍 DEBUG: Potential H2H line at {i}: '{line}'")
@@ -188,12 +142,9 @@ def parse_text_data(text):
                     if h2h_result:
                         match['h2h'].append(h2h_result)
                         debug_log(f"✅ DEBUG: Parsed H2H: {h2h_result}")
-            
-            # Check if match is complete
             if match and match['home_pct'] is not None:
                 essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away', 'avg_goals']
                 missing = [f for f in essential if match.get(f) is None]
-                
                 if missing:
                     debug_log(f"❌ DEBUG: Missing essential data: {missing}")
                 else:
@@ -201,8 +152,6 @@ def parse_text_data(text):
                     matches.append(match)
                     debug_log(f"✅ DEBUG: Match stored: {match['home_team']} vs {match['away_team']}")
                     match = None
-            
-            # Periodic debug
             if match and i % 50 == 0:
                 debug_log("🔍 DEBUG: Checking if match is complete...")
                 debug_log(f"home_pct={match.get('home_pct')}")
@@ -212,173 +161,39 @@ def parse_text_data(text):
                 debug_log(f"score_home={match.get('score_home')}")
                 debug_log(f"score_away={match.get('score_away')}")
                 debug_log(f"avg_goals={match.get('avg_goals')}")
-    
     debug_log("=== 🔍 DEBUG: parse_text_data COMPLETE ===")
     debug_log(f"Total matches found: {len(matches)}")
-    
-    return {
-        'league': league,
-        'matches': matches
-    }
+    return {'league': league, 'matches': matches}
 
-# ============================================
-# STREAMLIT APP
-# ============================================
-
+# Streamlit UI
 st.set_page_config(page_title="Forebet Parser", layout="wide")
-
 st.title("🐛 Refined Formula V1.1 - DEBUG MODE")
 st.markdown("DEBUG MODE: Shows exactly where the parser fails")
+st.markdown("🔍 All parser steps are displayed - scroll up to see the full debug output")
 
-st.markdown("""
-🔍 All parser steps are displayed - scroll up to see the full debug output
-
-[🔮 Analyze](#) | [📝 Pending](#) | [📊 Records](#) | [📈 Dashboard](#)
-""")
-
-# Sidebar
 with st.sidebar:
     st.header("📝 Paste Match Data")
     st.markdown("The debug output below will show you EXACTLY what the parser is doing")
-    
-    sample_text = """Iguatu CE VS Nacional AM
-Estádio Antônio Moreno de Melo 34°
-Iguatu CE - LogoDWWDWW 
-25/07/2026 20:00
-X
-Draw Probability47%
- 
-Nacional AM - LogoDLWDWW
-1st place
-Brazil Serie D
-2nd place
-1X2
- 
-Under/Over 2.5
- 
-Half Time
- 
-HT/FT
- 
-Btts
- 
-Handicap
- 
-Corners
- 
-Cards
- Home team
-Away team 
-Prob. %
-1X2 Pred Correct score Avg. goals Weather conditions Coef.  Score  Live
-coef.
-Round 16, 1/8-finals
- Br4 
-Iguatu CE
-Nacional AM
-25/07/2026 20:00
-284726X1 - 12.0034°3.00 
- -
-Head to head
-All
-18/07
-2026
- Nacional AM1 - 1
-(0 - 0)
- Iguatu CE Br4"""
+    text_input = st.text_area("Paste Forebet data here", height=400)
 
-    text_input = st.text_area(
-        "Paste Forebet data here",
-        value=sample_text,
-        height=400
-    )
-
-    if st.button("Load Second Sample (SK Lisen)"):
-        second_sample = """SK Lisen VS Mlada Boleslav
-Městský fotbalový stadion Srbská 24°
-SK Lisen - LogoLWWLDW 
-27/07/2026 17:00
-X
-Draw Probability35%
- 
-Mlada Boleslav - LogoLWLDDW
-9th place
-Czech Republic Chance Liga
-8th place
-1X2
- 
-Under/Over 2.5
- 
-Half Time
- 
-HT/FT
- 
-Btts
- 
-Handicap
- 
-Corners
- 
-Cards
- Home team
-Away team 
-Prob. %
-1X2 Pred Correct score Avg. goals Weather conditions Coef.  Score  Live
-coef.
-Round 1, Regular Season
- Cz1 
-SK Lisen
-Mlada Boleslav
-27/07/2026 17:00
-323533X0 - 01.4124°3.50 
- -
-Head to head
-All
-0
-0%
-Draw 0
-0%
-0
-0%"""
-        # Store in session state to update text area
-        st.session_state['input_text'] = second_sample
-        st.rerun()
-
-    if 'input_text' in st.session_state:
-        text_input = st.session_state['input_text']
-
-# Main area
 col1, col2 = st.columns([1, 1])
-
 with col1:
     st.subheader("📝 Input Data")
     st.text_area("Data to parse", value=text_input, height=300, key="display_text")
-
 with col2:
     st.subheader("📊 Results")
-    
     if st.button("🔍 Parse Data", type="primary"):
-        # Clear previous debug messages
         st.session_state.debug_messages = []
-        
-        # Parse the data
         result = parse_text_data(text_input)
-        
-        # Display debug output
         with st.expander("🔍 DEBUG OUTPUT (scroll down for results)", expanded=True):
             debug_output = "\n".join(st.session_state.debug_messages)
             st.code(debug_output, language="")
-        
-        # Display results
         st.subheader("📊 Parser Results")
-        
         if result['matches']:
             st.success(f"✅ Found {len(result['matches'])} matches!")
-            
             for match in result['matches']:
                 with st.container():
                     st.markdown(f"**{match['home_team']} vs {match['away_team']}**")
-                    
                     col_a, col_b, col_c, col_d = st.columns(4)
                     with col_a:
                         st.metric("Home %", f"{match['home_pct']}%")
@@ -388,7 +203,6 @@ with col2:
                         st.metric("Away %", f"{match['away_pct']}%")
                     with col_d:
                         st.metric("Prediction", f"{match['prediction']}")
-                    
                     col_e, col_f, col_g = st.columns(3)
                     with col_e:
                         st.metric("Correct Score", f"{match['score_home']}-{match['score_away']}")
@@ -396,23 +210,18 @@ with col2:
                         st.metric("Avg Goals", f"{match['avg_goals']}")
                     with col_g:
                         st.metric("Date", match['date'] if match['date'] else "Not found")
-                    
                     if match['h2h']:
                         st.write(f"📊 Found {len(match['h2h'])} H2H matches")
-                    
                     st.divider()
-            
             st.subheader("📋 Parsed Match Data")
             st.json(result['matches'])
         else:
             st.error("❌ No matches found in the data.")
             st.info("Scroll up to see the DEBUG output - it will show exactly where the parser failed.")
 
-# Rules
 with st.expander("📋 Parser Rules"):
     st.markdown("""
     ### Your 5 Refined Formula Rules:
-    
     1. 🏰 **Home Fortress** - Unbeaten in last 5 home games → Back Home Win
     2. 💀 **Away Form Killer** - Lost 4 of last 6 away games → Back Home Win
     3. 🏆 **H2H Dominance** - 3 of last 4 H2Hs won → Draw is a trap
@@ -428,8 +237,4 @@ st.sidebar.markdown("""
 3. Click "Parse Data"
 4. Check debug output for parsing details
 5. See results in the right panel
-
-**Samples:**
-- Click "Load Second Sample" to test with SK Lisen data
-- Edit the text area to test with your own data
 """)
