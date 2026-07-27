@@ -1,7 +1,7 @@
 """
 REFINED FORMULA - YOUR 5 RULES
 Single table: match_predictions
-Complete working code with fixed parser
+NO FALLBACK DATA - extracts ONLY real data from text
 """
 
 import streamlit as st
@@ -37,7 +37,6 @@ st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="
 # ============================================================================
 
 def save_prediction_to_db(data: dict) -> str:
-    """Save prediction to match_predictions table"""
     try:
         existing = supabase.table(TABLE_NAME).select("id")\
             .eq("home_team", data['home_team'])\
@@ -54,7 +53,6 @@ def save_prediction_to_db(data: dict) -> str:
         return None
 
 def submit_result(match_id: int, home_goals: int, away_goals: int):
-    """Submit actual result and update correctness"""
     try:
         actual_1x2 = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
         
@@ -101,42 +99,184 @@ def get_all_matches():
         return []
 
 # ============================================================================
-# ENHANCED PARSER - FIXED
+# PARSER - EXTRACTS ONLY REAL DATA, NO FALLBACKS
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
     if not name:
         return ""
-    # Remove common patterns
     name = re.sub(r'- Logo$|Logo$|\([^)]*\)', '', name)
     name = re.sub(r'[^\w\s\-\.]', '', name)
     name = re.sub(r'\d+$', '', name)
     name = re.sub(r'^\d+\s+', '', name)
-    # Remove suffixes
     for suffix in [' Rs1', ' Rs2', ' Rs3', ' (H)', ' (A)', ' Logo']:
         name = name.replace(suffix, '')
     name = name.strip()
-    return name if len(name) > 2 else "Unknown"
+    return name if len(name) > 2 else None
+
+def parse_encoded_line(line: str) -> dict:
+    """
+    Parse the encoded line: 255421X1 - 12.1526°3.80
+    Returns: {home_pct, draw_pct, away_pct, prediction, score_home, score_away, avg_goals}
+    Returns None if data cannot be extracted
+    """
+    # Remove spaces
+    cleaned = line.replace(' ', '')
+    
+    # Extract 6 digits + prediction
+    pct_match = re.search(r'(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
+    if not pct_match:
+        return None
+    
+    home_pct = int(pct_match.group(1))
+    draw_pct = int(pct_match.group(2))
+    away_pct = int(pct_match.group(3))
+    prediction = pct_match.group(4)
+    
+    # Extract score - look for pattern like "1 - 1" or "1-1"
+    score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
+    if not score_match:
+        return None
+    
+    score_home = int(score_match.group(1))
+    score_away = int(score_match.group(2))
+    
+    # Extract avg goals - look for pattern like "2.15°"
+    avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
+    if not avg_match:
+        return None
+    
+    avg_goals = float(avg_match.group(1))
+    
+    # Extract double chance - look for 1X, X2, 12
+    dc_match = re.search(r'([1X2]{2})', line)
+    double_chance = dc_match.group(1) if dc_match else None
+    
+    return {
+        'home_pct': home_pct,
+        'draw_pct': draw_pct,
+        'away_pct': away_pct,
+        'prediction': prediction,
+        'score_home': score_home,
+        'score_away': score_away,
+        'avg_goals': avg_goals,
+        'double_chance': double_chance
+    }
+
+def parse_form_data(lines: List[str], start_idx: int, team_name: str, match_type: str) -> Tuple[List[str], int]:
+    """
+    Parse form data from "home matches" or "away matches" section
+    Returns: (form_results, next_index)
+    """
+    form_results = []
+    i = start_idx
+    
+    # Find the Win/Draw/Lost line
+    while i < len(lines) and i < start_idx + 20:
+        line = lines[i].strip()
+        
+        win_match = re.search(r'Win\s+(\d+)\s+(\d+)%', line)
+        draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%', line)
+        loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%', line)
+        
+        if win_match or draw_match or loss_match:
+            wins = int(win_match.group(1)) if win_match else 0
+            draws = int(draw_match.group(1)) if draw_match else 0
+            losses = int(loss_match.group(1)) if loss_match else 0
+            
+            # Build form string: W repeated wins, D repeated draws, L repeated losses
+            form_results = ['W'] * wins + ['D'] * draws + ['L'] * losses
+            return form_results, i + 1
+        
+        i += 1
+    
+    return [], i
+
+def parse_h2h_data(lines: List[str], start_idx: int) -> Tuple[List[dict], int]:
+    """
+    Parse H2H data from "Head to head" section
+    Returns: (h2h_matches, next_index)
+    """
+    h2h_matches = []
+    i = start_idx + 1
+    h2h_count = 0
+    
+    while i < len(lines) and i < start_idx + 25 and h2h_count < 6:
+        line = lines[i].strip()
+        
+        # Look for date pattern
+        if re.search(r'\d{2}/\d{2}/\d{4}', line):
+            # Parse the H2H line
+            date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
+            score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
+            
+            if date_match and score_match:
+                date_str = date_match.group(1)
+                home_goals = int(score_match.group(1))
+                away_goals = int(score_match.group(2))
+                
+                # Determine winner
+                if home_goals > away_goals:
+                    winner = 'home'
+                elif away_goals > home_goals:
+                    winner = 'away'
+                else:
+                    winner = 'draw'
+                
+                # Extract team names
+                parts = re.split(r'\d+\s*-\s*\d+', line)
+                if len(parts) >= 2:
+                    left = re.sub(r'\d{2}/\d{2}/\d{4}', '', parts[0]).strip()
+                    right = parts[1].strip()
+                    home_team = clean_team_name(left)
+                    away_team = clean_team_name(right)
+                else:
+                    home_team = "Unknown"
+                    away_team = "Unknown"
+                
+                if home_team and away_team and home_team != "Unknown" and away_team != "Unknown":
+                    h2h_matches.append({
+                        'home_team': home_team,
+                        'away_team': away_team,
+                        'match_date': date_str,
+                        'home_goals': home_goals,
+                        'away_goals': away_goals,
+                        'winner': winner
+                    })
+                    h2h_count += 1
+        
+        i += 1
+    
+    return h2h_matches, i
 
 def parse_text_data(text: str) -> dict:
-    """Parse the complete text data from Forebet"""
+    """
+    Parse the complete text data from Forebet
+    NO FALLBACKS - returns only real data found
+    """
     result = {
         'matches': [],
-        'league': 'Unknown'
+        'league': None
     }
+    
+    if not text or len(text.strip()) < 100:
+        return result
+    
     lines = text.split('\n')
     
     # Detect league
     league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 
                        'Ligue 1', 'Serie B', 'Championship', 'Russia Premier League', 'EPL']
+    league = None
     for line in lines:
         for kw in league_keywords:
             if kw in line:
-                result['league'] = line.strip()
+                league = line.strip()
                 break
-        if result['league'] != 'Unknown':
+        if league:
             break
-
+    
+    # Find match
     current_match = {}
     match_found = False
     i = 0
@@ -146,33 +286,37 @@ def parse_text_data(text: str) -> dict:
         if not line:
             i += 1
             continue
-
+        
         # ----- Find match header (Team VS Team) -----
         if ' VS ' in line:
             parts = line.split(' VS ')
             if len(parts) == 2:
                 home = clean_team_name(parts[0])
                 away = clean_team_name(parts[1])
-                if home and away and len(home) > 2 and len(away) > 2:
+                if home and away:
                     current_match = {
                         'home_team': home,
                         'away_team': away,
-                        'date': datetime.now().strftime("%Y-%m-%d"),
-                        'is_finished': False,
-                        'home_pct': 33,
-                        'draw_pct': 33,
-                        'away_pct': 34,
-                        'forebet_prediction': 'X',
-                        'avg_goals': 2.5,
+                        'date': None,
+                        'league': league,
+                        'home_pct': None,
+                        'draw_pct': None,
+                        'away_pct': None,
+                        'forebet_prediction': None,
+                        'avg_goals': None,
                         'h2h_data': [],
                         'home_form': [],
                         'away_form': [],
                         'correct_score_home': None,
                         'correct_score_away': None,
-                        'double_chance': None
+                        'double_chance': None,
+                        'is_finished': False,
+                        'actual_home': None,
+                        'actual_away': None
                     }
                     match_found = True
-                    # find date nearby
+                    
+                    # Find date nearby
                     for j in range(max(0, i-5), min(len(lines), i+5)):
                         dt_line = lines[j].strip()
                         dt_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2})', dt_line)
@@ -183,38 +327,20 @@ def parse_text_data(text: str) -> dict:
                             except:
                                 pass
 
-        # ----- Look for encoded data line (e.g., "255421X1 - 12.1526°3.80") -----
+        # ----- Parse encoded data line -----
         if match_found and re.search(r'\d{6}[1X2]', line):
-            cleaned = line.replace(' ', '')
-            pct_match = re.search(r'(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
-            if pct_match:
-                current_match['home_pct'] = int(pct_match.group(1))
-                current_match['draw_pct'] = int(pct_match.group(2))
-                current_match['away_pct'] = int(pct_match.group(3))
-                current_match['forebet_prediction'] = pct_match.group(4)
+            encoded = parse_encoded_line(line)
+            if encoded:
+                current_match['home_pct'] = encoded['home_pct']
+                current_match['draw_pct'] = encoded['draw_pct']
+                current_match['away_pct'] = encoded['away_pct']
+                current_match['forebet_prediction'] = encoded['prediction']
+                current_match['correct_score_home'] = encoded['score_home']
+                current_match['correct_score_away'] = encoded['score_away']
+                current_match['avg_goals'] = encoded['avg_goals']
+                current_match['double_chance'] = encoded['double_chance']
 
-                # Score (e.g., "1 - 1")
-                score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
-                if score_match:
-                    current_match['correct_score_home'] = int(score_match.group(1))
-                    current_match['correct_score_away'] = int(score_match.group(2))
-                
-                # Avg goals (e.g., "2.15")
-                avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
-                if avg_match:
-                    current_match['avg_goals'] = float(avg_match.group(1))
-                else:
-                    # Try alternative: look for number with degree symbol
-                    avg_match2 = re.search(r'(\d+\.\d{2})[°]', line)
-                    if avg_match2:
-                        current_match['avg_goals'] = float(avg_match2.group(1))
-                
-                # Double chance
-                dc_match = re.search(r'([1X2]{2})', line)
-                if dc_match:
-                    current_match['double_chance'] = dc_match.group(1)
-
-        # ----- Check if match is finished (FT) -----
+        # ----- Check if match is finished -----
         if match_found and 'FT' in line:
             current_match['is_finished'] = True
             ft_score = re.search(r'(\d+)\s*-\s*(\d+)', line)
@@ -222,173 +348,81 @@ def parse_text_data(text: str) -> dict:
                 current_match['actual_home'] = int(ft_score.group(1))
                 current_match['actual_away'] = int(ft_score.group(2))
 
-        # ----- H2H section - FIXED -----
+        # ----- Parse H2H section -----
         if match_found and ('Head to head' in line or 'H2H' in line):
-            j = i + 1
-            h2h_count = 0
-            while j < len(lines) and j < i + 25 and h2h_count < 6:
-                h2h_line = lines[j].strip()
-                if re.search(r'\d{2}/\d{2}/\d{4}', h2h_line):
-                    h2h = parse_h2h_line(h2h_line)
-                    if h2h:
-                        current_match['h2h_data'].append(h2h)
-                        h2h_count += 1
-                j += 1
+            h2h_data, next_idx = parse_h2h_data(lines, i)
+            if h2h_data:
+                current_match['h2h_data'] = h2h_data
+            i = next_idx
+            continue
 
-        # ----- Form sections - FIXED -----
-        if match_found and ('Last 6 matches' in line or 'Last 6' in line):
-            section_team = None
-            # Look back up to 5 lines for team name
-            for k in range(max(0, i-5), i):
+        # ----- Parse Home Form -----
+        if match_found and ('home matches' in line.lower() or 'Home matches' in line):
+            # Look for the team name in previous lines
+            team_name = None
+            for k in range(max(0, i-3), i):
                 prev = lines[k].strip()
-                if current_match['home_team'] in prev or 'IMT' in prev:
-                    section_team = 'home'
-                    break
-                elif current_match['away_team'] in prev or 'FK Zemun' in prev:
-                    section_team = 'away'
+                if current_match['home_team'] in prev:
+                    team_name = current_match['home_team']
                     break
             
-            if section_team:
-                j = i + 1
-                form_results = []
-                while j < len(lines) and j < i + 10:
-                    form_line = lines[j].strip()
-                    if not form_line:
-                        j += 1
-                        continue
-                    
-                    win_match = re.search(r'Win\s+(\d+)\s+(\d+)%', form_line)
-                    draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%', form_line)
-                    loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%', form_line)
-                    
-                    if win_match or draw_match or loss_match:
-                        wins = int(win_match.group(1)) if win_match else 0
-                        draws = int(draw_match.group(1)) if draw_match else 0
-                        losses = int(loss_match.group(1)) if loss_match else 0
-                        
-                        form_results = ['W'] * wins + ['D'] * draws + ['L'] * losses
-                        if len(form_results) < 6:
-                            form_results = form_results + ['D'] * (6 - len(form_results))
-                        form_results = form_results[:6]
-                        break
-                    j += 1
-                
-                if form_results:
-                    if section_team == 'home':
-                        current_match['home_form'] = form_results
-                    else:
-                        current_match['away_form'] = form_results
+            if team_name:
+                form_data, next_idx = parse_form_data(lines, i + 1, team_name, 'home')
+                if form_data:
+                    current_match['home_form'] = form_data
+                i = next_idx
+                continue
 
-        # ----- If we have a complete match, save it -----
+        # ----- Parse Away Form -----
+        if match_found and ('away matches' in line.lower() or 'Away matches' in line):
+            team_name = None
+            for k in range(max(0, i-3), i):
+                prev = lines[k].strip()
+                if current_match['away_team'] in prev:
+                    team_name = current_match['away_team']
+                    break
+            
+            if team_name:
+                form_data, next_idx = parse_form_data(lines, i + 1, team_name, 'away')
+                if form_data:
+                    current_match['away_form'] = form_data
+                i = next_idx
+                continue
+
+        # ----- Save complete match -----
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
-            has_data = (current_match.get('home_pct') != 33 or
-                       current_match.get('draw_pct') != 33 or
-                       current_match.get('away_pct') != 34)
-            if has_data:
+            # Only save if we have the essential data
+            has_essential = (
+                current_match.get('home_pct') is not None and
+                current_match.get('draw_pct') is not None and
+                current_match.get('away_pct') is not None and
+                current_match.get('forebet_prediction') is not None and
+                current_match.get('correct_score_home') is not None and
+                current_match.get('correct_score_away') is not None and
+                current_match.get('avg_goals') is not None
+            )
+            
+            if has_essential:
+                # Check if already added
                 already_added = False
                 for m in result['matches']:
                     if (m.get('home_team') == current_match.get('home_team') and
                         m.get('away_team') == current_match.get('away_team')):
                         already_added = True
                         break
+                
                 if not already_added:
                     result['matches'].append(current_match.copy())
+                    
+                    # Reset for next match
                     current_match = {}
                     match_found = False
 
         i += 1
 
-    if not result['matches']:
-        result = fallback_parse(text)
+    if league:
+        result['league'] = league
 
-    if result['league'] == 'Unknown':
-        for kw in league_keywords:
-            if kw in text:
-                result['league'] = kw
-                break
-
-    return result
-
-def parse_h2h_line(line: str) -> dict:
-    """Parse a single H2H line"""
-    date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
-    if not date_match:
-        return None
-    date_str = date_match.group(1)
-    score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
-    if not score_match:
-        return None
-    home_goals = int(score_match.group(1))
-    away_goals = int(score_match.group(2))
-    winner = 'home' if home_goals > away_goals else 'away' if away_goals > home_goals else 'draw'
-    
-    parts = re.split(r'\d+\s*-\s*\d+', line)
-    if len(parts) >= 2:
-        left = re.sub(r'\d{2}/\d{2}/\d{4}', '', parts[0]).strip()
-        right = parts[1].strip()
-        home_team = clean_team_name(left)
-        away_team = clean_team_name(right)
-    else:
-        teams = re.findall(r'([A-Za-z\s]+?)\s+\d+\s*-\s*\d+\s+([A-Za-z\s]+)', line)
-        if teams:
-            home_team = clean_team_name(teams[0][0])
-            away_team = clean_team_name(teams[0][1])
-        else:
-            home_team = "Unknown"
-            away_team = "Unknown"
-    
-    return {
-        'home_team': home_team,
-        'away_team': away_team,
-        'match_date': date_str,
-        'home_goals': home_goals,
-        'away_goals': away_goals,
-        'winner': winner
-    }
-
-def fallback_parse(text: str) -> dict:
-    result = {'matches': [], 'league': 'Unknown'}
-    vs_pattern = r'([A-Za-z\s]+?)\s+VS\s+([A-Za-z\s]+?)(?:\s+\d+|$)'
-    for home, away in re.findall(vs_pattern, text):
-        home_team = clean_team_name(home)
-        away_team = clean_team_name(away)
-        if home_team and away_team and len(home_team) > 2 and len(away_team) > 2:
-            match_data = {
-                'home_team': home_team,
-                'away_team': away_team,
-                'date': datetime.now().strftime("%Y-%m-%d"),
-                'is_finished': False,
-                'home_pct': 33,
-                'draw_pct': 33,
-                'away_pct': 34,
-                'forebet_prediction': 'X',
-                'avg_goals': 2.5,
-                'h2h_data': [],
-                'home_form': [],
-                'away_form': [],
-                'correct_score_home': None,
-                'correct_score_away': None,
-                'double_chance': None
-            }
-            enc = re.search(r'(\d{6}[1X2])', text)
-            if enc:
-                code = enc.group(1)
-                if len(code) >= 7:
-                    match_data['home_pct'] = int(code[0:2])
-                    match_data['draw_pct'] = int(code[2:4])
-                    match_data['away_pct'] = int(code[4:6])
-                    match_data['forebet_prediction'] = code[6]
-            avg = re.search(r'(\d+\.\d{2})\s*°', text)
-            if avg:
-                match_data['avg_goals'] = float(avg.group(1))
-            dt_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2})', text)
-            if dt_match:
-                try:
-                    dt = datetime.strptime(dt_match.group(1), "%d/%m/%Y")
-                    match_data['date'] = dt.strftime("%Y-%m-%d")
-                except:
-                    pass
-            result['matches'].append(match_data)
     return result
 
 # ============================================================================
@@ -398,7 +432,8 @@ def fallback_parse(text: str) -> dict:
 def check_home_fortress(home_form: List[str]) -> Tuple[bool, int, str]:
     """Rule 1: Home Fortress - Unbeaten in last 5 home games"""
     if len(home_form) < 5:
-        return False, 0, "Not enough form data"
+        return False, 0, f"Only {len(home_form)} home matches available (need 5)"
+    
     recent = home_form[:5]
     unbeaten = sum(1 for r in recent if r != 'L')
     if unbeaten >= 5:
@@ -408,7 +443,8 @@ def check_home_fortress(home_form: List[str]) -> Tuple[bool, int, str]:
 def check_away_form_killer(away_form: List[str]) -> Tuple[bool, int, str]:
     """Rule 2: Away Form Killer - Lost 4 of last 6 away games"""
     if len(away_form) < 6:
-        return False, 0, "Not enough form data"
+        return False, 0, f"Only {len(away_form)} away matches available (need 6)"
+    
     recent = away_form[:6]
     losses = sum(1 for r in recent if r == 'L')
     if losses >= 4:
@@ -417,12 +453,14 @@ def check_away_form_killer(away_form: List[str]) -> Tuple[bool, int, str]:
 
 def check_h2h_dominance(h2h_data: List[dict]) -> Tuple[Optional[str], int, int, str]:
     """Rule 3: H2H Dominance - One team won 3 of last 4 H2Hs"""
-    if not h2h_data or len(h2h_data) < 4:
-        return None, 0, 0, "Not enough H2H data"
+    if len(h2h_data) < 4:
+        return None, 0, 0, f"Only {len(h2h_data)} H2H matches available (need 4)"
+    
     recent = h2h_data[:4]
     home_wins = sum(1 for m in recent if m.get('winner') == 'home')
     away_wins = sum(1 for m in recent if m.get('winner') == 'away')
     draws = sum(1 for m in recent if m.get('winner') == 'draw')
+    
     if home_wins >= 3:
         return 'home', home_wins, draws, f"Home won {home_wins}/4 H2Hs → Draw is a trap"
     elif away_wins >= 3:
@@ -431,8 +469,9 @@ def check_h2h_dominance(h2h_data: List[dict]) -> Tuple[Optional[str], int, int, 
 
 def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
     """Rule 4: H2H Draw Rate - 4+ draws in last 6 H2Hs"""
-    if not h2h_data or len(h2h_data) < 6:
-        return False, 0, "Not enough H2H data"
+    if len(h2h_data) < 6:
+        return False, 0, f"Only {len(h2h_data)} H2H matches available (need 6)"
+    
     recent = h2h_data[:6]
     draws = sum(1 for m in recent if m.get('winner') == 'draw')
     if draws >= 4:
@@ -443,11 +482,13 @@ def check_midweek_fatigue(team: str, match_date, fixtures: List[dict]) -> Tuple[
     """Rule 5: Midweek Fatigue - Away played 3-4 days ago"""
     if not match_date or not fixtures:
         return False, "No fixtures data"
+    
     if isinstance(match_date, str):
         try:
             match_date = datetime.strptime(match_date, "%Y-%m-%d").date()
         except:
             return False, "Invalid match date"
+    
     for fixture in fixtures:
         if fixture.get('team') == team:
             fixture_date = fixture.get('date')
@@ -631,9 +672,9 @@ def display_refined_analysis(match_data: dict, decision: dict, league: str = "Un
     if match_data.get('home_form') or match_data.get('away_form'):
         with st.expander("📈 Recent Form"):
             if match_data.get('home_form'):
-                st.write(f"**{home_team} (home, last 6):** {' '.join(match_data['home_form'])}")
+                st.write(f"**{home_team} (home):** {' '.join(match_data['home_form'])} ({len(match_data['home_form'])} matches)")
             if match_data.get('away_form'):
-                st.write(f"**{away_team} (away, last 6):** {' '.join(match_data['away_form'])}")
+                st.write(f"**{away_team} (away):** {' '.join(match_data['away_form'])} ({len(match_data['away_form'])} matches)")
 
 # ============================================================================
 # MAIN APP
@@ -648,6 +689,8 @@ def main():
     
     with tab1:
         st.markdown("### 📝 Paste Match Data")
+        st.warning("⚠️ No fallback data - only real data extracted from your text will be used")
+        
         text_data = st.text_area(
             "Paste Forebet data here",
             height=400,
@@ -732,7 +775,7 @@ def main():
                                 
                                 db_data = {
                                     'match_date': match.get('date', datetime.now().date()),
-                                    'league_name': league,
+                                    'league_name': league if league else 'Unknown',
                                     'home_team': match.get('home_team', 'Unknown'),
                                     'away_team': match.get('away_team', 'Unknown'),
                                     'season_round': None,
@@ -775,7 +818,8 @@ def main():
                             
                             st.info(f"📊 Summary: {saved_count} saved, {duplicate_count} duplicates skipped.")
                         else:
-                            st.error("No matches found in the data.")
+                            st.error("❌ No matches found in the data. Please check the format.")
+                            st.info("The parser needs:\n- 'Team VS Team' line\n- Encoded data like '255421X1 - 12.1526°3.80'\n- Form data (Win X Y%, Draw X Y%, Lost X Y%)\n- H2H data (Head to head section)")
                             
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
@@ -815,7 +859,6 @@ def main():
             c2.metric("Correct", correct)
             c3.metric("Accuracy", f"{rate}%")
             
-            # Rule performance
             rule_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
             for r in results:
                 rule = r.get('refined_rule_triggered', 'Unknown')
@@ -855,19 +898,18 @@ def main():
             c3.metric("Correct", correct)
             c4.metric("Accuracy", f"{rate}%")
             
-            # Confidence performance
-            conf_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
+            confidence_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
             for m in all_matches:
                 if m.get('actual_1x2') is not None:
                     conf = m.get('refined_confidence', 'LOW')
-                    conf_stats[conf]['total'] += 1
+                    confidence_stats[conf]['total'] += 1
                     if m.get('is_correct', False):
-                        conf_stats[conf]['correct'] += 1
+                        confidence_stats[conf]['correct'] += 1
             
-            if conf_stats:
+            if confidence_stats:
                 st.subheader("Confidence Performance")
                 conf_data = []
-                for conf, stats in conf_stats.items():
+                for conf, stats in confidence_stats.items():
                     conf_rate = round(stats['correct'] / stats['total'] * 100) if stats['total'] > 0 else 0
                     conf_data.append({
                         'Confidence': conf,
