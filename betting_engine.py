@@ -2,6 +2,7 @@
 REFINED FORMULA - YOUR 5 RULES
 Single table: match_predictions
 NO FALLBACK DATA - extracts ONLY real data from text
+FIXED: Handles all text variations
 """
 
 import streamlit as st
@@ -99,28 +100,25 @@ def get_all_matches():
         return []
 
 # ============================================================================
-# PARSER - EXTRACTS ONLY REAL DATA, NO FALLBACKS
+# PARSER - FIXED FOR ALL TEXT VARIATIONS
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
     if not name:
         return ""
+    # Remove common patterns
     name = re.sub(r'- Logo$|Logo$|\([^)]*\)', '', name)
     name = re.sub(r'[^\w\s\-\.]', '', name)
     name = re.sub(r'\d+$', '', name)
     name = re.sub(r'^\d+\s+', '', name)
-    for suffix in [' Rs1', ' Rs2', ' Rs3', ' (H)', ' (A)', ' Logo']:
+    # Remove suffixes
+    for suffix in [' Rs1', ' Rs2', ' Rs3', ' (H)', ' (A)', ' Logo', ' FC']:
         name = name.replace(suffix, '')
     name = name.strip()
     return name if len(name) > 2 else None
 
 def parse_encoded_line(line: str) -> dict:
-    """
-    Parse the encoded line: 255421X1 - 12.1526°3.80
-    Returns: {home_pct, draw_pct, away_pct, prediction, score_home, score_away, avg_goals}
-    Returns None if data cannot be extracted
-    """
-    # Remove spaces
+    """Parse encoded line like: 405010X1 - 12.3026°3.50"""
     cleaned = line.replace(' ', '')
     
     # Extract 6 digits + prediction
@@ -133,7 +131,7 @@ def parse_encoded_line(line: str) -> dict:
     away_pct = int(pct_match.group(3))
     prediction = pct_match.group(4)
     
-    # Extract score - look for pattern like "1 - 1" or "1-1"
+    # Extract score - look for "1 - 1" or "1-1"
     score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
     if not score_match:
         return None
@@ -141,14 +139,14 @@ def parse_encoded_line(line: str) -> dict:
     score_home = int(score_match.group(1))
     score_away = int(score_match.group(2))
     
-    # Extract avg goals - look for pattern like "2.15°"
+    # Extract avg goals - look for "2.30°"
     avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
     if not avg_match:
         return None
     
     avg_goals = float(avg_match.group(1))
     
-    # Extract double chance - look for 1X, X2, 12
+    # Extract double chance
     dc_match = re.search(r'([1X2]{2})', line)
     double_chance = dc_match.group(1) if dc_match else None
     
@@ -163,28 +161,24 @@ def parse_encoded_line(line: str) -> dict:
         'double_chance': double_chance
     }
 
-def parse_form_data(lines: List[str], start_idx: int, team_name: str, match_type: str) -> Tuple[List[str], int]:
-    """
-    Parse form data from "home matches" or "away matches" section
-    Returns: (form_results, next_index)
-    """
-    form_results = []
+def parse_form_counts(lines: List[str], start_idx: int) -> Tuple[List[str], int]:
+    """Parse Win/Draw/Lost counts from form section"""
     i = start_idx
+    form_results = []
     
-    # Find the Win/Draw/Lost line
-    while i < len(lines) and i < start_idx + 20:
+    while i < len(lines) and i < start_idx + 15:
         line = lines[i].strip()
         
-        win_match = re.search(r'Win\s+(\d+)\s+(\d+)%', line)
-        draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%', line)
-        loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%', line)
+        # Look for patterns like "Win 3 50%" or "Win 3 50"
+        win_match = re.search(r'Win\s+(\d+)\s+(\d+)%?', line)
+        draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%?', line)
+        loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%?', line)
         
         if win_match or draw_match or loss_match:
             wins = int(win_match.group(1)) if win_match else 0
             draws = int(draw_match.group(1)) if draw_match else 0
             losses = int(loss_match.group(1)) if loss_match else 0
             
-            # Build form string: W repeated wins, D repeated draws, L repeated losses
             form_results = ['W'] * wins + ['D'] * draws + ['L'] * losses
             return form_results, i + 1
         
@@ -192,21 +186,16 @@ def parse_form_data(lines: List[str], start_idx: int, team_name: str, match_type
     
     return [], i
 
-def parse_h2h_data(lines: List[str], start_idx: int) -> Tuple[List[dict], int]:
-    """
-    Parse H2H data from "Head to head" section
-    Returns: (h2h_matches, next_index)
-    """
+def parse_h2h_section(lines: List[str], start_idx: int) -> Tuple[List[dict], int]:
+    """Parse Head to head section"""
     h2h_matches = []
     i = start_idx + 1
     h2h_count = 0
     
-    while i < len(lines) and i < start_idx + 25 and h2h_count < 6:
+    while i < len(lines) and i < start_idx + 30 and h2h_count < 8:
         line = lines[i].strip()
         
-        # Look for date pattern
         if re.search(r'\d{2}/\d{2}/\d{4}', line):
-            # Parse the H2H line
             date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
             score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
             
@@ -215,13 +204,7 @@ def parse_h2h_data(lines: List[str], start_idx: int) -> Tuple[List[dict], int]:
                 home_goals = int(score_match.group(1))
                 away_goals = int(score_match.group(2))
                 
-                # Determine winner
-                if home_goals > away_goals:
-                    winner = 'home'
-                elif away_goals > home_goals:
-                    winner = 'away'
-                else:
-                    winner = 'draw'
+                winner = 'home' if home_goals > away_goals else 'away' if away_goals > home_goals else 'draw'
                 
                 # Extract team names
                 parts = re.split(r'\d+\s*-\s*\d+', line)
@@ -231,10 +214,15 @@ def parse_h2h_data(lines: List[str], start_idx: int) -> Tuple[List[dict], int]:
                     home_team = clean_team_name(left)
                     away_team = clean_team_name(right)
                 else:
-                    home_team = "Unknown"
-                    away_team = "Unknown"
+                    teams = re.findall(r'([A-Za-z\s]+?)\s+\d+\s*-\s*\d+\s+([A-Za-z\s]+)', line)
+                    if teams:
+                        home_team = clean_team_name(teams[0][0])
+                        away_team = clean_team_name(teams[0][1])
+                    else:
+                        home_team = None
+                        away_team = None
                 
-                if home_team and away_team and home_team != "Unknown" and away_team != "Unknown":
+                if home_team and away_team:
                     h2h_matches.append({
                         'home_team': home_team,
                         'away_team': away_team,
@@ -250,10 +238,7 @@ def parse_h2h_data(lines: List[str], start_idx: int) -> Tuple[List[dict], int]:
     return h2h_matches, i
 
 def parse_text_data(text: str) -> dict:
-    """
-    Parse the complete text data from Forebet
-    NO FALLBACKS - returns only real data found
-    """
+    """Parse the complete text data - NO FALLBACKS"""
     result = {
         'matches': [],
         'league': None
@@ -266,7 +251,8 @@ def parse_text_data(text: str) -> dict:
     
     # Detect league
     league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 
-                       'Ligue 1', 'Serie B', 'Championship', 'Russia Premier League', 'EPL']
+                       'Ligue 1', 'Serie B', 'Championship', 'Divizia A', 'Chance Liga',
+                       'Russia Premier League', 'EPL']
     league = None
     for line in lines:
         for kw in league_keywords:
@@ -317,7 +303,7 @@ def parse_text_data(text: str) -> dict:
                     match_found = True
                     
                     # Find date nearby
-                    for j in range(max(0, i-5), min(len(lines), i+5)):
+                    for j in range(max(0, i-5), min(len(lines), i+10)):
                         dt_line = lines[j].strip()
                         dt_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2})', dt_line)
                         if dt_match:
@@ -350,44 +336,27 @@ def parse_text_data(text: str) -> dict:
 
         # ----- Parse H2H section -----
         if match_found and ('Head to head' in line or 'H2H' in line):
-            h2h_data, next_idx = parse_h2h_data(lines, i)
+            h2h_data, next_idx = parse_h2h_section(lines, i)
             if h2h_data:
                 current_match['h2h_data'] = h2h_data
             i = next_idx
             continue
 
         # ----- Parse Home Form -----
-        if match_found and ('home matches' in line.lower() or 'Home matches' in line):
-            # Look for the team name in previous lines
-            team_name = None
-            for k in range(max(0, i-3), i):
-                prev = lines[k].strip()
-                if current_match['home_team'] in prev:
-                    team_name = current_match['home_team']
-                    break
-            
-            if team_name:
-                form_data, next_idx = parse_form_data(lines, i + 1, team_name, 'home')
-                if form_data:
-                    current_match['home_form'] = form_data
-                i = next_idx
-                continue
+        if match_found and ('home matches' in line.lower() or 'home matches' in line):
+            form_data, next_idx = parse_form_counts(lines, i + 1)
+            if form_data:
+                current_match['home_form'] = form_data
+            i = next_idx
+            continue
 
         # ----- Parse Away Form -----
-        if match_found and ('away matches' in line.lower() or 'Away matches' in line):
-            team_name = None
-            for k in range(max(0, i-3), i):
-                prev = lines[k].strip()
-                if current_match['away_team'] in prev:
-                    team_name = current_match['away_team']
-                    break
-            
-            if team_name:
-                form_data, next_idx = parse_form_data(lines, i + 1, team_name, 'away')
-                if form_data:
-                    current_match['away_form'] = form_data
-                i = next_idx
-                continue
+        if match_found and ('away matches' in line.lower() or 'away matches' in line):
+            form_data, next_idx = parse_form_counts(lines, i + 1)
+            if form_data:
+                current_match['away_form'] = form_data
+            i = next_idx
+            continue
 
         # ----- Save complete match -----
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
@@ -413,8 +382,6 @@ def parse_text_data(text: str) -> dict:
                 
                 if not already_added:
                     result['matches'].append(current_match.copy())
-                    
-                    # Reset for next match
                     current_match = {}
                     match_found = False
 
@@ -430,7 +397,6 @@ def parse_text_data(text: str) -> dict:
 # ============================================================================
 
 def check_home_fortress(home_form: List[str]) -> Tuple[bool, int, str]:
-    """Rule 1: Home Fortress - Unbeaten in last 5 home games"""
     if len(home_form) < 5:
         return False, 0, f"Only {len(home_form)} home matches available (need 5)"
     
@@ -441,7 +407,6 @@ def check_home_fortress(home_form: List[str]) -> Tuple[bool, int, str]:
     return False, unbeaten, f"Only {unbeaten}/5 unbeaten"
 
 def check_away_form_killer(away_form: List[str]) -> Tuple[bool, int, str]:
-    """Rule 2: Away Form Killer - Lost 4 of last 6 away games"""
     if len(away_form) < 6:
         return False, 0, f"Only {len(away_form)} away matches available (need 6)"
     
@@ -452,7 +417,6 @@ def check_away_form_killer(away_form: List[str]) -> Tuple[bool, int, str]:
     return False, losses, f"Only {losses}/6 losses"
 
 def check_h2h_dominance(h2h_data: List[dict]) -> Tuple[Optional[str], int, int, str]:
-    """Rule 3: H2H Dominance - One team won 3 of last 4 H2Hs"""
     if len(h2h_data) < 4:
         return None, 0, 0, f"Only {len(h2h_data)} H2H matches available (need 4)"
     
@@ -468,7 +432,6 @@ def check_h2h_dominance(h2h_data: List[dict]) -> Tuple[Optional[str], int, int, 
     return None, max(home_wins, away_wins), draws, f"No dominance (H:{home_wins}, A:{away_wins}, D:{draws})"
 
 def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
-    """Rule 4: H2H Draw Rate - 4+ draws in last 6 H2Hs"""
     if len(h2h_data) < 6:
         return False, 0, f"Only {len(h2h_data)} H2H matches available (need 6)"
     
@@ -479,7 +442,6 @@ def check_h2h_draw_rate(h2h_data: List[dict]) -> Tuple[bool, int, str]:
     return False, draws, f"Only {draws}/6 draws"
 
 def check_midweek_fatigue(team: str, match_date, fixtures: List[dict]) -> Tuple[bool, str]:
-    """Rule 5: Midweek Fatigue - Away played 3-4 days ago"""
     if not match_date or not fixtures:
         return False, "No fixtures data"
     
@@ -515,7 +477,6 @@ def get_stake_display(stake: str) -> Tuple[str, str]:
 # ============================================================================
 
 def refined_formula_decision(data: dict) -> dict:
-    """Your 5 Rules - uses parsed data only"""
     home_team = data.get('home_team', 'Unknown')
     away_team = data.get('away_team', 'Unknown')
     match_date = data.get('date')
@@ -662,13 +623,11 @@ def display_refined_analysis(match_data: dict, decision: dict, league: str = "Un
     st.caption(f"📊 Forebet Original: {match_data.get('forebet_prediction', '?')} | Avg Goals: {match_data.get('avg_goals', '?')}")
     st.markdown("---")
     
-    # Show H2H data
     if match_data.get('h2h_data'):
         with st.expander("📊 Head-to-Head History"):
             h2h_df = pd.DataFrame(match_data['h2h_data'])
             st.dataframe(h2h_df, use_container_width=True)
     
-    # Show form data
     if match_data.get('home_form') or match_data.get('away_form'):
         with st.expander("📈 Recent Form"):
             if match_data.get('home_form'):
@@ -743,10 +702,8 @@ def main():
                             for i, match in enumerate(matches, 1):
                                 match['midweek_fixtures'] = fixtures
                                 
-                                # Run YOUR refined formula
                                 decision = refined_formula_decision(match)
                                 
-                                # Display
                                 display_refined_analysis(match, decision, league)
                                 
                                 # Prepare data for database
@@ -754,7 +711,6 @@ def main():
                                 home_form_str = ','.join(match.get('home_form', []))
                                 away_form_str = ','.join(match.get('away_form', []))
                                 
-                                # Calculate H2H stats
                                 h2h_data = match.get('h2h_data', [])
                                 h2h_dominance = None
                                 h2h_dominance_count = 0
@@ -819,7 +775,7 @@ def main():
                             st.info(f"📊 Summary: {saved_count} saved, {duplicate_count} duplicates skipped.")
                         else:
                             st.error("❌ No matches found in the data. Please check the format.")
-                            st.info("The parser needs:\n- 'Team VS Team' line\n- Encoded data like '255421X1 - 12.1526°3.80'\n- Form data (Win X Y%, Draw X Y%, Lost X Y%)\n- H2H data (Head to head section)")
+                            st.info("The parser needs:\n- 'Team VS Team' line\n- Encoded data like '405010X1 - 12.3026°3.50'\n- Form data (Win X Y%, Draw X Y%, Lost X Y%)\n- H2H data (Head to head section)")
                             
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
@@ -827,7 +783,6 @@ def main():
     
     with tab2:
         st.subheader("📝 Pending Matches")
-        st.caption("Enter actual results for completed matches")
         pending = get_pending_matches()
         if pending:
             st.write(f"**{len(pending)} pending result(s)**")
