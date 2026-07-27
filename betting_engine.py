@@ -1,6 +1,5 @@
 import streamlit as st
 import re
-from datetime import datetime, timedelta
 
 # ============================================
 # DEBUG LOGGING
@@ -70,11 +69,10 @@ def parse_encoded_line(line):
 def parse_match_line(line):
     """
     Parse a match line like:
-    'Iguatu CE2 - 1 (1 - 0) Maguary PE'
+    'Cluj1 - 1 (0 - 0) Arges Pitesti'
     or 'Nacional AM1 - 1 (0 - 0) Iguatu CE'
     Returns dict with home, away, scores, or None.
     """
-    # Pattern: team1 + score1 - score2 (ht1 - ht2) team2
     pattern = r"(.+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*(.+)"
     m = re.match(pattern, line)
     if not m:
@@ -88,24 +86,23 @@ def parse_match_line(line):
         'away_team': m.group(6).strip()
     }
 
-def extract_team_abbreviation_mapping(lines):
-    """
-    Build a mapping from abbreviation (e.g., 'IGU') to full team name.
-    We look for patterns like: a line with only uppercase letters (2-4 chars)
-    followed later by a line containing the full team name (from the VS line).
-    But we already have the full names from the VS line, so we can map by
-    scanning for lines that contain the full name and an abbreviation nearby.
-    Simplified: we assume the abbreviation is the first 3-4 letters of the team name,
-    but we'll also detect explicit mappings from the data.
-    """
-    mapping = {}
-    # We'll use a heuristic: find lines like "IGU" alone and the next lines contain the team name.
-    # But it's easier: we can just use the full names from the VS line and later when we see
-    # sections like "IGU home matches", we know that 'IGU' corresponds to the team whose name
-    # appears in the match lines. We'll store the mapping as we parse.
-    # We'll do it dynamically: when we find a section header with an abbreviation,
-    # we look for the full team name in the match lines that follow (the home or away team).
-    return mapping  # will be filled during parsing
+def get_result(parsed, team):
+    """Return 'W', 'D', 'L' for the given team in a parsed match."""
+    if parsed['home_team'] == team:
+        if parsed['home_score'] > parsed['away_score']:
+            return 'W'
+        elif parsed['home_score'] < parsed['away_score']:
+            return 'L'
+        else:
+            return 'D'
+    elif parsed['away_team'] == team:
+        if parsed['away_score'] > parsed['home_score']:
+            return 'W'
+        elif parsed['away_score'] < parsed['home_score']:
+            return 'L'
+        else:
+            return 'D'
+    return None
 
 def parse_text_data(text):
     debug_log("=== 🔍 DEBUG: parse_text_data STARTED ===")
@@ -152,20 +149,48 @@ def parse_text_data(text):
 
     matches = []
     match = None
-    current_abbrev = None  # e.g., 'IGU', 'NAC'
-    current_section = None # 'home', 'away', 'last6', 'h2h'
+    current_abbrev = None
+    current_section = None
 
-    # Helper to determine result (W/D/L) for a team in a match
-    def get_result(home, away, team):
-        if team == home['home_team']:
-            if home['home_score'] > home['away_score']: return 'W'
-            elif home['home_score'] < home['away_score']: return 'L'
-            else: return 'D'
-        elif team == home['away_team']:
-            if home['away_score'] > home['home_score']: return 'W'
-            elif home['away_score'] < home['home_score']: return 'L'
-            else: return 'D'
-        return None
+    def store_current_match():
+        """Store the current match if it has essential data and is not already stored."""
+        nonlocal match, matches
+        if match and match['home_pct'] is not None:
+            essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away', 'avg_goals']
+            if all(match.get(f) is not None for f in essential):
+                # Process form data: we might have _form_data dict
+                if hasattr(match, '_form_data'):
+                    # Map abbreviations to team names
+                    abbrev_to_team = {}
+                    for abbrev in match['_form_data']:
+                        # Try to match abbreviation to home or away team
+                        if abbrev.upper() in match['home_team'].upper():
+                            team = match['home_team']
+                        elif abbrev.upper() in match['away_team'].upper():
+                            team = match['away_team']
+                        elif match['home_team'].upper().startswith(abbrev):
+                            team = match['home_team']
+                        elif match['away_team'].upper().startswith(abbrev):
+                            team = match['away_team']
+                        else:
+                            continue
+                        abbrev_to_team[abbrev] = team
+
+                    for abbrev, data in match['_form_data'].items():
+                        team = abbrev_to_team.get(abbrev)
+                        if team:
+                            if team == match['home_team']:
+                                match['home_form'] = data.get('home', [])
+                            elif team == match['away_team']:
+                                match['away_form'] = data.get('away', [])
+                            # recent form is stored separately, assign to match['recent_form']
+                            match['recent_form'] = data.get('recent', [])
+                    del match['_form_data']
+
+                # Store match
+                matches.append(match)
+                debug_log(f"✅ DEBUG: Match stored: {match['home_team']} vs {match['away_team']}")
+                match = None  # reset for next match
 
     for i, line in enumerate(lines):
         line = line.strip()
@@ -174,6 +199,10 @@ def parse_text_data(text):
 
         # ---- DETECT MATCH START (VS line) ----
         if ' VS ' in line:
+            # If there is a current match, store it before starting a new one
+            if match:
+                store_current_match()
+
             parts = line.split(' VS ', 1)
             left = parts[0].strip()
             right = parts[1].strip()
@@ -206,7 +235,6 @@ def parse_text_data(text):
                     'fatigue': False
                 }
                 debug_log("✅ DEBUG: match_found = True")
-                # Reset section tracking for this match
                 current_abbrev = None
                 current_section = None
                 continue
@@ -238,13 +266,11 @@ def parse_text_data(text):
                 debug_log("✅ DEBUG: Encoded line parsed successfully!")
             else:
                 debug_log("❌ DEBUG: parse_encoded_line FAILED")
+            # We do NOT store the match here; we wait for sections to be processed
 
         # ---- SECTION DETECTION (form, H2H) ----
-        # We need to know which team abbreviation corresponds to which full name.
-        # We'll build a mapping as we encounter abbreviations.
-        # For simplicity, we will store the mapping in a dict that persists for this match.
         if match:
-            # Check if line is a team abbreviation (2-4 uppercase letters, possibly followed by spaces)
+            # Check if line is a team abbreviation (2-4 uppercase letters, possibly with spaces trimmed)
             if re.match(r'^[A-Z]{2,4}$', line):
                 current_abbrev = line
                 debug_log(f"🔍 DEBUG: Detected team abbreviation: {current_abbrev}")
@@ -269,93 +295,38 @@ def parse_text_data(text):
                 continue
 
             # ---- PARSE MATCH LINES WITHIN SECTIONS ----
-            if current_section and current_abbrev and match:
-                # Try to parse a match line
+            if current_section and current_abbrev:
                 parsed = parse_match_line(line)
                 if parsed:
+                    debug_log(f"🔍 DEBUG: Parsed match line in section {current_section}: {parsed}")
                     # Determine which team this section belongs to
                     # We have the abbreviation, but we need to map to full name.
-                    # We can try to find the full name by checking if the parsed home or away team
-                    # matches the match's home or away team (case-insensitive partial match).
-                    # For now, we'll store the match data with the abbreviation as key.
-                    # Later we'll associate with the match.
-                    debug_log(f"🔍 DEBUG: Parsed match line in section {current_section}: {parsed}")
-                    # Store the parsed match in the appropriate list based on section
-                    if current_section == 'home':
-                        # We assume this section is for the team with current_abbrev.
-                        # We need to determine if this team is the home or away in this parsed match.
-                        # Since it's "home matches", the team is likely the home team.
-                        # But to be safe, we check if either team matches the match's home/away.
-                        # We'll just add the result for this team (we need to know which team we care about).
-                        # We'll determine the team by matching the abbreviation to the full name.
-                        # For now, we'll store the raw match and later compute form.
-                        # We'll store a list of (result, date) for the team.
-                        # We'll need to map abbreviation to full name.
-                        # We'll create a mapping dict.
-                        # Since we don't have a direct mapping, we can use the match's home/away team.
-                        # For home matches, the team is the home team (parsed['home_team']).
-                        # For away matches, the team is the away team.
-                        # We'll assume the abbreviation corresponds to the match's home or away.
-                        # We'll add the result for that team.
-                        team = None
-                        if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
-                            team = parsed['home_team']
-                        elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
-                            team = parsed['away_team']
-                        if team:
-                            result = get_result(parsed, None, team)  # we don't have the other team
-                            # But we need to know which team we are tracking.
-                            # We'll store the result with the team name.
-                            # We'll just add to a list of results for the current_abbrev.
-                            # We'll store in a dict keyed by abbreviation.
+                    # We'll store the result for the team that matches the abbreviation.
+                    # First, find which team in the current match corresponds to this abbreviation.
+                    team = None
+                    if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
+                        team = parsed['home_team']
+                    elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
+                        team = parsed['away_team']
+                    if team:
+                        result = get_result(parsed, team)
+                        if result:
                             if not hasattr(match, '_form_data'):
                                 match['_form_data'] = {}
                             if current_abbrev not in match['_form_data']:
                                 match['_form_data'][current_abbrev] = {'home': [], 'away': [], 'recent': []}
-                            match['_form_data'][current_abbrev][current_section].append(result)
+                            # Depending on section, store in appropriate list
+                            if current_section == 'home':
+                                match['_form_data'][current_abbrev]['home'].append(result)
+                            elif current_section == 'away':
+                                match['_form_data'][current_abbrev]['away'].append(result)
+                            elif current_section == 'last6':
+                                match['_form_data'][current_abbrev]['recent'].append(result)
                             debug_log(f"✅ DEBUG: Added {result} to {current_abbrev} {current_section} form")
-
-                    elif current_section == 'away':
-                        # similar
-                        team = None
-                        if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
-                            team = parsed['home_team']
-                        elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
-                            team = parsed['away_team']
-                        if team:
-                            result = get_result(parsed, None, team)
-                            if not hasattr(match, '_form_data'):
-                                match['_form_data'] = {}
-                            if current_abbrev not in match['_form_data']:
-                                match['_form_data'][current_abbrev] = {'home': [], 'away': [], 'recent': []}
-                            match['_form_data'][current_abbrev][current_section].append(result)
-                            debug_log(f"✅ DEBUG: Added {result} to {current_abbrev} {current_section} form")
-
-                    elif current_section == 'last6':
-                        # For recent form, we need to know which team this section belongs to.
-                        # It's usually the team indicated by current_abbrev.
-                        # We'll add the result for that team.
-                        team = None
-                        if parsed['home_team'] == match['home_team'] or parsed['home_team'] == match['away_team']:
-                            team = parsed['home_team']
-                        elif parsed['away_team'] == match['home_team'] or parsed['away_team'] == match['away_team']:
-                            team = parsed['away_team']
-                        if team:
-                            result = get_result(parsed, None, team)
-                            if not hasattr(match, '_form_data'):
-                                match['_form_data'] = {}
-                            if current_abbrev not in match['_form_data']:
-                                match['_form_data'][current_abbrev] = {'home': [], 'away': [], 'recent': []}
-                            match['_form_data'][current_abbrev]['recent'].append(result)
-                            debug_log(f"✅ DEBUG: Added {result} to {current_abbrev} recent form")
-
-                    elif current_section == 'h2h':
-                        # H2H lines are already parsed, we need to store them and determine winner
-                        # We have parsed['home_team'] and parsed['away_team'] with scores.
-                        # We need to check which team is the current match's home/away.
-                        # We'll store the result (which team won or draw) relative to the current match.
+                    # For H2H, we handle separately because we need winner relative to current match
+                    if current_section == 'h2h' and parsed:
+                        # Determine winner relative to match's home/away
                         if parsed['home_team'] == match['home_team'] and parsed['away_team'] == match['away_team']:
-                            # correct orientation
                             if parsed['home_score'] > parsed['away_score']:
                                 winner = match['home_team']
                             elif parsed['home_score'] < parsed['away_score']:
@@ -365,7 +336,6 @@ def parse_text_data(text):
                             match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
                             debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
                         elif parsed['home_team'] == match['away_team'] and parsed['away_team'] == match['home_team']:
-                            # reversed orientation
                             if parsed['home_score'] > parsed['away_score']:
                                 winner = match['away_team']  # because home in parsed is away in current
                             elif parsed['home_score'] < parsed['away_score']:
@@ -374,76 +344,6 @@ def parse_text_data(text):
                                 winner = 'Draw'
                             match['h2h'].append({'winner': winner, 'home_score': parsed['home_score'], 'away_score': parsed['away_score']})
                             debug_log(f"✅ DEBUG: Added H2H winner: {winner}")
-
-        # ---- CHECK COMPLETENESS ----
-        if match and match['home_pct'] is not None:
-            essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away', 'avg_goals']
-            missing = [f for f in essential if match.get(f) is None]
-            if missing:
-                debug_log(f"❌ DEBUG: Missing essential data: {missing}")
-            else:
-                # Process form data: we have _form_data dict with abbreviation keys.
-                # Now we need to map abbreviations to full team names.
-                # We'll build a mapping from abbreviation to full team name.
-                # We can derive it from the match's home/away team names.
-                # For each abbreviation in _form_data, we need to find which team it corresponds to.
-                # We'll check if the abbreviation appears in the match lines we parsed.
-                # But we already stored the results with the abbreviation.
-                # So we can just map abbreviation to team name by looking at the parsed matches.
-                # We'll do a simple mapping: if the abbreviation is in the home team name (first few letters) or away team.
-                # For now, we'll just copy the lists to match['home_form'] and match['away_form'] based on which team the abbreviation refers to.
-                # We'll create a mapping by scanning the parsed matches.
-                # Since we have the abbreviations, we can try to match them to full names.
-                # We'll use a simple approach: for each abbreviation, we look at the match's home and away teams,
-                # and see if the abbreviation is a substring of either team name (case-insensitive) or if the team name starts with the abbreviation.
-                # We'll assign the form data to the correct team.
-                # But we might have multiple abbreviations (home and away). We'll store them separately.
-                if hasattr(match, '_form_data'):
-                    # Determine which abbreviation belongs to which team
-                    abbrev_to_team = {}
-                    for abbrev in match['_form_data']:
-                        # Check if abbrev is part of home team name
-                        if abbrev.upper() in match['home_team'].upper():
-                            team = match['home_team']
-                        elif abbrev.upper() in match['away_team'].upper():
-                            team = match['away_team']
-                        else:
-                            # try to match by first 3 letters
-                            if match['home_team'].upper().startswith(abbrev):
-                                team = match['home_team']
-                            elif match['away_team'].upper().startswith(abbrev):
-                                team = match['away_team']
-                            else:
-                                continue
-                        abbrev_to_team[abbrev] = team
-
-                    # Now assign form lists
-                    for abbrev, data in match['_form_data'].items():
-                        team = abbrev_to_team.get(abbrev)
-                        if team:
-                            if team == match['home_team']:
-                                match['home_form'] = data.get('home', [])  # we want home form for home team
-                            elif team == match['away_team']:
-                                match['away_form'] = data.get('away', [])
-                            # recent form can be stored for both? We'll assign to match['recent_form'] as a dict.
-                            match['recent_form'] = data.get('recent', [])
-                    # Clean up temporary data
-                    del match['_form_data']
-
-                # ---- FATIGUE DETECTION ----
-                # Check if away team played a match within 3 days before current date.
-                if match['date'] and match['away_form']:
-                    # We don't have dates for away matches, but we can look at the last 6 matches
-                    # to see if any match date is close to current date.
-                    # We'll need to parse dates from the last 6 matches section.
-                    # Since we don't store dates in the form lists, we'll skip for now.
-                    # A more robust implementation would parse dates from the match lines.
-                    pass
-
-                debug_log("✅ DEBUG: All essential data present!")
-                matches.append(match)
-                debug_log(f"✅ DEBUG: Match stored: {match['home_team']} vs {match['away_team']}")
-                match = None   # reset
 
         # ---- PERIODIC DEBUG ----
         if match and i % 50 == 0:
@@ -456,12 +356,16 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
+    # After loop, store the last match if any
+    if match:
+        store_current_match()
+
     debug_log("=== 🔍 DEBUG: parse_text_data COMPLETE ===")
     debug_log(f"Total matches found: {len(matches)}")
     return {'league': league, 'matches': matches}
 
 # ============================================
-# STREAMLIT UI
+# STREAMLIT UI (unchanged)
 # ============================================
 
 st.set_page_config(page_title="Forebet Parser", layout="wide")
