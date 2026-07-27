@@ -1,8 +1,7 @@
 """
 REFINED FORMULA - YOUR 5 RULES
 Single table: match_predictions
-NO FALLBACK DATA - extracts ONLY real data from text
-FIXED: Handles all text variations
+FIXED: Abbreviation mapping for team names (CFR→Cluj, SK→SK Lisen, etc.)
 """
 
 import streamlit as st
@@ -32,6 +31,23 @@ TABLE_NAME = "match_predictions"
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="wide")
+
+# ============================================================================
+# TEAM ABBREVIATION MAPPING
+# ============================================================================
+TEAM_ABBREVIATIONS = {
+    'CFR': 'Cluj',
+    'FCV': 'FC Voluntari',
+    'SK': 'SK Lisen',
+    'MLA': 'Mlada Boleslav',
+    # Add more as needed
+}
+
+def get_full_team_name(abbr: str) -> str:
+    """Convert abbreviation to full team name"""
+    if abbr in TEAM_ABBREVIATIONS:
+        return TEAM_ABBREVIATIONS[abbr]
+    return abbr
 
 # ============================================================================
 # DATABASE HELPERS
@@ -100,7 +116,7 @@ def get_all_matches():
         return []
 
 # ============================================================================
-# PARSER - FIXED FOR ALL TEXT VARIATIONS
+# PARSER - WITH ABBREVIATION MAPPING
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
@@ -169,7 +185,6 @@ def parse_form_counts(lines: List[str], start_idx: int) -> Tuple[List[str], int]
     while i < len(lines) and i < start_idx + 15:
         line = lines[i].strip()
         
-        # Look for patterns like "Win 3 50%" or "Win 3 50"
         win_match = re.search(r'Win\s+(\d+)\s+(\d+)%?', line)
         draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%?', line)
         loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%?', line)
@@ -237,8 +252,19 @@ def parse_h2h_section(lines: List[str], start_idx: int) -> Tuple[List[dict], int
     
     return h2h_matches, i
 
+def find_team_abbreviation(lines: List[str], current_idx: int) -> Optional[str]:
+    """Look backwards to find the team abbreviation above home/away matches"""
+    # Look at the line immediately above (could be a blank line)
+    for j in range(current_idx - 1, max(0, current_idx - 5), -1):
+        line = lines[j].strip()
+        if line and len(line) < 10:  # Abbreviations are short (CFR, SK, MLA, FCV)
+            # Check if it's in our abbreviation mapping or looks like an abbreviation
+            if line in TEAM_ABBREVIATIONS or re.match(r'^[A-Z]{2,4}$', line):
+                return line
+    return None
+
 def parse_text_data(text: str) -> dict:
-    """Parse the complete text data - NO FALLBACKS"""
+    """Parse the complete text data - with abbreviation mapping"""
     result = {
         'matches': [],
         'league': None
@@ -342,21 +368,53 @@ def parse_text_data(text: str) -> dict:
             i = next_idx
             continue
 
-        # ----- Parse Home Form -----
-        if match_found and ('home matches' in line.lower() or 'home matches' in line):
-            form_data, next_idx = parse_form_counts(lines, i + 1)
-            if form_data:
-                current_match['home_form'] = form_data
-            i = next_idx
-            continue
+        # ----- Parse Home Form - WITH ABBREVIATION MAPPING -----
+        if match_found and ('home matches' in line.lower()):
+            # Find the abbreviation above this line
+            abbr = find_team_abbreviation(lines, i)
+            if abbr:
+                # Convert abbreviation to full team name
+                full_team = get_full_team_name(abbr)
+                # Check if this matches the home team
+                if full_team == current_match.get('home_team'):
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['home_form'] = form_data
+                    i = next_idx
+                    continue
+            # If no abbreviation found or doesn't match home team, look back for team name
+            for j in range(max(0, i-5), i):
+                prev = lines[j].strip()
+                if current_match.get('home_team') in prev:
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['home_form'] = form_data
+                    i = next_idx
+                    continue
 
-        # ----- Parse Away Form -----
-        if match_found and ('away matches' in line.lower() or 'away matches' in line):
-            form_data, next_idx = parse_form_counts(lines, i + 1)
-            if form_data:
-                current_match['away_form'] = form_data
-            i = next_idx
-            continue
+        # ----- Parse Away Form - WITH ABBREVIATION MAPPING -----
+        if match_found and ('away matches' in line.lower()):
+            # Find the abbreviation above this line
+            abbr = find_team_abbreviation(lines, i)
+            if abbr:
+                # Convert abbreviation to full team name
+                full_team = get_full_team_name(abbr)
+                # Check if this matches the away team
+                if full_team == current_match.get('away_team'):
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['away_form'] = form_data
+                    i = next_idx
+                    continue
+            # If no abbreviation found or doesn't match away team, look back for team name
+            for j in range(max(0, i-5), i):
+                prev = lines[j].strip()
+                if current_match.get('away_team') in prev:
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['away_form'] = form_data
+                    i = next_idx
+                    continue
 
         # ----- Save complete match -----
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
