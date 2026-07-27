@@ -1,5 +1,7 @@
 """
-REFINED FORMULA - YOUR 5 RULES - WITH DEBUG
+REFINED FORMULA - YOUR 5 RULES
+Single table: match_predictions
+FIXED: Regex in parse_encoded_line() now uses ^ to match from start of line
 """
 
 import streamlit as st
@@ -29,6 +31,24 @@ TABLE_NAME = "match_predictions"
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(page_title="Refined Formula V1.1", page_icon="🎯", layout="wide")
+
+# ============================================================================
+# TEAM ABBREVIATION MAPPING
+# ============================================================================
+TEAM_ABBREVIATIONS = {
+    'CFR': 'Cluj',
+    'FCV': 'FC Voluntari',
+    'SK': 'SK Lisen',
+    'MLA': 'Mlada Boleslav',
+    'DRU': 'Dunav Ruse',
+    'LUD': 'Ludogorets',
+}
+
+def get_full_team_name(abbr: str) -> str:
+    """Convert abbreviation to full team name"""
+    if abbr in TEAM_ABBREVIATIONS:
+        return TEAM_ABBREVIATIONS[abbr]
+    return abbr
 
 # ============================================================================
 # DATABASE HELPERS
@@ -97,7 +117,7 @@ def get_all_matches():
         return []
 
 # ============================================================================
-# PARSER - WITH DEBUG
+# PARSER
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
@@ -113,10 +133,14 @@ def clean_team_name(name: str) -> str:
     return name if len(name) > 2 else None
 
 def parse_encoded_line(line: str) -> dict:
-    """Parse encoded line like: 405010X1 - 12.3026°3.50"""
+    """
+    Parse encoded line like: 405010X1 - 12.3026°3.50
+    FIXED: Added ^ to match from start of line
+    """
     cleaned = line.replace(' ', '')
     
-    pct_match = re.search(r'(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
+    # ^ ensures we start at the beginning of the line
+    pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
     if not pct_match:
         return None
     
@@ -125,6 +149,7 @@ def parse_encoded_line(line: str) -> dict:
     away_pct = int(pct_match.group(3))
     prediction = pct_match.group(4)
     
+    # Extract score - look for "1 - 1" or "1-1"
     score_match = re.search(r'(\d+)\s*-\s*(\d+)', line)
     if not score_match:
         return None
@@ -132,12 +157,14 @@ def parse_encoded_line(line: str) -> dict:
     score_home = int(score_match.group(1))
     score_away = int(score_match.group(2))
     
+    # Extract avg goals - look for "2.30°"
     avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
     if not avg_match:
         return None
     
     avg_goals = float(avg_match.group(1))
     
+    # Extract double chance
     dc_match = re.search(r'([1X2]{2})', line)
     double_chance = dc_match.group(1) if dc_match else None
     
@@ -226,23 +253,26 @@ def parse_h2h_section(lines: List[str], start_idx: int) -> Tuple[List[dict], int
     
     return h2h_matches, i
 
+def find_team_abbreviation(lines: List[str], current_idx: int) -> Optional[str]:
+    """Look backwards to find the team abbreviation above home/away matches"""
+    for j in range(current_idx - 1, max(0, current_idx - 5), -1):
+        line = lines[j].strip()
+        if line and len(line) < 10:
+            if line in TEAM_ABBREVIATIONS or re.match(r'^[A-Z]{2,4}$', line):
+                return line
+    return None
+
 def parse_text_data(text: str) -> dict:
-    """Parse the complete text data - WITH DEBUG"""
+    """Parse the complete text data"""
     result = {
         'matches': [],
         'league': None
     }
     
-    # DEBUG: Show input
-    st.write("=== DEBUG: parse_text_data called ===")
-    st.write(f"Text length: {len(text)} characters")
-    
     if not text or len(text.strip()) < 100:
-        st.write("❌ Text too short or empty")
         return result
     
     lines = text.split('\n')
-    st.write(f"Lines: {len(lines)}")
     
     # Detect league
     league_keywords = ['Superliga', 'Premier League', 'Serie A', 'La Liga', 'Bundesliga', 
@@ -256,13 +286,11 @@ def parse_text_data(text: str) -> dict:
                 break
         if league:
             break
-    st.write(f"League detected: {league}")
     
     # Find match
     current_match = {}
     match_found = False
     i = 0
-    match_count = 0
     
     while i < len(lines):
         line = lines[i].strip()
@@ -272,12 +300,10 @@ def parse_text_data(text: str) -> dict:
         
         # ----- Find match header (Team VS Team) -----
         if ' VS ' in line:
-            st.write(f"DEBUG: Found VS line: {line}")
             parts = line.split(' VS ')
             if len(parts) == 2:
                 home = clean_team_name(parts[0])
                 away = clean_team_name(parts[1])
-                st.write(f"DEBUG: Home={home}, Away={away}")
                 if home and away:
                     current_match = {
                         'home_team': home,
@@ -300,7 +326,6 @@ def parse_text_data(text: str) -> dict:
                         'actual_away': None
                     }
                     match_found = True
-                    st.write(f"DEBUG: match_found = True for {home} vs {away}")
                     
                     # Find date nearby
                     for j in range(max(0, i-5), min(len(lines), i+10)):
@@ -310,16 +335,13 @@ def parse_text_data(text: str) -> dict:
                             try:
                                 dt = datetime.strptime(dt_match.group(1), "%d/%m/%Y")
                                 current_match['date'] = dt.strftime("%Y-%m-%d")
-                                st.write(f"DEBUG: Date found: {current_match['date']}")
                             except:
                                 pass
 
         # ----- Parse encoded data line -----
         if match_found and re.search(r'\d{6}[1X2]', line):
-            st.write(f"DEBUG: Found encoded line: {line}")
             encoded = parse_encoded_line(line)
             if encoded:
-                st.write(f"DEBUG: Encoded data: {encoded}")
                 current_match['home_pct'] = encoded['home_pct']
                 current_match['draw_pct'] = encoded['draw_pct']
                 current_match['away_pct'] = encoded['away_pct']
@@ -328,8 +350,6 @@ def parse_text_data(text: str) -> dict:
                 current_match['correct_score_away'] = encoded['score_away']
                 current_match['avg_goals'] = encoded['avg_goals']
                 current_match['double_chance'] = encoded['double_chance']
-            else:
-                st.write(f"DEBUG: Failed to parse encoded line")
 
         # ----- Check if match is finished -----
         if match_found and 'FT' in line:
@@ -341,9 +361,7 @@ def parse_text_data(text: str) -> dict:
 
         # ----- Parse H2H section -----
         if match_found and ('Head to head' in line or 'H2H' in line):
-            st.write(f"DEBUG: Found H2H section at line: {i}")
             h2h_data, next_idx = parse_h2h_section(lines, i)
-            st.write(f"DEBUG: Found {len(h2h_data)} H2H matches")
             if h2h_data:
                 current_match['h2h_data'] = h2h_data
             i = next_idx
@@ -351,47 +369,61 @@ def parse_text_data(text: str) -> dict:
 
         # ----- Parse Home Form -----
         if match_found and ('home matches' in line.lower()):
-            st.write(f"DEBUG: Found 'home matches' at line: {i}")
-            form_data, next_idx = parse_form_counts(lines, i + 1)
-            st.write(f"DEBUG: Home form data: {form_data}")
-            if form_data:
-                current_match['home_form'] = form_data
-            i = next_idx
-            continue
+            abbr = find_team_abbreviation(lines, i)
+            if abbr:
+                full_team = get_full_team_name(abbr)
+                if full_team == current_match.get('home_team'):
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['home_form'] = form_data
+                    i = next_idx
+                    continue
+            
+            # Fallback: look for team name in previous lines
+            for j in range(max(0, i-5), i):
+                prev = lines[j].strip()
+                if current_match.get('home_team') in prev:
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['home_form'] = form_data
+                    i = next_idx
+                    continue
 
         # ----- Parse Away Form -----
         if match_found and ('away matches' in line.lower()):
-            st.write(f"DEBUG: Found 'away matches' at line: {i}")
-            form_data, next_idx = parse_form_counts(lines, i + 1)
-            st.write(f"DEBUG: Away form data: {form_data}")
-            if form_data:
-                current_match['away_form'] = form_data
-            i = next_idx
-            continue
+            abbr = find_team_abbreviation(lines, i)
+            if abbr:
+                full_team = get_full_team_name(abbr)
+                if full_team == current_match.get('away_team'):
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['away_form'] = form_data
+                    i = next_idx
+                    continue
+            
+            # Fallback: look for team name in previous lines
+            for j in range(max(0, i-5), i):
+                prev = lines[j].strip()
+                if current_match.get('away_team') in prev:
+                    form_data, next_idx = parse_form_counts(lines, i + 1)
+                    if form_data:
+                        current_match['away_form'] = form_data
+                    i = next_idx
+                    continue
 
         # ----- Save complete match -----
         if match_found and current_match.get('home_team') and current_match.get('away_team'):
-            st.write("DEBUG: Checking if match is complete...")
-            
-            # Check what data we have
-            has_pct = current_match.get('home_pct') is not None
-            has_draw_pct = current_match.get('draw_pct') is not None
-            has_away_pct = current_match.get('away_pct') is not None
-            has_pred = current_match.get('forebet_prediction') is not None
-            has_score_home = current_match.get('correct_score_home') is not None
-            has_score_away = current_match.get('correct_score_away') is not None
-            has_avg = current_match.get('avg_goals') is not None
-            
-            st.write(f"DEBUG: home_pct={current_match.get('home_pct')}, draw_pct={current_match.get('draw_pct')}, away_pct={current_match.get('away_pct')}")
-            st.write(f"DEBUG: prediction={current_match.get('forebet_prediction')}, avg_goals={current_match.get('avg_goals')}")
-            
-            has_essential = has_pct and has_draw_pct and has_away_pct and has_pred and has_score_home and has_score_away and has_avg
-            
-            st.write(f"DEBUG: has_essential = {has_essential}")
+            has_essential = (
+                current_match.get('home_pct') is not None and
+                current_match.get('draw_pct') is not None and
+                current_match.get('away_pct') is not None and
+                current_match.get('forebet_prediction') is not None and
+                current_match.get('correct_score_home') is not None and
+                current_match.get('correct_score_away') is not None and
+                current_match.get('avg_goals') is not None
+            )
             
             if has_essential:
-                st.write("DEBUG: ✅ Match has essential data, saving...")
-                # Check if already added
                 already_added = False
                 for m in result['matches']:
                     if (m.get('home_team') == current_match.get('home_team') and
@@ -401,24 +433,14 @@ def parse_text_data(text: str) -> dict:
                 
                 if not already_added:
                     result['matches'].append(current_match.copy())
-                    match_count += 1
-                    st.write(f"DEBUG: ✅ Match {match_count} added to results")
                     current_match = {}
                     match_found = False
-                else:
-                    st.write("DEBUG: ⚠️ Match already added, skipping")
-            else:
-                st.write("DEBUG: ❌ Match missing essential data, not saving")
-                st.write(f"DEBUG: Missing: home_pct={not has_pct}, draw_pct={not has_draw_pct}, away_pct={not has_away_pct}, pred={not has_pred}, score_home={not has_score_home}, score_away={not has_score_away}, avg={not has_avg}")
 
         i += 1
 
     if league:
         result['league'] = league
 
-    st.write(f"=== DEBUG: parse_text_data complete ===")
-    st.write(f"Total matches found: {len(result['matches'])}")
-    
     return result
 
 # ============================================================================
@@ -669,14 +691,15 @@ def display_refined_analysis(match_data: dict, decision: dict, league: str = "Un
 # ============================================================================
 
 def main():
-    st.title("🎯 Refined Formula V1.1 - DEBUG MODE")
+    st.title("🎯 Refined Formula V1.1")
     st.caption("Your 5 Rules: Home Fortress | Away Form Killer | H2H Dominance | H2H Draw Rate | Midweek Fatigue")
-    st.warning("🔍 DEBUG MODE ENABLED - Showing parser steps")
+    st.info(f"📊 Using table: `{TABLE_NAME}`")
 
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending", "📊 Records", "📈 Dashboard"])
     
     with tab1:
         st.markdown("### 📝 Paste Match Data")
+        st.warning("⚠️ No fallback data - only real data extracted from your text will be used")
         
         text_data = st.text_area(
             "Paste Forebet data here",
@@ -709,10 +732,6 @@ def main():
                         parsed = parse_text_data(text_data)
                         matches = parsed.get('matches', [])
                         league = parsed.get('league', 'Unknown')
-                        
-                        st.write(f"### DEBUG RESULTS")
-                        st.write(f"League: {league}")
-                        st.write(f"Matches found: {len(matches)}")
                         
                         if matches:
                             st.success(f"✅ Found {len(matches)} matches in {league}")
@@ -806,7 +825,8 @@ def main():
                             
                             st.info(f"📊 Summary: {saved_count} saved, {duplicate_count} duplicates skipped.")
                         else:
-                            st.error("❌ No matches found in the data. Please check the debug output above.")
+                            st.error("❌ No matches found in the data. Please check the format.")
+                            st.info("The parser needs:\n- 'Team VS Team' line\n- Encoded data like '405010X1 - 12.3026°3.50'\n- Form data (Win X Y%, Draw X Y%, Lost X Y%)\n- H2H data (Head to head section)")
                             
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
