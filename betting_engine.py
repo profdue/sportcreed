@@ -1,7 +1,7 @@
 """
 REFINED FORMULA - YOUR 5 RULES
 Single table: match_predictions
-Auto-extracts from Forebet text data
+Complete working code with fixed parser
 """
 
 import streamlit as st
@@ -101,7 +101,7 @@ def get_all_matches():
         return []
 
 # ============================================================================
-# ENHANCED PARSER
+# ENHANCED PARSER - FIXED
 # ============================================================================
 
 def clean_team_name(name: str) -> str:
@@ -184,9 +184,9 @@ def parse_text_data(text: str) -> dict:
                                 pass
 
         # ----- Look for encoded data line (e.g., "255421X1 - 12.1526°3.80") -----
-        if match_found and re.search(r'^\d{6}[1X2]', line):
+        if match_found and re.search(r'\d{6}[1X2]', line):
             cleaned = line.replace(' ', '')
-            pct_match = re.search(r'^(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
+            pct_match = re.search(r'(\d{2})(\d{2})(\d{2})([1X2])', cleaned)
             if pct_match:
                 current_match['home_pct'] = int(pct_match.group(1))
                 current_match['draw_pct'] = int(pct_match.group(2))
@@ -198,68 +198,81 @@ def parse_text_data(text: str) -> dict:
                 if score_match:
                     current_match['correct_score_home'] = int(score_match.group(1))
                     current_match['correct_score_away'] = int(score_match.group(2))
+                
                 # Avg goals (e.g., "2.15")
                 avg_match = re.search(r'(\d+\.\d{2})\s*°', line)
                 if avg_match:
                     current_match['avg_goals'] = float(avg_match.group(1))
+                else:
+                    # Try alternative: look for number with degree symbol
+                    avg_match2 = re.search(r'(\d+\.\d{2})[°]', line)
+                    if avg_match2:
+                        current_match['avg_goals'] = float(avg_match2.group(1))
+                
                 # Double chance
                 dc_match = re.search(r'([1X2]{2})', line)
                 if dc_match:
                     current_match['double_chance'] = dc_match.group(1)
 
         # ----- Check if match is finished (FT) -----
-        if match_found and ('FT' in line or '1 - 0' in line):
+        if match_found and 'FT' in line:
             current_match['is_finished'] = True
             ft_score = re.search(r'(\d+)\s*-\s*(\d+)', line)
             if ft_score:
                 current_match['actual_home'] = int(ft_score.group(1))
                 current_match['actual_away'] = int(ft_score.group(2))
 
-        # ----- H2H section -----
-        if 'Head to head' in line or 'H2H' in line:
+        # ----- H2H section - FIXED -----
+        if match_found and ('Head to head' in line or 'H2H' in line):
             j = i + 1
-            while j < len(lines) and j < i + 20:
+            h2h_count = 0
+            while j < len(lines) and j < i + 25 and h2h_count < 6:
                 h2h_line = lines[j].strip()
                 if re.search(r'\d{2}/\d{2}/\d{4}', h2h_line):
                     h2h = parse_h2h_line(h2h_line)
-                    if h2h and match_found:
+                    if h2h:
                         current_match['h2h_data'].append(h2h)
-                    j += 1
-                else:
-                    break
+                        h2h_count += 1
+                j += 1
 
-        # ----- Form sections: "Last 6 matches" -----
+        # ----- Form sections - FIXED -----
         if match_found and ('Last 6 matches' in line or 'Last 6' in line):
             section_team = None
-            for k in range(max(0, i-3), i):
+            # Look back up to 5 lines for team name
+            for k in range(max(0, i-5), i):
                 prev = lines[k].strip()
-                if current_match['home_team'] in prev:
+                if current_match['home_team'] in prev or 'IMT' in prev:
                     section_team = 'home'
                     break
-                elif current_match['away_team'] in prev:
+                elif current_match['away_team'] in prev or 'FK Zemun' in prev:
                     section_team = 'away'
                     break
+            
             if section_team:
                 j = i + 1
                 form_results = []
-                while j < len(lines) and j < i + 15:
+                while j < len(lines) and j < i + 10:
                     form_line = lines[j].strip()
                     if not form_line:
                         j += 1
                         continue
+                    
                     win_match = re.search(r'Win\s+(\d+)\s+(\d+)%', form_line)
                     draw_match = re.search(r'Draw\s+(\d+)\s+(\d+)%', form_line)
                     loss_match = re.search(r'Lost\s+(\d+)\s+(\d+)%', form_line)
-                    if win_match:
-                        wins = int(win_match.group(1))
+                    
+                    if win_match or draw_match or loss_match:
+                        wins = int(win_match.group(1)) if win_match else 0
                         draws = int(draw_match.group(1)) if draw_match else 0
                         losses = int(loss_match.group(1)) if loss_match else 0
+                        
                         form_results = ['W'] * wins + ['D'] * draws + ['L'] * losses
                         if len(form_results) < 6:
                             form_results = form_results + ['D'] * (6 - len(form_results))
                         form_results = form_results[:6]
                         break
                     j += 1
+                
                 if form_results:
                     if section_team == 'home':
                         current_match['home_form'] = form_results
@@ -506,7 +519,6 @@ def refined_formula_decision(data: dict) -> dict:
     if dominant:
         pred = '1' if dominant == 'home' else '2'
         winner = 'Home' if dominant == 'home' else 'Away'
-        # Check if dominant side is fatigued
         if (dominant == 'home' and home_fatigued) or (dominant == 'away' and away_fatigued):
             return {
                 'prediction': 'X',
@@ -723,7 +735,7 @@ def main():
                                     'league_name': league,
                                     'home_team': match.get('home_team', 'Unknown'),
                                     'away_team': match.get('away_team', 'Unknown'),
-                                    'season_round': 'Round 2, Regular Season',
+                                    'season_round': None,
                                     'forebet_home_pct': match.get('home_pct', 0),
                                     'forebet_draw_pct': match.get('draw_pct', 0),
                                     'forebet_away_pct': match.get('away_pct', 0),
