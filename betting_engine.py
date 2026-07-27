@@ -67,7 +67,6 @@ def parse_encoded_line(line):
     }
 
 def get_result(parsed, team):
-    """Return 'W', 'D', 'L' for the given team in a parsed match dict."""
     if parsed['home_team'] == team:
         if parsed['home_score'] > parsed['away_score']: return 'W'
         elif parsed['home_score'] < parsed['away_score']: return 'L'
@@ -84,27 +83,26 @@ def normalize_team_name(name):
     Examples: 'CSKA-Sofia Br1' -> 'CSKA-Sofia'
               'Sport Recife Br2' -> 'Sport Recife'
               'Botev Plovdiv Bg1' -> 'Botev Plovdiv'
+              'Grobinas SC Lv1' -> 'Grobinas SC'
+              'Libertad FC (ECU)' -> 'Libertad FC (ECU)'  (keep parentheses)
     """
-    # Remove league/competition suffixes
-    name = re.sub(r'\s+(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2)\s*$', '', name)
+    # Remove league/competition suffixes (common ones)
+    suffixes = r'(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2|ECL|Ro|BgC|Cup|Copa|Série)'
+    name = re.sub(r'\s+' + suffixes + r'\s*$', '', name, flags=re.IGNORECASE)
     # Remove "View all"
-    name = re.sub(r'\s+View all.*$', '', name)
+    name = re.sub(r'\s+View all.*$', '', name, flags=re.IGNORECASE)
     # Remove "Win/Draw/Lost" and percentages
-    name = re.sub(r'\s+(Win|Draw|Lost)\s+\d+%.*$', '', name)
+    name = re.sub(r'\s+(Win|Draw|Lost)\s+\d+%.*$', '', name, flags=re.IGNORECASE)
     return name.strip()
 
 def process_section_block(match, abbrev, section_type, lines):
-    """
-    Process a block of lines belonging to a section (home, away, last6, h2h).
-    Join lines, extract all match patterns, and update the match object.
-    """
     if not match or not lines:
         return
     block = " ".join(lines)
     debug_log(f"🔍 Processing {section_type} block for {abbrev}")
 
-    # Regex to find match patterns: TeamA score - score (HT) TeamB
-    # Allow accented characters, hyphens, parentheses in team names
+    # First, try to find matches with a more lenient regex
+    # This regex handles cases where there is no space between team and score: "FK Ogre1"
     pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
     matches = pattern.findall(block)
 
@@ -137,11 +135,18 @@ def process_section_block(match, abbrev, section_type, lines):
 
         # Determine which team this match is about
         team = None
+        # Exact match after normalization
         if parsed_home_norm == match_home_norm or parsed_home_norm == match_away_norm:
             team = home_team
         elif parsed_away_norm == match_home_norm or parsed_away_norm == match_away_norm:
             team = away_team
-        # If still not matched, try using abbreviation (if available)
+        # If still not matched, try partial match (one name contains the other)
+        if not team:
+            if parsed_home_norm and (parsed_home_norm in match_home_norm or match_home_norm in parsed_home_norm):
+                team = home_team
+            elif parsed_away_norm and (parsed_away_norm in match_home_norm or match_home_norm in parsed_away_norm):
+                team = away_team
+        # If still not matched, try using abbreviation
         if not team and abbrev:
             if abbrev.upper() in home_team.upper():
                 team = home_team
@@ -193,7 +198,6 @@ def process_section_block(match, abbrev, section_type, lines):
                     debug_log(f"✅ Added H2H winner: {winner}")
 
 def store_current_match(match, matches):
-    """Finalize and store the current match if it has essential data."""
     if not match:
         return
     essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away']
@@ -243,7 +247,7 @@ def parse_text_data(text):
     match = None
     current_abbrev = None
     current_section = None
-    section_lines = []  # accumulate lines for the current section
+    section_lines = []
 
     for i, line in enumerate(lines):
         line = line.strip()
@@ -256,13 +260,13 @@ def parse_text_data(text):
 
         # ---- DETECT MATCH START ----
         if ' VS ' in line:
+            # Store previous match before starting new one
             if match:
                 store_current_match(match, matches)
                 match = None
             parts = line.split(' VS ', 1)
             left = parts[0].strip()
             right = parts[1].strip()
-            # Only reject if empty or contains quotes (code artifacts)
             if left and right and "'" not in left and '"' not in left and "'" not in right and '"' not in right:
                 debug_log(f"🔍 DEBUG: Found valid VS line at index {i}: '{line}'")
                 match = {
@@ -290,7 +294,7 @@ def parse_text_data(text):
                 section_lines = []
                 continue
 
-        # ---- DATE EXTRACTION (first date with time) ----
+        # ---- DATE EXTRACTION ----
         if match and match['date'] is None:
             date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}', line)
             if date_match:
@@ -317,14 +321,14 @@ def parse_text_data(text):
                 debug_log("✅ DEBUG: Encoded line parsed successfully!")
             else:
                 debug_log("❌ DEBUG: parse_encoded_line FAILED")
-            # Do NOT reset section – encoded line is separate
+            # Do NOT store match here; let it accumulate sections
             continue
 
         # ---- SECTION DETECTION ----
         if match:
-            # Check for team abbreviation (2-4 uppercase letters)
+            # Team abbreviation (2-4 uppercase letters)
             if re.match(r'^[A-Z]{2,4}$', line):
-                # Process any pending section before changing abbreviation
+                # Process pending section before changing abbreviation
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
                     section_lines = []
@@ -354,7 +358,7 @@ def parse_text_data(text):
                 current_section = 'last6'
                 debug_log(f"🔍 DEBUG: Found last 6 matches section for {current_abbrev}")
                 continue
-            elif 'head to head' in lower:
+            elif 'head to head' in lower or 'head-to-head' in lower:
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
                     section_lines = []
@@ -390,7 +394,7 @@ def parse_text_data(text):
     return {'league': league, 'matches': matches}
 
 # ============================================
-# STREAMLIT UI
+# STREAMLIT UI (unchanged)
 # ============================================
 
 st.set_page_config(page_title="Forebet Parser", layout="wide")
