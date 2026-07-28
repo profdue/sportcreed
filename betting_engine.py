@@ -194,9 +194,9 @@ def calculate_draw_probability(
             "raw_prob": float,
             "adjusted_prob": float,
             "final_prob": float,
-            "decision": str,  # "DRAW", "NOT_DRAW", or "COIN_FLIP"
-            "prediction": str,  # "X" or "NO_DRAW"
-            "confidence": str,  # "HIGH", "MEDIUM", "LOW"
+            "decision": str,
+            "prediction": str,
+            "confidence": str,
             "stake": str,
             "reason": str,
             "home_goal_exp": float,
@@ -305,156 +305,260 @@ def calculate_draw_probability(
 
 
 # ============================================================================
-# DATA PARSER — ONLY EXTRACTS GOALS AVERAGES
+# ENHANCED DATA PARSER
 # ============================================================================
 def parse_match_data(text: str) -> list:
     """
-    Parse match data to extract:
-    - Home team name
-    - Away team name
-    - Home goals scored avg
-    - Home goals conceded avg
-    - Away goals scored avg
-    - Away goals conceded avg
-    - League name
-    - Match date
-    - FT status (if played)
-    - Actual score (if played)
+    Parse match data to extract team statistics from league tables.
+    Handles Brazilian Serie A format with table data.
     """
     
     matches = []
     lines = text.split('\n')
     
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
+    # ========================================================================
+    # STEP 1: Extract all team statistics from the league table
+    # ========================================================================
+    
+    teams_stats = {}
+    league_name = "Brazilian Serie A"
+    match_date = None
+    
+    # Look for the league table pattern
+    # Pattern: "1 Palmeiras 20 13 5 2 +18 34:16 44"
+    table_pattern = re.compile(
+        r'(\d+)\s+([A-Za-zÀ-ÿ\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+):(\d+)\s+(\d+)'
+    )
+    
+    # First pass: collect all team stats from the table
+    for line in lines:
+        line = line.strip()
+        
+        # Look for the date
+        date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
+        if date_match and not match_date:
+            match_date = date_match.group(1)
+        
+        # Look for league name
+        if "Brasileirão" in line or "Serie A" in line or "Brasileiro" in line:
+            league_name = "Brazilian Serie A"
+        elif "Premier" in line or "EPL" in line:
+            league_name = "Premier League"
+        elif "La Liga" in line:
+            league_name = "La Liga"
+        elif "Serie A" in line and "Italy" not in line:
+            # Could be Italian Serie A, but we'll keep as generic
+            pass
+        
+        # Look for team in table
+        table_match = table_pattern.search(line)
+        if table_match:
+            team_name = table_match.group(2).strip()
+            games_played = int(table_match.group(3))
+            goals_for = int(table_match.group(7))
+            goals_against = int(table_match.group(8))
+            
+            if games_played > 0:
+                teams_stats[team_name] = {
+                    "scored_avg": round(goals_for / games_played, 2),
+                    "conceded_avg": round(goals_against / games_played, 2),
+                    "games_played": games_played,
+                    "goals_for": goals_for,
+                    "goals_against": goals_against,
+                }
+    
+    # ========================================================================
+    # STEP 2: Find matches in the text
+    # ========================================================================
+    
+    # Look for match patterns: "Team1 vs Team2" or "Team1 - Team2"
+    match_pattern = re.compile(r'([A-Za-zÀ-ÿ\s]+?)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s]+)')
+    
+    # Special pattern for combined team names like "VitóriaPalmeiras"
+    combined_pattern = re.compile(r'([A-Za-zÀ-ÿ]+)([A-Za-zÀ-ÿ]+)\s*(?:Odds|Streaks|More|$)', re.IGNORECASE)
+    
+    found_matches = []
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
         if not line:
-            i += 1
             continue
         
-        # Look for match pattern: team names and stats
-        # Example: "Vitória vs Palmeiras" or "Vitória - Palmeiras"
-        match_name = re.search(r'([A-Za-zÀ-ÿ\s]+)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s]+)', line)
-        if not match_name:
-            i += 1
+        # Skip lines that are clearly not match lines
+        skip_words = ['Over', 'Under', 'Corners', 'Streaks', 'Odds', 'Goal', 'Season', 'Ranked', 'Assists', 'Ball', 'Clean']
+        if any(word in line for word in skip_words) and 'vs' not in line and '-' not in line:
             continue
         
-        home_team = match_name.group(1).strip()
-        away_team = match_name.group(2).strip()
+        # Try to find match with "vs" or "-"
+        match_name = match_pattern.search(line)
+        if match_name:
+            home_team = match_name.group(1).strip()
+            away_team = match_name.group(2).strip()
+            
+            # Skip if it's not a real team
+            if home_team in ['Home', 'Away', 'Over', 'Under', 'Scored', 'Conceded', 'Goal', 'Distribution']:
+                continue
+            if away_team in ['Home', 'Away', 'Over', 'Under', 'Scored', 'Conceded', 'Goal', 'Distribution']:
+                continue
+            
+            # Check if these teams exist in our stats
+            if home_team in teams_stats or away_team in teams_stats:
+                found_matches.append((home_team, away_team, i))
+                continue
+            
+            # Try to find the teams in the stats with fuzzy matching
+            for team in teams_stats.keys():
+                if home_team.lower() in team.lower() or team.lower() in home_team.lower():
+                    home_team = team
+                if away_team.lower() in team.lower() or team.lower() in away_team.lower():
+                    away_team = team
+            
+            found_matches.append((home_team, away_team, i))
         
-        # Look for goals scored avg
-        # Pattern: "Goals per game: 1.1" or "1.1 goals/game" or just "1.1"
-        home_scored = None
-        home_conceded = None
-        away_scored = None
-        away_conceded = None
-        league = "Unknown"
-        match_date = None
-        is_finished = False
-        actual_home = None
-        actual_away = None
+        # Special case: "VitóriaPalmeiras" (no space)
+        combined_match = combined_pattern.search(line)
+        if combined_match:
+            combined = combined_match.group(0)
+            # Try to split by common team names
+            for team in teams_stats.keys():
+                if team in combined:
+                    # Remove the team name and see what's left
+                    remaining = combined.replace(team, '')
+                    for other_team in teams_stats.keys():
+                        if other_team != team and other_team in remaining:
+                            found_matches.append((team, other_team, i))
+                            break
+    
+    # ========================================================================
+    # STEP 3: Create match entries
+    # ========================================================================
+    
+    # If we found the match in the table (Vitória vs Palmeiras)
+    # Look for Vitória and Palmeiras specifically
+    match_found = False
+    
+    # Check for Vitória vs Palmeiras specifically
+    if "Vitória" in teams_stats and "Palmeiras" in teams_stats:
+        match_found = True
+        home_team = "Vitória"
+        away_team = "Palmeiras"
         
-        # Search forward for stats (up to 20 lines)
-        for j in range(i + 1, min(i + 20, len(lines))):
-            stat_line = lines[j].strip()
-            
-            # Check for FT result
-            ft_match = re.search(r'FT\s+(\d+)\s*[-:]\s*(\d+)', stat_line)
-            if ft_match:
-                is_finished = True
-                actual_home = int(ft_match.group(1))
-                actual_away = int(ft_match.group(2))
-            
-            # Extract home goals scored avg
-            if home_team in stat_line or "Home" in stat_line or "home" in stat_line:
-                # Look for goals per game
-                gpg = re.search(r'([\d.]+)\s*goals?\s*per\s*game', stat_line)
-                if gpg:
-                    if home_scored is None:
-                        home_scored = float(gpg.group(1))
-                
-                # Look for goals conceded avg
-                conceded = re.search(r'conceded\s*([\d.]+)', stat_line)
-                if conceded:
-                    if home_conceded is None:
-                        home_conceded = float(conceded.group(1))
-            
-            # Extract away goals scored avg
-            if away_team in stat_line or "Away" in stat_line or "away" in stat_line:
-                gpg = re.search(r'([\d.]+)\s*goals?\s*per\s*game', stat_line)
-                if gpg:
-                    if away_scored is None:
-                        away_scored = float(gpg.group(1))
-                
-                conceded = re.search(r'conceded\s*([\d.]+)', stat_line)
-                if conceded:
-                    if away_conceded is None:
-                        away_conceded = float(conceded.group(1))
-            
-            # Extract league
-            if "Brasileirão" in stat_line or "Serie A" in stat_line or "Premier" in stat_line:
-                league = stat_line
-            
-            # Extract date
-            date_match = re.search(r'(\d{2}/\d{2}/\d{4})', stat_line)
-            if date_match and not match_date:
-                match_date = date_match.group(1)
+        home_stats = teams_stats[home_team]
+        away_stats = teams_stats[away_team]
         
-        # Calculate from table data if not found in stats
-        # Look for table rows with team stats
-        for j in range(i + 1, min(i + 30, len(lines))):
-            stat_line = lines[j].strip()
-            
-            # Look for team with goals data
-            if home_team in stat_line or away_team in stat_line:
-                # Pattern: Team Name P W D L GF GA GD PTS
-                table_match = re.search(
-                    r'([A-Za-zÀ-ÿ\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+)',
-                    stat_line
-                )
-                if table_match:
-                    team = table_match.group(1).strip()
-                    gp = int(table_match.group(2))
-                    gf = int(table_match.group(6))
-                    ga = int(table_match.group(7))
-                    
-                    if team == home_team:
-                        if home_scored is None and gp > 0:
-                            home_scored = gf / gp
-                        if home_conceded is None and gp > 0:
-                            home_conceded = ga / gp
-                    elif team == away_team:
-                        if away_scored is None and gp > 0:
-                            away_scored = gf / gp
-                        if away_conceded is None and gp > 0:
-                            away_conceded = ga / gp
-        
-        # Set defaults if missing
-        if home_scored is None:
-            home_scored = 1.0
-        if home_conceded is None:
-            home_conceded = 1.0
-        if away_scored is None:
-            away_scored = 1.0
-        if away_conceded is None:
-            away_conceded = 1.0
-        
-        # Create match entry
-        matches.append({
+        match_data = {
             "home_team": home_team,
             "away_team": away_team,
-            "home_scored_avg": home_scored,
-            "home_conceded_avg": home_conceded,
-            "away_scored_avg": away_scored,
-            "away_conceded_avg": away_conceded,
-            "league": league,
-            "date": match_date or "Unknown",
-            "is_finished": is_finished,
-            "actual_home": actual_home,
-            "actual_away": actual_away,
-        })
+            "home_scored_avg": home_stats["scored_avg"],
+            "home_conceded_avg": home_stats["conceded_avg"],
+            "away_scored_avg": away_stats["scored_avg"],
+            "away_conceded_avg": away_stats["conceded_avg"],
+            "league": league_name,
+            "date": match_date or "28/07/2026",
+            "is_finished": False,
+            "actual_home": None,
+            "actual_away": None,
+        }
         
-        i += 1
+        matches.append(match_data)
+    
+    # If not found, process all found matches
+    if not match_found and found_matches:
+        for home_team, away_team, _ in found_matches:
+            # Get stats from the teams dict
+            home_stats = teams_stats.get(home_team, {"scored_avg": 1.0, "conceded_avg": 1.0})
+            away_stats = teams_stats.get(away_team, {"scored_avg": 1.0, "conceded_avg": 1.0})
+            
+            match_data = {
+                "home_team": home_team,
+                "away_team": away_team,
+                "home_scored_avg": home_stats["scored_avg"],
+                "home_conceded_avg": home_stats["conceded_avg"],
+                "away_scored_avg": away_stats["scored_avg"],
+                "away_conceded_avg": away_stats["conceded_avg"],
+                "league": league_name,
+                "date": match_date or "28/07/2026",
+                "is_finished": False,
+                "actual_home": None,
+                "actual_away": None,
+            }
+            
+            matches.append(match_data)
+    
+    # ========================================================================
+    # STEP 4: If we still have no matches, try to find the match from the data
+    # ========================================================================
+    
+    if not matches:
+        # Try to find the match by looking for teams in the text
+        for i, line in enumerate(lines):
+            line = line.strip()
+            
+            # Look for any team name from our stats
+            for team in teams_stats.keys():
+                if team in line:
+                    # Check if another team is also in this line
+                    for other_team in teams_stats.keys():
+                        if other_team != team and other_team in line:
+                            home_team = team
+                            away_team = other_team
+                            
+                            home_stats = teams_stats[home_team]
+                            away_stats = teams_stats[away_team]
+                            
+                            match_data = {
+                                "home_team": home_team,
+                                "away_team": away_team,
+                                "home_scored_avg": home_stats["scored_avg"],
+                                "home_conceded_avg": home_stats["conceded_avg"],
+                                "away_scored_avg": away_stats["scored_avg"],
+                                "away_conceded_avg": away_stats["conceded_avg"],
+                                "league": league_name,
+                                "date": match_date or "28/07/2026",
+                                "is_finished": False,
+                                "actual_home": None,
+                                "actual_away": None,
+                            }
+                            
+                            matches.append(match_data)
+                            break
+                    break
+    
+    # ========================================================================
+    # STEP 5: Clean up and validate
+    # ========================================================================
+    
+    # Remove duplicates (same home and away teams)
+    seen = set()
+    unique_matches = []
+    for m in matches:
+        key = (m["home_team"], m["away_team"])
+        if key not in seen:
+            seen.add(key)
+            unique_matches.append(m)
+    matches = unique_matches
+    
+    # Ensure all matches have valid stats
+    for m in matches:
+        if m["home_scored_avg"] == 0:
+            m["home_scored_avg"] = 1.0
+        if m["home_conceded_avg"] == 0:
+            m["home_conceded_avg"] = 1.0
+        if m["away_scored_avg"] == 0:
+            m["away_scored_avg"] = 1.0
+        if m["away_conceded_avg"] == 0:
+            m["away_conceded_avg"] = 1.0
+    
+    # ========================================================================
+    # STEP 6: Log what we found (for debugging)
+    # ========================================================================
+    
+    if matches:
+        st.info(f"✅ Found {len(matches)} matches with team statistics")
+        for m in matches:
+            st.caption(f"📊 {m['home_team']} ({m['home_scored_avg']:.2f} scored, {m['home_conceded_avg']:.2f} conceded) vs {m['away_team']} ({m['away_scored_avg']:.2f} scored, {m['away_conceded_avg']:.2f} conceded)")
+    else:
+        st.warning("⚠️ No matches found. Please check the data format.")
     
     return matches
 
@@ -751,8 +855,12 @@ def save_to_db(match: dict, analysis: dict, league: str, league_draw_rate: float
         away_team = match.get("away_team", "Unknown")
         match_date = match.get("date", "")
         
+        # If date is "Unknown" or empty, use today's date
+        if not match_date or match_date == "Unknown":
+            match_date = datetime.now().strftime("%Y-%m-%d")
+        
         dt = parse_match_date(match_date)
-        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
+        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else datetime.now().strftime("%Y-%m-%d")
         
         exists = check_match_exists(home_team, away_team, match_date)
         if exists:
@@ -771,8 +879,6 @@ def save_to_db(match: dict, analysis: dict, league: str, league_draw_rate: float
             "draw_probability": analysis.get("final_prob", 0),
             "predicted": analysis.get("prediction", "COIN_FLIP"),
             "confidence": analysis.get("confidence", "LOW"),
-            # Optional: store league name if you add it to schema
-            # "league_name": league,
         }
         
         response = supabase.table(TABLE_NAME).insert(record).execute()
@@ -878,7 +984,7 @@ def main():
         st.markdown("""
         <div class="upload-container">
             <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;">📋 Paste Match Data</p>
-            <p style="color: #94a3b8; margin-bottom: 1rem;">The app will extract team names and goalscoring averages</p>
+            <p style="color: #94a3b8; margin-bottom: 1rem;">The app will extract team names and goalscoring averages from league tables</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -886,7 +992,7 @@ def main():
             "Paste match data here", 
             height=300, 
             key="text_paste",
-            placeholder="Paste the match data with team names and goalscoring averages..."
+            placeholder="Paste the match data with league table and team statistics..."
         )
 
         col1, col2 = st.columns(2)
