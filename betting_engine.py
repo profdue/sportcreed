@@ -75,36 +75,20 @@ def normalize_team_name(name):
 
 def parse_match_blocks(block):
     """
-    Extract all match tuples (home_team, home_score, away_score, ht_home, ht_away, away_team)
-    from a block of text using a robust two‑stage approach.
+    Extract all match tuples from a block of text using a robust method.
+    Returns a list of dicts with keys: home_team, home_score, away_score, ht_home, ht_away, away_team.
     """
-    # First, find all score patterns with their positions
-    score_pattern = re.compile(r"(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)")
-    matches = []
-    for m in score_pattern.finditer(block):
-        start, end = m.start(), m.end()
-        home_score = int(m.group(1))
-        away_score = int(m.group(2))
-        ht_home = int(m.group(3))
-        ht_away = int(m.group(4))
-        # Extract text before and after the score
-        before = block[:start].strip()
-        after = block[end:].strip()
-        # We need to find the team names: the one before the score is the home team,
-        # the one after is the away team (but may include the next score, so we need to split carefully)
-        # Simpler: split by the score pattern and take the immediate text before and after.
-        # We'll use a regex to capture the surrounding text without overlapping.
-        # We'll re-split using the score pattern as a delimiter.
-        parts = re.split(r'\s*\d+\s*-\s*\d+\s*\(\s*\d+\s*-\s*\d+\s*\)\s*', block)
-        # But we need the team names, not the scores themselves.
-        # Instead, we can use a more direct approach: look for the pattern of text - score - text.
-        # Since this is getting complex, we'll fall back to the original regex but with a cleaned block.
-        # The previous regex failed due to dates, so we remove dates.
-    # Let's use the original regex but clean the block first.
+    # First, remove all non‑essential text that could confuse the regex
+    # Remove dates (dd/mm/yyyy or dd/mm)
     cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
+    # Remove "All", "View all", "Win X%", etc.
     cleaned = re.sub(r'\bAll\b', '', cleaned)
-    # Remove "Win", "Draw", "Lost" percentages
-    cleaned = re.sub(r'\b(Win|Draw|Lost)\s+\d+%\s*\b', '', cleaned)
+    cleaned = re.sub(r'\bView all.*$', '', cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r'\b(Win|Draw|Lost)\s+\d+%(\s*\d+%)?\s*', '', cleaned)
+    # Remove extra whitespace
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    # Now use a regex that matches the pattern: team name, score, score, (HT), team name
+    # But team names can contain spaces, dots, parentheses, hyphens.
     pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
     raw_matches = pattern.findall(cleaned)
     result = []
@@ -140,7 +124,6 @@ def process_section_block(match, abbrev, section_type, lines):
     elif section_type == 'last6':
         # Use abbreviation to decide which team
         if abbrev:
-            # Try to map abbreviation to home or away team
             home_norm = normalize_team_name(match['home_team'])
             away_norm = normalize_team_name(match['away_team'])
             if abbrev.upper() in match['home_team'].upper() or abbrev.upper() in home_norm:
@@ -203,7 +186,9 @@ def parse_overall_stats(match, block):
         stats['away_avg_ga'] = float(avg_goals[3])
         debug_log(f"✅ Avg goals: home GF={stats['home_avg_gf']}, GA={stats['home_avg_ga']}; away GF={stats['away_avg_gf']}, GA={stats['away_avg_ga']}")
 
-    # Under/Over 2.5 percentages
+    # Find all Under/Over 2.5 blocks
+    # The pattern: some numbers, then "2.5 Goals" with percentages around it.
+    # We'll find all occurrences of the pattern and assign first to home, second to away.
     u25_pattern = re.compile(r'(\d+)\s+(\d+)\s*(\d+)%(\d+)%\s*2\.5\s+Goals', re.IGNORECASE)
     u25_matches = u25_pattern.findall(block)
     if len(u25_matches) >= 1:
@@ -216,7 +201,7 @@ def parse_overall_stats(match, block):
                 stats['away_u25_pct'] = under_pct
                 debug_log(f"✅ Away Under 2.5: {under_pct}%")
 
-    # BTTS Yes percentages
+    # BTTS Yes percentages – same approach
     btts_pattern = re.compile(r'Both scored\s*\(Yes/No\)\s*Yes\s*\d+\s*(\d+)%(\d+)%\s*No', re.IGNORECASE)
     btts_matches = btts_pattern.findall(block)
     if len(btts_matches) >= 1:
@@ -360,6 +345,7 @@ def parse_text_data(text):
             lower = line.lower()
 
             if current_section == 'overall':
+                # Stop collecting overall if we hit a new section
                 if 'home matches' in lower or 'away matches' in lower or 'last 6 matches' in lower or 'head to head' in lower or 'discover more' in lower:
                     if section_lines:
                         parse_overall_stats(match, " ".join(section_lines))
@@ -369,6 +355,7 @@ def parse_text_data(text):
                     section_lines.append(line)
                     continue
 
+            # Team abbreviation detection
             if re.match(r'^[A-Z]{2,4}$', line):
                 false_abbrevs = {'FT', 'HT', 'ALL', 'VIEW', 'WIN', 'DRAW', 'LOST', 'PTS', 'GP', 'GF', 'GA'}
                 if line.upper() not in false_abbrevs:
@@ -382,6 +369,7 @@ def parse_text_data(text):
                     debug_log(f"ℹ️ Ignoring non-team abbreviation: {line}")
                     continue
 
+            # Section detection
             if 'home matches' in lower:
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
