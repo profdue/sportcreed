@@ -307,7 +307,7 @@ def calculate_draw_probability(
 
 
 # ============================================================================
-# DEBUG DATA PARSER
+# FIXED DATA PARSER - ROBUST TABLE EXTRACTION
 # ============================================================================
 def parse_match_data(text: str, debug: bool = False) -> tuple:
     """
@@ -316,94 +316,85 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
     Returns (matches, debug_info)
     """
     
-    lines = text.split('\n')
     matches = []
     debug_info = [] if debug else None
     
-    # ========================================================================
-    # STEP 1: Extract all team statistics from the league table
-    # ========================================================================
+    # Join all lines with a space to handle line breaks between tokens
+    clean_text = ' '.join(text.splitlines())
+    
+    # Regex to match table rows: rank, team, games, wins, draws, losses, diff, goals:against, points
+    # The team name may contain letters, spaces, hyphens, and accented characters
+    table_pattern = re.compile(
+        r'(\d+)\s+([A-Za-zÀ-ÿ\s\-\.]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+):(\d+)\s+\d+',
+        re.DOTALL
+    )
     
     teams_stats = {}
     league_name = "Brazilian Serie A"
     match_date = None
     
-    # Pattern for table rows: "1 Palmeiras 20 13 5 2 +18 34:16 44"
-    table_pattern = re.compile(
-        r'(\d+)\s+([A-Za-zÀ-ÿ\s]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+):(\d+)\s+(\d+)'
-    )
-    
     if debug:
         debug_info.append("=== DEBUG: parse_match_data ===")
-        debug_info.append(f"Total lines: {len(lines)}")
+        debug_info.append(f"Cleaned text length: {len(clean_text)}")
     
-    for idx, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
+    # Extract date from text
+    date_match = re.search(r'(\d{2}/\d{2}/\d{4})', clean_text)
+    if date_match:
+        match_date = date_match.group(1)
+        if debug:
+            debug_info.append(f"Found date: {match_date}")
+    
+    # Extract league
+    if "Brasileirão" in clean_text or "Serie A" in clean_text:
+        league_name = "Brazilian Serie A"
+        if debug:
+            debug_info.append(f"Found league: {league_name}")
+    
+    # Find all table rows
+    found_rows = list(table_pattern.finditer(clean_text))
+    if debug:
+        debug_info.append(f"Found {len(found_rows)} potential table rows")
+    
+    for match in found_rows:
+        team_name = match.group(2).strip()
+        games_played = int(match.group(3))
+        goals_for = int(match.group(7))
+        goals_against = int(match.group(8))
         
-        # Extract date
-        date_match = re.search(r'(\d{2}/\d{2}/\d{4})', line)
-        if date_match and not match_date:
-            match_date = date_match.group(1)
+        if games_played > 0:
+            teams_stats[team_name] = {
+                "scored_avg": round(goals_for / games_played, 2),
+                "conceded_avg": round(goals_against / games_played, 2),
+            }
             if debug:
-                debug_info.append(f"Found date: {match_date}")
-        
-        # Extract league
-        if "Brasileirão" in line or "Serie A" in line:
-            league_name = "Brazilian Serie A"
-            if debug:
-                debug_info.append(f"Found league: {league_name}")
-        
-        # Extract team stats
-        table_match = table_pattern.search(line)
-        if table_match:
-            team_name = table_match.group(2).strip()
-            games_played = int(table_match.group(3))
-            goals_for = int(table_match.group(7))
-            goals_against = int(table_match.group(8))
-            
-            if games_played > 0:
-                teams_stats[team_name] = {
-                    "scored_avg": round(goals_for / games_played, 2),
-                    "conceded_avg": round(goals_against / games_played, 2),
-                }
-                if debug:
-                    debug_info.append(f"  Team: {team_name} ({goals_for}/{games_played} scored, {goals_against}/{games_played} conceded)")
+                debug_info.append(f"  Team: {team_name} ({goals_for}/{games_played} scored, {goals_against}/{games_played} conceded)")
     
     if debug:
         debug_info.append(f"Extracted {len(teams_stats)} teams")
     
-    # ========================================================================
-    # STEP 2: Find the match - ONLY from teams in the league table
-    # ========================================================================
-    
-    # The match we want is Vitória vs Palmeiras (they are in the table)
-    # If both exist, use them
+    # Now find the match
     home_team = None
     away_team = None
     
+    # First, look specifically for Vitória vs Palmeiras
     if "Vitória" in teams_stats and "Palmeiras" in teams_stats:
         home_team = "Vitória"
         away_team = "Palmeiras"
         if debug:
             debug_info.append("Found specific match: Vitória vs Palmeiras")
     else:
-        # Fallback: look for any two teams that appear together in the text
-        # and both are in the stats
-        match_pattern = re.compile(r'([A-Za-zÀ-ÿ\s]+?)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s]+)')
-        for idx, line in enumerate(lines):
+        # Look for any two teams that appear together in the text (with "vs" or "-")
+        match_pattern = re.compile(r'([A-Za-zÀ-ÿ\s\-]+?)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s\-]+)')
+        # Remove lines with common non-team words
+        skip_words = ['Over', 'Under', 'Corners', 'Streaks', 'Odds', 'Goal', 'Season', 'Ranked', 'Assists', 'Ball', 'Clean', 'Head', 'More', 'Less', 'First', 'Affiliate']
+        for line in text.splitlines():
             line = line.strip()
-            # Skip lines with common non-team words
-            skip_words = ['Over', 'Under', 'Corners', 'Streaks', 'Odds', 'Goal', 'Season', 'Ranked', 'Assists', 'Ball', 'Clean', 'Head', 'More', 'Less', 'First', 'Affiliate']
             if any(word in line for word in skip_words):
-                if debug:
-                    debug_info.append(f"Skipping line {idx}: contains skip word")
                 continue
-            match_name = match_pattern.search(line)
-            if match_name:
-                h = match_name.group(1).strip()
-                a = match_name.group(2).strip()
+            m = match_pattern.search(line)
+            if m:
+                h = m.group(1).strip()
+                a = m.group(2).strip()
                 if debug:
                     debug_info.append(f"Found match candidate: '{h}' vs '{a}'")
                 if h in teams_stats and a in teams_stats:
@@ -418,19 +409,6 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
                             debug_info.append(f"  '{h}' not in stats")
                         if a not in teams_stats:
                             debug_info.append(f"  '{a}' not in stats")
-            else:
-                # Check if line contains two team names from the stats (without 'vs')
-                found_teams = [t for t in teams_stats.keys() if t in line]
-                if len(found_teams) >= 2:
-                    if debug:
-                        debug_info.append(f"Found two teams in same line without 'vs': {found_teams}")
-                    home_team = found_teams[0]
-                    away_team = found_teams[1]
-                    break
-    
-    # ========================================================================
-    # STEP 3: If we have a valid match, create the entry
-    # ========================================================================
     
     if debug:
         debug_info.append(f"Final home_team: {home_team}, away_team: {away_team}")
@@ -439,7 +417,6 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
         home_stats = teams_stats[home_team]
         away_stats = teams_stats[away_team]
         
-        # Use the date from the text or default
         if not match_date:
             match_date = datetime.now().strftime("%d/%m/%Y")
             if debug:
@@ -464,10 +441,6 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
     else:
         if debug:
             debug_info.append("No valid match found")
-    
-    # ========================================================================
-    # STEP 4: Log results
-    # ========================================================================
     
     if matches:
         if debug:
