@@ -307,7 +307,7 @@ def calculate_draw_probability(
 
 
 # ============================================================================
-# FIXED DATA PARSER - ROBUST TABLE EXTRACTION
+# FIXED DATA PARSER - CORRECTED REGEX
 # ============================================================================
 def parse_match_data(text: str, debug: bool = False) -> tuple:
     """
@@ -322,15 +322,16 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
     # Join all lines with a space to handle line breaks between tokens
     clean_text = ' '.join(text.splitlines())
     
-    # Regex to match table rows: rank, team, games, wins, draws, losses, diff, goals:against, points
+    # Regex to match table rows: rank, team, games, wins, draws, losses, diff, goals:against, [last 5 results], points
     # The team name may contain letters, spaces, hyphens, and accented characters
+    # The last 5 results are five capital letters separated by spaces
     table_pattern = re.compile(
-        r'(\d+)\s+([A-Za-zÀ-ÿ\s\-\.]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+):(\d+)\s+\d+',
+        r'(\d+)\s+([A-Za-zÀ-ÿ\s\-\.]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+):(\d+)\s+(?:[A-Z]+\s+){5}(\d+)',
         re.DOTALL
     )
     
     teams_stats = {}
-    league_name = "Brazilian Serie A"
+    league_name = "Unknown League"
     match_date = None
     
     if debug:
@@ -345,10 +346,16 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
             debug_info.append(f"Found date: {match_date}")
     
     # Extract league
-    if "Brasileirão" in clean_text or "Serie A" in clean_text:
+    if "Brasileirão" in clean_text or "Serie A" in clean_text or "Brasileiro" in clean_text:
         league_name = "Brazilian Serie A"
-        if debug:
-            debug_info.append(f"Found league: {league_name}")
+    elif "LigaPro" in clean_text or "Serie A" in clean_text:
+        league_name = "Ecuadorian Serie A"
+    elif "Premier" in clean_text or "EPL" in clean_text:
+        league_name = "Premier League"
+    elif "La Liga" in clean_text:
+        league_name = "La Liga"
+    if debug:
+        debug_info.append(f"Detected league: {league_name}")
     
     # Find all table rows
     found_rows = list(table_pattern.finditer(clean_text))
@@ -376,19 +383,30 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
     home_team = None
     away_team = None
     
-    # First, look specifically for Vitória vs Palmeiras
-    if "Vitória" in teams_stats and "Palmeiras" in teams_stats:
-        home_team = "Vitória"
-        away_team = "Palmeiras"
-        if debug:
-            debug_info.append("Found specific match: Vitória vs Palmeiras")
-    else:
-        # Look for any two teams that appear together in the text (with "vs" or "-")
+    # First, look specifically for the two teams in the match (from the odds section)
+    # They are usually mentioned in the "Odds" section
+    odds_section = re.search(r'Odds(.*?)(?=League|$)', clean_text, re.DOTALL)
+    if odds_section:
+        odds_text = odds_section.group(1)
+        # Look for two team names that appear in odds section
+        team_names = list(teams_stats.keys())
+        found_teams = []
+        for team in team_names:
+            if team in odds_text:
+                found_teams.append(team)
+        if len(found_teams) >= 2:
+            home_team = found_teams[0]
+            away_team = found_teams[1]
+            if debug:
+                debug_info.append(f"Found match from odds section: {home_team} vs {away_team}")
+    
+    # If not found, look for "vs" in the text
+    if not home_team or not away_team:
         match_pattern = re.compile(r'([A-Za-zÀ-ÿ\s\-]+?)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s\-]+)')
-        # Remove lines with common non-team words
-        skip_words = ['Over', 'Under', 'Corners', 'Streaks', 'Odds', 'Goal', 'Season', 'Ranked', 'Assists', 'Ball', 'Clean', 'Head', 'More', 'Less', 'First', 'Affiliate']
         for line in text.splitlines():
             line = line.strip()
+            # Skip lines with common non-team words
+            skip_words = ['Over', 'Under', 'Corners', 'Streaks', 'Odds', 'Goal', 'Season', 'Ranked', 'Assists', 'Ball', 'Clean', 'Head', 'More', 'Less', 'First', 'Affiliate']
             if any(word in line for word in skip_words):
                 continue
             m = match_pattern.search(line)
