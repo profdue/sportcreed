@@ -252,11 +252,12 @@ def parse_text_data(text):
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
+            # If we are in the overall section, don't process on blank line; keep collecting
+            if current_section == 'overall':
+                section_lines.append(line)  # keep blank lines as part of block
+                continue
             if current_section and section_lines:
-                if current_section == 'overall':
-                    parse_overall_stats(match, " ".join(section_lines))
-                else:
-                    process_section_block(match, current_abbrev, current_section, section_lines)
+                process_section_block(match, current_abbrev, current_section, section_lines)
                 section_lines = []
             continue
 
@@ -325,21 +326,25 @@ def parse_text_data(text):
         if match:
             lower = line.lower()
 
-            # If we are currently in the overall section, we must not let abbreviations or other section headers break it.
+            # If currently in overall, we only stop if we hit a new major section (not overall)
             if current_section == 'overall':
-                # Check if we've reached the end of the overall block (e.g., "Trends" or "next matches")
-                if 'trends' in lower or 'next matches' in lower:
-                    # Process the accumulated overall block
+                # Check if we've reached a new section header that is not part of overall stats
+                # These headers are typically: home matches, away matches, last 6 matches, head to head, or discover more
+                # Also, we should stop if we encounter "next matches" or "Trends" but those are not in this data.
+                # We'll treat "Discover more" as the end.
+                if 'home matches' in lower or 'away matches' in lower or 'last 6 matches' in lower or 'head to head' in lower or 'discover more' in lower:
+                    # Process the overall block we have collected
                     if section_lines:
                         parse_overall_stats(match, " ".join(section_lines))
                         section_lines = []
-                    current_section = None
-                    # Continue to next line; do not process this line as a new section
+                    current_section = None  # exit overall
+                    # Do not continue; let the new section be processed below
+                else:
+                    # Keep collecting
+                    section_lines.append(line)
                     continue
-                # Otherwise, keep collecting lines
-                section_lines.append(line)
-                continue
 
+            # If we are not in overall, look for new sections
             # Team abbreviation detection (only if not in overall)
             if re.match(r'^[A-Z]{2,4}$', line):
                 false_abbrevs = {'FT', 'HT', 'ALL', 'VIEW', 'WIN', 'DRAW', 'LOST', 'PTS', 'GP', 'GF', 'GA'}
@@ -389,12 +394,18 @@ def parse_text_data(text):
                 match['sections_found'].append('overall_stats')
                 # Start collecting lines for overall block
                 section_lines = []
+                # Do not continue; we want to add this line to the block? Actually we don't need to add the header line itself,
+                # but we can skip adding it because it's already used to trigger the section.
                 continue
             elif 'head to head' in lower or 'head-to-head' in lower:
                 debug_log("ℹ️ Skipping H2H section (not used)")
                 current_section = None
                 section_lines = []
                 continue
+            elif 'discover more' in lower:
+                # This is a signal that overall stats might have ended earlier, but if we are not in overall, ignore.
+                # If we are in overall, we already handled it above.
+                pass
 
             # If we are inside any section (home, away, last6), accumulate lines
             if current_section and match:
@@ -425,7 +436,7 @@ def parse_text_data(text):
     return {'league': league, 'matches': matches}
 
 # ============================================
-# PREDICTION LOGIC
+# PREDICTION LOGIC (unchanged)
 # ============================================
 
 def compute_draw_score(match):
@@ -497,7 +508,7 @@ def decide_prediction(match):
         return {'prediction': 'X', 'confidence': 'LOW', 'stake': 0.25, 'rule': 'Fallback Draw'}
 
 # ============================================
-# STREAMLIT UI
+# STREAMLIT UI (unchanged)
 # ============================================
 
 st.set_page_config(page_title="Forebet Parser & Predictor", layout="wide")
@@ -567,7 +578,7 @@ with col2:
                         st.write(f"**Home Under 2.5%:** {stats.get('home_u25_pct', 'N/A')}%  **BTTS Yes%:** {stats.get('home_btts_yes_pct', 'N/A')}%")
                         st.write(f"**Away Under 2.5%:** {stats.get('away_u25_pct', 'N/A')}%  **BTTS Yes%:** {stats.get('away_btts_yes_pct', 'N/A')}%")
                     else:
-                        st.write("**Overall Statistics:** Not extracted (section may be missing)")
+                        st.write("**Overall Statistics:** Not extracted")
 
                     score = compute_draw_score(match)
                     st.write(f"🎯 **Draw Score:** {score}/10")
