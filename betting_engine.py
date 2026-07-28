@@ -24,7 +24,7 @@ TABLE_NAME = "match_predictions"
 # ============================================================================
 # PAGE CONFIG
 # ============================================================================
-st.set_page_config(page_title="DC12-VS Double Chance 12 V1.0", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="DC12-VS Double Chance 12 V2.0", page_icon="🎯", layout="wide")
 
 st.markdown("""
 <style>
@@ -45,9 +45,6 @@ st.markdown("""
     .final-badge { background: #10b981; color: #fff; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; border: 2px solid #10b981; }
     .bet-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .skip-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .dc12-score-high { color: #10b981; font-weight: 800; }
-    .dc12-score-mid { color: #f59e0b; font-weight: 800; }
-    .dc12-score-low { color: #ef4444; font-weight: 800; }
     .factor-row { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #1e293b; }
     .factor-name { color: #94a3b8; }
     .factor-value { font-weight: 600; }
@@ -55,7 +52,6 @@ st.markdown("""
     .upload-container:hover { border-color: #34d399; background: rgba(16, 185, 129, 0.05); }
 </style>
 """, unsafe_allow_html=True)
-
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -73,13 +69,11 @@ def parse_match_date(date_val) -> datetime:
             continue
     return datetime(1900, 1, 1)
 
-
 def format_date_display(date_val) -> str:
     dt = parse_match_date(date_val)
     if dt.year == 1900:
         return str(date_val)
     return dt.strftime("%Y-%m-%d")
-
 
 def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
     try:
@@ -90,11 +84,14 @@ def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
     except:
         return False
 
-
 # ============================================================================
-# DC12-VS CALCULATION
+# DC12-VS CALCULATION - V2.0
 # ============================================================================
 def calculate_dc12_vs(match_data: dict) -> dict:
+    """
+    Calculate Double Chance 12 Value Score (DC12-VS) - V2.0
+    ND (No Draw) is the CORE metric with 10x weight.
+    """
     nd_home = match_data.get('nd_home', 0)
     nd_away = match_data.get('nd_away', 0)
     w_home = match_data.get('w_home', 0)
@@ -114,14 +111,15 @@ def calculate_dc12_vs(match_data: dict) -> dict:
     nol_home = match_data.get('nol_home', 0)
     nol_away = match_data.get('nol_away', 0)
 
+    # DC12-VS V2.0 - ND has 10x weight
     dc12_vs = (
-        (nd_home * 1) + (nd_away * 1) +
-        (w_home + w_away) * 3 +
-        (l_home + l_away) * 3 +
-        (best_team_home + best_team_away) * 4 +
-        (worst_team_home + worst_team_away) * 4 +
-        (best_off_home + best_off_away) * 3 +
-        (worst_def_home + worst_def_away) * 3 -
+        (nd_home + nd_away) * 10 +
+        (w_home + w_away) * 2 +
+        (l_home + l_away) * -2 +
+        (best_team_home + best_team_away) * 1 +
+        (worst_team_home + worst_team_away) * -1 +
+        (best_off_home + best_off_away) * 1 +
+        (worst_def_home + worst_def_away) * 1 -
         (now_home + now_away) * 3 -
         (nol_home + nol_away) * 3
     )
@@ -131,9 +129,9 @@ def calculate_dc12_vs(match_data: dict) -> dict:
     dc12_odds = 1 / ((1 / home_odds) + (1 / away_odds)) if home_odds > 0 and away_odds > 0 else 0
     draw_odds = match_data.get('draw_odds', 0)
 
-    if dc12_vs > 20 and draw_odds > 3.00:
+    if dc12_vs > 80 and draw_odds > 3.00:
         decision, action, confidence = "BET", "✅ BET on Double Chance 12", "HIGH"
-    elif dc12_vs > 15 and draw_odds > 3.00:
+    elif dc12_vs > 50 and draw_odds > 3.00:
         decision, action, confidence = "CONSIDER", "⚠️ CONSIDER betting", "MEDIUM"
     else:
         decision, action, confidence = "SKIP", "❌ SKIP - No value", "LOW"
@@ -163,27 +161,12 @@ def calculate_dc12_vs(match_data: dict) -> dict:
         "worst_def_away": worst_def_away,
     }
 
-
 # ============================================================================
-# SMART PARSER - Handles multiple pages
+# PARSER
 # ============================================================================
 def parse_betexplorer_data(text: str) -> list:
-    """
-    Parse Betexplorer data - extracts matches from multiple pages.
-    Handles:
-    1. Wins page (Team W Next match 1 X 2)
-    2. Draws page (Team D Next match 1 X 2)
-    3. Losses page (Team L Next match 1 X 2)
-    4. No Win page (Team NW Next match 1 X 2)
-    5. No Loss page (Team NL Next match 1 X 2)
-    6. ND page (Team ND Next match 1 X 2)
-    7. Best/Worst teams (skip - not needed for DC12-VS)
-    8. Combined CSV format
-    """
     matches = []
     lines = text.split('\n')
-    
-    # Store data by match key
     match_cache = {}
     current_page_type = None
     current_country = None
@@ -193,9 +176,7 @@ def parse_betexplorer_data(text: str) -> list:
         if not line:
             continue
         
-        # ====================================================================
-        # DETECT PAGE TYPE
-        # ====================================================================
+        # Detect page type
         if 'Team\tW\tNext match' in line or 'Team, W, Next match' in line:
             current_page_type = 'wins'
             continue
@@ -218,41 +199,31 @@ def parse_betexplorer_data(text: str) -> list:
             current_page_type = 'quality'
             continue
         
-        # Skip quality pages entirely
         if current_page_type == 'quality':
             continue
         
-        # ====================================================================
-        # DETECT COUNTRY/LEAGUE NAME
-        # ====================================================================
-        # If line has only letters and no digits, it's a country/league name
+        # Country/league name
         if re.match(r'^[A-Za-z\s]+$', line):
             current_country = line
             continue
         
-        # ====================================================================
-        # PARSE PAGE-SPECIFIC DATA
-        # ====================================================================
+        # Parse page-specific data
         if current_page_type in ['wins', 'draws', 'losses', 'no_wins', 'no_losses', 'no_draws']:
-            # Parse tab-separated: Team [streak] Next match 1 X 2
             parts = re.split(r'\t+', line)
             parts = [p.strip() for p in parts if p.strip()]
             
             if len(parts) >= 4:
                 try:
-                    # Check if first part is team name and second is streak number
                     if re.search(r'[A-Za-z]', parts[0]) and parts[1].isdigit():
                         team = parts[0]
                         streak_value = int(parts[1])
                         next_match = parts[2]
                         
-                        # Extract home and away from "Home - Away"
                         match_parts = re.split(r'\s*[-–]\s*', next_match)
                         if len(match_parts) == 2:
                             home_team = match_parts[0].strip()
                             away_team = match_parts[1].strip()
                             
-                            # Extract odds from remaining parts
                             odds_text = ' '.join(parts[3:])
                             odds = re.findall(r'[\d.]+', odds_text)
                             
@@ -264,7 +235,6 @@ def parse_betexplorer_data(text: str) -> list:
                                 if home_odds > 0 and draw_odds > 0 and away_odds > 0:
                                     match_key = f"{home_team}|{away_team}"
                                     
-                                    # Initialize match data if not exists
                                     if match_key not in match_cache:
                                         match_cache[match_key] = {
                                             "home_team": home_team,
@@ -286,7 +256,6 @@ def parse_betexplorer_data(text: str) -> list:
                                             "is_finished": False,
                                         }
                                     
-                                    # Assign streak to correct team and stat
                                     if team == home_team:
                                         if current_page_type == 'wins':
                                             match_cache[match_key]['w_home'] = streak_value
@@ -310,30 +279,24 @@ def parse_betexplorer_data(text: str) -> list:
                                         elif current_page_type == 'no_draws':
                                             match_cache[match_key]['nd_away'] = streak_value
                                     
-                                    # Update odds if better
                                     current_odds = match_cache[match_key].get('home_odds', 0)
                                     if home_odds > current_odds and home_odds > 0:
                                         match_cache[match_key]['home_odds'] = home_odds
                                         match_cache[match_key]['draw_odds'] = draw_odds
                                         match_cache[match_key]['away_odds'] = away_odds
-                                    
                                     continue
                 except (ValueError, IndexError):
                     pass
     
-    # ====================================================================
-    # PARSE COMBINED CSV FORMAT
-    # ====================================================================
+    # Parse combined CSV format
     for line in lines:
         line = line.strip()
         if not line:
             continue
         
-        # Skip if already parsed as page data
         if any(key in line for key in ['Team\tW\t', 'Team\tD\t', 'Team\tL\t', 'Team\tNW\t', 'Team\tNL\t', 'Team\tND\t']):
             continue
         
-        # Parse CSV: Home,Away,1,X,2,ND_Home,ND_Away,W_Home,W_Away,...
         parts = re.split(r'[\t,;|]+', line)
         parts = [p.strip() for p in parts if p.strip()]
         
@@ -347,7 +310,6 @@ def parse_betexplorer_data(text: str) -> list:
                     if home_odds > 0 and draw_odds > 0 and away_odds > 0:
                         match_key = f"{parts[0]}|{parts[1]}"
                         
-                        # Only add if not already in cache
                         if match_key not in match_cache:
                             match_data = {
                                 "home_team": parts[0],
@@ -381,14 +343,10 @@ def parse_betexplorer_data(text: str) -> list:
             except (ValueError, IndexError):
                 pass
     
-    # ====================================================================
-    # CONVERT CACHE TO LIST
-    # ====================================================================
     for match_data in match_cache.values():
         matches.append(match_data)
     
     return matches
-
 
 # ============================================================================
 # DISPLAY
@@ -420,7 +378,7 @@ def display_dc12_analysis(match: dict, analysis: dict, already_stored: bool = Fa
                 </div>
                 <div>
                     {badge}
-                    <span class="final-badge" style="margin-left:0.5rem;">DC12-VS</span>
+                    <span class="final-badge" style="margin-left:0.5rem;">DC12-VS V2.0</span>
                 </div>
             </div>
             <div style="text-align: right;">
@@ -455,34 +413,43 @@ def display_dc12_analysis(match: dict, analysis: dict, already_stored: bool = Fa
     with st.expander("Show DC12-VS Components"):
         st.markdown(f"""
         <div style="background:#0f172a; border-radius:8px; padding:0.75rem; margin:0.25rem 0;">
+            <div style="color: #10b981; font-weight: 700; margin-bottom: 0.5rem;">ND (No Draw) - CORE METRIC (×10)</div>
             <div class="factor-row"><span class="factor-name">🏠 {home_team} ND</span><span class="factor-value">{analysis.get('nd_home', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">✈️ {away_team} ND</span><span class="factor-value">{analysis.get('nd_away', 0)}</span></div>
+            <div style="color: #fbbf24; font-weight: 700; margin: 0.5rem 0;">Momentum (×2)</div>
             <div class="factor-row"><span class="factor-name">🏆 {home_team} Wins</span><span class="factor-value">{analysis.get('w_home', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">🏆 {away_team} Wins</span><span class="factor-value">{analysis.get('w_away', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">📉 {home_team} Losses</span><span class="factor-value">{analysis.get('l_home', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">📉 {away_team} Losses</span><span class="factor-value">{analysis.get('l_away', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">📉 {home_team} Losses</span><span class="factor-value">-{analysis.get('l_home', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">📉 {away_team} Losses</span><span class="factor-value">-{analysis.get('l_away', 0)}</span></div>
+            <div style="color: #ef4444; font-weight: 700; margin: 0.5rem 0;">Draw Risk Penalties (×3)</div>
+            <div class="factor-row"><span class="factor-name">🚫 No Win ({home_team})</span><span class="factor-value">-{analysis.get('now_home', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">🚫 No Win ({away_team})</span><span class="factor-value">-{analysis.get('now_away', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">🚫 No Loss ({home_team})</span><span class="factor-value">-{analysis.get('nol_home', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">🚫 No Loss ({away_team})</span><span class="factor-value">-{analysis.get('nol_away', 0)}</span></div>
+            <div style="color: #64748b; font-weight: 700; margin: 0.5rem 0;">Quality Indicators (×1)</div>
             <div class="factor-row"><span class="factor-name">⭐ Best Team ({home_team})</span><span class="factor-value">{analysis.get('best_team_home', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">⭐ Best Team ({away_team})</span><span class="factor-value">{analysis.get('best_team_away', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">⚠️ Worst Team ({home_team})</span><span class="factor-value">{analysis.get('worst_team_home', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">⚠️ Worst Team ({away_team})</span><span class="factor-value">{analysis.get('worst_team_away', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">⚠️ Worst Team ({home_team})</span><span class="factor-value">-{analysis.get('worst_team_home', 0)}</span></div>
+            <div class="factor-row"><span class="factor-name">⚠️ Worst Team ({away_team})</span><span class="factor-value">-{analysis.get('worst_team_away', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">⚽ Best Offense ({home_team})</span><span class="factor-value">{analysis.get('best_off_home', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">⚽ Best Offense ({away_team})</span><span class="factor-value">{analysis.get('best_off_away', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">🛡️ Worst Defense ({home_team})</span><span class="factor-value">{analysis.get('worst_def_home', 0)}</span></div>
             <div class="factor-row"><span class="factor-name">🛡️ Worst Defense ({away_team})</span><span class="factor-value">{analysis.get('worst_def_away', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">🚫 No Win ({home_team})</span><span class="factor-value">{analysis.get('now_home', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">🚫 No Win ({away_team})</span><span class="factor-value">{analysis.get('now_away', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">🚫 No Loss ({home_team})</span><span class="factor-value">{analysis.get('nol_home', 0)}</span></div>
-            <div class="factor-row"><span class="factor-name">🚫 No Loss ({away_team})</span><span class="factor-value">{analysis.get('nol_away', 0)}</span></div>
         </div>
         """, unsafe_allow_html=True)
-    st.caption("📐 DC12-VS = ND×1 + (W+L)×3 + (Best+Worst Team)×4 + (Best Off+Worst Def)×3 - (NoW+NoL)×3")
-
+    st.caption("📐 DC12-VS = (ND×10) + (W×2) - (L×2) + (Best×1) - (Worst×1) + (BestOff×1) + (WorstDef×1) - (NoW×3) - (NoL×3)")
 
 # ============================================================================
 # SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(match: dict, analysis: dict):
+    """Only save matches that are BET or CONSIDER"""
     try:
+        decision = analysis.get("decision", "SKIP")
+        
+        if decision == "SKIP":
+            return "SKIPPED"
+            
         home_team = match.get("home_team", "Unknown")
         away_team = match.get("away_team", "Unknown")
         match_date = match.get("date", datetime.now().strftime("%Y-%m-%d"))
@@ -519,7 +486,7 @@ def save_to_db(match: dict, analysis: dict):
             "nol_away": match.get("nol_away", 0),
             "dc12_vs": analysis.get("dc12_vs", 0),
             "dc12_odds": analysis.get("dc12_odds", 0),
-            "predicted": "BET" if analysis.get("decision") == "BET" else "NO_BET",
+            "predicted": decision,
             "confidence": analysis.get("confidence", "LOW"),
         }
         
@@ -530,7 +497,6 @@ def save_to_db(match: dict, analysis: dict):
         st.error(f"Failed to save: {e}")
         return None
 
-
 def get_pending():
     try:
         response = supabase.table(TABLE_NAME).select("*").is_("actual_result", "null").execute()
@@ -538,7 +504,6 @@ def get_pending():
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")))
     except:
         return []
-
 
 def submit_result(analysis_id, home_goals, away_goals):
     try:
@@ -559,7 +524,6 @@ def submit_result(analysis_id, home_goals, away_goals):
     except:
         return False
 
-
 def get_results():
     try:
         response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_result", "null").execute()
@@ -567,7 +531,6 @@ def get_results():
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")), reverse=True)
     except:
         return []
-
 
 def display_records_table(results: list):
     if not results:
@@ -578,23 +541,23 @@ def display_records_table(results: list):
     incorrect = total - correct
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Matches</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Bets</div></div>', unsafe_allow_html=True)
     with col2:
         win_rate = round(correct / total * 100) if total > 0 else 0
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Accuracy</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
     with col3:
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Wins</div></div>', unsafe_allow_html=True)
     with col4:
-        st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
-    st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
+        st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Losses</div></div>', unsafe_allow_html=True)
+    st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
     rows = []
     for r in results:
         pred = r.get('predicted', '?')
         actual = r.get('actual_result', '?')
         is_correct = r.get('is_correct', False)
         result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-        pred_display = "🎯 BET" if pred == "BET" else "❌ NO BET"
-        actual_display = "🤝" if actual == "X" else "🏠" if actual == "1" else "✈️"
+        pred_display = "🎯 BET" if pred == "BET" else "⚠️ CONSIDER" if pred == "CONSIDER" else "❌ NO BET"
+        actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
         rows.append({
             "Date": r.get("match_date", ""),
             "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
@@ -606,90 +569,57 @@ def display_records_table(results: list):
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True)
 
-
 # ============================================================================
 # MAIN
 # ============================================================================
 def main():
-    st.title("🎯 DC12-VS: Double Chance 12 Value Score")
-    st.caption(f"Bet on Home Win OR Away Win (No Draw) | Table: {TABLE_NAME}")
+    st.title("🎯 DC12-VS: Double Chance 12 Value Score V2.0")
+    st.caption(f"Bet on Home Win OR Away Win (No Draw) | ND is CORE (×10) | Table: {TABLE_NAME}")
 
-    with st.expander("📖 HOW DC12-VS WORKS", expanded=False):
+    with st.expander("📖 HOW DC12-VS V2.0 WORKS", expanded=False):
         st.markdown("""
         **Double Chance 12** = Betting that the match will **NOT end in a draw** (Home Win OR Away Win)
 
-        ### The DC12-VS Formula:
-        DC12-VS = (ND_Home × 1) + (ND_Away × 1)
-                + (W_Home + W_Away) × 3
-                + (L_Home + L_Away) × 3
-                + (BestTeam_Home + BestTeam_Away) × 4
-                + (WorstTeam_Home + WorstTeam_Away) × 4
-                + (BestOff_Home + BestOff_Away) × 3
-                + (WorstDef_Home + WorstDef_Away) × 3
-                - (NoW_Home + NoW_Away) × 3
-                - (NoL_Home + NoL_Away) × 3
+        ### The DC12-VS Formula (V2.0):
+        DC12-VS = (ND_Home + ND_Away) × 10 + (W_Home + W_Away) × 2 - (L_Home + L_Away) × 2 + (BestTeam_Home + BestTeam_Away) × 1 - (WorstTeam_Home + WorstTeam_Away) × 1 + (BestOff_Home + BestOff_Away) × 1 + (WorstDef_Home + WorstDef_Away) × 1 - (NoW_Home + NoW_Away) × 3 - (NoL_Home + NoL_Away) × 3
 
         ### Decision Rules:
         | Score | Draw Odds | Decision |
         |-------|-----------|----------|
-        | **> 20** | **> 3.00** | ✅ **BET on Double Chance 12** |
-        | **15-20** | **> 3.00** | ⚠️ **CONSIDER betting** |
-        | **< 15** | Any | ❌ **SKIP** |
-
-        ### Data Required (from Betexplorer):
-        1. Home Team, Away Team
-        2. 1 (Home Win Odds), X (Draw Odds), 2 (Away Win Odds)
-        3. ND (No Draw streak) for both teams
-        4. W (Wins), L (Losses) for both teams
-        5. Best/Worst Team indicators
-        6. Best Offense/Worst Defense indicators
-        7. No Win/No Loss streaks
-        
-        ### How to Paste Data:
-        You can paste ALL pages from Betexplorer at once. The parser will:
-        1. Detect which page type each section is (W, D, L, ND, NW, NL)
-        2. Extract streaks from each page
-        3. Combine data for the same match
-        4. Skip quality pages (Best teams, Worst teams, etc.)
+        | **> 80** | **> 3.00** | ✅ **BET** |
+        | **50-80** | **> 3.00** | ⚠️ **CONSIDER** |
+        | **< 50** | Any | ❌ **SKIP** |
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["🎯 Analyze", "📝 Pending Matches", "📊 Records", "📈 Dashboard"])
 
     with tab1:
         st.markdown("### 📝 Paste Betexplorer Data")
-        st.info("DC12-VS: Double Chance 12 Value Score. Saving to `match_predictions`")
-        st.markdown("""
-        <div class="upload-container">
-            <p style="font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;">📋 Paste Betexplorer Data</p>
-            <p style="color: #94a3b8; margin-bottom: 1rem;">Paste ALL Betexplorer pages at once - the parser will auto-detect each page type.</p>
-            <p style="color: #94a3b8; font-size: 0.85rem;">
-                Supported: Wins (W), Draws (D), Losses (L), No Win (NW), No Loss (NL), ND (No Draw)
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("DC12-VS V2.0: ND is CORE (×10). Only BET/CONSIDER matches are stored.")
 
         text_data = st.text_area(
             "Paste Betexplorer data here",
             height=300,
             key="text_paste",
-            placeholder="Paste all Betexplorer page data here...\n\nExample:\nTeam\tW\tNext match\t1\tX\t2\nChile\nColo Colo\t7\tEverton - Colo Colo\t3.70\t3.45\t1.91\n\nTeam\tND\tNext match\t1\tX\t2\nChile\nColo Colo\t21\tEverton - Colo Colo\t3.69\t3.43\t1.94"
+            placeholder="Paste all Betexplorer page data here..."
         )
 
-        if st.button("🎯 CALCULATE DC12-VS", type="primary"):
+        if st.button("🎯 CALCULATE DC12-VS V2.0", type="primary"):
             if not text_data or len(text_data.strip()) < 10:
                 st.error("❌ Please paste valid data (minimum 10 characters).")
             else:
                 try:
-                    with st.spinner("Calculating DC12-VS scores..."):
+                    with st.spinner("Calculating DC12-VS V2.0 scores..."):
                         matches = parse_betexplorer_data(text_data)
                     if matches:
                         st.success(f"✅ Found {len(matches)} unique matches")
                         analyzed_results = []
-                        stored_count = already_stored_count = bet_count = 0
+                        stored_count = already_stored_count = bet_count = consider_count = 0
                         
                         for match in matches:
                             analysis = calculate_dc12_vs(match)
                             exists = check_match_exists(match.get("home_team"), match.get("away_team"), match.get("date"))
+                            
                             if exists:
                                 already_stored_count += 1
                                 analyzed_results.append((match, analysis, True))
@@ -698,19 +628,23 @@ def main():
                                 if saved_id == "ALREADY_EXISTS":
                                     already_stored_count += 1
                                     analyzed_results.append((match, analysis, True))
+                                elif saved_id == "SKIPPED":
+                                    analyzed_results.append((match, analysis, False))
                                 elif saved_id:
                                     stored_count += 1
                                     analyzed_results.append((match, analysis, False))
                                     if analysis.get("decision") == "BET":
                                         bet_count += 1
+                                    elif analysis.get("decision") == "CONSIDER":
+                                        consider_count += 1
                                 else:
                                     analyzed_results.append((match, analysis, False))
                         
-                        st.info(f"💾 {stored_count} new predictions stored | {already_stored_count} already existed | 🎯 {bet_count} bets found")
+                        st.info(f"💾 {stored_count} new predictions stored | {already_stored_count} already existed | 🎯 {bet_count} bets | ⚠️ {consider_count} considered")
                         
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### 🎯 DC12-VS RESULTS")
+                            st.markdown("### 🎯 DC12-VS V2.0 RESULTS")
                             bets = [(m, a, s) for m, a, s in analyzed_results if a.get("decision") == "BET"]
                             considers = [(m, a, s) for m, a, s in analyzed_results if a.get("decision") == "CONSIDER"]
                             skips = [(m, a, s) for m, a, s in analyzed_results if a.get("decision") == "SKIP"]
@@ -739,22 +673,20 @@ def main():
 
                             if skips:
                                 st.markdown("#### ❌ SKIPPED (No Value)")
-                                for idx, (match, analysis, already_stored) in enumerate(skips[:5], 1):
-                                    with st.expander(f"SKIP: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')} - DC12-VS: {analysis.get('dc12_vs', 0)}"):
-                                        display_dc12_analysis(match, analysis, already_stored)
-                                if len(skips) > 5:
-                                    st.caption(f"... and {len(skips) - 5} more skipped matches")
+                                st.caption(f"Total skipped: {len(skips)} matches (DC12-VS < 50 or Draw Odds ≤ 3.00)")
 
                             st.markdown("---")
                             st.markdown("### 📊 Summary")
-                            col1, col2, col3, col4 = st.columns(4)
+                            col1, col2, col3, col4, col5 = st.columns(5)
                             with col1:
                                 st.metric("Total Matches", len(matches))
                             with col2:
                                 st.metric("🎯 Bets Found", bet_count)
                             with col3:
-                                st.metric("💾 New Stored", stored_count)
+                                st.metric("⚠️ Considered", consider_count)
                             with col4:
+                                st.metric("💾 Stored", stored_count)
+                            with col5:
                                 st.metric("📌 Already Stored", already_stored_count)
                     else:
                         st.error("No matches found in the data. Please check the format.")
@@ -776,14 +708,16 @@ def main():
                 match_date = a.get('match_date', 'Date unknown')
                 date_display = format_date_display(match_date)
                 dc12_vs = a.get('dc12_vs', 0)
-                pred_display = "🎯 BET" if pred == "BET" else "❌ NO BET"
+                pred_display = "🎯 BET" if pred == "BET" else "⚠️ CONSIDER" if pred == "CONSIDER" else "❌ NO BET"
                 badge = f"{pred_display} ({confidence}) — DC12-VS: {dc12_vs}"
                 with st.expander(f"📅 {date_display} | {badge} | {ht} vs {at}"):
                     st.info(f"📊 Prediction: {pred_display} — DC12-VS: {dc12_vs}")
                     st.caption(f"📅 Match Date: {match_date}")
                     c1, c2 = st.columns(2)
-                    with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
-                    with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
+                    with c1: 
+                        hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
+                    with c2: 
+                        ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
                     if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
                         if submit_result(a['id'], hg, ag):
                             st.success("Result submitted!")
@@ -807,23 +741,23 @@ def main():
         incorrect = total - correct
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Matches</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Bets</div></div>', unsafe_allow_html=True)
         with col2:
             win_rate = round(correct / total * 100) if total > 0 else 0
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Accuracy</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
         with col3:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Wins</div></div>', unsafe_allow_html=True)
         with col4:
-            st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
-        st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
+            st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Losses</div></div>', unsafe_allow_html=True)
+        st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
         rows = []
         for r in results:
             pred = r.get('predicted', '?')
             actual = r.get('actual_result', '?')
             is_correct = r.get('is_correct', False)
             result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-            pred_display = "🎯 BET" if pred == "BET" else "❌ NO BET"
-            actual_display = "🤝" if actual == "X" else "🏠" if actual == "1" else "✈️"
+            pred_display = "🎯 BET" if pred == "BET" else "⚠️ CONSIDER" if pred == "CONSIDER" else "❌ NO BET"
+            actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
             rows.append({
                 "Date": r.get("match_date", ""),
                 "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
@@ -834,7 +768,6 @@ def main():
             })
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True)
-
 
 if __name__ == "__main__":
     main()
