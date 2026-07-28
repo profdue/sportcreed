@@ -67,8 +67,7 @@ def parse_encoded_line(line):
     }
 
 def normalize_team_name(name):
-    # Remove league suffixes and extra text for matching
-    suffixes = r'(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2|ECL|Ro|BgC|Cup|Copa|Série|LvC)'
+    suffixes = r'(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2|ECL|Ro|BgC|Cup|Copa|Série|LvC|Ru1|Ru2)'
     name = re.sub(r'\s+' + suffixes + r'\s*$', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s+View all.*$', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s+(Win|Draw|Lost)\s+\d+%.*$', '', name, flags=re.IGNORECASE)
@@ -86,15 +85,18 @@ def get_result(parsed, team):
     return None
 
 def process_section_block(match, abbrev, section_type, lines):
-    """Parse form sections (home, away, last6) – no H2H."""
     if not match or not lines:
         return
     block = " ".join(lines)
     debug_log(f"🔍 Processing {section_type} block for {abbrev}")
 
-    # Regex to find match patterns: TeamA score - score (HT) TeamB
     pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
     matches = pattern.findall(block)
+
+    if not matches:
+        # Try again after removing dates (dd/mm or dd/mm/yyyy)
+        cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
+        matches = pattern.findall(cleaned)
 
     if not matches:
         debug_log(f"❌ No match patterns found in {section_type} block for {abbrev}")
@@ -128,9 +130,9 @@ def process_section_block(match, abbrev, section_type, lines):
         elif parsed_away_norm == match_home_norm or parsed_away_norm == match_away_norm:
             team = away_team
         if not team:
-            if parsed_home_norm in match_home_norm or match_home_norm in parsed_home_norm:
+            if parsed_home_norm and (parsed_home_norm in match_home_norm or match_home_norm in parsed_home_norm):
                 team = home_team
-            elif parsed_away_norm in match_home_norm or match_home_norm in parsed_away_norm:
+            elif parsed_away_norm and (parsed_away_norm in match_home_norm or match_home_norm in parsed_away_norm):
                 team = away_team
         if not team and abbrev:
             if abbrev.upper() in home_team.upper():
@@ -170,7 +172,6 @@ def parse_text_data(text):
     lines = text.split('\n')
     debug_log(f"✅ DEBUG: Total lines: {len(lines)}")
 
-    # ---- LEAGUE DETECTION ----
     league = None
     league_keywords = {
         'Brazil Serie D': 'Brazil Serie D',
@@ -181,6 +182,7 @@ def parse_text_data(text):
         'Romania Divizia A': 'Romania Divizia A',
         'Ecuador Serie A': 'Ecuador Serie A',
         'Bulgaria Parva Liga': 'Bulgaria Parva Liga',
+        'Russia Premier League': 'Russia Premier League',
         'Serie D': 'Serie D',
         'Chance Liga': 'Chance Liga',
         'Virsliga': 'Virsliga',
@@ -240,7 +242,6 @@ def parse_text_data(text):
                     'home_recent': [],
                     'away_recent': [],
                     'fatigue': False,
-                    # Overall stats will be parsed from the "Overall statistics" section later
                     'overall_stats': {}
                 }
                 debug_log("✅ DEBUG: match_found = True")
@@ -277,14 +278,19 @@ def parse_text_data(text):
             continue
 
         if match:
-            # Team abbreviation (2-4 uppercase letters)
+            # Team abbreviation (2-4 uppercase letters) – ignore false positives
             if re.match(r'^[A-Z]{2,4}$', line):
-                if current_section and section_lines:
-                    process_section_block(match, current_abbrev, current_section, section_lines)
-                    section_lines = []
-                current_abbrev = line
-                debug_log(f"🔍 DEBUG: Detected team abbreviation: {current_abbrev}")
-                continue
+                false_abbrevs = {'FT', 'HT', 'ALL', 'VIEW', 'WIN', 'DRAW', 'LOST', 'PTS', 'GP', 'GF', 'GA'}
+                if line.upper() not in false_abbrevs:
+                    if current_section and section_lines:
+                        process_section_block(match, current_abbrev, current_section, section_lines)
+                        section_lines = []
+                    current_abbrev = line
+                    debug_log(f"🔍 DEBUG: Detected team abbreviation: {current_abbrev}")
+                    continue
+                else:
+                    debug_log(f"ℹ️ Ignoring non-team abbreviation: {line}")
+                    continue
 
             lower = line.lower()
             if 'home matches' in lower:
@@ -308,10 +314,8 @@ def parse_text_data(text):
                 current_section = 'last6'
                 debug_log(f"🔍 DEBUG: Found last 6 matches section for {current_abbrev}")
                 continue
-            # We ignore 'head to head' sections entirely
             elif 'head to head' in lower or 'head-to-head' in lower:
                 debug_log("ℹ️ Skipping H2H section (not used)")
-                # Reset section to avoid accumulating H2H lines
                 current_section = None
                 section_lines = []
                 continue
@@ -340,16 +344,11 @@ def parse_text_data(text):
     return {'league': league, 'matches': matches}
 
 # ============================================
-# PREDICTION LOGIC (using overall statistics)
+# PREDICTION LOGIC
 # ============================================
 
 def compute_draw_score(match):
-    """
-    Compute a score (0-10) indicating how likely a draw is,
-    based on available overall statistics.
-    """
     score = 0
-    # 1. Draw rates
     home_recent = match.get('home_recent', [])
     away_recent = match.get('away_recent', [])
     home_form = match.get('home_form', [])
@@ -373,35 +372,10 @@ def compute_draw_score(match):
         if draw_rate_away_form >= 0.4:
             score += 1
 
-    # 2. Goal averages (if available from overall stats)
-    stats = match.get('overall_stats', {})
-    home_avg_gf = stats.get('home_avg_gf')
-    home_avg_ga = stats.get('home_avg_ga')
-    away_avg_gf = stats.get('away_avg_gf')
-    away_avg_ga = stats.get('away_avg_ga')
-    if None not in (home_avg_gf, away_avg_gf):
-        if abs(home_avg_gf - away_avg_gf) <= 0.5:
-            score += 2
-    if None not in (home_avg_ga, away_avg_ga):
-        if abs(home_avg_ga - away_avg_ga) <= 0.5:
-            score += 2
-
-    # 3. Under/Over 2.5 – low scoring favours draws
-    home_u25 = stats.get('home_u25_pct')
-    away_u25 = stats.get('away_u25_pct')
-    if None not in (home_u25, away_u25) and home_u25 >= 60 and away_u25 >= 60:
-        score += 1
-
-    # 4. Both teams to score (BTTS) – if both often score, draws more likely
-    home_btts_yes = stats.get('home_btts_yes_pct')
-    away_btts_yes = stats.get('away_btts_yes_pct')
-    if None not in (home_btts_yes, away_btts_yes) and home_btts_yes >= 55 and away_btts_yes >= 55:
-        score += 1
-
+    # We don't have overall stats yet, so skip goal averages for now
     return score
 
 def decide_prediction(match):
-    """Apply rules in priority order. Return dict with prediction, confidence, stake."""
     # Rule 1: Home Fortress
     home_form = match.get('home_form', [])
     if len(home_form) >= 5 and all(r != 'L' for r in home_form[-5:]):
@@ -416,9 +390,6 @@ def decide_prediction(match):
     draw_score = compute_draw_score(match)
     if draw_score >= 7:
         return {'prediction': 'X', 'confidence': 'HIGH', 'stake': 2, 'rule': f'Draw Score ({draw_score})'}
-
-    # Rule 4: Midweek Fatigue (if away played within 3-4 days)
-    # We don't have fatigue data yet, but we could add it later.
 
     # Default: Trust Forebet
     forebet_pred = match.get('prediction')
@@ -464,12 +435,10 @@ with col2:
                     cols[1].metric("Draw %", f"{match['draw_pct']}%")
                     cols[2].metric("Away %", f"{match['away_pct']}%")
                     cols[3].metric("Forebet Pred", match['prediction'])
-                    # Compute and show our decision
                     decision = decide_prediction(match)
                     cols[4].metric("Our Prediction", decision['prediction'],
                                    help=f"Rule: {decision['rule']}\nConfidence: {decision['confidence']}\nStake: {decision['stake']} units")
 
-                    # Show form
                     if match['home_form']:
                         st.write(f"🏠 Home form (last 5): {', '.join(match['home_form'][:5])}")
                     if match['away_form']:
@@ -478,7 +447,6 @@ with col2:
                         st.write(f"📈 Recent form (last 6) - {match['home_team']}: {', '.join(match['home_recent'][:6])}")
                     if match['away_recent']:
                         st.write(f"📈 Recent form (last 6) - {match['away_team']}: {', '.join(match['away_recent'][:6])}")
-                    # Show draw score
                     score = compute_draw_score(match)
                     st.write(f"🎯 Draw Score: {score}/10")
                     st.divider()
