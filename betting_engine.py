@@ -95,27 +95,14 @@ st.markdown("""
 def parse_match_date(date_val) -> datetime:
     if not date_val:
         return datetime(1900, 1, 1)
-    
     if isinstance(date_val, (date, datetime)):
         return datetime(date_val.year, date_val.month, date_val.day)
-    
     date_str = str(date_val).strip()
-    
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    except:
-        pass
-    
-    try:
-        return datetime.strptime(date_str, "%d/%m/%Y")
-    except:
-        pass
-    
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-    except:
-        pass
-    
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except:
+            continue
     return datetime(1900, 1, 1)
 
 
@@ -130,134 +117,85 @@ def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
     try:
         dt = parse_match_date(match_date)
         date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else match_date[:10]
-        
         response = supabase.table(TABLE_NAME).select("id").eq("home_team", home_team).eq("away_team", away_team).eq("match_date", date_part).execute()
         return len(response.data) > 0
-    except Exception as e:
+    except:
         return False
 
 
 def get_stake_display(stake_value: str) -> tuple:
-    stake_mapping = {
-        "2 units": ("2 units", "stake-full"),
-        "1 unit": ("1 unit", "stake-half"),
-        "0.1 unit": ("0.1 unit", "stake-tiny"),
-        "": ("0 units", "stake-tiny"),
-    }
-    
-    if stake_value in stake_mapping:
-        return stake_mapping[stake_value]
-    else:
-        return (stake_value, "stake-tiny")
+    mapping = {"2 units": ("2 units", "stake-full"), "1 unit": ("1 unit", "stake-half"), "0.1 unit": ("0.1 unit", "stake-tiny"), "": ("0 units", "stake-tiny")}
+    return mapping.get(stake_value, (stake_value, "stake-tiny"))
 
 
 def get_league_badge(league: str) -> str:
     league_lower = league.lower()
     if "brazil" in league_lower or "brasileiro" in league_lower:
         return "br"
-    elif "premier" in league_lower or "epl" in league_lower:
+    if "premier" in league_lower or "epl" in league_lower:
         return "uk"
-    elif "spain" in league_lower or "la liga" in league_lower:
+    if "spain" in league_lower or "la liga" in league_lower:
         return "es"
-    elif "italy" in league_lower or "serie a" in league_lower:
+    if "italy" in league_lower or "serie a" in league_lower:
         return "it"
-    elif "germany" in league_lower or "bundesliga" in league_lower:
+    if "germany" in league_lower or "bundesliga" in league_lower:
         return "de"
-    elif "france" in league_lower or "ligue" in league_lower:
+    if "france" in league_lower or "ligue" in league_lower:
         return "fr"
-    elif "turkey" in league_lower or "super lig" in league_lower:
+    if "turkey" in league_lower or "super lig" in league_lower:
         return "tr"
-    elif "saudi" in league_lower:
+    if "saudi" in league_lower:
         return "sa"
-    elif "australia" in league_lower or "a-league" in league_lower:
+    if "australia" in league_lower or "a-league" in league_lower:
         return "au"
-    elif "norway" in league_lower or "eliteserien" in league_lower:
+    if "norway" in league_lower or "eliteserien" in league_lower:
         return "no"
-    else:
-        return "unknown"
+    return "unknown"
 
 
 # ============================================================================
 # POISSON DRAW PROBABILITY ENGINE
 # ============================================================================
-def calculate_draw_probability(
-    home_scored_avg: float,
-    home_conceded_avg: float,
-    away_scored_avg: float,
-    away_conceded_avg: float,
-    league_draw_rate: float = 0.26,
-    draw_odds: Optional[float] = None
-) -> dict:
-    """
-    Calculate draw probability using Poisson distribution.
-    """
-    
-    # Step 1: Calculate Goal Expectancies (λ)
-    lambda_home = (home_scored_avg + away_conceded_avg) / 2
-    lambda_away = (away_scored_avg + home_conceded_avg) / 2
-    
-    # Prevent impossible values
-    lambda_home = max(lambda_home, 0.1)
-    lambda_away = max(lambda_away, 0.1)
-    
-    # Poisson probability function
-    def poisson_probability(lambda_val: float, k: int) -> float:
+def calculate_draw_probability(home_scored_avg: float, home_conceded_avg: float,
+                               away_scored_avg: float, away_conceded_avg: float,
+                               league_draw_rate: float = 0.26, draw_odds: Optional[float] = None) -> dict:
+    lambda_home = max((home_scored_avg + away_conceded_avg) / 2, 0.1)
+    lambda_away = max((away_scored_avg + home_conceded_avg) / 2, 0.1)
+
+    def poisson(lam, k):
         if k == 0:
-            return math.exp(-lambda_val)
-        log_prob = k * math.log(lambda_val) - lambda_val - math.lgamma(k + 1)
-        return math.exp(log_prob)
-    
-    # Calculate draw scoreline probabilities
+            return math.exp(-lam)
+        return math.exp(k * math.log(lam) - lam - math.lgamma(k + 1))
+
     draw_scorelines = []
-    raw_draw_prob = 0.0
-    for k in range(0, 11):
-        p_home = poisson_probability(lambda_home, k)
-        p_away = poisson_probability(lambda_away, k)
-        draw_prob = p_home * p_away
-        raw_draw_prob += draw_prob
-        draw_scorelines.append({
-            "scoreline": f"{k}-{k}",
-            "home_goals": k,
-            "away_goals": k,
-            "probability": draw_prob
-        })
-    
-    # League adjustment
-    global_avg_draw = 0.26
-    adjusted_draw_prob = raw_draw_prob * (league_draw_rate / global_avg_draw)
-    adjusted_draw_prob = max(0.05, min(0.45, adjusted_draw_prob))
-    
-    # Market adjustment (optional)
+    raw_prob = 0.0
+    for k in range(11):
+        p = poisson(lambda_home, k) * poisson(lambda_away, k)
+        raw_prob += p
+        draw_scorelines.append({"scoreline": f"{k}-{k}", "home_goals": k, "away_goals": k, "probability": p})
+
+    adjusted = raw_prob * (league_draw_rate / 0.26)
+    adjusted = max(0.05, min(0.45, adjusted))
+
     if draw_odds and draw_odds > 0:
-        implied_draw_prob = 1.0 / draw_odds
-        final_draw_prob = 0.60 * adjusted_draw_prob + 0.40 * implied_draw_prob
+        final_prob = 0.60 * adjusted + 0.40 * (1.0 / draw_odds)
     else:
-        final_draw_prob = adjusted_draw_prob
-    
-    # Decision rule
-    if final_draw_prob > 0.32:
-        decision = "DRAW"
-        prediction = "X"
-        confidence = "HIGH"
-        stake = "2 units"
-        reason = f"Draw probability {final_draw_prob:.1%} > 32% threshold"
-    elif final_draw_prob < 0.28:
-        decision = "NOT_DRAW"
-        prediction = "NO_DRAW"
-        confidence = "MEDIUM"
-        stake = "1 unit"
-        reason = f"Draw probability {final_draw_prob:.1%} < 28% threshold"
+        final_prob = adjusted
+
+    if final_prob > 0.32:
+        decision, prediction, confidence, stake = "DRAW", "X", "HIGH", "2 units"
+        reason = f"Draw probability {final_prob:.1%} > 32% threshold"
+    elif final_prob < 0.28:
+        decision, prediction, confidence, stake = "NOT_DRAW", "NO_DRAW", "MEDIUM", "1 unit"
+        reason = f"Draw probability {final_prob:.1%} < 28% threshold"
     else:
-        decision = "COIN_FLIP"
-        prediction = "COIN_FLIP"
-        confidence = "LOW"
-        stake = "0.1 unit"
-        reason = f"Draw probability {final_draw_prob:.1%} in coin-flip zone (28-32%)"
-    
+        decision, prediction, confidence, stake = "COIN_FLIP", "COIN_FLIP", "LOW", "0.1 unit"
+        reason = f"Draw probability {final_prob:.1%} in coin-flip zone (28-32%)"
+
     return {
-        "raw_prob": raw_draw_prob,
-        "adjusted_prob": adjusted_draw_prob,
-        "final_prob": final_draw_prob,
+        "raw_prob": raw_prob,
+        "adjusted_prob": adjusted,
+        "final_prob": final_prob,
         "decision": decision,
         "prediction": prediction,
         "confidence": confidence,
@@ -271,130 +209,151 @@ def calculate_draw_probability(
 
 
 # ============================================================================
-# ROBUST ROW-BASED PARSER
+# ROBUST TABLE PARSER
 # ============================================================================
 def parse_match_data(text: str, debug: bool = False) -> tuple:
     """
-    Parse match data by scanning lines to extract table rows.
-    Handles both Brazilian and Ecuadorian formats.
+    Extracts team stats from league tables by detecting the table header and
+    reading rows until a section break is encountered.
     Returns (matches, debug_info)
     """
     matches = []
     debug_info = [] if debug else None
-    
-    lines = text.split('\n')
-    # Remove empty lines but keep indices for debugging
-    lines = [line.strip() for line in lines if line.strip()]
-    
+
+    lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
     if debug:
         debug_info.append("=== DEBUG: parse_match_data ===")
         debug_info.append(f"Total non-empty lines: {len(lines)}")
-    
-    # Find all rows by scanning for a line that is a number (the rank)
-    # and then reading subsequent tokens until we have a complete row.
-    rows = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        # Check if line is a number (rank)
-        if line.isdigit():
-            # Start a new row
-            row_tokens = [line]
-            i += 1
-            # Collect tokens until we have enough fields
-            # We need: rank, team name (one or more tokens), games, wins, draws, losses, diff, goals, (5 last results), points
-            # We'll collect tokens until we see a ':' in a token (goals) and then collect the next 6 tokens (last 5 results + points)
-            # But safer: collect until we have at least 15 tokens (rank + team + 10 stats + 5 results + points)
-            # Actually, we can collect until we hit a token that looks like a number and then continue.
-            # Better: just collect all tokens until we have a token that is a number and the next token is also a number? 
-            # We'll use a more systematic approach: after rank, we collect tokens until we see a token that matches a number (games played).
-            # The team name may consist of multiple tokens.
-            # We'll collect all tokens until we encounter a token that can be parsed as an integer (games played).
-            # Then we have team name tokens before that.
-            tokens = []
-            while i < len(lines):
-                token = lines[i]
-                # Check if token is a number (games played)
-                if token.isdigit():
-                    # This could be the games played, but it could also be part of the team name (e.g., "Guayaquil City" has no number)
-                    # We need to check if the next token is also a number (wins). If yes, this is the games played.
-                    # But we have to be careful: some team names may have numbers (e.g., "9 de Octubre") - but our data doesn't have that.
-                    # We'll try to parse: if the token is a number and the next token (if any) is also a number, then we have found the start of stats.
-                    if i+1 < len(lines) and lines[i+1].isdigit():
-                        # We have two consecutive numbers: games and wins => this is the start of stats
-                        # So the team name ends before this token.
-                        break
-                    else:
-                        # This number might be part of the team name (e.g., "9 de Octubre")
-                        tokens.append(token)
-                        i += 1
-                        continue
-                else:
-                    tokens.append(token)
-                    i += 1
-            # Now we have the team name tokens (tokens) and the rest of the stats start at index i.
-            # But we need to break the loop to parse stats, but we already broke out.
-            # So we have tokens = team name parts, and i points to the games played token.
-            if i >= len(lines):
-                break
-            # Now collect the stats tokens starting from i
-            stats_tokens = []
-            # We need: games, wins, draws, losses, diff, goals, last5 (5 tokens), points
-            # We'll collect until we have at least 11 tokens (games, wins, draws, losses, diff, goals, 5 last, points)
-            # But we can stop when we have collected enough.
-            # We'll read sequentially.
-            while i < len(lines) and len(stats_tokens) < 11:
-                stats_tokens.append(lines[i])
-                i += 1
-            # Now we have all tokens for this row.
-            # Combine team name
-            team_name = ' '.join(tokens)
-            # Parse stats
-            try:
-                games = int(stats_tokens[0])
-                wins = int(stats_tokens[1])
-                draws = int(stats_tokens[2])
-                losses = int(stats_tokens[3])
-                diff = stats_tokens[4]  # e.g., "+33" or "-5"
-                goals_str = stats_tokens[5]  # e.g., "55:22"
-                # The next 5 tokens are last 5 results, but we don't need them
-                # The last token is points
-                points = int(stats_tokens[-1])  # last token
-                # Extract goals for and against
-                if ':' in goals_str:
-                    gf, ga = goals_str.split(':')
-                    gf = int(gf)
-                    ga = int(ga)
-                else:
-                    # fallback
-                    gf = 0
-                    ga = 0
-                # Store team stats
-                if games > 0:
-                    rows.append({
-                        "team": team_name,
-                        "games": games,
-                        "goals_for": gf,
-                        "goals_against": ga,
-                        "scored_avg": round(gf / games, 2),
-                        "conceded_avg": round(ga / games, 2),
-                    })
-                    if debug:
-                        debug_info.append(f"  Team: {team_name} ({gf}/{games} scored, {ga}/{games} conceded)")
-            except (ValueError, IndexError) as e:
-                if debug:
-                    debug_info.append(f"  Parse error for row starting with {tokens[0] if tokens else '?'}: {e}")
-                # Skip this row
-                continue
-        else:
-            i += 1
-    
+
+    # Find the table header: look for a sequence containing 'P', 'W', 'D', 'L', 'DIFF', 'GLS', 'Last 5', 'Pts'
+    header_idx = -1
+    for i, line in enumerate(lines):
+        # The header is typically a set of capital letters or abbreviations
+        if re.match(r'^(P|W|D|L|DIFF|GLS|Last 5|Pts)$', line):
+            # Check that we have a sequence of these
+            # For simplicity, we'll just look for the first occurrence of 'P' followed by 'W' etc.
+            # But we can also check if the next few lines are also header tokens.
+            # We'll just take the line that contains 'P' as the start and assume the next few lines are header.
+            if line == 'P':
+                # verify that next lines are W, D, L, DIFF, GLS, Last 5, Pts
+                if i+6 < len(lines) and lines[i+1] == 'W' and lines[i+2] == 'D' and lines[i+3] == 'L' and lines[i+4] == 'DIFF' and lines[i+5] == 'GLS' and lines[i+6] == 'Last 5' and lines[i+7] == 'Pts':
+                    header_idx = i
+                    break
     if debug:
-        debug_info.append(f"Extracted {len(rows)} teams")
-    
+        debug_info.append(f"Header found at line {header_idx}")
+
+    if header_idx == -1:
+        if debug:
+            debug_info.append("Header not found. Falling back to heuristic.")
+        # Fallback: try to find a line that starts with a number and then team name pattern
+        # We'll just use the previous regex approach but with more flexible pattern
+        clean_text = ' '.join(lines)
+        # Regex that matches a row: rank, team name (any chars except digits), then numbers, goal diff, goals, then letters, then points
+        pattern = re.compile(r'(\d+)\s+([A-Za-zÀ-ÿ\s\-\.]+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+([+-]?\d+)\s+(\d+):(\d+)\s+.*?(\d+)$', re.MULTILINE)
+        rows = pattern.findall(clean_text)
+        if debug:
+            debug_info.append(f"Fallback found {len(rows)} rows")
+        for row in rows:
+            team = row[1].strip()
+            games = int(row[2])
+            gf = int(row[6])
+            ga = int(row[7])
+            if games > 0:
+                matches.append({
+                    "team": team,
+                    "scored_avg": round(gf / games, 2),
+                    "conceded_avg": round(ga / games, 2),
+                })
+        # Build teams_stats from matches
+        teams_stats = {m["team"]: {"scored_avg": m["scored_avg"], "conceded_avg": m["conceded_avg"]} for m in matches}
+        # Continue with match finding later
+    else:
+        # We have the header position; now we need to read rows after it until a section break
+        # The rows start after the header tokens (header_idx + 8)
+        row_start = header_idx + 8
+        # Find the end of the table: look for a line that is a section marker
+        section_markers = ['Head-to-head', 'Odds', 'Goal distribution', 'In the event', 'Relegation', 'Qualifying', 'Championship']
+        row_end = len(lines)
+        for i in range(row_start, len(lines)):
+            if any(marker in lines[i] for marker in section_markers):
+                row_end = i
+                break
+
+        if debug:
+            debug_info.append(f"Table rows from {row_start} to {row_end}")
+
+        # Now parse rows from row_start to row_end
+        i = row_start
+        while i < row_end:
+            line = lines[i]
+            # A row starts with a number (rank)
+            if line.isdigit():
+                rank = int(line)
+                i += 1
+                # Collect team name tokens until we hit a number (games)
+                team_tokens = []
+                while i < row_end and not lines[i].isdigit():
+                    team_tokens.append(lines[i])
+                    i += 1
+                if i >= row_end:
+                    break
+                team_name = ' '.join(team_tokens).strip()
+                # Now we have games at lines[i]
+                try:
+                    games = int(lines[i])
+                    i += 1
+                    wins = int(lines[i]) if i < row_end else 0
+                    i += 1
+                    draws = int(lines[i]) if i < row_end else 0
+                    i += 1
+                    losses = int(lines[i]) if i < row_end else 0
+                    i += 1
+                    diff = lines[i] if i < row_end else ''
+                    i += 1
+                    goals_str = lines[i] if i < row_end else ''
+                    i += 1
+                    # Next 5 tokens are last 5 results (letters)
+                    last5 = []
+                    for _ in range(5):
+                        if i < row_end and lines[i].isalpha():
+                            last5.append(lines[i])
+                            i += 1
+                        else:
+                            break
+                    # Next token is points
+                    points = int(lines[i]) if i < row_end else 0
+                    i += 1
+
+                    # Extract GF/GA
+                    if ':' in goals_str:
+                        gf, ga = goals_str.split(':')
+                        gf = int(gf)
+                        ga = int(ga)
+                    else:
+                        gf, ga = 0, 0
+
+                    if games > 0:
+                        matches.append({
+                            "team": team_name,
+                            "scored_avg": round(gf / games, 2),
+                            "conceded_avg": round(ga / games, 2),
+                        })
+                        if debug:
+                            debug_info.append(f"  Team: {team_name} ({gf}/{games} scored, {ga}/{games} conceded)")
+                except (ValueError, IndexError) as e:
+                    if debug:
+                        debug_info.append(f"  Parse error for {team_name}: {e}")
+                    # skip this row
+                    continue
+            else:
+                i += 1
+
     # Build teams_stats dict
-    teams_stats = {row["team"]: {"scored_avg": row["scored_avg"], "conceded_avg": row["conceded_avg"]} for row in rows}
-    
+    teams_stats = {m["team"]: {"scored_avg": m["scored_avg"], "conceded_avg": m["conceded_avg"]} for m in matches}
+
+    if debug:
+        debug_info.append(f"Extracted {len(teams_stats)} teams")
+
     # Detect league and date
     league_name = "Unknown League"
     if "Brasileirão" in text or "Serie A" in text and "Brazil" not in text:
@@ -403,22 +362,22 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
         league_name = "Ecuadorian Serie A"
     elif "Premier" in text:
         league_name = "Premier League"
-    
+
     match_date = None
     date_match = re.search(r'(\d{2}/\d{2}/\d{4})', text)
     if date_match:
         match_date = date_match.group(1)
     else:
         match_date = datetime.now().strftime("%d/%m/%Y")
-    
+
     if debug:
         debug_info.append(f"League: {league_name}, Date: {match_date}")
-    
+
     # Find the match: look for two teams that appear in the "Odds" section or in a "vs" line
     home_team = None
     away_team = None
-    
-    # First try the odds section
+
+    # Try odds section
     odds_match = re.search(r'Odds(.*?)(?=League|$)', text, re.DOTALL)
     if odds_match:
         odds_text = odds_match.group(1)
@@ -432,13 +391,12 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
             away_team = found_teams[1]
             if debug:
                 debug_info.append(f"Found match from odds: {home_team} vs {away_team}")
-    
+
     # If not found, look for "vs" lines
     if not home_team or not away_team:
         vs_pattern = re.compile(r'([A-Za-zÀ-ÿ\s\-]+?)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s\-]+)')
         for line in lines:
             line = line.strip()
-            # Skip lines with common non-team words
             skip_words = ['Over', 'Under', 'Corners', 'Streaks', 'Odds', 'Goal', 'Season', 'Ranked', 'Assists', 'Ball', 'Clean', 'Head', 'More', 'Less', 'First', 'Affiliate']
             if any(word in line for word in skip_words):
                 continue
@@ -460,10 +418,10 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
                             debug_info.append(f"  '{h}' not in stats")
                         if a not in teams_stats:
                             debug_info.append(f"  '{a}' not in stats")
-    
+
     if debug:
         debug_info.append(f"Final home_team: {home_team}, away_team: {away_team}")
-    
+
     if home_team and away_team and home_team in teams_stats and away_team in teams_stats:
         home_stats = teams_stats[home_team]
         away_stats = teams_stats[away_team]
@@ -480,13 +438,12 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
             "actual_home": None,
             "actual_away": None,
         }
-        matches.append(match_data)
+        matches = [match_data]  # only one match
         if debug:
             debug_info.append(f"Created match: {home_team} vs {away_team}")
     else:
-        if debug:
-            debug_info.append("No valid match found")
-    
+        matches = []
+
     if matches:
         if debug:
             debug_info.append(f"✅ Found {len(matches)} match(es)")
@@ -496,10 +453,10 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
     else:
         if debug:
             debug_info.append("⚠️ No valid matches found")
-    
+
     if debug:
         debug_info.append("=== END DEBUG ===")
-    
+
     return matches, debug_info
 
 
@@ -508,24 +465,15 @@ def parse_match_data(text: str, debug: bool = False) -> tuple:
 # ============================================================================
 def analyze_match(match: dict, league_draw_rate: float, draw_odds: Optional[float] = None) -> dict:
     if match.get("is_finished"):
-        return {
-            "verdict": "SKIP",
-            "skip_reason": "Already played (FT)",
-            "prediction": None,
-            "confidence": None,
-            "stake": None,
-            "reason": None,
-        }
-    
+        return {"verdict": "SKIP", "skip_reason": "Already played (FT)", "prediction": None, "confidence": None, "stake": None, "reason": None}
     result = calculate_draw_probability(
-        home_scored_avg=match.get("home_scored_avg", 1.0),
-        home_conceded_avg=match.get("home_conceded_avg", 1.0),
-        away_scored_avg=match.get("away_scored_avg", 1.0),
-        away_conceded_avg=match.get("away_conceded_avg", 1.0),
-        league_draw_rate=league_draw_rate,
-        draw_odds=draw_odds
+        match.get("home_scored_avg", 1.0),
+        match.get("home_conceded_avg", 1.0),
+        match.get("away_scored_avg", 1.0),
+        match.get("away_conceded_avg", 1.0),
+        league_draw_rate,
+        draw_odds
     )
-    
     return {
         "verdict": "PROCESSED",
         "prediction": result["prediction"],
@@ -549,37 +497,13 @@ def analyze_match(match: dict, league_draw_rate: float, draw_odds: Optional[floa
 
 def evaluate_prediction(prediction: str, actual_home: int, actual_away: int) -> dict:
     try:
-        home = int(actual_home) if actual_home is not None else 0
-        away = int(actual_away) if actual_away is not None else 0
-    except (ValueError, TypeError):
+        home, away = int(actual_home or 0), int(actual_away or 0)
+    except:
         return {"is_correct": False, "actual": "INVALID", "winner": "INVALID"}
-    
-    if home > away:
-        actual = "1"
-    elif away > home:
-        actual = "2"
-    else:
-        actual = "X"
-    
-    if prediction == "X":
-        predicted = "X"
-    else:
-        predicted = "NOT_DRAW"
-    
-    if predicted == "X" and actual == "X":
-        is_correct = True
-    elif predicted == "NOT_DRAW" and actual != "X":
-        is_correct = True
-    else:
-        is_correct = False
-    
-    return {
-        "is_correct": is_correct,
-        "actual": actual,
-        "winner": "HOME" if home > away else "AWAY" if away > home else "DRAW",
-        "score": f"{home}-{away}",
-        "total_goals": home + away,
-    }
+    actual = "1" if home > away else "2" if away > home else "X"
+    predicted = "X" if prediction == "X" else "NOT_DRAW"
+    is_correct = (predicted == "X" and actual == "X") or (predicted == "NOT_DRAW" and actual != "X")
+    return {"is_correct": is_correct, "actual": actual, "winner": "HOME" if home > away else "AWAY" if away > home else "DRAW", "score": f"{home}-{away}", "total_goals": home + away}
 
 
 # ============================================================================
@@ -591,52 +515,41 @@ def display_analysis(match: dict, analysis: dict, league: str, already_stored: b
         <div class="output-card ft-card">
             <div style="text-align:center; padding:1rem;">
                 <div style="font-size:1.5rem; font-weight:800; color:#ef4444;">⏭️ SKIPPED — Already Played</div>
-                <p style="color:#94a3b8; font-size:1.1rem;">
-                    {match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}
-                </p>
+                <p style="color:#94a3b8; font-size:1.1rem;">{match.get('home_team', 'Unknown')} vs {match.get('away_team', 'Unknown')}</p>
                 <p style="color:#ef4444;">FT {match.get('actual_home', '?')}-{match.get('actual_away', '?')}</p>
             </div>
         </div>
         """, unsafe_allow_html=True)
         return
-    
+
     badge_class = get_league_badge(league)
     st.markdown(f'<span class="league-badge {badge_class}">{league}</span>', unsafe_allow_html=True)
-    
     if already_stored:
         st.markdown('<span class="already-stored">📌 ALREADY STORED</span>', unsafe_allow_html=True)
-    
-    prediction = analysis.get("prediction", "COIN_FLIP")
-    confidence = analysis.get("confidence", "LOW")
+
+    pred = analysis.get("prediction", "COIN_FLIP")
+    conf = analysis.get("confidence", "LOW")
     stake = analysis.get("stake", "0.1 unit")
-    reason = analysis.get("reason", "")
     final_prob = analysis.get("final_prob", 0)
-    
-    if prediction == "X":
-        pred_text = "DRAW"
-        pred_emoji = "🤝"
-        pred_class = "prediction-draw"
-    elif prediction == "NO_DRAW":
-        pred_text = "NOT DRAW"
-        pred_emoji = "🚫"
-        pred_class = "prediction-no-draw"
+    reason = analysis.get("reason", "")
+
+    if pred == "X":
+        pred_text, pred_emoji, pred_class = "DRAW", "🤝", "prediction-draw"
+    elif pred == "NO_DRAW":
+        pred_text, pred_emoji, pred_class = "NOT DRAW", "🚫", "prediction-no-draw"
     else:
-        pred_text = "COIN FLIP"
-        pred_emoji = "🪙"
-        pred_class = "prediction-coinflip"
-    
-    confidence_color = "#10b981" if confidence == "HIGH" else "#f59e0b" if confidence == "MEDIUM" else "#64748b"
+        pred_text, pred_emoji, pred_class = "COIN FLIP", "🪙", "prediction-coinflip"
+
+    confidence_color = "#10b981" if conf == "HIGH" else "#f59e0b" if conf == "MEDIUM" else "#64748b"
     prob_class = "draw-prob-high" if final_prob > 0.32 else "draw-prob-low" if final_prob < 0.28 else "draw-prob-mid"
     stake_display, _ = get_stake_display(stake)
-    
+
     st.markdown(f"""
     <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 16px; padding: 1.5rem; margin: 0.75rem 0; border-left: 4px solid {confidence_color};">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <div>
                 <div style="font-size: 0.8rem; color: #94a3b8;">V18.0 POISSON DRAW PROBABILITY</div>
-                <div class="prediction-display {pred_class}">
-                    {pred_emoji} {pred_text}
-                </div>
+                <div class="prediction-display {pred_class}">{pred_emoji} {pred_text}</div>
                 <div>
                     <span style="background:#8b5cf6; color:#fff; padding:0.2rem 0.6rem; border-radius:4px; font-size:0.8rem; font-weight:700;">Poisson Distribution</span>
                     <span class="final-badge" style="margin-left:0.5rem;">V18.0</span>
@@ -647,49 +560,40 @@ def display_analysis(match: dict, analysis: dict, league: str, already_stored: b
                 <div style="font-size: 2.5rem; font-weight: 800; class="{prob_class};">{final_prob:.1%}</div>
                 <div>
                     <span class="stake-badge {stake_display.split()[1] if len(stake_display.split()) > 1 else 'stake-tiny'}">Stake: {stake_display.split()[0]}</span>
-                    <span style="font-size:0.7rem; color:#94a3b8; margin-left:0.5rem;">{confidence} Confidence</span>
+                    <span style="font-size:0.7rem; color:#94a3b8; margin-left:0.5rem;">{conf} Confidence</span>
                 </div>
             </div>
         </div>
-        <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
-            📝 {reason}
-        </div>
+        <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">📝 {reason}</div>
     </div>
     """, unsafe_allow_html=True)
-    
+
     st.markdown("---")
-    
     st.markdown("### 📊 Poisson Metrics")
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        home_exp = analysis.get("home_goal_exp", 0)
-        away_exp = analysis.get("away_goal_exp", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{home_exp:.2f} / {away_exp:.2f}</div><div class="metric-label">Goal Expectancy (λ H/A)</div></div>', unsafe_allow_html=True)
-    with m2:
-        raw_prob = analysis.get("raw_prob", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{raw_prob:.1%}</div><div class="metric-label">Raw Poisson Draw</div></div>', unsafe_allow_html=True)
-    with m3:
-        adj_prob = analysis.get("adjusted_prob", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{adj_prob:.1%}</div><div class="metric-label">League-Adjusted</div></div>', unsafe_allow_html=True)
-    with m4:
-        league_rate = analysis.get("league_draw_rate", 0)
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{league_rate:.1%}</div><div class="metric-label">League Draw Rate</div></div>', unsafe_allow_html=True)
-    
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{analysis.get("home_goal_exp", 0):.2f} / {analysis.get("away_goal_exp", 0):.2f}</div><div class="metric-label">Goal Expectancy (λ H/A)</div></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{analysis.get("raw_prob", 0):.1%}</div><div class="metric-label">Raw Poisson Draw</div></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{analysis.get("adjusted_prob", 0):.1%}</div><div class="metric-label">League-Adjusted</div></div>', unsafe_allow_html=True)
+    with c4:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{analysis.get("league_draw_rate", 0):.1%}</div><div class="metric-label">League Draw Rate</div></div>', unsafe_allow_html=True)
+
     st.markdown("### 🎯 Most Likely Draw Scorelines")
     draw_scorelines = analysis.get("draw_scorelines", [])
     if draw_scorelines:
-        top_scores = sorted(draw_scorelines, key=lambda x: x["probability"], reverse=True)[:6]
-        cols = st.columns(min(6, len(top_scores)))
-        for idx, s in enumerate(top_scores):
+        top = sorted(draw_scorelines, key=lambda x: x["probability"], reverse=True)[:6]
+        cols = st.columns(min(6, len(top)))
+        for idx, s in enumerate(top):
             with cols[idx]:
-                prob_pct = s["probability"] * 100
                 st.markdown(f"""
                 <div style="background:#1e293b; border-radius:8px; padding:0.5rem; text-align:center; color:#fff;">
                     <div style="font-size:1.2rem; font-weight:800;">{s['scoreline']}</div>
-                    <div style="font-size:0.7rem; color:#94a3b8;">{prob_pct:.2f}%</div>
+                    <div style="font-size:0.7rem; color:#94a3b8;">{s['probability']*100:.2f}%</div>
                 </div>
                 """, unsafe_allow_html=True)
-    
+
     st.markdown("### 📈 Input Data Used")
     st.markdown(f"""
     <div style="background:#0f172a; border-radius:8px; padding:0.75rem; margin:0.25rem 0;">
@@ -700,7 +604,6 @@ def display_analysis(match: dict, analysis: dict, league: str, already_stored: b
         <div class="factor-row"><span class="factor-name">🏷️ League Draw Rate</span><span class="factor-value">{analysis.get('league_draw_rate', 0):.1%}</span></div>
     </div>
     """, unsafe_allow_html=True)
-    
     st.caption("📐 Formula: Draw Probability = Σ(λ_home^k × e^(-λ_home) / k! × λ_away^k × e^(-λ_away) / k!) × (League_Rate / 0.26)")
 
 
@@ -708,22 +611,11 @@ def display_records_table(results: list):
     if not results:
         st.info("No results recorded yet.")
         return
-    
     total = len(results)
-    correct = 0
-    incorrect = 0
-    
-    for r in results:
-        if r.get('predicted') and r.get('actual_result'):
-            pred = r.get('predicted')
-            actual = r.get('actual_result')
-            if pred == "X" and actual == "X":
-                correct += 1
-            elif pred == "NO_DRAW" and actual != "X":
-                correct += 1
-            else:
-                incorrect += 1
-    
+    correct = sum(1 for r in results if r.get('predicted') and r.get('actual_result') and
+                  ((r['predicted'] == 'X' and r['actual_result'] == 'X') or
+                   (r['predicted'] == 'NO_DRAW' and r['actual_result'] != 'X')))
+    incorrect = total - correct
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Matches</div></div>', unsafe_allow_html=True)
@@ -734,20 +626,14 @@ def display_records_table(results: list):
         st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
     with col4:
         st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Incorrect</div></div>', unsafe_allow_html=True)
-    
     st.markdown(f"**Overall: {correct} correct | {incorrect} incorrect**")
-    
     rows = []
     for r in results:
         pred = r.get('predicted', '?')
         actual = r.get('actual_result', '?')
         league = r.get('league_name', '')
         badge_class = get_league_badge(league)
-        is_correct = False
-        if pred == "X" and actual == "X":
-            is_correct = True
-        elif pred == "NO_DRAW" and actual != "X":
-            is_correct = True
+        is_correct = (pred == "X" and actual == "X") or (pred == "NO_DRAW" and actual != "X")
         result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
         pred_display = "🤝 DRAW" if pred == "X" else "🚫 NO DRAW"
         actual_display = "🤝" if actual == "X" else "🏠" if actual == "1" else "✈️"
@@ -760,7 +646,6 @@ def display_records_table(results: list):
             "Draw Prob": f"{r.get('draw_probability', 0):.1%}",
             "Result": result_badge,
         })
-    
     df = pd.DataFrame(rows)
     st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
@@ -777,11 +662,8 @@ def save_to_db(match: dict, analysis: dict, league: str, league_draw_rate: float
             match_date = datetime.now().strftime("%Y-%m-%d")
         dt = parse_match_date(match_date)
         date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else datetime.now().strftime("%Y-%m-%d")
-        
-        exists = check_match_exists(home_team, away_team, match_date)
-        if exists:
+        if check_match_exists(home_team, away_team, match_date):
             return "ALREADY_EXISTS"
-        
         record = {
             "match_date": date_part,
             "home_team": home_team,
@@ -818,12 +700,7 @@ def submit_result(analysis_id, home_goals, away_goals):
         response = supabase.table(TABLE_NAME).select("predicted").eq("id", analysis_id).execute()
         if response.data:
             predicted = response.data[0].get("predicted")
-            if predicted == "X" and actual_result == "X":
-                is_correct = True
-            elif predicted == "NO_DRAW" and actual_result != "X":
-                is_correct = True
-            else:
-                is_correct = False
+            is_correct = (predicted == "X" and actual_result == "X") or (predicted == "NO_DRAW" and actual_result != "X")
         else:
             is_correct = False
         supabase.table(TABLE_NAME).update({
@@ -1041,15 +918,11 @@ def main():
             pred = r.get('predicted')
             actual = r.get('actual_result')
             if pred and actual:
-                if pred == "X" and actual == "X":
+                if (pred == "X" and actual == "X") or (pred == "NO_DRAW" and actual != "X"):
                     is_correct = True
-                elif pred == "NO_DRAW" and actual != "X":
-                    is_correct = True
-                else:
-                    is_correct = False
-                if is_correct:
                     correct += 1
                 else:
+                    is_correct = False
                     incorrect += 1
                 confidence = r.get('confidence', 'LOW')
                 if confidence == 'HIGH':
@@ -1108,9 +981,7 @@ def main():
             else:
                 key = "> 36%"
             prob_ranges[key]["total"] += 1
-            if pred == "X" and actual == "X":
-                prob_ranges[key]["correct"] += 1
-            elif pred == "NO_DRAW" and actual != "X":
+            if (pred == "X" and actual == "X") or (pred == "NO_DRAW" and actual != "X"):
                 prob_ranges[key]["correct"] += 1
 
         df_probs = pd.DataFrame([
