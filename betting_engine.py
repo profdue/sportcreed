@@ -94,7 +94,6 @@ def process_section_block(match, abbrev, section_type, lines):
     matches = pattern.findall(block)
 
     if not matches:
-        # Try again after removing dates (dd/mm or dd/mm/yyyy)
         cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
         matches = pattern.findall(cleaned)
 
@@ -156,6 +155,53 @@ def process_section_block(match, abbrev, section_type, lines):
                 elif team == match['away_team']:
                     match['away_recent'].append(result)
 
+def parse_overall_stats(match, block):
+    """Extract overall statistics from the block."""
+    debug_log("🔍 Extracting overall stats from block")
+    stats = {}
+
+    # Extract average goals per game for home and away
+    avg_goals = re.findall(r'Avg\.\s+per\s+game\s*([\d.]+)', block)
+    if len(avg_goals) >= 4:
+        stats['home_avg_gf'] = float(avg_goals[0])
+        stats['home_avg_ga'] = float(avg_goals[1])
+        stats['away_avg_gf'] = float(avg_goals[2])
+        stats['away_avg_ga'] = float(avg_goals[3])
+        debug_log(f"✅ Avg goals: home GF={stats['home_avg_gf']}, GA={stats['home_avg_ga']}; away GF={stats['away_avg_gf']}, GA={stats['away_avg_ga']}")
+
+    # Extract Under/Over 2.5 percentages
+    # Look for pattern like: "9 6 60%40% 2.5 Goals"
+    u25_pattern = re.compile(r'(\d+)\s+(\d+)\s*(\d+)%(\d+)%\s*2\.5\s+Goals', re.IGNORECASE)
+    u25_matches = u25_pattern.findall(block)
+    if len(u25_matches) >= 1:
+        # First occurrence is for home team, second for away (if present)
+        # But order might be home then away, or away then home depending on the section.
+        # We'll assign based on the order they appear: first is home, second is away.
+        for idx, m in enumerate(u25_matches):
+            under_pct = int(m[2])
+            if idx == 0:
+                stats['home_u25_pct'] = under_pct
+                debug_log(f"✅ Home Under 2.5: {under_pct}%")
+            elif idx == 1:
+                stats['away_u25_pct'] = under_pct
+                debug_log(f"✅ Away Under 2.5: {under_pct}%")
+
+    # Extract BTTS Yes percentages
+    # Look for pattern like: "Both scored (Yes/No) Yes 10 67%33% No 5"
+    btts_pattern = re.compile(r'Both scored\s*\(Yes/No\)\s*Yes\s*\d+\s*(\d+)%(\d+)%\s*No', re.IGNORECASE)
+    btts_matches = btts_pattern.findall(block)
+    if len(btts_matches) >= 1:
+        for idx, m in enumerate(btts_matches):
+            yes_pct = int(m[0])
+            if idx == 0:
+                stats['home_btts_yes_pct'] = yes_pct
+                debug_log(f"✅ Home BTTS Yes: {yes_pct}%")
+            elif idx == 1:
+                stats['away_btts_yes_pct'] = yes_pct
+                debug_log(f"✅ Away BTTS Yes: {yes_pct}%")
+
+    match['overall_stats'] = stats
+
 def store_current_match(match, matches):
     if not match:
         return
@@ -207,6 +253,8 @@ def parse_text_data(text):
     current_abbrev = None
     current_section = None
     section_lines = []
+    # Track which sections were found for display
+    found_sections = set()
 
     for i, line in enumerate(lines):
         line = line.strip()
@@ -242,7 +290,8 @@ def parse_text_data(text):
                     'home_recent': [],
                     'away_recent': [],
                     'fatigue': False,
-                    'overall_stats': {}
+                    'overall_stats': {},
+                    'sections_found': []
                 }
                 debug_log("✅ DEBUG: match_found = True")
                 current_abbrev = None
@@ -299,6 +348,7 @@ def parse_text_data(text):
                     section_lines = []
                 current_section = 'home'
                 debug_log(f"🔍 DEBUG: Found home matches section for {current_abbrev}")
+                match['sections_found'].append('home_matches')
                 continue
             elif 'away matches' in lower:
                 if current_section and section_lines:
@@ -306,6 +356,7 @@ def parse_text_data(text):
                     section_lines = []
                 current_section = 'away'
                 debug_log(f"🔍 DEBUG: Found away matches section for {current_abbrev}")
+                match['sections_found'].append('away_matches')
                 continue
             elif 'last 6 matches' in lower:
                 if current_section and section_lines:
@@ -313,6 +364,18 @@ def parse_text_data(text):
                     section_lines = []
                 current_section = 'last6'
                 debug_log(f"🔍 DEBUG: Found last 6 matches section for {current_abbrev}")
+                match['sections_found'].append('last6_matches')
+                continue
+            elif 'overall statistics' in lower:
+                # We'll process this block as a whole
+                debug_log("🔍 DEBUG: Found Overall statistics section")
+                match['sections_found'].append('overall_stats')
+                # Accumulate lines until we hit another section marker
+                # Since we don't know where it ends, we'll collect until we see a new section or blank line
+                # But we can process the block when we encounter the end.
+                # We'll just collect lines here and process at the end of the file.
+                current_section = 'overall'
+                section_lines = []  # reset for this section
                 continue
             elif 'head to head' in lower or 'head-to-head' in lower:
                 debug_log("ℹ️ Skipping H2H section (not used)")
@@ -320,7 +383,9 @@ def parse_text_data(text):
                 section_lines = []
                 continue
 
-            if current_section and match:
+            if current_section == 'overall':
+                section_lines.append(line)
+            elif current_section and match:
                 section_lines.append(line)
 
         if match and i % 50 == 0:
@@ -333,8 +398,14 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
-    if current_section and section_lines and match:
-        process_section_block(match, current_abbrev, current_section, section_lines)
+    # Process any remaining section lines (including overall stats)
+    if current_section and section_lines:
+        if current_section == 'overall':
+            # We have collected the overall stats block
+            block = " ".join(section_lines)
+            parse_overall_stats(match, block)
+        else:
+            process_section_block(match, current_abbrev, current_section, section_lines)
 
     if match:
         store_current_match(match, matches)
@@ -354,6 +425,7 @@ def compute_draw_score(match):
     home_form = match.get('home_form', [])
     away_form = match.get('away_form', [])
 
+    # Draw rates (recent)
     if len(home_recent) >= 6:
         draw_rate_home_recent = sum(1 for r in home_recent[-6:] if r == 'D') / 6
         if draw_rate_home_recent >= 0.33:
@@ -363,6 +435,7 @@ def compute_draw_score(match):
         if draw_rate_away_recent >= 0.33:
             score += 2
 
+    # Draw rates (home/away forms)
     if len(home_form) >= 5:
         draw_rate_home_form = sum(1 for r in home_form[-5:] if r == 'D') / 5
         if draw_rate_home_form >= 0.4:
@@ -372,7 +445,31 @@ def compute_draw_score(match):
         if draw_rate_away_form >= 0.4:
             score += 1
 
-    # We don't have overall stats yet, so skip goal averages for now
+    # Goal averages from overall stats
+    stats = match.get('overall_stats', {})
+    home_avg_gf = stats.get('home_avg_gf')
+    home_avg_ga = stats.get('home_avg_ga')
+    away_avg_gf = stats.get('away_avg_gf')
+    away_avg_ga = stats.get('away_avg_ga')
+    if None not in (home_avg_gf, away_avg_gf):
+        if abs(home_avg_gf - away_avg_gf) <= 0.5:
+            score += 2
+    if None not in (home_avg_ga, away_avg_ga):
+        if abs(home_avg_ga - away_avg_ga) <= 0.5:
+            score += 2
+
+    # Under 2.5
+    home_u25 = stats.get('home_u25_pct')
+    away_u25 = stats.get('away_u25_pct')
+    if None not in (home_u25, away_u25) and home_u25 >= 60 and away_u25 >= 60:
+        score += 1
+
+    # BTTS Yes
+    home_btts = stats.get('home_btts_yes_pct')
+    away_btts = stats.get('away_btts_yes_pct')
+    if None not in (home_btts, away_btts) and home_btts >= 55 and away_btts >= 55:
+        score += 1
+
     return score
 
 def decide_prediction(match):
@@ -439,16 +536,43 @@ with col2:
                     cols[4].metric("Our Prediction", decision['prediction'],
                                    help=f"Rule: {decision['rule']}\nConfidence: {decision['confidence']}\nStake: {decision['stake']} units")
 
-                    if match['home_form']:
-                        st.write(f"🏠 Home form (last 5): {', '.join(match['home_form'][:5])}")
-                    if match['away_form']:
-                        st.write(f"✈️ Away form (last 5): {', '.join(match['away_form'][:5])}")
-                    if match['home_recent']:
-                        st.write(f"📈 Recent form (last 6) - {match['home_team']}: {', '.join(match['home_recent'][:6])}")
-                    if match['away_recent']:
-                        st.write(f"📈 Recent form (last 6) - {match['away_team']}: {', '.join(match['away_recent'][:6])}")
+                    # Show all extracted sections
+                    st.markdown("---")
+                    st.subheader("📋 Extracted Data")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.write("**📅 Date:**", match['date'] if match['date'] else "Not found")
+                        st.write("**🏷️ League:**", match['league'] if match['league'] else "Not found")
+                        st.write("**🎯 Encoded line:**")
+                        st.write(f"  Home %: {match['home_pct']}%")
+                        st.write(f"  Draw %: {match['draw_pct']}%")
+                        st.write(f"  Away %: {match['away_pct']}%")
+                        st.write(f"  Prediction: {match['prediction']}")
+                        st.write(f"  Correct Score: {match['score_home']}-{match['score_away']}")
+                        st.write(f"  Avg Goals: {match['avg_goals'] if match['avg_goals'] is not None else 'N/A'}")
+                    with col_b:
+                        st.write("**📊 Sections Found:**")
+                        for sec in match.get('sections_found', []):
+                            st.write(f"  - {sec}")
+                        st.write("**🏠 Home Form:**", ', '.join(match['home_form']) if match['home_form'] else 'None')
+                        st.write("**✈️ Away Form:**", ', '.join(match['away_form']) if match['away_form'] else 'None')
+                        st.write("**📈 Recent (Home):**", ', '.join(match['home_recent']) if match['home_recent'] else 'None')
+                        st.write("**📈 Recent (Away):**", ', '.join(match['away_recent']) if match['away_recent'] else 'None')
+
+                    # Overall stats
+                    stats = match.get('overall_stats', {})
+                    if stats:
+                        st.subheader("📊 Overall Statistics")
+                        st.write(f"**Home Avg GF:** {stats.get('home_avg_gf', 'N/A')}  **GA:** {stats.get('home_avg_ga', 'N/A')}")
+                        st.write(f"**Away Avg GF:** {stats.get('away_avg_gf', 'N/A')}  **GA:** {stats.get('away_avg_ga', 'N/A')}")
+                        st.write(f"**Home Under 2.5%:** {stats.get('home_u25_pct', 'N/A')}%  **BTTS Yes%:** {stats.get('home_btts_yes_pct', 'N/A')}%")
+                        st.write(f"**Away Under 2.5%:** {stats.get('away_u25_pct', 'N/A')}%  **BTTS Yes%:** {stats.get('away_btts_yes_pct', 'N/A')}%")
+                    else:
+                        st.write("**Overall Statistics:** Not extracted (section may be missing)")
+
+                    # Draw Score
                     score = compute_draw_score(match)
-                    st.write(f"🎯 Draw Score: {score}/10")
+                    st.write(f"🎯 **Draw Score:** {score}/10")
                     st.divider()
         else:
             st.error("❌ No matches found.")
