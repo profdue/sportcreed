@@ -73,16 +73,51 @@ def normalize_team_name(name):
     name = re.sub(r'\s+(Win|Draw|Lost)\s+\d+%.*$', '', name, flags=re.IGNORECASE)
     return name.strip()
 
-def get_result(parsed, team):
-    if parsed['home_team'] == team:
-        if parsed['home_score'] > parsed['away_score']: return 'W'
-        elif parsed['home_score'] < parsed['away_score']: return 'L'
-        else: return 'D'
-    elif parsed['away_team'] == team:
-        if parsed['away_score'] > parsed['home_score']: return 'W'
-        elif parsed['away_score'] < parsed['home_score']: return 'L'
-        else: return 'D'
-    return None
+def parse_match_blocks(block):
+    """
+    Extract all match tuples (home_team, home_score, away_score, ht_home, ht_away, away_team)
+    from a block of text using a robust two‑stage approach.
+    """
+    # First, find all score patterns with their positions
+    score_pattern = re.compile(r"(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)")
+    matches = []
+    for m in score_pattern.finditer(block):
+        start, end = m.start(), m.end()
+        home_score = int(m.group(1))
+        away_score = int(m.group(2))
+        ht_home = int(m.group(3))
+        ht_away = int(m.group(4))
+        # Extract text before and after the score
+        before = block[:start].strip()
+        after = block[end:].strip()
+        # We need to find the team names: the one before the score is the home team,
+        # the one after is the away team (but may include the next score, so we need to split carefully)
+        # Simpler: split by the score pattern and take the immediate text before and after.
+        # We'll use a regex to capture the surrounding text without overlapping.
+        # We'll re-split using the score pattern as a delimiter.
+        parts = re.split(r'\s*\d+\s*-\s*\d+\s*\(\s*\d+\s*-\s*\d+\s*\)\s*', block)
+        # But we need the team names, not the scores themselves.
+        # Instead, we can use a more direct approach: look for the pattern of text - score - text.
+        # Since this is getting complex, we'll fall back to the original regex but with a cleaned block.
+        # The previous regex failed due to dates, so we remove dates.
+    # Let's use the original regex but clean the block first.
+    cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
+    cleaned = re.sub(r'\bAll\b', '', cleaned)
+    # Remove "Win", "Draw", "Lost" percentages
+    cleaned = re.sub(r'\b(Win|Draw|Lost)\s+\d+%\s*\b', '', cleaned)
+    pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
+    raw_matches = pattern.findall(cleaned)
+    result = []
+    for m in raw_matches:
+        result.append({
+            'home_team': m[0].strip(),
+            'home_score': int(m[1]),
+            'away_score': int(m[2]),
+            'ht_home': int(m[3]),
+            'ht_away': int(m[4]),
+            'away_team': m[5].strip()
+        })
+    return result
 
 def process_section_block(match, abbrev, section_type, lines):
     if not match or not lines:
@@ -90,70 +125,69 @@ def process_section_block(match, abbrev, section_type, lines):
     block = " ".join(lines)
     debug_log(f"🔍 Processing {section_type} block for {abbrev}")
 
-    pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
-    matches = pattern.findall(block)
-
-    if not matches:
-        cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
-        matches = pattern.findall(cleaned)
-
-    if not matches:
+    parsed_matches = parse_match_blocks(block)
+    if not parsed_matches:
         debug_log(f"❌ No match patterns found in {section_type} block for {abbrev}")
         return
 
-    for m in matches:
-        home_team = m[0].strip()
-        home_score = int(m[1])
-        away_score = int(m[2])
-        ht_home = int(m[3])
-        ht_away = int(m[4])
-        away_team = m[5].strip()
+    # Determine which team we are tracking for this section
+    if section_type == 'home':
+        target_team = match['home_team']
+        target_normalized = normalize_team_name(target_team)
+    elif section_type == 'away':
+        target_team = match['away_team']
+        target_normalized = normalize_team_name(target_team)
+    elif section_type == 'last6':
+        # Use abbreviation to decide which team
+        if abbrev:
+            # Try to map abbreviation to home or away team
+            home_norm = normalize_team_name(match['home_team'])
+            away_norm = normalize_team_name(match['away_team'])
+            if abbrev.upper() in match['home_team'].upper() or abbrev.upper() in home_norm:
+                target_team = match['home_team']
+                target_normalized = home_norm
+            elif abbrev.upper() in match['away_team'].upper() or abbrev.upper() in away_norm:
+                target_team = match['away_team']
+                target_normalized = away_norm
+            else:
+                debug_log(f"⚠️ Cannot map abbreviation {abbrev} to a team for last6")
+                return
+        else:
+            debug_log(f"⚠️ No abbreviation for last6 section")
+            return
+    else:
+        return
 
-        parsed = {
-            'home_team': home_team,
-            'home_score': home_score,
-            'away_score': away_score,
-            'ht_home': ht_home,
-            'ht_away': ht_away,
-            'away_team': away_team
-        }
-
-        parsed_home_norm = normalize_team_name(home_team)
-        parsed_away_norm = normalize_team_name(away_team)
-        match_home_norm = normalize_team_name(match['home_team'])
-        match_away_norm = normalize_team_name(match['away_team'])
-
-        team = None
-        if parsed_home_norm == match_home_norm or parsed_home_norm == match_away_norm:
-            team = home_team
-        elif parsed_away_norm == match_home_norm or parsed_away_norm == match_away_norm:
-            team = away_team
-        if not team:
-            if parsed_home_norm and (parsed_home_norm in match_home_norm or match_home_norm in parsed_home_norm):
-                team = home_team
-            elif parsed_away_norm and (parsed_away_norm in match_home_norm or match_home_norm in parsed_away_norm):
-                team = away_team
-        if not team and abbrev:
-            if abbrev.upper() in home_team.upper():
-                team = home_team
-            elif abbrev.upper() in away_team.upper():
-                team = away_team
-
-        if not team:
-            debug_log(f"⚠️ Could not determine which team for match: {home_team} vs {away_team}")
+    # For each parsed match, determine the result for target_team
+    for parsed in parsed_matches:
+        home_norm = normalize_team_name(parsed['home_team'])
+        away_norm = normalize_team_name(parsed['away_team'])
+        # Check if target team appears in this parsed match
+        if home_norm == target_normalized or target_normalized in home_norm or home_norm in target_normalized:
+            team = parsed['home_team']
+        elif away_norm == target_normalized or target_normalized in away_norm or away_norm in target_normalized:
+            team = parsed['away_team']
+        else:
             continue
 
-        result = get_result(parsed, team)
-        if result:
-            if section_type == 'home' and team == match['home_team']:
-                match['home_form'].append(result)
-            elif section_type == 'away' and team == match['away_team']:
-                match['away_form'].append(result)
-            elif section_type == 'last6':
-                if team == match['home_team']:
-                    match['home_recent'].append(result)
-                elif team == match['away_team']:
-                    match['away_recent'].append(result)
+        # Determine result
+        if parsed['home_score'] > parsed['away_score']:
+            result = 'W' if team == parsed['home_team'] else 'L'
+        elif parsed['home_score'] < parsed['away_score']:
+            result = 'L' if team == parsed['home_team'] else 'W'
+        else:
+            result = 'D'
+
+        # Store in appropriate list
+        if section_type == 'home':
+            match['home_form'].append(result)
+        elif section_type == 'away':
+            match['away_form'].append(result)
+        elif section_type == 'last6':
+            if team == match['home_team']:
+                match['home_recent'].append(result)
+            elif team == match['away_team']:
+                match['away_recent'].append(result)
 
 def parse_overall_stats(match, block):
     """Extract overall statistics from the block."""
@@ -252,9 +286,8 @@ def parse_text_data(text):
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
-            # If we are in the overall section, don't process on blank line; keep collecting
             if current_section == 'overall':
-                section_lines.append(line)  # keep blank lines as part of block
+                section_lines.append(line)
                 continue
             if current_section and section_lines:
                 process_section_block(match, current_abbrev, current_section, section_lines)
@@ -326,26 +359,16 @@ def parse_text_data(text):
         if match:
             lower = line.lower()
 
-            # If currently in overall, we only stop if we hit a new major section (not overall)
             if current_section == 'overall':
-                # Check if we've reached a new section header that is not part of overall stats
-                # These headers are typically: home matches, away matches, last 6 matches, head to head, or discover more
-                # Also, we should stop if we encounter "next matches" or "Trends" but those are not in this data.
-                # We'll treat "Discover more" as the end.
                 if 'home matches' in lower or 'away matches' in lower or 'last 6 matches' in lower or 'head to head' in lower or 'discover more' in lower:
-                    # Process the overall block we have collected
                     if section_lines:
                         parse_overall_stats(match, " ".join(section_lines))
                         section_lines = []
-                    current_section = None  # exit overall
-                    # Do not continue; let the new section be processed below
+                    current_section = None
                 else:
-                    # Keep collecting
                     section_lines.append(line)
                     continue
 
-            # If we are not in overall, look for new sections
-            # Team abbreviation detection (only if not in overall)
             if re.match(r'^[A-Z]{2,4}$', line):
                 false_abbrevs = {'FT', 'HT', 'ALL', 'VIEW', 'WIN', 'DRAW', 'LOST', 'PTS', 'GP', 'GF', 'GA'}
                 if line.upper() not in false_abbrevs:
@@ -359,7 +382,6 @@ def parse_text_data(text):
                     debug_log(f"ℹ️ Ignoring non-team abbreviation: {line}")
                     continue
 
-            # Section detection (home, away, last6, overall)
             if 'home matches' in lower:
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
@@ -385,29 +407,20 @@ def parse_text_data(text):
                 match['sections_found'].append('last6_matches')
                 continue
             elif 'overall statistics' in lower:
-                # If we were in another section, process it first
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
                     section_lines = []
                 current_section = 'overall'
                 debug_log("🔍 DEBUG: Found Overall statistics section")
                 match['sections_found'].append('overall_stats')
-                # Start collecting lines for overall block
                 section_lines = []
-                # Do not continue; we want to add this line to the block? Actually we don't need to add the header line itself,
-                # but we can skip adding it because it's already used to trigger the section.
                 continue
             elif 'head to head' in lower or 'head-to-head' in lower:
                 debug_log("ℹ️ Skipping H2H section (not used)")
                 current_section = None
                 section_lines = []
                 continue
-            elif 'discover more' in lower:
-                # This is a signal that overall stats might have ended earlier, but if we are not in overall, ignore.
-                # If we are in overall, we already handled it above.
-                pass
 
-            # If we are inside any section (home, away, last6), accumulate lines
             if current_section and match:
                 section_lines.append(line)
 
@@ -421,7 +434,6 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
-    # After loop, process any remaining section lines
     if current_section and section_lines and match:
         if current_section == 'overall':
             parse_overall_stats(match, " ".join(section_lines))
