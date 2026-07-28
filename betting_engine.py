@@ -160,7 +160,7 @@ def parse_overall_stats(match, block):
     debug_log("🔍 Extracting overall stats from block")
     stats = {}
 
-    # Extract average goals per game for home and away
+    # Average goals per game
     avg_goals = re.findall(r'Avg\.\s+per\s+game\s*([\d.]+)', block)
     if len(avg_goals) >= 4:
         stats['home_avg_gf'] = float(avg_goals[0])
@@ -169,14 +169,10 @@ def parse_overall_stats(match, block):
         stats['away_avg_ga'] = float(avg_goals[3])
         debug_log(f"✅ Avg goals: home GF={stats['home_avg_gf']}, GA={stats['home_avg_ga']}; away GF={stats['away_avg_gf']}, GA={stats['away_avg_ga']}")
 
-    # Extract Under/Over 2.5 percentages
-    # Look for pattern like: "9 6 60%40% 2.5 Goals"
+    # Under/Over 2.5 percentages
     u25_pattern = re.compile(r'(\d+)\s+(\d+)\s*(\d+)%(\d+)%\s*2\.5\s+Goals', re.IGNORECASE)
     u25_matches = u25_pattern.findall(block)
     if len(u25_matches) >= 1:
-        # First occurrence is for home team, second for away (if present)
-        # But order might be home then away, or away then home depending on the section.
-        # We'll assign based on the order they appear: first is home, second is away.
         for idx, m in enumerate(u25_matches):
             under_pct = int(m[2])
             if idx == 0:
@@ -186,8 +182,7 @@ def parse_overall_stats(match, block):
                 stats['away_u25_pct'] = under_pct
                 debug_log(f"✅ Away Under 2.5: {under_pct}%")
 
-    # Extract BTTS Yes percentages
-    # Look for pattern like: "Both scored (Yes/No) Yes 10 67%33% No 5"
+    # BTTS Yes percentages
     btts_pattern = re.compile(r'Both scored\s*\(Yes/No\)\s*Yes\s*\d+\s*(\d+)%(\d+)%\s*No', re.IGNORECASE)
     btts_matches = btts_pattern.findall(block)
     if len(btts_matches) >= 1:
@@ -253,14 +248,15 @@ def parse_text_data(text):
     current_abbrev = None
     current_section = None
     section_lines = []
-    # Track which sections were found for display
-    found_sections = set()
 
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
             if current_section and section_lines:
-                process_section_block(match, current_abbrev, current_section, section_lines)
+                if current_section == 'overall':
+                    parse_overall_stats(match, " ".join(section_lines))
+                else:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
                 section_lines = []
             continue
 
@@ -327,7 +323,24 @@ def parse_text_data(text):
             continue
 
         if match:
-            # Team abbreviation (2-4 uppercase letters) – ignore false positives
+            lower = line.lower()
+
+            # If we are currently in the overall section, we must not let abbreviations or other section headers break it.
+            if current_section == 'overall':
+                # Check if we've reached the end of the overall block (e.g., "Trends" or "next matches")
+                if 'trends' in lower or 'next matches' in lower:
+                    # Process the accumulated overall block
+                    if section_lines:
+                        parse_overall_stats(match, " ".join(section_lines))
+                        section_lines = []
+                    current_section = None
+                    # Continue to next line; do not process this line as a new section
+                    continue
+                # Otherwise, keep collecting lines
+                section_lines.append(line)
+                continue
+
+            # Team abbreviation detection (only if not in overall)
             if re.match(r'^[A-Z]{2,4}$', line):
                 false_abbrevs = {'FT', 'HT', 'ALL', 'VIEW', 'WIN', 'DRAW', 'LOST', 'PTS', 'GP', 'GF', 'GA'}
                 if line.upper() not in false_abbrevs:
@@ -341,7 +354,7 @@ def parse_text_data(text):
                     debug_log(f"ℹ️ Ignoring non-team abbreviation: {line}")
                     continue
 
-            lower = line.lower()
+            # Section detection (home, away, last6, overall)
             if 'home matches' in lower:
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
@@ -367,15 +380,15 @@ def parse_text_data(text):
                 match['sections_found'].append('last6_matches')
                 continue
             elif 'overall statistics' in lower:
-                # We'll process this block as a whole
+                # If we were in another section, process it first
+                if current_section and section_lines:
+                    process_section_block(match, current_abbrev, current_section, section_lines)
+                    section_lines = []
+                current_section = 'overall'
                 debug_log("🔍 DEBUG: Found Overall statistics section")
                 match['sections_found'].append('overall_stats')
-                # Accumulate lines until we hit another section marker
-                # Since we don't know where it ends, we'll collect until we see a new section or blank line
-                # But we can process the block when we encounter the end.
-                # We'll just collect lines here and process at the end of the file.
-                current_section = 'overall'
-                section_lines = []  # reset for this section
+                # Start collecting lines for overall block
+                section_lines = []
                 continue
             elif 'head to head' in lower or 'head-to-head' in lower:
                 debug_log("ℹ️ Skipping H2H section (not used)")
@@ -383,9 +396,8 @@ def parse_text_data(text):
                 section_lines = []
                 continue
 
-            if current_section == 'overall':
-                section_lines.append(line)
-            elif current_section and match:
+            # If we are inside any section (home, away, last6), accumulate lines
+            if current_section and match:
                 section_lines.append(line)
 
         if match and i % 50 == 0:
@@ -398,12 +410,10 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
-    # Process any remaining section lines (including overall stats)
-    if current_section and section_lines:
+    # After loop, process any remaining section lines
+    if current_section and section_lines and match:
         if current_section == 'overall':
-            # We have collected the overall stats block
-            block = " ".join(section_lines)
-            parse_overall_stats(match, block)
+            parse_overall_stats(match, " ".join(section_lines))
         else:
             process_section_block(match, current_abbrev, current_section, section_lines)
 
@@ -425,7 +435,6 @@ def compute_draw_score(match):
     home_form = match.get('home_form', [])
     away_form = match.get('away_form', [])
 
-    # Draw rates (recent)
     if len(home_recent) >= 6:
         draw_rate_home_recent = sum(1 for r in home_recent[-6:] if r == 'D') / 6
         if draw_rate_home_recent >= 0.33:
@@ -435,7 +444,6 @@ def compute_draw_score(match):
         if draw_rate_away_recent >= 0.33:
             score += 2
 
-    # Draw rates (home/away forms)
     if len(home_form) >= 5:
         draw_rate_home_form = sum(1 for r in home_form[-5:] if r == 'D') / 5
         if draw_rate_home_form >= 0.4:
@@ -445,7 +453,6 @@ def compute_draw_score(match):
         if draw_rate_away_form >= 0.4:
             score += 1
 
-    # Goal averages from overall stats
     stats = match.get('overall_stats', {})
     home_avg_gf = stats.get('home_avg_gf')
     home_avg_ga = stats.get('home_avg_ga')
@@ -458,13 +465,11 @@ def compute_draw_score(match):
         if abs(home_avg_ga - away_avg_ga) <= 0.5:
             score += 2
 
-    # Under 2.5
     home_u25 = stats.get('home_u25_pct')
     away_u25 = stats.get('away_u25_pct')
     if None not in (home_u25, away_u25) and home_u25 >= 60 and away_u25 >= 60:
         score += 1
 
-    # BTTS Yes
     home_btts = stats.get('home_btts_yes_pct')
     away_btts = stats.get('away_btts_yes_pct')
     if None not in (home_btts, away_btts) and home_btts >= 55 and away_btts >= 55:
@@ -473,22 +478,18 @@ def compute_draw_score(match):
     return score
 
 def decide_prediction(match):
-    # Rule 1: Home Fortress
     home_form = match.get('home_form', [])
     if len(home_form) >= 5 and all(r != 'L' for r in home_form[-5:]):
         return {'prediction': '1', 'confidence': 'HIGH', 'stake': 2, 'rule': 'Home Fortress'}
 
-    # Rule 2: Away Form Killer
     away_form = match.get('away_form', [])
     if len(away_form) >= 6 and sum(1 for r in away_form[-6:] if r == 'L') >= 4:
         return {'prediction': '1', 'confidence': 'HIGH', 'stake': 2, 'rule': 'Away Form Killer'}
 
-    # Rule 3: Draw Score
     draw_score = compute_draw_score(match)
     if draw_score >= 7:
         return {'prediction': 'X', 'confidence': 'HIGH', 'stake': 2, 'rule': f'Draw Score ({draw_score})'}
 
-    # Default: Trust Forebet
     forebet_pred = match.get('prediction')
     if forebet_pred:
         return {'prediction': forebet_pred, 'confidence': 'LOW', 'stake': 0.25, 'rule': 'Forebet Default'}
@@ -536,7 +537,6 @@ with col2:
                     cols[4].metric("Our Prediction", decision['prediction'],
                                    help=f"Rule: {decision['rule']}\nConfidence: {decision['confidence']}\nStake: {decision['stake']} units")
 
-                    # Show all extracted sections
                     st.markdown("---")
                     st.subheader("📋 Extracted Data")
                     col_a, col_b = st.columns(2)
@@ -559,7 +559,6 @@ with col2:
                         st.write("**📈 Recent (Home):**", ', '.join(match['home_recent']) if match['home_recent'] else 'None')
                         st.write("**📈 Recent (Away):**", ', '.join(match['away_recent']) if match['away_recent'] else 'None')
 
-                    # Overall stats
                     stats = match.get('overall_stats', {})
                     if stats:
                         st.subheader("📊 Overall Statistics")
@@ -570,7 +569,6 @@ with col2:
                     else:
                         st.write("**Overall Statistics:** Not extracted (section may be missing)")
 
-                    # Draw Score
                     score = compute_draw_score(match)
                     st.write(f"🎯 **Draw Score:** {score}/10")
                     st.divider()
