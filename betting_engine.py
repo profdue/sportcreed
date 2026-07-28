@@ -165,113 +165,261 @@ def calculate_dc12_vs(match_data: dict) -> dict:
 
 
 # ============================================================================
-# PARSER
+# IMPROVED PARSER
 # ============================================================================
 def parse_betexplorer_data(text: str) -> list:
+    """
+    Parse Betexplorer data - extracts matches from any page format.
+    Handles:
+    1. Combined CSV: Home,Away,1,X,2,ND_Home,ND_Away,W_Home,W_Away,...
+    2. ND page: Team,ND,Next match,1,X,2
+    3. Wins page: Team,W,Next match,1,X,2
+    4. Losses page: Team,L,Next match,1,X,2
+    5. Simple: Team1 vs Team2 1.50 3.80 6.00
+    """
     matches = []
     lines = text.split('\n')
+    
+    # Dictionary to store matches with team names as key
+    match_cache = {}
+    
     for line in lines:
         line = line.strip()
         if not line:
             continue
+        
+        # Skip country/league names (lines with only letters and no digits)
+        if re.match(r'^[A-Za-z\s]+$', line):
+            continue
+        
+        # Skip header lines
+        if any(header in line.lower() for header in ['team', 'next match', 'best teams', 'worst teams', 'best offensive', 'best defensive']):
+            continue
+        
+        # ========================================================================
+        # FORMAT 1: CSV with full data (Home,Away,1,X,2,ND_Home,ND_Away,...)
+        # ========================================================================
         parts = re.split(r'[\t,;|]+', line)
         parts = [p.strip() for p in parts if p.strip()]
+        
         if len(parts) >= 5:
             try:
+                # Check if first two parts are team names
                 if re.search(r'[A-Za-z]', parts[0]) and re.search(r'[A-Za-z]', parts[1]):
-                    match_data = {
-                        "home_team": parts[0],
-                        "away_team": parts[1],
-                        "home_odds": float(parts[2]) if parts[2] else 0,
-                        "draw_odds": float(parts[3]) if parts[3] else 0,
-                        "away_odds": float(parts[4]) if parts[4] else 0,
-                        "nd_home": int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0,
-                        "nd_away": int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
-                        "w_home": int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
-                        "w_away": int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
-                        "l_home": int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
-                        "l_away": int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
-                        "best_team_home": 1 if len(parts) > 11 and parts[11] == '1' else 0,
-                        "best_team_away": 1 if len(parts) > 12 and parts[12] == '1' else 0,
-                        "worst_team_home": 1 if len(parts) > 13 and parts[13] == '1' else 0,
-                        "worst_team_away": 1 if len(parts) > 14 and parts[14] == '1' else 0,
-                        "best_off_home": 1 if len(parts) > 15 and parts[15] == '1' else 0,
-                        "best_off_away": 1 if len(parts) > 16 and parts[16] == '1' else 0,
-                        "worst_def_home": 1 if len(parts) > 17 and parts[17] == '1' else 0,
-                        "worst_def_away": 1 if len(parts) > 18 and parts[18] == '1' else 0,
-                        "now_home": int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 0,
-                        "now_away": int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 0,
-                        "nol_home": int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 0,
-                        "nol_away": int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 0,
-                        "league": "Unknown",
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "is_finished": False,
-                    }
-                    matches.append(match_data)
-            except:
-                continue
-
-    if not matches:
+                    # Try to parse as odds
+                    home_odds = float(parts[2]) if parts[2] and parts[2].replace('.', '').replace('-', '').isdigit() else 0
+                    draw_odds = float(parts[3]) if parts[3] and parts[3].replace('.', '').replace('-', '').isdigit() else 0
+                    away_odds = float(parts[4]) if parts[4] and parts[4].replace('.', '').replace('-', '').isdigit() else 0
+                    
+                    if home_odds > 0 and draw_odds > 0 and away_odds > 0:
+                        match_data = {
+                            "home_team": parts[0],
+                            "away_team": parts[1],
+                            "home_odds": home_odds,
+                            "draw_odds": draw_odds,
+                            "away_odds": away_odds,
+                            "nd_home": int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0,
+                            "nd_away": int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
+                            "w_home": int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
+                            "w_away": int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
+                            "l_home": int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
+                            "l_away": int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                            "best_team_home": 1 if len(parts) > 11 and parts[11] == '1' else 0,
+                            "best_team_away": 1 if len(parts) > 12 and parts[12] == '1' else 0,
+                            "worst_team_home": 1 if len(parts) > 13 and parts[13] == '1' else 0,
+                            "worst_team_away": 1 if len(parts) > 14 and parts[14] == '1' else 0,
+                            "best_off_home": 1 if len(parts) > 15 and parts[15] == '1' else 0,
+                            "best_off_away": 1 if len(parts) > 16 and parts[16] == '1' else 0,
+                            "worst_def_home": 1 if len(parts) > 17 and parts[17] == '1' else 0,
+                            "worst_def_away": 1 if len(parts) > 18 and parts[18] == '1' else 0,
+                            "now_home": int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 0,
+                            "now_away": int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 0,
+                            "nol_home": int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 0,
+                            "nol_away": int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 0,
+                            "league": "Unknown",
+                            "date": datetime.now().strftime("%Y-%m-%d"),
+                            "is_finished": False,
+                        }
+                        matches.append(match_data)
+                        continue
+            except (ValueError, IndexError):
+                pass
+        
+        # ========================================================================
+        # FORMAT 2: Page-specific format (Team, Streak, Next match, odds)
+        # ========================================================================
+        # Try tab-separated format
+        parts = re.split(r'\t+', line)
+        parts = [p.strip() for p in parts if p.strip()]
+        
+        if len(parts) >= 4:
+            try:
+                # Check if first part is a team name and second is a number (streak)
+                if re.search(r'[A-Za-z]', parts[0]) and parts[1].isdigit():
+                    streak_team = parts[0]
+                    streak_value = int(parts[1])
+                    next_match = parts[2]
+                    
+                    # Extract Home - Away from next_match
+                    match_parts = re.split(r'\s*[-–]\s*', next_match)
+                    if len(match_parts) == 2:
+                        home_team = match_parts[0].strip()
+                        away_team = match_parts[1].strip()
+                        
+                        # Extract odds from remaining parts
+                        odds_text = ' '.join(parts[3:])
+                        odds = re.findall(r'[\d.]+', odds_text)
+                        
+                        if len(odds) >= 3:
+                            home_odds = float(odds[0]) if odds[0] else 0
+                            draw_odds = float(odds[1]) if odds[1] else 0
+                            away_odds = float(odds[2]) if odds[2] else 0
+                            
+                            if home_odds > 0 and draw_odds > 0 and away_odds > 0:
+                                # Create a key for this match
+                                match_key = f"{home_team}|{away_team}"
+                                
+                                # Check if we already have this match in cache
+                                if match_key not in match_cache:
+                                    match_cache[match_key] = {
+                                        "home_team": home_team,
+                                        "away_team": away_team,
+                                        "home_odds": home_odds,
+                                        "draw_odds": draw_odds,
+                                        "away_odds": away_odds,
+                                        "nd_home": 0,
+                                        "nd_away": 0,
+                                        "w_home": 0,
+                                        "w_away": 0,
+                                        "l_home": 0,
+                                        "l_away": 0,
+                                        "best_team_home": 0,
+                                        "best_team_away": 0,
+                                        "worst_team_home": 0,
+                                        "worst_team_away": 0,
+                                        "best_off_home": 0,
+                                        "best_off_away": 0,
+                                        "worst_def_home": 0,
+                                        "worst_def_away": 0,
+                                        "now_home": 0,
+                                        "now_away": 0,
+                                        "nol_home": 0,
+                                        "nol_away": 0,
+                                        "league": "Unknown",
+                                        "date": datetime.now().strftime("%Y-%m-%d"),
+                                        "is_finished": False,
+                                    }
+                                
+                                # Assign the streak to the correct team
+                                if streak_team == home_team:
+                                    # Check if we can determine which type of streak this is from context
+                                    # We'll look at the previous line for context
+                                    # Default to ND (No Draw) if not sure
+                                    if 'ND' in line or 'No Draw' in line:
+                                        match_cache[match_key]['nd_home'] = streak_value
+                                    elif 'W' in line or 'Wins' in line:
+                                        match_cache[match_key]['w_home'] = streak_value
+                                    elif 'L' in line or 'Losses' in line:
+                                        match_cache[match_key]['l_home'] = streak_value
+                                    elif 'No Win' in line or 'NW' in line:
+                                        match_cache[match_key]['now_home'] = streak_value
+                                    elif 'No Loss' in line or 'NL' in line:
+                                        match_cache[match_key]['nol_home'] = streak_value
+                                elif streak_team == away_team:
+                                    if 'ND' in line or 'No Draw' in line:
+                                        match_cache[match_key]['nd_away'] = streak_value
+                                    elif 'W' in line or 'Wins' in line:
+                                        match_cache[match_key]['w_away'] = streak_value
+                                    elif 'L' in line or 'Losses' in line:
+                                        match_cache[match_key]['l_away'] = streak_value
+                                    elif 'No Win' in line or 'NW' in line:
+                                        match_cache[match_key]['now_away'] = streak_value
+                                    elif 'No Loss' in line or 'NL' in line:
+                                        match_cache[match_key]['nol_away'] = streak_value
+                                
+                                # Also update odds if they're different (prefer higher quality odds)
+                                current_odds = match_cache[match_key].get('home_odds', 0)
+                                if home_odds > current_odds and home_odds > 0:
+                                    match_cache[match_key]['home_odds'] = home_odds
+                                    match_cache[match_key]['draw_odds'] = draw_odds
+                                    match_cache[match_key]['away_odds'] = away_odds
+                                
+                                continue
+            except (ValueError, IndexError):
+                pass
+        
+        # ========================================================================
+        # FORMAT 3: Simple "Team1 vs Team2 1.50 3.80 6.00"
+        # ========================================================================
         pattern = re.compile(
             r'([A-Za-zÀ-ÿ\s\-\.\']+?)\s*(?:vs|VS|[-–])\s*([A-Za-zÀ-ÿ\s\-\.\']+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)'
         )
-        for line in lines:
-            line = line.strip()
-            if not line:
+        match = pattern.search(line)
+        if match:
+            try:
+                home_team = match.group(1).strip()
+                away_team = match.group(2).strip()
+                home_odds = float(match.group(3))
+                draw_odds = float(match.group(4))
+                away_odds = float(match.group(5))
+                
+                # Try to extract ND, W, L streaks from line if present
+                nd_home = nd_away = w_home = w_away = l_home = l_away = 0
+                
+                nd_matches = re.findall(r'ND\s*[:=]\s*(\d+)', line, re.IGNORECASE)
+                if len(nd_matches) >= 1:
+                    nd_home = int(nd_matches[0])
+                if len(nd_matches) >= 2:
+                    nd_away = int(nd_matches[1])
+                
+                w_matches = re.findall(r'W\s*[:=]\s*(\d+)', line, re.IGNORECASE)
+                if len(w_matches) >= 1:
+                    w_home = int(w_matches[0])
+                if len(w_matches) >= 2:
+                    w_away = int(w_matches[1])
+                
+                l_matches = re.findall(r'L\s*[:=]\s*(\d+)', line, re.IGNORECASE)
+                if len(l_matches) >= 1:
+                    l_home = int(l_matches[0])
+                if len(l_matches) >= 2:
+                    l_away = int(l_matches[1])
+                
+                match_data = {
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "home_odds": home_odds,
+                    "draw_odds": draw_odds,
+                    "away_odds": away_odds,
+                    "nd_home": nd_home,
+                    "nd_away": nd_away,
+                    "w_home": w_home,
+                    "w_away": w_away,
+                    "l_home": l_home,
+                    "l_away": l_away,
+                    "best_team_home": 0,
+                    "best_team_away": 0,
+                    "worst_team_home": 0,
+                    "worst_team_away": 0,
+                    "best_off_home": 0,
+                    "best_off_away": 0,
+                    "worst_def_home": 0,
+                    "worst_def_away": 0,
+                    "now_home": 0,
+                    "now_away": 0,
+                    "nol_home": 0,
+                    "nol_away": 0,
+                    "league": "Unknown",
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "is_finished": False,
+                }
+                matches.append(match_data)
+            except (ValueError, IndexError):
                 continue
-            m = pattern.search(line)
-            if m:
-                try:
-                    home_team, away_team = m.group(1).strip(), m.group(2).strip()
-                    home_odds, draw_odds, away_odds = float(m.group(3)), float(m.group(4)), float(m.group(5))
-                    # extract ND, W, L if present
-                    nd_home = nd_away = w_home = w_away = l_home = l_away = 0
-                    nd_match = re.findall(r'ND\s*[:=]\s*(\d+)', line, re.IGNORECASE)
-                    if len(nd_match) >= 1:
-                        nd_home = int(nd_match[0])
-                    if len(nd_match) >= 2:
-                        nd_away = int(nd_match[1])
-                    w_match = re.findall(r'W\s*[:=]\s*(\d+)', line, re.IGNORECASE)
-                    if len(w_match) >= 1:
-                        w_home = int(w_match[0])
-                    if len(w_match) >= 2:
-                        w_away = int(w_match[1])
-                    l_match = re.findall(r'L\s*[:=]\s*(\d+)', line, re.IGNORECASE)
-                    if len(l_match) >= 1:
-                        l_home = int(l_match[0])
-                    if len(l_match) >= 2:
-                        l_away = int(l_match[1])
-                    match_data = {
-                        "home_team": home_team,
-                        "away_team": away_team,
-                        "home_odds": home_odds,
-                        "draw_odds": draw_odds,
-                        "away_odds": away_odds,
-                        "nd_home": nd_home,
-                        "nd_away": nd_away,
-                        "w_home": w_home,
-                        "w_away": w_away,
-                        "l_home": l_home,
-                        "l_away": l_away,
-                        "best_team_home": 0,
-                        "best_team_away": 0,
-                        "worst_team_home": 0,
-                        "worst_team_away": 0,
-                        "best_off_home": 0,
-                        "best_off_away": 0,
-                        "worst_def_home": 0,
-                        "worst_def_away": 0,
-                        "now_home": 0,
-                        "now_away": 0,
-                        "nol_home": 0,
-                        "nol_away": 0,
-                        "league": "Unknown",
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "is_finished": False,
-                    }
-                    matches.append(match_data)
-                except:
-                    continue
+    
+    # Add cached matches to the results
+    for match_data in match_cache.values():
+        matches.append(match_data)
+    
     return matches
 
 
