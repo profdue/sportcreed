@@ -26,7 +26,7 @@ except Exception as e:
 # ============================================================================
 # TABLE NAME
 # ============================================================================
-TABLE_NAME = "match_predictions_v18"
+TABLE_NAME = "match_predictions"
 
 # ============================================================================
 # PAGE CONFIG
@@ -685,10 +685,10 @@ def display_records_table(results: list):
     incorrect = 0
     
     for r in results:
-        if r.get('predicted_1x2') and r.get('actual_1x2'):
+        if r.get('predicted') and r.get('actual_result'):
             # Convert stored prediction back to draw/no-draw
-            pred = r.get('predicted_1x2')
-            actual = r.get('actual_1x2')
+            pred = r.get('predicted')
+            actual = r.get('actual_result')
             
             if pred == "X" and actual == "X":
                 correct += 1
@@ -712,8 +712,8 @@ def display_records_table(results: list):
     
     rows = []
     for r in results:
-        pred = r.get('predicted_1x2', '?')
-        actual = r.get('actual_1x2', '?')
+        pred = r.get('predicted', '?')
+        actual = r.get('actual_result', '?')
         league = r.get('league_name', '')
         badge_class = get_league_badge(league)
         
@@ -758,9 +758,9 @@ def save_to_db(match: dict, analysis: dict, league: str, league_draw_rate: float
         if exists:
             return "ALREADY_EXISTS"
         
+        # Only fields that exist in the schema
         record = {
             "match_date": date_part,
-            "league_name": league,
             "home_team": home_team,
             "away_team": away_team,
             "home_scored_avg": match.get("home_scored_avg", 0),
@@ -768,19 +768,11 @@ def save_to_db(match: dict, analysis: dict, league: str, league_draw_rate: float
             "away_scored_avg": match.get("away_scored_avg", 0),
             "away_conceded_avg": match.get("away_conceded_avg", 0),
             "league_draw_rate": league_draw_rate,
-            "predicted_1x2": analysis.get("prediction"),
-            "prediction_confidence": analysis.get("confidence"),
-            "recommended_bet": "Draw" if analysis.get("prediction") == "X" else "No Draw",
-            "stake": analysis.get("stake"),
             "draw_probability": analysis.get("final_prob", 0),
-            "raw_poisson_prob": analysis.get("raw_prob", 0),
-            "adjusted_poisson_prob": analysis.get("adjusted_prob", 0),
-            "home_goal_exp": analysis.get("home_goal_exp", 0),
-            "away_goal_exp": analysis.get("away_goal_exp", 0),
-            "actual_home_goals": None,
-            "actual_away_goals": None,
-            "actual_1x2": None,
-            "is_correct": False,
+            "predicted": analysis.get("prediction", "COIN_FLIP"),
+            "confidence": analysis.get("confidence", "LOW"),
+            # Optional: store league name if you add it to schema
+            # "league_name": league,
         }
         
         response = supabase.table(TABLE_NAME).insert(record).execute()
@@ -793,7 +785,7 @@ def save_to_db(match: dict, analysis: dict, league: str, league_draw_rate: float
 
 def get_pending():
     try:
-        response = supabase.table(TABLE_NAME).select("*").is_("actual_1x2", "null").execute()
+        response = supabase.table(TABLE_NAME).select("*").is_("actual_result", "null").execute()
         data = response.data if response.data else []
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")))
     except Exception as e:
@@ -803,14 +795,15 @@ def get_pending():
 
 def submit_result(analysis_id, home_goals, away_goals):
     try:
-        actual_1x2 = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
+        actual_result = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
         
-        response = supabase.table(TABLE_NAME).select("predicted_1x2").eq("id", analysis_id).execute()
+        # Get the prediction to calculate is_correct
+        response = supabase.table(TABLE_NAME).select("predicted").eq("id", analysis_id).execute()
         if response.data:
-            predicted = response.data[0].get("predicted_1x2")
-            if predicted == "X" and actual_1x2 == "X":
+            predicted = response.data[0].get("predicted")
+            if predicted == "X" and actual_result == "X":
                 is_correct = True
-            elif predicted == "NO_DRAW" and actual_1x2 != "X":
+            elif predicted == "NO_DRAW" and actual_result != "X":
                 is_correct = True
             else:
                 is_correct = False
@@ -820,7 +813,7 @@ def submit_result(analysis_id, home_goals, away_goals):
         supabase.table(TABLE_NAME).update({
             "actual_home_goals": home_goals,
             "actual_away_goals": away_goals,
-            "actual_1x2": actual_1x2,
+            "actual_result": actual_result,
             "is_correct": is_correct
         }).eq("id", analysis_id).execute()
         return True
@@ -831,7 +824,7 @@ def submit_result(analysis_id, home_goals, away_goals):
 
 def get_results():
     try:
-        response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_1x2", "null").execute()
+        response = supabase.table(TABLE_NAME).select("*").not_.is_("actual_result", "null").execute()
         data = response.data if response.data else []
         return sorted(data, key=lambda x: parse_match_date(x.get("match_date")), reverse=True)
     except:
@@ -1022,8 +1015,8 @@ def main():
             for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
-                pred = a.get('predicted_1x2', '?')
-                confidence = a.get('prediction_confidence', '')
+                pred = a.get('predicted', '?')
+                confidence = a.get('confidence', '')
                 match_date = a.get('match_date', 'Date unknown')
                 date_display = format_date_display(match_date)
                 draw_prob = a.get('draw_probability', 0)
@@ -1068,8 +1061,8 @@ def main():
         low_correct = 0
 
         for r in results:
-            pred = r.get('predicted_1x2')
-            actual = r.get('actual_1x2')
+            pred = r.get('predicted')
+            actual = r.get('actual_result')
             
             if pred and actual:
                 if pred == "X" and actual == "X":
@@ -1084,7 +1077,7 @@ def main():
                 else:
                     incorrect += 1
                 
-                confidence = r.get('prediction_confidence', 'LOW')
+                confidence = r.get('confidence', 'LOW')
                 if confidence == 'HIGH':
                     high_confidence += 1
                     if is_correct:
@@ -1128,8 +1121,8 @@ def main():
 
         for r in results:
             prob = r.get('draw_probability', 0)
-            pred = r.get('predicted_1x2', '')
-            actual = r.get('actual_1x2', '')
+            pred = r.get('predicted', '')
+            actual = r.get('actual_result', '')
             
             if prob < 0.20:
                 key = "< 20%"
