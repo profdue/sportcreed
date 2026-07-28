@@ -1,597 +1,210 @@
-import streamlit as st
-import re
 
-# ============================================
-# DEBUG LOGGING
-# ============================================
+### Decision Rules
 
-def debug_log(msg):
-    if 'debug_messages' not in st.session_state:
-        st.session_state.debug_messages = []
-    st.session_state.debug_messages.append(msg)
+| Draw Probability | Decision | Stake |
+|------------------|----------|-------|
+| **> 32%** | DRAW | 2 units |
+| **< 28%** | NOT DRAW | 1 unit |
+| **28-32%** | COIN FLIP | 0.1 unit |
 
-# ============================================
-# PARSER CORE FUNCTIONS
-# ============================================
+### Data Required (Only 5-6 numbers)
 
-def parse_encoded_line(line):
-    debug_log(f"🔍 parse_encoded_line INPUT: '{line}'")
-    if ' - ' not in line:
-        debug_log("❌ No ' - ' separator found")
-        return None
-    left_part, right_part = line.split(' - ', 1)
-    left_part = left_part.replace(" ", "")
-    right_part = right_part.strip()
-    debug_log(f"📊 Left: '{left_part}', Right: '{right_part}'")
-    pattern = r"(\d{2})(\d{2})(\d{2})([12X])(\d)"
-    m = re.match(pattern, left_part)
-    if not m:
-        debug_log(f"❌ Left part did not match pattern: {left_part}")
-        return None
-    home_pct = int(m.group(1))
-    draw_pct = int(m.group(2))
-    away_pct = int(m.group(3))
-    pred = m.group(4)
-    score_home = int(m.group(5))
-    debug_log(f"✅ Percentages: home={home_pct}, draw={draw_pct}, away={away_pct}, pred={pred}")
-    debug_log(f"✅ Home score: {score_home}")
+1. Home Goals Scored Avg
+2. Home Goals Conceded Avg
+3. Away Goals Scored Avg
+4. Away Goals Conceded Avg
+5. League Draw Rate (select from dropdown)
+6. Draw Odds (optional)
 
-    pattern2 = r"(\d+)\.\d+°\s*([\d.]+|-)"
-    m2 = re.search(pattern2, right_part)
-    if not m2:
-        debug_log(f"❌ Could not parse right part: '{right_part}'")
-        return None
-    integer_part = m2.group(1)
-    avg_goals_str = m2.group(2)
-    if avg_goals_str == '-':
-        avg_goals = None
-        debug_log("⚠️ No average goals provided (set to None)")
-    else:
-        avg_goals = float(avg_goals_str)
-        debug_log(f"✅ Average goals: {avg_goals}")
-    score_away = int(integer_part[0])
-    debug_log(f"✅ Integer part: {integer_part}, Away score: {score_away}")
+**No team names needed. No form. No streaks. No Forebet.**
+""")
 
-    total = home_pct + draw_pct + away_pct
-    if total < 95 or total > 105:
-        debug_log(f"⚠️ Percentages sum to {total}% (unusual but continuing)")
+tab1, tab2, tab3, tab4 = st.tabs(["🔮 Analyze", "📝 Pending", "📊 Records", "📈 Dashboard"])
 
-    return {
-        'home_pct': home_pct,
-        'draw_pct': draw_pct,
-        'away_pct': away_pct,
-        'pred': pred,
-        'score_home': score_home,
-        'score_away': score_away,
-        'avg_goals': avg_goals
-    }
+with tab1:
+st.markdown("### 📝 Input Match Data")
 
-def normalize_team_name(name):
-    suffixes = r'(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2|ECL|Ro|BgC|Cup|Copa|Série|LvC|Ru1|Ru2)'
-    name = re.sub(r'\s+' + suffixes + r'\s*$', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\s+View all.*$', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\s+(Win|Draw|Lost)\s+\d+%.*$', '', name, flags=re.IGNORECASE)
-    return name.strip()
+# Input method selection
+input_method = st.radio(
+    "Choose input method:",
+    ["Manual Entry", "Paste Data (Auto-Extract)"],
+    horizontal=True
+)
 
-def parse_match_blocks(block):
-    """
-    Extract all match tuples from a block of text using a robust method.
-    Returns a list of dicts with keys: home_team, home_score, away_score, ht_home, ht_away, away_team.
-    """
-    # First, remove all non‑essential text that could confuse the regex
-    # Remove dates (dd/mm/yyyy or dd/mm)
-    cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
-    # Remove "All", "View all", "Win X%", etc.
-    cleaned = re.sub(r'\bAll\b', '', cleaned)
-    cleaned = re.sub(r'\bView all.*$', '', cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r'\b(Win|Draw|Lost)\s+\d+%(\s*\d+%)?\s*', '', cleaned)
-    # Remove extra whitespace
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    # Now use a regex that matches the pattern: team name, score, score, (HT), team name
-    # But team names can contain spaces, dots, parentheses, hyphens.
-    pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
-    raw_matches = pattern.findall(cleaned)
-    result = []
-    for m in raw_matches:
-        result.append({
-            'home_team': m[0].strip(),
-            'home_score': int(m[1]),
-            'away_score': int(m[2]),
-            'ht_home': int(m[3]),
-            'ht_away': int(m[4]),
-            'away_team': m[5].strip()
-        })
-    return result
+if input_method == "Manual Entry":
+    st.markdown("### Enter the 5 numbers directly")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        home_scored = st.number_input("🏠 Home Goals Scored Avg", min_value=0.0, max_value=5.0, value=1.1, step=0.01)
+        home_conceded = st.number_input("🏠 Home Goals Conceded Avg", min_value=0.0, max_value=5.0, value=1.35, step=0.01)
+    with col2:
+        away_scored = st.number_input("✈️ Away Goals Scored Avg", min_value=0.0, max_value=5.0, value=1.7, step=0.01)
+        away_conceded = st.number_input("✈️ Away Goals Conceded Avg", min_value=0.0, max_value=5.0, value=0.8, step=0.01)
+    
+    st.markdown("### League & Odds")
+    col3, col4 = st.columns(2)
+    with col3:
+        league = st.selectbox("📊 League", list(LEAGUE_DRAW_RATES.keys()), index=0)
+        league_draw_rate = LEAGUE_DRAW_RATES[league]
+    with col4:
+        draw_odds = st.number_input("🎯 Draw Odds (optional)", min_value=0.0, max_value=20.0, value=0.0, step=0.01, help="Enter 0 to skip market adjustment")
+    
+    home_team = st.text_input("🏠 Home Team Name (optional)", value="Home Team")
+    away_team = st.text_input("✈️ Away Team Name (optional)", value="Away Team")
+    
+    if st.button("📊 Calculate Draw Probability", type="primary"):
+        data = {
+            "home_team": home_team,
+            "away_team": away_team,
+            "home_scored_avg": home_scored,
+            "home_conceded_avg": home_conceded,
+            "away_scored_avg": away_scored,
+            "away_conceded_avg": away_conceded,
+            "date": datetime.now().strftime("%d/%m/%Y"),
+            "is_finished": False,
+        }
+        
+        analysis = analyze_match(data, league_draw_rate, draw_odds if draw_odds > 0 else None)
+        
+        if analysis.get("verdict") != "SKIP":
+            saved_id = save_to_db(data, analysis, league, draw_odds if draw_odds > 0 else None)
+            if saved_id == "ALREADY_EXISTS":
+                st.warning("This match already exists in the database.")
+            elif saved_id:
+                st.success(f"✅ Saved to database (ID: {saved_id})")
+            
+            display_analysis(data, analysis, league, False)
 
-def process_section_block(match, abbrev, section_type, lines):
-    if not match or not lines:
-        return
-    block = " ".join(lines)
-    debug_log(f"🔍 Processing {section_type} block for {abbrev}")
-
-    parsed_matches = parse_match_blocks(block)
-    if not parsed_matches:
-        debug_log(f"❌ No match patterns found in {section_type} block for {abbrev}")
-        return
-
-    # Determine which team we are tracking for this section
-    if section_type == 'home':
-        target_team = match['home_team']
-        target_normalized = normalize_team_name(target_team)
-    elif section_type == 'away':
-        target_team = match['away_team']
-        target_normalized = normalize_team_name(target_team)
-    elif section_type == 'last6':
-        # Use abbreviation to decide which team
-        if abbrev:
-            home_norm = normalize_team_name(match['home_team'])
-            away_norm = normalize_team_name(match['away_team'])
-            if abbrev.upper() in match['home_team'].upper() or abbrev.upper() in home_norm:
-                target_team = match['home_team']
-                target_normalized = home_norm
-            elif abbrev.upper() in match['away_team'].upper() or abbrev.upper() in away_norm:
-                target_team = match['away_team']
-                target_normalized = away_norm
-            else:
-                debug_log(f"⚠️ Cannot map abbreviation {abbrev} to a team for last6")
-                return
-        else:
-            debug_log(f"⚠️ No abbreviation for last6 section")
-            return
-    else:
-        return
-
-    # For each parsed match, determine the result for target_team
-    for parsed in parsed_matches:
-        home_norm = normalize_team_name(parsed['home_team'])
-        away_norm = normalize_team_name(parsed['away_team'])
-        # Check if target team appears in this parsed match
-        if home_norm == target_normalized or target_normalized in home_norm or home_norm in target_normalized:
-            team = parsed['home_team']
-        elif away_norm == target_normalized or target_normalized in away_norm or away_norm in target_normalized:
-            team = parsed['away_team']
-        else:
-            continue
-
-        # Determine result
-        if parsed['home_score'] > parsed['away_score']:
-            result = 'W' if team == parsed['home_team'] else 'L'
-        elif parsed['home_score'] < parsed['away_score']:
-            result = 'L' if team == parsed['home_team'] else 'W'
-        else:
-            result = 'D'
-
-        # Store in appropriate list
-        if section_type == 'home':
-            match['home_form'].append(result)
-        elif section_type == 'away':
-            match['away_form'].append(result)
-        elif section_type == 'last6':
-            if team == match['home_team']:
-                match['home_recent'].append(result)
-            elif team == match['away_team']:
-                match['away_recent'].append(result)
-
-def parse_overall_stats(match, block):
-    """Extract overall statistics from the block."""
-    debug_log("🔍 Extracting overall stats from block")
-    stats = {}
-
-    # Average goals per game
-    avg_goals = re.findall(r'Avg\.\s+per\s+game\s*([\d.]+)', block)
-    if len(avg_goals) >= 4:
-        stats['home_avg_gf'] = float(avg_goals[0])
-        stats['home_avg_ga'] = float(avg_goals[1])
-        stats['away_avg_gf'] = float(avg_goals[2])
-        stats['away_avg_ga'] = float(avg_goals[3])
-        debug_log(f"✅ Avg goals: home GF={stats['home_avg_gf']}, GA={stats['home_avg_ga']}; away GF={stats['away_avg_gf']}, GA={stats['away_avg_ga']}")
-
-    # Find all Under/Over 2.5 blocks
-    # The pattern: some numbers, then "2.5 Goals" with percentages around it.
-    # We'll find all occurrences of the pattern and assign first to home, second to away.
-    u25_pattern = re.compile(r'(\d+)\s+(\d+)\s*(\d+)%(\d+)%\s*2\.5\s+Goals', re.IGNORECASE)
-    u25_matches = u25_pattern.findall(block)
-    if len(u25_matches) >= 1:
-        for idx, m in enumerate(u25_matches):
-            under_pct = int(m[2])
-            if idx == 0:
-                stats['home_u25_pct'] = under_pct
-                debug_log(f"✅ Home Under 2.5: {under_pct}%")
-            elif idx == 1:
-                stats['away_u25_pct'] = under_pct
-                debug_log(f"✅ Away Under 2.5: {under_pct}%")
-
-    # BTTS Yes percentages – same approach
-    btts_pattern = re.compile(r'Both scored\s*\(Yes/No\)\s*Yes\s*\d+\s*(\d+)%(\d+)%\s*No', re.IGNORECASE)
-    btts_matches = btts_pattern.findall(block)
-    if len(btts_matches) >= 1:
-        for idx, m in enumerate(btts_matches):
-            yes_pct = int(m[0])
-            if idx == 0:
-                stats['home_btts_yes_pct'] = yes_pct
-                debug_log(f"✅ Home BTTS Yes: {yes_pct}%")
-            elif idx == 1:
-                stats['away_btts_yes_pct'] = yes_pct
-                debug_log(f"✅ Away BTTS Yes: {yes_pct}%")
-
-    match['overall_stats'] = stats
-
-def store_current_match(match, matches):
-    if not match:
-        return
-    essential = ['home_pct', 'draw_pct', 'away_pct', 'prediction', 'score_home', 'score_away']
-    if all(match.get(f) is not None for f in essential):
-        matches.append(match)
-        debug_log(f"✅ DEBUG: Match stored: {match['home_team']} vs {match['away_team']}")
-    else:
-        missing = [f for f in essential if match.get(f) is None]
-        debug_log(f"❌ DEBUG: Match incomplete, missing: {missing}")
-
-def parse_text_data(text):
-    debug_log("=== 🔍 DEBUG: parse_text_data STARTED ===")
-    lines = text.split('\n')
-    debug_log(f"✅ DEBUG: Total lines: {len(lines)}")
-
-    league = None
-    league_keywords = {
-        'Brazil Serie D': 'Brazil Serie D',
-        'Brazil Serie B': 'Brazil Serie B',
-        'Czech Republic Chance Liga': 'Czech Republic Chance Liga',
-        'Latvia Virsliga': 'Latvia Virsliga',
-        'Sweden Superettan': 'Sweden Superettan',
-        'Romania Divizia A': 'Romania Divizia A',
-        'Ecuador Serie A': 'Ecuador Serie A',
-        'Bulgaria Parva Liga': 'Bulgaria Parva Liga',
-        'Russia Premier League': 'Russia Premier League',
-        'Serie D': 'Serie D',
-        'Chance Liga': 'Chance Liga',
-        'Virsliga': 'Virsliga',
-        'Superettan': 'Superettan',
-        'Divizia A': 'Divizia A',
-        'Parva Liga': 'Parva Liga'
-    }
-    for line in lines:
-        for key, val in league_keywords.items():
-            if key in line:
-                league = val
-                break
-        if league:
-            break
-    if league:
-        debug_log(f"✅ DEBUG: League found: '{league}'")
-    else:
-        debug_log("❌ DEBUG: No league found – will still try to parse")
-
-    matches = []
-    match = None
-    current_abbrev = None
-    current_section = None
-    section_lines = []
-
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            if current_section == 'overall':
-                section_lines.append(line)
-                continue
-            if current_section and section_lines:
-                process_section_block(match, current_abbrev, current_section, section_lines)
-                section_lines = []
-            continue
-
-        if ' VS ' in line:
-            if match:
-                store_current_match(match, matches)
-                match = None
-            parts = line.split(' VS ', 1)
-            left = parts[0].strip()
-            right = parts[1].strip()
-            if left and right and "'" not in left and '"' not in left and "'" not in right and '"' not in right:
-                debug_log(f"🔍 DEBUG: Found valid VS line at index {i}: '{line}'")
-                match = {
-                    'home_team': left,
-                    'away_team': right,
-                    'league': league,
-                    'home_pct': None,
-                    'draw_pct': None,
-                    'away_pct': None,
-                    'prediction': None,
-                    'score_home': None,
-                    'score_away': None,
-                    'avg_goals': None,
-                    'date': None,
-                    'home_form': [],
-                    'away_form': [],
-                    'home_recent': [],
-                    'away_recent': [],
-                    'fatigue': False,
-                    'overall_stats': {},
-                    'sections_found': []
-                }
-                debug_log("✅ DEBUG: match_found = True")
-                current_abbrev = None
-                current_section = None
-                section_lines = []
-                continue
-
-        if match and match['date'] is None:
-            date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}', line)
-            if date_match:
-                date_str = date_match.group(1)
-                try:
-                    day, month, year = date_str.split('/')
-                    match['date'] = f"{year}-{month}-{day}"
-                    debug_log(f"✅ DEBUG: Date found: {match['date']}")
-                except:
-                    pass
-
-        if match and ' - ' in line and re.search(r'\d{6}[12X]\d', line.replace(' ', '')):
-            debug_log(f"🔍 DEBUG: Found encoded line at index {i}: '{line}'")
-            result = parse_encoded_line(line)
-            if result:
-                match['home_pct'] = result['home_pct']
-                match['draw_pct'] = result['draw_pct']
-                match['away_pct'] = result['away_pct']
-                match['prediction'] = result['pred']
-                match['score_home'] = result['score_home']
-                match['score_away'] = result['score_away']
-                match['avg_goals'] = result['avg_goals']
-                debug_log("✅ DEBUG: Encoded line parsed successfully!")
-            else:
-                debug_log("❌ DEBUG: parse_encoded_line FAILED")
-            continue
-
-        if match:
-            lower = line.lower()
-
-            if current_section == 'overall':
-                # Stop collecting overall if we hit a new section
-                if 'home matches' in lower or 'away matches' in lower or 'last 6 matches' in lower or 'head to head' in lower or 'discover more' in lower:
-                    if section_lines:
-                        parse_overall_stats(match, " ".join(section_lines))
-                        section_lines = []
-                    current_section = None
-                else:
-                    section_lines.append(line)
-                    continue
-
-            # Team abbreviation detection
-            if re.match(r'^[A-Z]{2,4}$', line):
-                false_abbrevs = {'FT', 'HT', 'ALL', 'VIEW', 'WIN', 'DRAW', 'LOST', 'PTS', 'GP', 'GF', 'GA'}
-                if line.upper() not in false_abbrevs:
-                    if current_section and section_lines:
-                        process_section_block(match, current_abbrev, current_section, section_lines)
-                        section_lines = []
-                    current_abbrev = line
-                    debug_log(f"🔍 DEBUG: Detected team abbreviation: {current_abbrev}")
-                    continue
-                else:
-                    debug_log(f"ℹ️ Ignoring non-team abbreviation: {line}")
-                    continue
-
-            # Section detection
-            if 'home matches' in lower:
-                if current_section and section_lines:
-                    process_section_block(match, current_abbrev, current_section, section_lines)
-                    section_lines = []
-                current_section = 'home'
-                debug_log(f"🔍 DEBUG: Found home matches section for {current_abbrev}")
-                match['sections_found'].append('home_matches')
-                continue
-            elif 'away matches' in lower:
-                if current_section and section_lines:
-                    process_section_block(match, current_abbrev, current_section, section_lines)
-                    section_lines = []
-                current_section = 'away'
-                debug_log(f"🔍 DEBUG: Found away matches section for {current_abbrev}")
-                match['sections_found'].append('away_matches')
-                continue
-            elif 'last 6 matches' in lower:
-                if current_section and section_lines:
-                    process_section_block(match, current_abbrev, current_section, section_lines)
-                    section_lines = []
-                current_section = 'last6'
-                debug_log(f"🔍 DEBUG: Found last 6 matches section for {current_abbrev}")
-                match['sections_found'].append('last6_matches')
-                continue
-            elif 'overall statistics' in lower:
-                if current_section and section_lines:
-                    process_section_block(match, current_abbrev, current_section, section_lines)
-                    section_lines = []
-                current_section = 'overall'
-                debug_log("🔍 DEBUG: Found Overall statistics section")
-                match['sections_found'].append('overall_stats')
-                section_lines = []
-                continue
-            elif 'head to head' in lower or 'head-to-head' in lower:
-                debug_log("ℹ️ Skipping H2H section (not used)")
-                current_section = None
-                section_lines = []
-                continue
-
-            if current_section and match:
-                section_lines.append(line)
-
-        if match and i % 50 == 0:
-            debug_log("🔍 DEBUG: Checking if match is complete...")
-            debug_log(f"home_pct={match.get('home_pct')}")
-            debug_log(f"draw_pct={match.get('draw_pct')}")
-            debug_log(f"away_pct={match.get('away_pct')}")
-            debug_log(f"prediction={match.get('prediction')}")
-            debug_log(f"score_home={match.get('score_home')}")
-            debug_log(f"score_away={match.get('score_away')}")
-            debug_log(f"avg_goals={match.get('avg_goals')}")
-
-    if current_section and section_lines and match:
-        if current_section == 'overall':
-            parse_overall_stats(match, " ".join(section_lines))
-        else:
-            process_section_block(match, current_abbrev, current_section, section_lines)
-
-    if match:
-        store_current_match(match, matches)
-
-    debug_log("=== 🔍 DEBUG: parse_text_data COMPLETE ===")
-    debug_log(f"Total matches found: {len(matches)}")
-    return {'league': league, 'matches': matches}
-
-# ============================================
-# PREDICTION LOGIC (unchanged)
-# ============================================
-
-def compute_draw_score(match):
-    score = 0
-    home_recent = match.get('home_recent', [])
-    away_recent = match.get('away_recent', [])
-    home_form = match.get('home_form', [])
-    away_form = match.get('away_form', [])
-
-    if len(home_recent) >= 6:
-        draw_rate_home_recent = sum(1 for r in home_recent[-6:] if r == 'D') / 6
-        if draw_rate_home_recent >= 0.33:
-            score += 2
-    if len(away_recent) >= 6:
-        draw_rate_away_recent = sum(1 for r in away_recent[-6:] if r == 'D') / 6
-        if draw_rate_away_recent >= 0.33:
-            score += 2
-
-    if len(home_form) >= 5:
-        draw_rate_home_form = sum(1 for r in home_form[-5:] if r == 'D') / 5
-        if draw_rate_home_form >= 0.4:
-            score += 1
-    if len(away_form) >= 5:
-        draw_rate_away_form = sum(1 for r in away_form[-5:] if r == 'D') / 5
-        if draw_rate_away_form >= 0.4:
-            score += 1
-
-    stats = match.get('overall_stats', {})
-    home_avg_gf = stats.get('home_avg_gf')
-    home_avg_ga = stats.get('home_avg_ga')
-    away_avg_gf = stats.get('away_avg_gf')
-    away_avg_ga = stats.get('away_avg_ga')
-    if None not in (home_avg_gf, away_avg_gf):
-        if abs(home_avg_gf - away_avg_gf) <= 0.5:
-            score += 2
-    if None not in (home_avg_ga, away_avg_ga):
-        if abs(home_avg_ga - away_avg_ga) <= 0.5:
-            score += 2
-
-    home_u25 = stats.get('home_u25_pct')
-    away_u25 = stats.get('away_u25_pct')
-    if None not in (home_u25, away_u25) and home_u25 >= 60 and away_u25 >= 60:
-        score += 1
-
-    home_btts = stats.get('home_btts_yes_pct')
-    away_btts = stats.get('away_btts_yes_pct')
-    if None not in (home_btts, away_btts) and home_btts >= 55 and away_btts >= 55:
-        score += 1
-
-    return score
-
-def decide_prediction(match):
-    home_form = match.get('home_form', [])
-    if len(home_form) >= 5 and all(r != 'L' for r in home_form[-5:]):
-        return {'prediction': '1', 'confidence': 'HIGH', 'stake': 2, 'rule': 'Home Fortress'}
-
-    away_form = match.get('away_form', [])
-    if len(away_form) >= 6 and sum(1 for r in away_form[-6:] if r == 'L') >= 4:
-        return {'prediction': '1', 'confidence': 'HIGH', 'stake': 2, 'rule': 'Away Form Killer'}
-
-    draw_score = compute_draw_score(match)
-    if draw_score >= 7:
-        return {'prediction': 'X', 'confidence': 'HIGH', 'stake': 2, 'rule': f'Draw Score ({draw_score})'}
-
-    forebet_pred = match.get('prediction')
-    if forebet_pred:
-        return {'prediction': forebet_pred, 'confidence': 'LOW', 'stake': 0.25, 'rule': 'Forebet Default'}
-    else:
-        return {'prediction': 'X', 'confidence': 'LOW', 'stake': 0.25, 'rule': 'Fallback Draw'}
-
-# ============================================
-# STREAMLIT UI (unchanged)
-# ============================================
-
-st.set_page_config(page_title="Forebet Parser & Predictor", layout="wide")
-st.title("🐛 Refined Formula V1.1 - DEBUG MODE")
-st.markdown("DEBUG MODE: Shows exactly where the parser fails and the prediction logic.")
-
-with st.sidebar:
-    st.header("📝 Paste Match Data")
-    text_input = st.text_area("Paste Forebet data here", height=400)
-
-col1, col2 = st.columns([1, 1])
-with col1:
-    st.subheader("📝 Input Data")
-    st.text_area("Data to parse", value=text_input, height=300, key="display_text")
-
-with col2:
-    st.subheader("📊 Results")
-    if st.button("🔍 Parse & Predict", type="primary"):
-        st.session_state.debug_messages = []
-        result = parse_text_data(text_input)
-
-        with st.expander("🔍 DEBUG OUTPUT", expanded=True):
-            debug_output = "\n".join(st.session_state.debug_messages)
-            st.code(debug_output, language="")
-
-        st.subheader("📊 Prediction Results")
-        if result['matches']:
-            for match in result['matches']:
-                with st.container():
-                    st.markdown(f"**{match['home_team']} vs {match['away_team']}**")
-                    cols = st.columns(5)
-                    cols[0].metric("Home %", f"{match['home_pct']}%")
-                    cols[1].metric("Draw %", f"{match['draw_pct']}%")
-                    cols[2].metric("Away %", f"{match['away_pct']}%")
-                    cols[3].metric("Forebet Pred", match['prediction'])
-                    decision = decide_prediction(match)
-                    cols[4].metric("Our Prediction", decision['prediction'],
-                                   help=f"Rule: {decision['rule']}\nConfidence: {decision['confidence']}\nStake: {decision['stake']} units")
-
-                    st.markdown("---")
-                    st.subheader("📋 Extracted Data")
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write("**📅 Date:**", match['date'] if match['date'] else "Not found")
-                        st.write("**🏷️ League:**", match['league'] if match['league'] else "Not found")
-                        st.write("**🎯 Encoded line:**")
-                        st.write(f"  Home %: {match['home_pct']}%")
-                        st.write(f"  Draw %: {match['draw_pct']}%")
-                        st.write(f"  Away %: {match['away_pct']}%")
-                        st.write(f"  Prediction: {match['prediction']}")
-                        st.write(f"  Correct Score: {match['score_home']}-{match['score_away']}")
-                        st.write(f"  Avg Goals: {match['avg_goals'] if match['avg_goals'] is not None else 'N/A'}")
-                    with col_b:
-                        st.write("**📊 Sections Found:**")
-                        for sec in match.get('sections_found', []):
-                            st.write(f"  - {sec}")
-                        st.write("**🏠 Home Form:**", ', '.join(match['home_form']) if match['home_form'] else 'None')
-                        st.write("**✈️ Away Form:**", ', '.join(match['away_form']) if match['away_form'] else 'None')
-                        st.write("**📈 Recent (Home):**", ', '.join(match['home_recent']) if match['home_recent'] else 'None')
-                        st.write("**📈 Recent (Away):**", ', '.join(match['away_recent']) if match['away_recent'] else 'None')
-
-                    stats = match.get('overall_stats', {})
-                    if stats:
-                        st.subheader("📊 Overall Statistics")
-                        st.write(f"**Home Avg GF:** {stats.get('home_avg_gf', 'N/A')}  **GA:** {stats.get('home_avg_ga', 'N/A')}")
-                        st.write(f"**Away Avg GF:** {stats.get('away_avg_gf', 'N/A')}  **GA:** {stats.get('away_avg_ga', 'N/A')}")
-                        st.write(f"**Home Under 2.5%:** {stats.get('home_u25_pct', 'N/A')}%  **BTTS Yes%:** {stats.get('home_btts_yes_pct', 'N/A')}%")
-                        st.write(f"**Away Under 2.5%:** {stats.get('away_u25_pct', 'N/A')}%  **BTTS Yes%:** {stats.get('away_btts_yes_pct', 'N/A')}%")
+else:
+    st.markdown("### Paste the data and the app will extract the numbers")
+    
+    text_data = st.text_area(
+        "Paste match data here",
+        height=300,
+        placeholder="Paste the complete data including season statistics, tables, etc."
+    )
+    
+    if text_data:
+        with st.spinner("Extracting data..."):
+            matches = extract_match_data(text_data)
+        
+        if matches:
+            st.success(f"✅ Found {len(matches)} matches")
+            
+            league = st.selectbox("📊 League", list(LEAGUE_DRAW_RATES.keys()), index=0)
+            league_draw_rate = LEAGUE_DRAW_RATES[league]
+            draw_odds = st.number_input("🎯 Draw Odds (optional)", min_value=0.0, max_value=20.0, value=0.0, step=0.01)
+            
+            if st.button("📊 Analyze All Matches", type="primary"):
+                for match in matches:
+                    if match.get("is_finished"):
+                        st.info(f"⏭️ {match['home_team']} vs {match['away_team']} — Already played (FT)")
+                        continue
+                    
+                    analysis = analyze_match(match, league_draw_rate, draw_odds if draw_odds > 0 else None)
+                    
+                    if analysis.get("verdict") != "SKIP":
+                        saved_id = save_to_db(match, analysis, league, draw_odds if draw_odds > 0 else None)
+                        if saved_id == "ALREADY_EXISTS":
+                            st.warning(f"⚠️ {match['home_team']} vs {match['away_team']} — Already exists")
+                        elif saved_id:
+                            st.success(f"✅ {match['home_team']} vs {match['away_team']} — Saved")
+                        
+                        display_analysis(match, analysis, league, saved_id == "ALREADY_EXISTS")
                     else:
-                        st.write("**Overall Statistics:** Not extracted")
-
-                    score = compute_draw_score(match)
-                    st.write(f"🎯 **Draw Score:** {score}/10")
-                    st.divider()
+                        st.info(f"⏭️ {match['home_team']} vs {match['away_team']} — Skipped")
         else:
-            st.error("❌ No matches found.")
+            st.warning("No matches found in the data.")
 
-with st.expander("📋 Prediction Rules"):
-    st.markdown("""
-    1. **Home Fortress** – Home unbeaten in last 5 home → Home Win (HIGH, 2u)
-    2. **Away Form Killer** – Away lost 4 of last 6 away → Home Win (HIGH, 2u)
-    3. **Draw Score** – If score ≥ 7 → Draw (HIGH, 2u)
-       - Factors: draw rates, goal similarity, low scoring, BTTS
-    4. **Midweek Fatigue** – (not yet implemented)
-    5. **Default** – Trust Forebet (LOW, 0.25u)
-    """)
+with tab2:
+st.subheader("📝 Pending Matches")
+pending = get_pending()
+if pending:
+    st.write(f"**{len(pending)} pending result(s)**")
+    for a in pending:
+        ht = a.get('home_team', 'Home')
+        at = a.get('away_team', 'Away')
+        pred = a.get('predicted_decision', '?')
+        confidence = a.get('prediction_confidence', '')
+        draw_prob = a.get('draw_probability', 0)
+        match_date = a.get('match_date', 'Date unknown')
+        
+        with st.expander(f"📅 {match_date} | {ht} vs {at} | {pred} ({confidence}) — Draw: {draw_prob:.1%}"):
+            st.info(f"Prediction: {pred} ({confidence})")
+            st.caption(f"Draw Probability: {draw_prob:.1%}")
+            c1, c2 = st.columns(2)
+            with c1:
+                hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
+            with c2:
+                ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
+            if st.button("✅ Submit Result", key=f"sub_{a['id']}"):
+                if submit_result(a['id'], hg, ag):
+                    st.success("Result submitted!")
+                    st.rerun()
+else:
+    st.info("No pending matches.")
+
+with tab3:
+st.subheader("📊 Performance Records")
+results = get_results()
+display_records_table(results)
+
+with tab4:
+st.subheader("📊 Dashboard")
+results = get_results()
+if not results:
+    st.info("No results recorded yet.")
+    return
+
+total = len(results)
+correct = 0
+
+for r in results:
+    if r.get('predicted_decision') and r.get('actual_decision'):
+        if r['predicted_decision'] == r['actual_decision']:
+            correct += 1
+
+overall_rate = round(correct / total * 100) if total > 0 else 0
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total</div></div>', unsafe_allow_html=True)
+with col2:
+    st.markdown(f'<div class="stat-box"><div class="stat-number">{overall_rate}%</div><div class="stat-label">Accuracy</div></div>', unsafe_allow_html=True)
+with col3:
+    st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Correct</div></div>', unsafe_allow_html=True)
+
+# Distribution by draw probability range
+st.markdown("#### Draw Probability Distribution")
+ranges = {"< 20%": 0, "20-24%": 0, "24-28%": 0, "28-32%": 0, "32-36%": 0, "> 36%": 0}
+correct_by_range = {"< 20%": 0, "20-24%": 0, "24-28%": 0, "28-32%": 0, "32-36%": 0, "> 36%": 0}
+
+for r in results:
+    prob = r.get('draw_probability', 0)
+    if prob < 0.20:
+        key = "< 20%"
+    elif prob < 0.24:
+        key = "20-24%"
+    elif prob < 0.28:
+        key = "24-28%"
+    elif prob < 0.32:
+        key = "28-32%"
+    elif prob < 0.36:
+        key = "32-36%"
+    else:
+        key = "> 36%"
+    
+    ranges[key] += 1
+    if r.get('predicted_decision') == r.get('actual_decision'):
+        correct_by_range[key] += 1
+
+df_ranges = pd.DataFrame([
+    {"Range": k, "Total": v, "Correct": correct_by_range[k], "Rate": f"{round(correct_by_range[k]/v*100) if v > 0 else 0}%"}
+    for k, v in ranges.items() if v > 0
+])
+st.dataframe(df_ranges, use_container_width=True)
+
+
+if __name__ == "__main__":
+main()
