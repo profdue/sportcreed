@@ -313,8 +313,6 @@ def parse_betexplorer_data(text: str) -> list:
                                 # Assign the streak to the correct team
                                 if streak_team == home_team:
                                     # Check if we can determine which type of streak this is from context
-                                    # We'll look at the previous line for context
-                                    # Default to ND (No Draw) if not sure
                                     if 'ND' in line or 'No Draw' in line:
                                         match_cache[match_key]['nd_home'] = streak_value
                                     elif 'W' in line or 'Wins' in line:
@@ -521,28 +519,61 @@ def save_to_db(match: dict, analysis: dict):
         match_date = match.get("date", datetime.now().strftime("%Y-%m-%d"))
         dt = parse_match_date(match_date)
         date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else datetime.now().strftime("%Y-%m-%d")
+        
         if check_match_exists(home_team, away_team, match_date):
             return "ALREADY_EXISTS"
+        
         record = {
+            # Match info
             "match_date": date_part,
             "home_team": home_team,
             "away_team": away_team,
-            "home_scored_avg": 0,
-            "home_conceded_avg": 0,
-            "away_scored_avg": 0,
-            "away_conceded_avg": 0,
-            "league_draw_rate": 0.26,
-            "draw_probability": analysis.get("dc12_vs", 0) / 100,
-            "predicted": "BET" if analysis.get("decision") == "BET" else "NO_BET",
-            "confidence": analysis.get("confidence", "LOW"),
+            
+            # Odds
+            "home_odds": match.get("home_odds", 0),
+            "draw_odds": match.get("draw_odds", 0),
+            "away_odds": match.get("away_odds", 0),
+            
+            # No Draw streaks (CRITICAL)
+            "nd_home": match.get("nd_home", 0),
+            "nd_away": match.get("nd_away", 0),
+            
+            # Win/Loss streaks
+            "w_home": match.get("w_home", 0),
+            "w_away": match.get("w_away", 0),
+            "l_home": match.get("l_home", 0),
+            "l_away": match.get("l_away", 0),
+            
+            # Best/Worst Team indicators
+            "best_team_home": match.get("best_team_home", 0),
+            "best_team_away": match.get("best_team_away", 0),
+            "worst_team_home": match.get("worst_team_home", 0),
+            "worst_team_away": match.get("worst_team_away", 0),
+            
+            # Best Offense/Worst Defense indicators
+            "best_off_home": match.get("best_off_home", 0),
+            "best_off_away": match.get("best_off_away", 0),
+            "worst_def_home": match.get("worst_def_home", 0),
+            "worst_def_away": match.get("worst_def_away", 0),
+            
+            # No Win/No Loss streaks
+            "now_home": match.get("now_home", 0),
+            "now_away": match.get("now_away", 0),
+            "nol_home": match.get("nol_home", 0),
+            "nol_away": match.get("nol_away", 0),
+            
+            # Calculated values
             "dc12_vs": analysis.get("dc12_vs", 0),
             "dc12_odds": analysis.get("dc12_odds", 0),
-            "home_odds": analysis.get("home_odds", 0),
-            "draw_odds": analysis.get("draw_odds", 0),
-            "away_odds": analysis.get("away_odds", 0),
+            
+            # Prediction
+            "predicted": "BET" if analysis.get("decision") == "BET" else "NO_BET",
+            "confidence": analysis.get("confidence", "LOW"),
         }
+        
         response = supabase.table(TABLE_NAME).insert(record).execute()
         return response.data[0]["id"] if response.data else None
+        
     except Exception as e:
         st.error(f"Failed to save: {e}")
         return None
