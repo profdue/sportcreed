@@ -78,20 +78,10 @@ def get_result(parsed, team):
     return None
 
 def normalize_team_name(name):
-    """
-    Remove common suffixes and extra text so that team names can be compared.
-    Examples: 'CSKA-Sofia Br1' -> 'CSKA-Sofia'
-              'Sport Recife Br2' -> 'Sport Recife'
-              'Botev Plovdiv Bg1' -> 'Botev Plovdiv'
-              'Grobinas SC Lv1' -> 'Grobinas SC'
-              'Libertad FC (ECU)' -> 'Libertad FC (ECU)'  (keep parentheses)
-    """
-    # Remove league/competition suffixes (common ones)
-    suffixes = r'(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2|ECL|Ro|BgC|Cup|Copa|Série)'
+    # Remove common suffixes and extra text
+    suffixes = r'(Br|Br2|Br4|Bg|Bg1|Ro1|Ro2|Se2|Ec1|Lv1|UEL|BrN|BrC|Cz1|Cz2|ECL|Ro|BgC|Cup|Copa|Série|LvC)'
     name = re.sub(r'\s+' + suffixes + r'\s*$', '', name, flags=re.IGNORECASE)
-    # Remove "View all"
     name = re.sub(r'\s+View all.*$', '', name, flags=re.IGNORECASE)
-    # Remove "Win/Draw/Lost" and percentages
     name = re.sub(r'\s+(Win|Draw|Lost)\s+\d+%.*$', '', name, flags=re.IGNORECASE)
     return name.strip()
 
@@ -101,10 +91,66 @@ def process_section_block(match, abbrev, section_type, lines):
     block = " ".join(lines)
     debug_log(f"🔍 Processing {section_type} block for {abbrev}")
 
-    # First, try to find matches with a more lenient regex
-    # This regex handles cases where there is no space between team and score: "FK Ogre1"
+    # For H2H, we need a more robust extraction because dates and "All" can confuse regex.
+    if section_type == 'h2h':
+        # Find all occurrences of the score pattern: digits - digits (digits - digits)
+        score_pattern = re.compile(r"(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)")
+        # Find all matches with their positions
+        matches = []
+        for m in score_pattern.finditer(block):
+            start = m.start()
+            end = m.end()
+            # Extract the home team: text before the score pattern (up to the previous match or start)
+            # We'll split by the score pattern to get the text around it.
+            # Simpler: use the whole block and split around the matched pattern.
+            # But we need to find the surrounding text. We'll extract text before and after.
+            # We'll use the positions to slice the block.
+            # However, we also need to handle multiple matches.
+            # We'll use a split approach: split the block by the score pattern.
+            # But that's complex with overlapping. Let's just use a regex that captures the teams too.
+            # For now, let's try a more relaxed regex that doesn't care about dates.
+            pass
+
+    # Default: use the existing regex that expects team names around the score.
+    # For non-H2H sections, this works fine.
     pattern = re.compile(r"([A-Za-zÀ-ÿ\s.()-]+?)\s*(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)\s*([A-Za-zÀ-ÿ\s.()]+)")
     matches = pattern.findall(block)
+
+    # If no matches and it's an H2H section, try a more lenient approach:
+    if not matches and section_type == 'h2h':
+        debug_log("⚠️ Using fallback H2H extraction (split by score pattern)")
+        # Find all score patterns and extract surrounding text
+        score_re = re.compile(r"(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*-\s*(\d+)\s*\)")
+        # We'll split the block by the score pattern and then reconstruct pairs
+        # This is a bit involved; we'll use finditer and get the text between matches.
+        parts = []
+        last_end = 0
+        for m in score_re.finditer(block):
+            start, end = m.start(), m.end()
+            # Text before the match
+            before = block[last_end:start].strip()
+            # The score digits
+            digits = m.groups()
+            # Text after will be handled in next iteration
+            parts.append((before, digits))
+            last_end = end
+        # After the last match, we don't have trailing text for the last team, so we skip it.
+        # Now we need to pair the before text with the after text of the next match.
+        # Actually, each match has a home_team (before) and away_team (after the next score)
+        # So we iterate and pair consecutive parts.
+        for i in range(len(parts)):
+            before, digits = parts[i]
+            if i < len(parts)-1:
+                # The away team is the text between the end of this match and the start of the next match
+                next_start = score_re.search(block, last_end).start()  # This is messy.
+                # Simpler: use a different approach: split the block by the score pattern and then clean.
+                pass
+        # This is getting complicated; let's just use a regex that handles dates by ignoring them.
+        # We can pre-clean the block: remove all dates (dd/mm/yyyy or dd/mm) and "All".
+        cleaned = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{4})?\b', '', block)
+        cleaned = re.sub(r'\bAll\b', '', cleaned)
+        # Try the default pattern again on cleaned block
+        matches = pattern.findall(cleaned)
 
     if not matches:
         debug_log(f"❌ No match patterns found in {section_type} block for {abbrev}")
@@ -127,26 +173,21 @@ def process_section_block(match, abbrev, section_type, lines):
             'away_team': away_team
         }
 
-        # Normalize all team names for comparison
         parsed_home_norm = normalize_team_name(home_team)
         parsed_away_norm = normalize_team_name(away_team)
         match_home_norm = normalize_team_name(match['home_team'])
         match_away_norm = normalize_team_name(match['away_team'])
 
-        # Determine which team this match is about
         team = None
-        # Exact match after normalization
         if parsed_home_norm == match_home_norm or parsed_home_norm == match_away_norm:
             team = home_team
         elif parsed_away_norm == match_home_norm or parsed_away_norm == match_away_norm:
             team = away_team
-        # If still not matched, try partial match (one name contains the other)
         if not team:
             if parsed_home_norm and (parsed_home_norm in match_home_norm or match_home_norm in parsed_home_norm):
                 team = home_team
             elif parsed_away_norm and (parsed_away_norm in match_home_norm or match_home_norm in parsed_away_norm):
                 team = away_team
-        # If still not matched, try using abbreviation
         if not team and abbrev:
             if abbrev.upper() in home_team.upper():
                 team = home_team
@@ -172,7 +213,6 @@ def process_section_block(match, abbrev, section_type, lines):
                     match['away_recent'].append(result)
                 debug_log(f"✅ Added {result} to recent form for {team}")
             elif section_type == 'h2h':
-                # Determine winner relative to current match's home/away
                 if parsed_home_norm == match_home_norm and parsed_away_norm == match_away_norm:
                     if home_score > away_score:
                         winner = match['home_team']
@@ -213,7 +253,6 @@ def parse_text_data(text):
     lines = text.split('\n')
     debug_log(f"✅ DEBUG: Total lines: {len(lines)}")
 
-    # ---- LEAGUE DETECTION ----
     league = None
     league_keywords = {
         'Brazil Serie D': 'Brazil Serie D',
@@ -252,15 +291,12 @@ def parse_text_data(text):
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:
-            # Blank line: if we were accumulating, process the block now
             if current_section and section_lines:
                 process_section_block(match, current_abbrev, current_section, section_lines)
                 section_lines = []
             continue
 
-        # ---- DETECT MATCH START ----
         if ' VS ' in line:
-            # Store previous match before starting new one
             if match:
                 store_current_match(match, matches)
                 match = None
@@ -294,7 +330,6 @@ def parse_text_data(text):
                 section_lines = []
                 continue
 
-        # ---- DATE EXTRACTION ----
         if match and match['date'] is None:
             date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}', line)
             if date_match:
@@ -306,7 +341,6 @@ def parse_text_data(text):
                 except:
                     pass
 
-        # ---- ENCODED LINE ----
         if match and ' - ' in line and re.search(r'\d{6}[12X]\d', line.replace(' ', '')):
             debug_log(f"🔍 DEBUG: Found encoded line at index {i}: '{line}'")
             result = parse_encoded_line(line)
@@ -321,14 +355,10 @@ def parse_text_data(text):
                 debug_log("✅ DEBUG: Encoded line parsed successfully!")
             else:
                 debug_log("❌ DEBUG: parse_encoded_line FAILED")
-            # Do NOT store match here; let it accumulate sections
             continue
 
-        # ---- SECTION DETECTION ----
         if match:
-            # Team abbreviation (2-4 uppercase letters)
             if re.match(r'^[A-Z]{2,4}$', line):
-                # Process pending section before changing abbreviation
                 if current_section and section_lines:
                     process_section_block(match, current_abbrev, current_section, section_lines)
                     section_lines = []
@@ -366,11 +396,9 @@ def parse_text_data(text):
                 debug_log(f"🔍 DEBUG: Found H2H section")
                 continue
 
-            # ---- ACCUMULATE LINES FOR THE CURRENT SECTION ----
             if current_section and match:
                 section_lines.append(line)
 
-        # ---- PERIODIC DEBUG ----
         if match and i % 50 == 0:
             debug_log("🔍 DEBUG: Checking if match is complete...")
             debug_log(f"home_pct={match.get('home_pct')}")
@@ -381,11 +409,9 @@ def parse_text_data(text):
             debug_log(f"score_away={match.get('score_away')}")
             debug_log(f"avg_goals={match.get('avg_goals')}")
 
-    # Process any remaining section lines
     if current_section and section_lines and match:
         process_section_block(match, current_abbrev, current_section, section_lines)
 
-    # Store last match if any
     if match:
         store_current_match(match, matches)
 
