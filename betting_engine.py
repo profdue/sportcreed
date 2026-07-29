@@ -52,6 +52,8 @@ st.markdown("""
     .positive-badge { border-left: 3px solid #10b981; }
     .negative-badge { border-left: 3px solid #ef4444; }
     .neutral-badge { border-left: 3px solid #fbbf24; }
+    .upload-container { border: 2px dashed #10b981; border-radius: 12px; padding: 2rem; text-align: center; margin: 1rem 0; }
+    .upload-container:hover { border-color: #34d399; background: rgba(16, 185, 129, 0.05); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -91,55 +93,44 @@ def check_match_exists(home_team: str, away_team: str, match_date: str) -> bool:
 
 
 # ============================================================================
-# MULTI-APPEARANCE SCORING SYSTEM - UPDATED FOR DATABASE SCHEMA
+# MULTI-APPEARANCE SCORING SYSTEM
 # ============================================================================
-def calculate_team_score_from_db(team_data: dict, is_home: bool = True) -> dict:
+def calculate_team_score(team_data: dict) -> dict:
     """
-    Calculate a team's multi-appearance score using the database schema.
+    Calculate a team's multi-appearance score based on appearances across sections.
     """
-    prefix = "home" if is_home else "away"
-    
-    # Map database columns to section names
     sections = {
-        "table_w": team_data.get(f"w_{prefix}", 0),
-        "table_d": team_data.get(f"d_{prefix}", 0),
-        "table_l": team_data.get(f"l_{prefix}", 0),
-        "table_nw": team_data.get(f"nw_{prefix}", 0),
-        "table_nd": team_data.get(f"nd_{prefix}", 0),
-        "best_teams": team_data.get(f"best_team_{prefix}", 0),
-        "worst_teams": team_data.get(f"worst_team_{prefix}", 0),
-        "best_offensive": team_data.get(f"best_off_{prefix}", 0),
-        "best_defensive": team_data.get(f"best_def_{prefix}", 0),
-        "worst_offensive": team_data.get(f"worst_off_{prefix}", 0),
-        "worst_defensive": team_data.get(f"worst_def_{prefix}", 0),
+        "table_w": team_data.get("w_team", 0),
+        "table_d": team_data.get("d_team", 0),
+        "table_l": team_data.get("l_team", 0),
+        "table_nw": team_data.get("nw_team", 0),
+        "table_nd": team_data.get("nd_team", 0),
+        "best_teams": team_data.get("best_team", 0),
+        "worst_teams": team_data.get("worst_team", 0),
+        "best_offensive": team_data.get("best_off", 0),
+        "best_defensive": team_data.get("best_def", 0),
+        "worst_offensive": team_data.get("worst_off", 0),
+        "worst_defensive": team_data.get("worst_def", 0),
     }
     
-    # Category definitions
     positive_sections = ["best_teams", "best_offensive", "best_defensive"]
     negative_sections = ["worst_teams", "worst_offensive", "worst_defensive", "table_l"]
-    neutral_sections = ["table_w", "table_d", "table_nw", "table_nd"]
     
-    # Count appearances and categorize
     positive_count = 0
     negative_count = 0
     neutral_count = 0
     total_appearances = 0
-    appearance_details = []
     
     for section, value in sections.items():
         if value > 0:
             total_appearances += 1
             if section in positive_sections:
                 positive_count += 1
-                appearance_details.append({"section": section, "type": "positive", "value": value})
             elif section in negative_sections:
                 negative_count += 1
-                appearance_details.append({"section": section, "type": "negative", "value": value})
             else:
                 neutral_count += 1
-                appearance_details.append({"section": section, "type": "neutral", "value": value})
     
-    # Calculate Multi-Appearance Score
     base_score = total_appearances
     
     bonus = 0
@@ -159,7 +150,6 @@ def calculate_team_score_from_db(team_data: dict, is_home: bool = True) -> dict:
     quality_score = (positive_count * 2) + (negative_count * -1) + (neutral_count * 0)
     total_score = base_score + quality_score + bonus - penalty
     
-    # Determine team profile
     if positive_count > negative_count and positive_count >= 2:
         profile = "OFFENSIVE/POSITIVE"
     elif negative_count > positive_count and negative_count >= 2:
@@ -176,28 +166,40 @@ def calculate_team_score_from_db(team_data: dict, is_home: bool = True) -> dict:
         "positive_count": positive_count,
         "negative_count": negative_count,
         "neutral_count": neutral_count,
-        "base_score": base_score,
-        "bonus": bonus,
-        "penalty": penalty,
-        "quality_score": quality_score,
         "total_score": total_score,
         "profile": profile,
-        "appearance_details": appearance_details,
     }
 
 
-def predict_match_from_db(match_data: dict) -> dict:
-    """
-    Predict No Draw based on multi-appearance scoring from database records.
-    """
-    home_score_data = calculate_team_score_from_db(match_data, is_home=True)
-    away_score_data = calculate_team_score_from_db(match_data, is_home=False)
+def calculate_team_score_from_db(match_data: dict, is_home: bool = True) -> dict:
+    """Calculate team score from database schema"""
+    prefix = "home" if is_home else "away"
+    
+    team_data = {
+        "w_team": match_data.get(f"w_{prefix}", 0),
+        "d_team": match_data.get(f"d_{prefix}", 0),
+        "l_team": match_data.get(f"l_{prefix}", 0),
+        "nw_team": match_data.get(f"nw_{prefix}", 0),
+        "nd_team": match_data.get(f"nd_{prefix}", 0),
+        "best_team": match_data.get(f"best_team_{prefix}", 0),
+        "worst_team": match_data.get(f"worst_team_{prefix}", 0),
+        "best_off": match_data.get(f"best_off_{prefix}", 0),
+        "best_def": match_data.get(f"best_def_{prefix}", 0),
+        "worst_off": match_data.get(f"worst_off_{prefix}", 0),
+        "worst_def": match_data.get(f"worst_def_{prefix}", 0),
+    }
+    return calculate_team_score(team_data)
+
+
+def predict_match(match_data: dict) -> dict:
+    """Predict No Draw based on multi-appearance scoring"""
+    home_score_data = calculate_team_score(match_data["home"])
+    away_score_data = calculate_team_score(match_data["away"])
     
     home_score = home_score_data["total_score"]
     away_score = away_score_data["total_score"]
     match_score = home_score + away_score
     
-    # Adjustments for special cases
     adjustment = 0
     
     if home_score_data["positive_count"] >= 2 and home_score_data["negative_count"] == 0 and \
@@ -216,7 +218,72 @@ def predict_match_from_db(match_data: dict) -> dict:
     
     final_score = match_score + adjustment
     
-    # Determine prediction
+    if final_score >= 15:
+        prediction = "NO_DRAW"
+        confidence = "VERY HIGH"
+        action = "✅ BET - Strong no-draw signal"
+        reason = f"High multi-section appearance score ({final_score:.0f}) indicates extreme team profiles"
+    elif final_score >= 10:
+        prediction = "NO_DRAW"
+        confidence = "HIGH"
+        action = "✅ BET - Good no-draw signal"
+        reason = f"Good multi-section score ({final_score:.0f}) suggests no-draw likely"
+    elif final_score >= 6:
+        prediction = "NO_DRAW"
+        confidence = "MEDIUM"
+        action = "⚠️ CONSIDER - Moderate no-draw signal"
+        reason = f"Moderate score ({final_score:.0f}) - consider as a value bet"
+    elif final_score >= 3:
+        prediction = "DRAW_POSSIBLE"
+        confidence = "LOW"
+        action = "❌ SKIP - Draw possible"
+        reason = f"Low score ({final_score:.0f}) suggests draw is possible"
+    else:
+        prediction = "SKIP"
+        confidence = "LOW"
+        action = "❌ SKIP - Insufficient evidence"
+        reason = f"Very low score ({final_score:.0f}) - no clear signal"
+    
+    return {
+        "prediction": prediction,
+        "confidence": confidence,
+        "action": action,
+        "reason": reason,
+        "final_score": final_score,
+        "match_score": match_score,
+        "adjustment": adjustment,
+        "home_score": home_score_data,
+        "away_score": away_score_data,
+    }
+
+
+def predict_match_from_db(match_data: dict) -> dict:
+    """Predict from database data"""
+    home_score_data = calculate_team_score_from_db(match_data, is_home=True)
+    away_score_data = calculate_team_score_from_db(match_data, is_home=False)
+    
+    home_score = home_score_data["total_score"]
+    away_score = away_score_data["total_score"]
+    match_score = home_score + away_score
+    
+    adjustment = 0
+    
+    if home_score_data["positive_count"] >= 2 and home_score_data["negative_count"] == 0 and \
+       away_score_data["positive_count"] >= 2 and away_score_data["negative_count"] == 0:
+        adjustment = -5
+    
+    if home_score_data["profile"] == "OFFENSIVE/POSITIVE" and away_score_data["profile"] == "OFFENSIVE/POSITIVE":
+        adjustment = -3
+    
+    if (home_score_data["negative_count"] >= 2 and away_score_data["positive_count"] >= 2) or \
+       (away_score_data["negative_count"] >= 2 and home_score_data["positive_count"] >= 2):
+        adjustment = +3
+    
+    if home_score_data["total_appearances"] == 0 or away_score_data["total_appearances"] == 0:
+        adjustment = -2
+    
+    final_score = match_score + adjustment
+    
     if final_score >= 15:
         prediction = "NO_DRAW"
         confidence = "VERY HIGH"
@@ -257,38 +324,216 @@ def predict_match_from_db(match_data: dict) -> dict:
 
 
 # ============================================================================
+# PARSER - Extracts ALL data from ALL pages
+# ============================================================================
+def parse_betexplorer_data(text: str) -> list:
+    """Parse Betexplorer data - extracts matches from ALL pages."""
+    matches = []
+    lines = text.split('\n')
+    
+    team_cache = {}
+    match_cache = {}
+    current_page_type = None
+    current_country = None
+    
+    def get_or_create_team(team_name):
+        if team_name not in team_cache:
+            team_cache[team_name] = {
+                "team_name": team_name,
+                "w_team": 0, "d_team": 0, "l_team": 0,
+                "nw_team": 0, "nd_team": 0,
+                "best_team": 0, "worst_team": 0,
+                "best_off": 0, "best_def": 0,
+                "worst_off": 0, "worst_def": 0,
+                "appearances": []
+            }
+        return team_cache[team_name]
+    
+    def get_or_create_match(home_team, away_team, home_odds=0, draw_odds=0, away_odds=0):
+        match_key = f"{home_team}|{away_team}"
+        if match_key not in match_cache:
+            match_cache[match_key] = {
+                "home_team": home_team,
+                "away_team": away_team,
+                "home_odds": home_odds,
+                "draw_odds": draw_odds,
+                "away_odds": away_odds,
+                "home_team_data": {},
+                "away_team_data": {},
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "league": current_country or "Unknown",
+            }
+        if home_odds > 0 and draw_odds > 0 and away_odds > 0:
+            current_odds = match_cache[match_key].get('home_odds', 0)
+            if home_odds > current_odds:
+                match_cache[match_key]['home_odds'] = home_odds
+                match_cache[match_key]['draw_odds'] = draw_odds
+                match_cache[match_key]['away_odds'] = away_odds
+        return match_cache[match_key]
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Detect page type
+        if 'Team\tW\tNext match' in line or 'Team, W, Next match' in line:
+            current_page_type = 'wins'
+            continue
+        elif 'Team\tD\tNext match' in line or 'Team, D, Next match' in line:
+            current_page_type = 'draws'
+            continue
+        elif 'Team\tL\tNext match' in line or 'Team, L, Next match' in line:
+            current_page_type = 'losses'
+            continue
+        elif 'Team\tNW\tNext match' in line or 'Team, NW, Next match' in line:
+            current_page_type = 'no_wins'
+            continue
+        elif 'ND' in line and ('Next match' in line or '1\tX\t2' in line) or 'Team\tND\tNext match' in line or 'Team, ND, Next match' in line:
+            current_page_type = 'no_draws'
+            continue
+        elif 'Team\tNL\tNext match' in line or 'Team, NL, Next match' in line:
+            current_page_type = 'no_losses'
+            continue
+        elif 'Best teams' in line or 'Less streaks' in line:
+            current_page_type = 'best_teams'
+            continue
+        elif 'Worst teams' in line:
+            current_page_type = 'worst_teams'
+            continue
+        elif 'Best offensive' in line:
+            current_page_type = 'best_offensive'
+            continue
+        elif 'Best defensive' in line:
+            current_page_type = 'best_defensive'
+            continue
+        elif 'Worst offensive' in line:
+            current_page_type = 'worst_offensive'
+            continue
+        elif 'Worst defensive' in line:
+            current_page_type = 'worst_defensive'
+            continue
+        
+        # Detect country/league
+        if re.match(r'^[A-Za-z\s]+$', line) and not re.search(r'[0-9.]', line) and len(line) < 30:
+            if line not in ['Team', 'W', 'D', 'L', 'NW', 'ND', 'NL', 'Best teams', 'Worst teams', 'Best offensive', 'Best defensive', 'Worst offensive', 'Worst defensive', 'Next match']:
+                current_country = line
+                continue
+        
+        # Parse page-specific data
+        if current_page_type in ['wins', 'draws', 'losses', 'no_wins', 'no_draws', 'no_losses']:
+            parts = re.split(r'\t+', line)
+            parts = [p.strip() for p in parts if p.strip()]
+            
+            if len(parts) >= 4:
+                try:
+                    if re.search(r'[A-Za-z]', parts[0]) and re.search(r'\d', parts[1]):
+                        team = parts[0]
+                        streak_value = int(re.search(r'\d+', parts[1]).group()) if re.search(r'\d+', parts[1]) else 0
+                        next_match = parts[2]
+                        
+                        match_parts = re.split(r'\s*[-–]\s*', next_match)
+                        if len(match_parts) == 2:
+                            home_team = match_parts[0].strip()
+                            away_team = match_parts[1].strip()
+                            
+                            odds_text = ' '.join(parts[3:])
+                            odds = re.findall(r'[\d.]+', odds_text)
+                            
+                            if len(odds) >= 3:
+                                home_odds = float(odds[0]) if odds[0] else 0
+                                draw_odds = float(odds[1]) if odds[1] else 0
+                                away_odds = float(odds[2]) if odds[2] else 0
+                                
+                                if home_odds > 0 and draw_odds > 0 and away_odds > 0:
+                                    match_data = get_or_create_match(home_team, away_team, home_odds, draw_odds, away_odds)
+                                    team_obj = get_or_create_team(team)
+                                    team_obj["appearances"].append(current_page_type)
+                                    
+                                    if current_page_type == 'wins':
+                                        team_obj["w_team"] = max(team_obj.get("w_team", 0), streak_value)
+                                    elif current_page_type == 'draws':
+                                        team_obj["d_team"] = max(team_obj.get("d_team", 0), streak_value)
+                                    elif current_page_type == 'losses':
+                                        team_obj["l_team"] = max(team_obj.get("l_team", 0), streak_value)
+                                    elif current_page_type == 'no_wins':
+                                        team_obj["nw_team"] = max(team_obj.get("nw_team", 0), streak_value)
+                                    elif current_page_type == 'no_draws':
+                                        team_obj["nd_team"] = max(team_obj.get("nd_team", 0), streak_value)
+                                    
+                                    continue
+                except (ValueError, IndexError, AttributeError):
+                    pass
+        
+        # Parse Best/Worst teams pages
+        if current_page_type in ['best_teams', 'worst_teams', 'best_offensive', 'best_defensive', 'worst_offensive', 'worst_defensive']:
+            parts = re.split(r'\t+', line)
+            parts = [p.strip() for p in parts if p.strip()]
+            
+            if len(parts) >= 4:
+                try:
+                    if re.search(r'[A-Za-z]', parts[0]) and not re.search(r'^[A-Za-z\s]+$', parts[0]) or len(parts) > 3:
+                        team = parts[0]
+                        
+                        next_match = None
+                        for part in parts:
+                            if '-' in part or 'vs' in part:
+                                next_match = part
+                                break
+                        
+                        if next_match:
+                            match_parts = re.split(r'\s*[-–]\s*', next_match)
+                            if len(match_parts) == 2:
+                                home_team = match_parts[0].strip()
+                                away_team = match_parts[1].strip()
+                                
+                                odds = re.findall(r'[\d.]+', line)
+                                home_odds = float(odds[-3]) if len(odds) >= 3 else 0
+                                draw_odds = float(odds[-2]) if len(odds) >= 3 else 0
+                                away_odds = float(odds[-1]) if len(odds) >= 3 else 0
+                                
+                                match_data = get_or_create_match(home_team, away_team, home_odds, draw_odds, away_odds)
+                                team_obj = get_or_create_team(team)
+                                team_obj["appearances"].append(current_page_type)
+                                
+                                if current_page_type == 'best_teams':
+                                    team_obj["best_team"] = 1
+                                elif current_page_type == 'worst_teams':
+                                    team_obj["worst_team"] = 1
+                                elif current_page_type == 'best_offensive':
+                                    team_obj["best_off"] = 1
+                                elif current_page_type == 'best_defensive':
+                                    team_obj["best_def"] = 1
+                                elif current_page_type == 'worst_offensive':
+                                    team_obj["worst_off"] = 1
+                                elif current_page_type == 'worst_defensive':
+                                    team_obj["worst_def"] = 1
+                                
+                                continue
+                except (ValueError, IndexError):
+                    pass
+    
+    # Build matches with team data
+    for match_key, match_data in match_cache.items():
+        home_team_name = match_data["home_team"]
+        away_team_name = match_data["away_team"]
+        
+        home_data = team_cache.get(home_team_name, {})
+        away_data = team_cache.get(away_team_name, {})
+        
+        match_data["home_team_data"] = home_data
+        match_data["away_team_data"] = away_data
+        matches.append(match_data)
+    
+    return matches
+
+
+# ============================================================================
 # DISPLAY FUNCTIONS
 # ============================================================================
-def display_team_profile_from_db(match_data: dict, is_home: bool):
-    """Display a team's multi-appearance profile from database data"""
-    
-    prefix = "home" if is_home else "away"
-    team_name = match_data.get(f"{prefix}_team", "Unknown")
-    
-    # Count appearances
-    appearances = []
-    section_map = {
-        f"w_{prefix}": ("W", "neutral"),
-        f"d_{prefix}": ("D", "neutral"),
-        f"l_{prefix}": ("L", "negative"),
-        f"nw_{prefix}": ("NW", "neutral"),
-        f"nd_{prefix}": ("ND", "neutral"),
-        f"best_team_{prefix}": ("⭐ Best", "positive"),
-        f"worst_team_{prefix}": ("⚠️ Worst", "negative"),
-        f"best_off_{prefix}": ("⚽ Best Off", "positive"),
-        f"best_def_{prefix}": ("🛡️ Best Def", "positive"),
-        f"worst_off_{prefix}": ("❌ Worst Off", "negative"),
-        f"worst_def_{prefix}": ("❌ Worst Def", "negative"),
-    }
-    
-    for col, (display, section_type) in section_map.items():
-        if match_data.get(col, 0) > 0:
-            appearances.append({"display": display, "type": section_type})
-    
-    # Calculate score
-    score_data = calculate_team_score_from_db(match_data, is_home)
-    
-    if not appearances:
+def display_team_profile(team_data: dict, team_name: str):
+    """Display a team's multi-appearance profile"""
+    if not team_data:
         st.markdown(f"""
         <div style="background:#0f172a; border-radius:8px; padding:0.75rem; margin:0.25rem 0;">
             <span style="font-weight:700;">{team_name}</span>
@@ -297,14 +542,31 @@ def display_team_profile_from_db(match_data: dict, is_home: bool):
         """, unsafe_allow_html=True)
         return
     
-    # Build badges
+    appearances = team_data.get("appearances", [])
+    
+    section_display = {
+        "wins": "W", "draws": "D", "losses": "L",
+        "no_wins": "NW", "no_draws": "ND",
+        "best_teams": "⭐ Best", "worst_teams": "⚠️ Worst",
+        "best_offensive": "⚽ Best Off", "best_defensive": "🛡️ Best Def",
+        "worst_offensive": "❌ Worst Off", "worst_defensive": "❌ Worst Def"
+    }
+    
+    positive_sections = ["best_teams", "best_offensive", "best_defensive"]
+    negative_sections = ["worst_teams", "worst_offensive", "worst_defensive", "losses"]
+    
     badges = []
     for app in appearances:
-        color = "#10b981" if app["type"] == "positive" else "#ef4444" if app["type"] == "negative" else "#fbbf24"
-        badge_class = "positive-badge" if app["type"] == "positive" else "negative-badge" if app["type"] == "negative" else "neutral-badge"
-        badges.append(f'<span class="appearance-badge {badge_class}" style="color:{color};">{app["display"]}</span>')
+        display_name = section_display.get(app, app)
+        if app in positive_sections:
+            badges.append(f'<span class="appearance-badge positive-badge" style="color:#10b981;">{display_name}</span>')
+        elif app in negative_sections:
+            badges.append(f'<span class="appearance-badge negative-badge" style="color:#ef4444;">{display_name}</span>')
+        else:
+            badges.append(f'<span class="appearance-badge neutral-badge" style="color:#fbbf24;">{display_name}</span>')
     
-    # Determine profile color
+    score_data = calculate_team_score(team_data)
+    
     profile_colors = {
         "OFFENSIVE/POSITIVE": "#10b981",
         "DEFENSIVE/NEGATIVE": "#ef4444",
@@ -338,8 +600,167 @@ def display_team_profile_from_db(match_data: dict, is_home: bool):
     """, unsafe_allow_html=True)
 
 
+def display_team_profile_from_db(match_data: dict, is_home: bool):
+    """Display team profile from database data"""
+    prefix = "home" if is_home else "away"
+    team_name = match_data.get(f"{prefix}_team", "Unknown")
+    
+    team_data = {
+        "w_team": match_data.get(f"w_{prefix}", 0),
+        "d_team": match_data.get(f"d_{prefix}", 0),
+        "l_team": match_data.get(f"l_{prefix}", 0),
+        "nw_team": match_data.get(f"nw_{prefix}", 0),
+        "nd_team": match_data.get(f"nd_{prefix}", 0),
+        "best_team": match_data.get(f"best_team_{prefix}", 0),
+        "worst_team": match_data.get(f"worst_team_{prefix}", 0),
+        "best_off": match_data.get(f"best_off_{prefix}", 0),
+        "best_def": match_data.get(f"best_def_{prefix}", 0),
+        "worst_off": match_data.get(f"worst_off_{prefix}", 0),
+        "worst_def": match_data.get(f"worst_def_{prefix}", 0),
+    }
+    
+    # Count appearances for display
+    appearances = []
+    section_map = {
+        f"w_{prefix}": ("W", "neutral"),
+        f"d_{prefix}": ("D", "neutral"),
+        f"l_{prefix}": ("L", "negative"),
+        f"nw_{prefix}": ("NW", "neutral"),
+        f"nd_{prefix}": ("ND", "neutral"),
+        f"best_team_{prefix}": ("⭐ Best", "positive"),
+        f"worst_team_{prefix}": ("⚠️ Worst", "negative"),
+        f"best_off_{prefix}": ("⚽ Best Off", "positive"),
+        f"best_def_{prefix}": ("🛡️ Best Def", "positive"),
+        f"worst_off_{prefix}": ("❌ Worst Off", "negative"),
+        f"worst_def_{prefix}": ("❌ Worst Def", "negative"),
+    }
+    
+    for col, (display, section_type) in section_map.items():
+        if match_data.get(col, 0) > 0:
+            appearances.append({"display": display, "type": section_type})
+    
+    score_data = calculate_team_score(team_data)
+    
+    if not appearances:
+        st.markdown(f"""
+        <div style="background:#0f172a; border-radius:8px; padding:0.75rem; margin:0.25rem 0;">
+            <span style="font-weight:700;">{team_name}</span>
+            <span style="color:#64748b; margin-left:0.5rem;">No appearances</span>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    badges = []
+    for app in appearances:
+        color = "#10b981" if app["type"] == "positive" else "#ef4444" if app["type"] == "negative" else "#fbbf24"
+        badge_class = "positive-badge" if app["type"] == "positive" else "negative-badge" if app["type"] == "negative" else "neutral-badge"
+        badges.append(f'<span class="appearance-badge {badge_class}" style="color:{color};">{app["display"]}</span>')
+    
+    profile_colors = {
+        "OFFENSIVE/POSITIVE": "#10b981",
+        "DEFENSIVE/NEGATIVE": "#ef4444",
+        "VOLATILE/MIXED": "#fbbf24",
+        "ESTABLISHED": "#3b82f6",
+        "WEAK PROFILE": "#64748b"
+    }
+    profile_color = profile_colors.get(score_data["profile"], "#64748b")
+    
+    st.markdown(f"""
+    <div style="background:#0f172a; border-radius:8px; padding:0.75rem; margin:0.25rem 0; border-left: 3px solid {profile_color};">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;">
+            <div>
+                <span style="font-weight:700;">{team_name}</span>
+                <span style="font-size:0.7rem; color:#94a3b8; margin-left:0.5rem;">{len(appearances)} appearances</span>
+            </div>
+            <div style="font-weight:800; font-size:1.2rem; color:{profile_color};">
+                {score_data["total_score"]:.0f}
+                <span style="font-size:0.7rem; font-weight:400; color:#94a3b8;">({score_data["profile"]})</span>
+            </div>
+        </div>
+        <div style="display:flex; gap:0.25rem; flex-wrap:wrap; margin-top:0.25rem;">
+            {' '.join(badges)}
+        </div>
+        <div style="display:flex; gap:1rem; font-size:0.7rem; margin-top:0.25rem; color:#94a3b8;">
+            <span>✅ Positive: {score_data["positive_count"]}</span>
+            <span>❌ Negative: {score_data["negative_count"]}</span>
+            <span>➖ Neutral: {score_data["neutral_count"]}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def display_prediction(match: dict, result: dict):
+    """Display prediction result"""
+    prediction = result["prediction"]
+    score = result["final_score"]
+    home_team = match.get("home_team", "Home")
+    away_team = match.get("away_team", "Away")
+    
+    if prediction == "NO_DRAW":
+        if result["confidence"] == "VERY HIGH":
+            card_class = "no-draw-card"
+            pred_class = "prediction-no-draw"
+            pred_emoji = "⚔️"
+            pred_text = "NO DRAW EXPECTED"
+            badge = f'<span class="no-draw-badge">✅ BET (Double Chance 12)</span>'
+        else:
+            card_class = "consider-card"
+            pred_class = "prediction-consider"
+            pred_emoji = "⚠️"
+            pred_text = "CONSIDER NO DRAW"
+            badge = f'<span class="consider-badge">⚠️ CONSIDER</span>'
+    elif prediction == "DRAW_POSSIBLE":
+        card_class = "draw-possible-card"
+        pred_class = "prediction-draw-possible"
+        pred_emoji = "🤝"
+        pred_text = "DRAW POSSIBLE"
+        badge = f'<span class="draw-possible-badge">🤝 DRAW POSSIBLE</span>'
+    else:
+        card_class = "skip-card"
+        pred_class = "prediction-skip"
+        pred_emoji = "❌"
+        pred_text = "SKIP"
+        badge = f'<span class="skip-badge">❌ SKIP</span>'
+    
+    st.markdown(f"""
+    <div class="output-card {card_class}">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap;">
+            <div>
+                <div style="font-size: 0.8rem; color: #94a3b8;">MULTI-APPEARANCE NO-DRAW PREDICTOR</div>
+                <div class="prediction-display {pred_class}">
+                    {pred_emoji} {pred_text}
+                </div>
+                <div>
+                    {badge}
+                    <span class="final-badge" style="margin-left:0.5rem;">Score: {score:.0f}</span>
+                </div>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 0.8rem; color: #94a3b8;">Confidence</div>
+                <div style="font-size: 1.5rem; font-weight: 800; color: #10b981;">{result.get('confidence', 'LOW')}</div>
+            </div>
+        </div>
+        <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
+            {result.get('action', '')}
+            <br><span style="color:#94a3b8;">{result.get('reason', '')}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.markdown("### 🏷️ Team Multi-Appearance Profiles")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        display_team_profile(match.get("home_team_data", {}), home_team)
+        st.caption(f"Home Score: {result['home_score']['total_score']:.0f}")
+    with col2:
+        display_team_profile(match.get("away_team_data", {}), away_team)
+        st.caption(f"Away Score: {result['away_score']['total_score']:.0f}")
+
+
 def display_prediction_from_db(match_data: dict, result: dict):
-    """Display the prediction result from database data"""
+    """Display prediction from database"""
     prediction = result["prediction"]
     score = result["final_score"]
     home_team = match_data.get("home_team", "Home")
@@ -411,6 +832,91 @@ def display_prediction_from_db(match_data: dict, result: dict):
 # ============================================================================
 # SUPABASE OPERATIONS
 # ============================================================================
+def save_to_db(match: dict, result: dict):
+    """Save matches that are NO_DRAW or DRAW_POSSIBLE"""
+    try:
+        prediction = result.get("prediction", "SKIP")
+        
+        if prediction not in ["NO_DRAW", "DRAW_POSSIBLE"]:
+            return "SKIPPED"
+            
+        home_team = match.get("home_team", "Unknown")
+        away_team = match.get("away_team", "Unknown")
+        match_date = match.get("date", datetime.now().strftime("%Y-%m-%d"))
+        dt = parse_match_date(match_date)
+        date_part = dt.strftime("%Y-%m-%d") if dt.year != 1900 else datetime.now().strftime("%Y-%m-%d")
+        
+        if check_match_exists(home_team, away_team, match_date):
+            return "ALREADY_EXISTS"
+        
+        home_data = match.get("home_team_data", {})
+        away_data = match.get("away_team_data", {})
+        home_score_data = result.get("home_score", {})
+        away_score_data = result.get("away_score", {})
+        
+        record = {
+            "match_date": date_part,
+            "home_team": home_team,
+            "away_team": away_team,
+            "league": match.get("league", "Unknown"),
+            "home_odds": match.get("home_odds", 0),
+            "draw_odds": match.get("draw_odds", 0),
+            "away_odds": match.get("away_odds", 0),
+            "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
+            
+            "w_home": home_data.get("w_team", 0),
+            "d_home": home_data.get("d_team", 0),
+            "l_home": home_data.get("l_team", 0),
+            "nw_home": home_data.get("nw_team", 0),
+            "nd_home": home_data.get("nd_team", 0),
+            "best_team_home": home_data.get("best_team", 0),
+            "worst_team_home": home_data.get("worst_team", 0),
+            "best_off_home": home_data.get("best_off", 0),
+            "best_def_home": home_data.get("best_def", 0),
+            "worst_off_home": home_data.get("worst_off", 0),
+            "worst_def_home": home_data.get("worst_def", 0),
+            
+            "w_away": away_data.get("w_team", 0),
+            "d_away": away_data.get("d_team", 0),
+            "l_away": away_data.get("l_team", 0),
+            "nw_away": away_data.get("nw_team", 0),
+            "nd_away": away_data.get("nd_team", 0),
+            "best_team_away": away_data.get("best_team", 0),
+            "worst_team_away": away_data.get("worst_team", 0),
+            "best_off_away": away_data.get("best_off", 0),
+            "best_def_away": away_data.get("best_def", 0),
+            "worst_off_away": away_data.get("worst_off", 0),
+            "worst_def_away": away_data.get("worst_def", 0),
+            
+            "multi_score": result.get("final_score", 0),
+            "home_score": home_score_data.get("total_score", 0),
+            "away_score": away_score_data.get("total_score", 0),
+            
+            "home_positive_count": home_score_data.get("positive_count", 0),
+            "home_negative_count": home_score_data.get("negative_count", 0),
+            "home_neutral_count": home_score_data.get("neutral_count", 0),
+            "home_total_appearances": home_score_data.get("total_appearances", 0),
+            "home_profile": home_score_data.get("profile", "WEAK PROFILE"),
+            
+            "away_positive_count": away_score_data.get("positive_count", 0),
+            "away_negative_count": away_score_data.get("negative_count", 0),
+            "away_neutral_count": away_score_data.get("neutral_count", 0),
+            "away_total_appearances": away_score_data.get("total_appearances", 0),
+            "away_profile": away_score_data.get("profile", "WEAK PROFILE"),
+            
+            "predicted": prediction,
+            "confidence": result.get("confidence", "LOW"),
+            "prediction_reason": result.get("reason", ""),
+        }
+        
+        response = supabase.table(TABLE_NAME).insert(record).execute()
+        return response.data[0]["id"] if response.data else None
+        
+    except Exception as e:
+        st.error(f"Failed to save: {e}")
+        return None
+
+
 def get_pending():
     try:
         response = supabase.table(TABLE_NAME).select("*").is_("actual_result", "null").execute()
@@ -555,55 +1061,158 @@ def main():
         | ≤ 2 | SKIP | LOW |
         """)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Database Predictions", "📝 Pending", "📊 Records", "📈 Dashboard"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Paste & Predict", "📝 Pending", "📊 Records", "📈 Dashboard"])
 
     with tab1:
-        st.subheader("📊 Predictions from Database")
+        st.markdown("### 📝 Paste Betexplorer Data OR Analyze Database")
         
-        # Button to analyze all predictions
-        if st.button("🔄 Analyze All Predictions", type="primary"):
-            with st.spinner("Analyzing predictions from database..."):
-                all_data = get_all_predictions()
-                if not all_data:
-                    st.warning("No predictions found in database.")
+        # Option 1: Paste data
+        st.markdown("#### Option 1: Paste New Data")
+        text_data = st.text_area(
+            "Paste Betexplorer data here",
+            height=200,
+            key="text_paste",
+            placeholder="Paste all Betexplorer page data here..."
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("⚔️ PREDICT FROM PASTED DATA", type="primary"):
+                if not text_data or len(text_data.strip()) < 10:
+                    st.error("❌ Please paste valid data.")
                 else:
-                    st.success(f"Found {len(all_data)} predictions in database")
-                    
-                    # Filter out records that already have actual results
-                    pending_data = [d for d in all_data if d.get("actual_result") is None]
-                    
-                    if pending_data:
-                        st.info(f"Analyzing {len(pending_data)} pending predictions...")
-                        
-                        analyzed_results = []
-                        for match in pending_data:
-                            result = predict_match_from_db(match)
-                            analyzed_results.append((match, result))
-                        
-                        # Display results
-                        no_draws = [(m, r) for m, r in analyzed_results if r.get("prediction") == "NO_DRAW"]
-                        draw_possibles = [(m, r) for m, r in analyzed_results if r.get("prediction") == "DRAW_POSSIBLE"]
-                        skips = [(m, r) for m, r in analyzed_results if r.get("prediction") == "SKIP"]
-                        
-                        if no_draws:
-                            st.markdown("#### ⚔️ NO DRAW PREDICTIONS")
-                            for idx, (match, result) in enumerate(no_draws, 1):
-                                st.markdown(f"##### Match #{idx}: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}")
-                                display_prediction_from_db(match, result)
-                                if idx < len(no_draws):
-                                    st.markdown("---")
-                        
-                        if draw_possibles:
-                            st.markdown("#### 🤝 DRAW POSSIBLE")
-                            for idx, (match, result) in enumerate(draw_possibles, 1):
-                                with st.expander(f"{match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')} - Score: {result.get('final_score', 0):.0f}"):
-                                    display_prediction_from_db(match, result)
-                        
-                        if skips:
-                            st.markdown("#### ❌ SKIPPED")
-                            st.caption(f"Total skipped: {len(skips)} matches")
+                    try:
+                        with st.spinner("Analyzing team multi-appearance profiles..."):
+                            matches = parse_betexplorer_data(text_data)
+                        if matches:
+                            st.success(f"✅ Found {len(matches)} unique matches")
+                            analyzed_results = []
+                            stored_count = already_stored_count = no_draw_count = draw_possible_count = 0
+                            
+                            for match in matches:
+                                match_for_prediction = {
+                                    "home": match.get("home_team_data", {}),
+                                    "away": match.get("away_team_data", {})
+                                }
+                                result = predict_match(match_for_prediction)
+                                exists = check_match_exists(match.get("home_team"), match.get("away_team"), match.get("date"))
+                                
+                                if exists:
+                                    already_stored_count += 1
+                                    analyzed_results.append((match, result, True))
+                                else:
+                                    if result["prediction"] in ["NO_DRAW", "DRAW_POSSIBLE"]:
+                                        saved_id = save_to_db(match, result)
+                                        if saved_id == "ALREADY_EXISTS":
+                                            already_stored_count += 1
+                                            analyzed_results.append((match, result, True))
+                                        elif saved_id:
+                                            stored_count += 1
+                                            analyzed_results.append((match, result, False))
+                                            if result["prediction"] == "NO_DRAW":
+                                                no_draw_count += 1
+                                            elif result["prediction"] == "DRAW_POSSIBLE":
+                                                draw_possible_count += 1
+                                        else:
+                                            analyzed_results.append((match, result, False))
+                                    else:
+                                        analyzed_results.append((match, result, False))
+                            
+                            st.info(f"💾 {stored_count} new predictions stored | {already_stored_count} already existed | ⚔️ {no_draw_count} no-draw bets | 🤝 {draw_possible_count} draw possible")
+                            
+                            if analyzed_results:
+                                st.markdown("---")
+                                st.markdown("### ⚔️ PREDICTION RESULTS")
+                                
+                                no_draws = [(m, r, s) for m, r, s in analyzed_results if r.get("prediction") == "NO_DRAW"]
+                                draw_possibles = [(m, r, s) for m, r, s in analyzed_results if r.get("prediction") == "DRAW_POSSIBLE"]
+                                skips = [(m, r, s) for m, r, s in analyzed_results if r.get("prediction") == "SKIP"]
+
+                                if no_draws:
+                                    st.markdown("#### ⚔️ NO DRAW PREDICTIONS")
+                                    for idx, (match, result, already_stored) in enumerate(no_draws, 1):
+                                        st.markdown(f"##### Match #{idx}: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}")
+                                        display_prediction(match, result)
+                                        if idx < len(no_draws):
+                                            st.markdown("---")
+
+                                if draw_possibles:
+                                    st.markdown("#### 🤝 DRAW POSSIBLE")
+                                    for idx, (match, result, already_stored) in enumerate(draw_possibles, 1):
+                                        with st.expander(f"{match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')} - Score: {result.get('final_score', 0):.0f}"):
+                                            display_prediction(match, result)
+
+                                if skips:
+                                    st.markdown("#### ❌ SKIPPED")
+                                    st.caption(f"Total skipped: {len(skips)} matches")
+                                    for idx, (match, result, already_stored) in enumerate(skips[:5], 1):
+                                        with st.expander(f"SKIP: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}"):
+                                            display_prediction(match, result)
+                                    if len(skips) > 5:
+                                        st.caption(f"... and {len(skips) - 5} more skipped matches")
+
+                                st.markdown("---")
+                                st.markdown("### 📊 Summary")
+                                col1, col2, col3, col4, col5 = st.columns(5)
+                                with col1:
+                                    st.metric("Total Matches", len(matches))
+                                with col2:
+                                    st.metric("⚔️ No Draw", no_draw_count)
+                                with col3:
+                                    st.metric("🤝 Draw Possible", draw_possible_count)
+                                with col4:
+                                    st.metric("💾 New Stored", stored_count)
+                                with col5:
+                                    st.metric("📌 Already Stored", already_stored_count)
+                        else:
+                            st.error("No matches found in the data.")
+                    except Exception as e:
+                        st.error(f"❌ Error: {str(e)}")
+                        st.code(traceback.format_exc())
+        
+        with col2:
+            st.markdown("#### Option 2: Analyze Database")
+            if st.button("🔄 ANALYZE DATABASE PREDICTIONS", type="secondary"):
+                with st.spinner("Analyzing predictions from database..."):
+                    all_data = get_all_predictions()
+                    if not all_data:
+                        st.warning("No predictions found in database.")
                     else:
-                        st.info("All predictions have been resolved. Check the Pending tab for unsubmitted results.")
+                        st.success(f"Found {len(all_data)} predictions in database")
+                        
+                        pending_data = [d for d in all_data if d.get("actual_result") is None]
+                        
+                        if pending_data:
+                            st.info(f"Analyzing {len(pending_data)} pending predictions...")
+                            
+                            analyzed_results = []
+                            for match in pending_data:
+                                result = predict_match_from_db(match)
+                                analyzed_results.append((match, result))
+                            
+                            no_draws = [(m, r) for m, r in analyzed_results if r.get("prediction") == "NO_DRAW"]
+                            draw_possibles = [(m, r) for m, r in analyzed_results if r.get("prediction") == "DRAW_POSSIBLE"]
+                            skips = [(m, r) for m, r in analyzed_results if r.get("prediction") == "SKIP"]
+                            
+                            if no_draws:
+                                st.markdown("#### ⚔️ NO DRAW PREDICTIONS (from DB)")
+                                for idx, (match, result) in enumerate(no_draws, 1):
+                                    st.markdown(f"##### Match #{idx}: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}")
+                                    display_prediction_from_db(match, result)
+                                    if idx < len(no_draws):
+                                        st.markdown("---")
+                            
+                            if draw_possibles:
+                                st.markdown("#### 🤝 DRAW POSSIBLE (from DB)")
+                                for idx, (match, result) in enumerate(draw_possibles, 1):
+                                    with st.expander(f"{match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')} - Score: {result.get('final_score', 0):.0f}"):
+                                        display_prediction_from_db(match, result)
+                            
+                            if skips:
+                                st.markdown("#### ❌ SKIPPED (from DB)")
+                                st.caption(f"Total skipped: {len(skips)} matches")
+                        else:
+                            st.info("All predictions have been resolved. Check the Pending tab for unsubmitted results.")
 
     with tab2:
         st.subheader("📝 Pending Matches")
@@ -622,7 +1231,6 @@ def main():
                 badge = f"{pred_display} ({confidence}) — Score: {score:.0f}"
                 
                 with st.expander(f"📅 {date_display} | {badge} | {ht} vs {at}"):
-                    # Show team profiles
                     col1, col2 = st.columns(2)
                     with col1:
                         display_team_profile_from_db(a, is_home=True)
@@ -668,7 +1276,6 @@ def main():
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Losses</div></div>', unsafe_allow_html=True)
             st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
             
-            # Performance chart
             if len(results) > 1:
                 df_results = pd.DataFrame(results)
                 df_results['match_date'] = pd.to_datetime(df_results['match_date'])
