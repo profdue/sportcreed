@@ -250,8 +250,11 @@ def parse_betexplorer_data(text: str) -> list:
         if not line:
             continue
         
-        # Detect page type
-        if 'Team\tW\tNext match' in line or 'Team, W, Next match' in line:
+        # Detect page type - FIXED for No Draws
+        if 'ND' in line and ('Next match' in line or '1\tX\t2' in line) or 'Team\tND\tNext match' in line or 'Team, ND, Next match' in line:
+            current_page_type = 'no_draws'
+            continue
+        elif 'Team\tW\tNext match' in line or 'Team, W, Next match' in line:
             current_page_type = 'wins'
             continue
         elif 'Team\tD\tNext match' in line or 'Team, D, Next match' in line:
@@ -265,9 +268,6 @@ def parse_betexplorer_data(text: str) -> list:
             continue
         elif 'Team\tNL\tNext match' in line or 'Team, NL, Next match' in line:
             current_page_type = 'no_losses'
-            continue
-        elif 'Team\tND\tNext match' in line or 'Team, ND, Next match' in line:
-            current_page_type = 'no_draws'
             continue
         elif 'Best teams' in line or 'Less streaks' in line:
             current_page_type = 'best_teams'
@@ -576,7 +576,7 @@ def save_to_db(match: dict, result: dict):
             "now_away": match.get("now_away", 0),
             "nol_home": match.get("nol_home", 0),
             "nol_away": match.get("nol_away", 0),
-            "dc12_vs": result.get("score", 0),  # Reusing field as No Draw Score
+            "dc12_vs": result.get("score", 0),
             "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
             "predicted": decision,
             "confidence": result.get("confidence", "LOW"),
