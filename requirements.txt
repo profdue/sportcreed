@@ -4,5 +4,6 @@ numpy>=1.26.0,<2.0
 pandas>=2.0.0
 plotly>=5.18.0
 supabase
+scikit-learn
 python-dotenv
 beautifulsoup4
