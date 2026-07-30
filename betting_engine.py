@@ -5,9 +5,16 @@ import pandas as pd
 import re
 import traceback
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import cross_val_score, StratifiedKFold
-from sklearn.preprocessing import StandardScaler
+
+# Try to import sklearn, fall back to simple rules if not available
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import cross_val_score, StratifiedKFold
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+
 import pickle
 import os
 
@@ -210,65 +217,6 @@ def engineer_features(match_data: dict) -> dict:
 
 
 # ============================================================================
-# LOGISTIC REGRESSION MODEL
-# ============================================================================
-class DrawPredictor:
-    def __init__(self):
-        self.model = None
-        self.scaler = None
-        self.is_trained = False
-        self.feature_names = [
-            'draw_odds_implied', 'home_off_ratio', 'away_def_ratio',
-            'profile_difference', 'both_weak', 'best_team_home',
-            'worst_def_away', 'dc_implied_no_draw'
-        ]
-    
-    def train(self, X, y):
-        """Train the logistic regression model with cross-validation"""
-        # Scale features
-        self.scaler = StandardScaler()
-        X_scaled = self.scaler.fit_transform(X)
-        
-        # Train model with L1 regularization
-        self.model = LogisticRegression(
-            penalty='l1',
-            solver='saga',
-            C=1.0,
-            max_iter=1000,
-            random_state=42,
-            class_weight='balanced'
-        )
-        self.model.fit(X_scaled, y)
-        self.is_trained = True
-        
-        # Cross-validation results
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        cv_scores = cross_val_score(self.model, X_scaled, y, cv=cv, scoring='accuracy')
-        
-        return {
-            'cv_accuracy_mean': cv_scores.mean(),
-            'cv_accuracy_std': cv_scores.std(),
-            'feature_importance': dict(zip(self.feature_names, self.model.coef_[0]))
-        }
-    
-    def predict_proba(self, features_dict):
-        """Predict probability of draw"""
-        if not self.is_trained:
-            return 0.5
-        
-        # Extract features in correct order
-        X = np.array([[features_dict.get(f, 0) for f in self.feature_names]])
-        X_scaled = self.scaler.transform(X)
-        proba = self.model.predict_proba(X_scaled)[0][1]  # Probability of draw
-        return proba
-    
-    def predict(self, features_dict, threshold=0.38):
-        """Predict draw (1) or no-draw (0)"""
-        proba = self.predict_proba(features_dict)
-        return 1 if proba > threshold else 0
-
-
-# ============================================================================
 # DECISION TREE RULES (Simplified from Logistic Regression)
 # ============================================================================
 def apply_decision_rules(features: dict) -> dict:
@@ -317,7 +265,7 @@ def apply_decision_rules(features: dict) -> dict:
         }
     
     # Over 2.5 Goals Rule
-    if draw_odds > 5.0 and home_off_ratio + away_def_ratio > 0.80:
+    if draw_odds > 5.0 and total_off_ratio > 0.80:
         return {
             'prediction': 'OVER_2.5',
             'confidence': 'MEDIUM',
@@ -327,7 +275,7 @@ def apply_decision_rules(features: dict) -> dict:
         }
     
     # Under 2.5 Goals Rule
-    if draw_odds < 3.5 and home_off_ratio + away_def_ratio < 0.50:
+    if draw_odds < 3.5 and total_off_ratio < 0.50:
         return {
             'prediction': 'UNDER_2.5',
             'confidence': 'MEDIUM',
@@ -575,64 +523,52 @@ def display_features(features: dict):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("""
+        st.markdown(f"""
         <div class="feature-box">
             <div class="feature-label">Draw Odds</div>
-            <div class="feature-value">{:.2f}</div>
+            <div class="feature-value">{features.get('draw_odds', 0):.2f}</div>
         </div>
         <div class="feature-box">
             <div class="feature-label">Draw Implied Probability</div>
-            <div class="feature-value">{:.1%}</div>
+            <div class="feature-value">{1 / features.get('draw_odds', 0) if features.get('draw_odds', 0) > 0 else 0:.1%}</div>
         </div>
         <div class="feature-box">
             <div class="feature-label">DC12 Odds</div>
-            <div class="feature-value">{:.2f}</div>
+            <div class="feature-value">{features.get('dc_implied_no_draw', 0):.2f}</div>
         </div>
-        """.format(
-            features.get('draw_odds', 0),
-            1 / features.get('draw_odds', 0) if features.get('draw_odds', 0) > 0 else 0,
-            features.get('dc_implied_no_draw', 0)
-        ), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
     
     with col2:
-        st.markdown("""
+        st.markdown(f"""
         <div class="feature-box">
             <div class="feature-label">Home Offensive Ratio</div>
-            <div class="feature-value">{:.2f}</div>
+            <div class="feature-value">{features.get('home_off_ratio', 0):.2f}</div>
         </div>
         <div class="feature-box">
             <div class="feature-label">Away Defensive Ratio</div>
-            <div class="feature-value">{:.2f}</div>
+            <div class="feature-value">{features.get('away_def_ratio', 0):.2f}</div>
         </div>
         <div class="feature-box">
             <div class="feature-label">Profile Difference</div>
-            <div class="feature-value">{:.2f}</div>
+            <div class="feature-value">{features.get('profile_difference', 0):.2f}</div>
         </div>
-        """.format(
-            features.get('home_off_ratio', 0),
-            features.get('away_def_ratio', 0),
-            features.get('profile_difference', 0)
-        ), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
     
     with col3:
-        st.markdown("""
+        st.markdown(f"""
         <div class="feature-box">
             <div class="feature-label">Both Weak</div>
-            <div class="feature-value">{}</div>
+            <div class="feature-value">{"✅" if features.get('both_weak', 0) == 1 else "❌"}</div>
         </div>
         <div class="feature-box">
             <div class="feature-label">Best Team Home</div>
-            <div class="feature-value">{}</div>
+            <div class="feature-value">{"✅" if features.get('best_team_home', 0) == 1 else "❌"}</div>
         </div>
         <div class="feature-box">
             <div class="feature-label">Worst Def Away</div>
-            <div class="feature-value">{}</div>
+            <div class="feature-value">{"✅" if features.get('worst_def_away', 0) == 1 else "❌"}</div>
         </div>
-        """.format(
-            "✅" if features.get('both_weak', 0) == 1 else "❌",
-            "✅" if features.get('best_team_home', 0) == 1 else "❌",
-            "✅" if features.get('worst_def_away', 0) == 1 else "❌"
-        ), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
 
 def display_prediction(result: dict, features: dict = None):
@@ -728,6 +664,15 @@ def save_to_db(match: dict, result: dict, features: dict):
         home_data = match.get("home_team_data", {})
         away_data = match.get("away_team_data", {})
         
+        # Map prediction to valid values for the constraint
+        pred_map = {
+            'NO_DRAW': 'NO_DRAW',
+            'DRAW': 'DRAW_POSSIBLE',  # Map to valid constraint value
+            'OVER_2.5': 'NO_DRAW',  # Map to valid constraint value
+            'UNDER_2.5': 'NO_DRAW',  # Map to valid constraint value
+        }
+        db_prediction = pred_map.get(prediction, 'SKIP')
+        
         record = {
             "match_date": date_part,
             "home_team": home_team,
@@ -771,9 +716,12 @@ def save_to_db(match: dict, result: dict, features: dict):
             "total_off_ratio": features.get("total_off_ratio", 0),
             
             "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
-            "predicted": prediction,
+            "predicted": db_prediction,
             "confidence": result.get("confidence", "LOW"),
             "multi_score": features.get("profile_difference", 0) * 10,  # Legacy field
+            
+            # Store actual bet type separately
+            "bet_type": prediction,
         }
         
         response = supabase.table(TABLE_NAME).insert(record).execute()
@@ -796,17 +744,18 @@ def get_pending():
 def submit_result(analysis_id, home_goals, away_goals):
     try:
         actual_result = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
-        response = supabase.table(TABLE_NAME).select("predicted").eq("id", analysis_id).execute()
+        response = supabase.table(TABLE_NAME).select("predicted", "bet_type").eq("id", analysis_id).execute()
         if response.data:
             predicted = response.data[0].get("predicted")
+            bet_type = response.data[0].get("bet_type", predicted)
             # Define correct predictions based on bet type
-            if predicted in ["NO_DRAW"]:
+            if bet_type in ["NO_DRAW"]:
                 is_correct = actual_result != "X"
-            elif predicted == "DRAW":
+            elif bet_type == "DRAW":
                 is_correct = actual_result == "X"
-            elif predicted in ["OVER_2.5"]:
+            elif bet_type in ["OVER_2.5"]:
                 is_correct = (home_goals + away_goals) > 2.5
-            elif predicted in ["UNDER_2.5"]:
+            elif bet_type in ["UNDER_2.5"]:
                 is_correct = (home_goals + away_goals) < 2.5
             else:
                 is_correct = False
@@ -852,7 +801,7 @@ def display_records_table(results: list):
     st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
     rows = []
     for r in results:
-        pred = r.get('predicted', '?')
+        pred = r.get('bet_type', r.get('predicted', '?'))
         actual = r.get('actual_result', '?')
         is_correct = r.get('is_correct', False)
         result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
@@ -874,13 +823,16 @@ def display_records_table(results: list):
 # ============================================================================
 def main():
     st.title("⚔️ Advanced No-Draw Predictor")
-    st.caption("Machine Learning-based predictions using draw odds and team profile ratios")
+    st.caption("Multi-feature prediction using draw odds and team profile ratios")
+
+    if not SKLEARN_AVAILABLE:
+        st.warning("⚠️ scikit-learn not available. Using simplified decision rules.")
 
     with st.expander("📖 HOW IT WORKS", expanded=False):
         st.markdown("""
         ### The New Approach
         
-        This system uses **8 engineered features** derived from the raw data, validated on 70 historical matches with actual results.
+        This system uses **8 engineered features** derived from the raw data.
         
         ### Key Features
         
@@ -895,27 +847,20 @@ def main():
         | Worst Def Away | binary flag | Weak away defense |
         | DC Implied No-Draw | 1 / double chance odds | Market expectation |
         
-        ### Decision Rules (Simplified from Logistic Regression)
+        ### Decision Rules
         
         1. **Primary No-Draw**: draw_odds > 4.50 AND home_off > 0.30 AND away_def < 0.25
         2. **Secondary No-Draw**: draw_odds > 3.80 AND profile_diff > 0.15 AND NOT both_weak
         3. **Draw Likely**: draw_odds ≤ 4.00 AND both_weak AND home_off < 0.20 AND away_def > 0.30
         4. **Over 2.5 Goals**: draw_odds > 5.0 AND total_off_ratio > 0.80
         5. **Under 2.5 Goals**: draw_odds < 3.5 AND total_off_ratio < 0.50
-        
-        ### Expected Performance (from 5-fold Cross-Validation)
-        
-        - Overall Accuracy: **~73%**
-        - No-Draw Accuracy: **~81%**
-        - Draw Accuracy: **~55%**
-        - Expected ROI on No-Draw bets: **+21.5%**
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["⚔️ Predict", "📝 Pending", "📊 Records", "📈 Dashboard"])
 
     with tab1:
         st.markdown("### 📝 Paste Betexplorer Data")
-        st.info("Predicts no-draw using advanced logistic regression features")
+        st.info("Predicts no-draw using advanced multi-feature analysis")
 
         text_data = st.text_area(
             "Paste Betexplorer data here",
@@ -929,7 +874,7 @@ def main():
                 st.error("❌ Please paste valid data.")
             else:
                 try:
-                    with st.spinner("Analyzing data with machine learning model..."):
+                    with st.spinner("Analyzing data with advanced features..."):
                         matches = parse_betexplorer_data(text_data)
                     if matches:
                         st.success(f"✅ Found {len(matches)} unique matches")
@@ -1036,7 +981,7 @@ def main():
             for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
-                pred = a.get('predicted', '?')
+                pred = a.get('bet_type', a.get('predicted', '?'))
                 confidence = a.get('confidence', '')
                 match_date = a.get('match_date', 'Date unknown')
                 date_display = format_date_display(match_date)
@@ -1081,7 +1026,7 @@ def main():
             st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
             rows = []
             for r in results:
-                pred = r.get('predicted', '?')
+                pred = r.get('bet_type', r.get('predicted', '?'))
                 actual = r.get('actual_result', '?')
                 is_correct = r.get('is_correct', False)
                 result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
