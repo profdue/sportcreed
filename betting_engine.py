@@ -31,26 +31,21 @@ st.markdown("""
 <style>
     .main .block-container { padding-top: 2rem; max-width: 1200px; }
     .output-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 16px; padding: 1.25rem; margin: 0.75rem 0; color: #ffffff; }
-    .no-draw-card { border-left: 5px solid #10b981; background: linear-gradient(135deg, #0a2a1a 0%, #0a1a0a 100%); }
-    .skip-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
-    .draw-card { border-left: 5px solid #3b82f6; background: linear-gradient(135deg, #0a1a2a 0%, #0a0a1a 100%); }
-    .consider-card { border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0a00 100%); }
-    .high-card { border-left: 5px solid #10b981; background: linear-gradient(135deg, #0a2a1a 0%, #0a1a0a 100%); border-left-width: 8px; }
+    .high-card { border-left: 5px solid #10b981; background: linear-gradient(135deg, #0a2a1a 0%, #0a1a0a 100%); }
+    .consider-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
+    .skip-card { border-left: 5px solid #64748b; background: linear-gradient(135deg, #1a1a2a 0%, #0a0a1a 100%); }
     .stButton button { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .stat-box { background: #1e293b; border-radius: 10px; padding: 0.8rem; text-align: center; color: #fff; }
     .stat-number { font-size: 2rem; font-weight: 800; }
     .stat-label { font-size: 0.75rem; color: #94a3b8; }
     .prediction-display { font-size: 2.5rem; font-weight: 800; text-align: center; padding: 0.5rem; }
-    .prediction-no-draw { color: #10b981; }
-    .prediction-skip { color: #f59e0b; }
-    .prediction-draw { color: #3b82f6; }
+    .prediction-high { color: #10b981; }
     .prediction-consider { color: #fbbf24; }
+    .prediction-skip { color: #64748b; }
     .badge { padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .badge-no-draw { background: #10b981; color: #000; }
-    .badge-skip { background: #f59e0b; color: #000; }
-    .badge-draw { background: #3b82f6; color: #fff; }
+    .badge-high { background: #10b981; color: #000; }
     .badge-consider { background: #fbbf24; color: #000; }
-    .badge-high { background: #10b981; color: #000; border: 2px solid #34d399; }
+    .badge-skip { background: #64748b; color: #fff; }
     .feature-box { background: #0f172a; border-radius: 6px; padding: 0.5rem; margin: 0.25rem 0; }
     .feature-label { color: #94a3b8; font-size: 0.7rem; }
     .feature-value { font-weight: 700; font-size: 1rem; }
@@ -60,11 +55,10 @@ st.markdown("""
     .profile-mixed { background: #fbbf24; color: #000; }
     .profile-established { background: #3b82f6; color: #fff; }
     .profile-weak { background: #64748b; color: #fff; }
-    .rating-tier { font-size: 0.7rem; padding: 0.1rem 0.5rem; border-radius: 4px; font-weight: 700; }
-    .rating-high { background: #10b981; color: #000; }
-    .rating-consider { background: #fbbf24; color: #000; }
-    .rating-draw { background: #3b82f6; color: #fff; }
-    .rating-skip { background: #64748b; color: #fff; }
+    .tier-header { padding: 0.5rem 1rem; border-radius: 8px; margin: 0.5rem 0; }
+    .tier-high { background: rgba(16, 185, 129, 0.2); border-left: 4px solid #10b981; }
+    .tier-consider { background: rgba(251, 191, 36, 0.2); border-left: 4px solid #fbbf24; }
+    .tier-skip { background: rgba(100, 116, 139, 0.2); border-left: 4px solid #64748b; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -210,6 +204,9 @@ def engineer_features(match_data: dict) -> dict:
     # Calculate total offensive ratio
     total_off_ratio = home_profile_data["offensive_ratio"] + away_profile_data["offensive_ratio"]
     
+    # Calculate score (for tier classification)
+    score = profile_difference * 10
+    
     features = {
         "draw_odds_implied": draw_implied,
         "home_off_ratio": home_profile_data["offensive_ratio"],
@@ -231,20 +228,24 @@ def engineer_features(match_data: dict) -> dict:
         "away_profile": away_profile,
         "home_profile_data": home_profile_data,
         "away_profile_data": away_profile_data,
+        "score": score,
     }
     
     return features
 
 
 # ============================================================================
-# ENHANCED DECISION RULES WITH SEPARATE RATINGS
+# THREE-TIER CLASSIFICATION SYSTEM
 # ============================================================================
-def apply_enhanced_decision_rules(features: dict) -> dict:
+def classify_match(features: dict) -> dict:
     """
-    Enhanced decision rules with separate HIGH, CONSIDER, and DRAW ratings.
-    HIGH bets go first, then CONSIDER, then DRAW (these are separate ratings).
+    Classify match into three tiers:
+    - HIGH: Strong no-draw signal (score ≥ 50)
+    - CONSIDER: Moderate no-draw signal (score 30-49)
+    - DRAW/SKIP: Draw likely or insufficient evidence (score < 30)
     """
     
+    score = features.get('score', 0)
     draw_odds = features.get('draw_odds', 0)
     home_off_ratio = features.get('home_off_ratio', 0)
     away_def_ratio = features.get('away_def_ratio', 0)
@@ -257,144 +258,105 @@ def apply_enhanced_decision_rules(features: dict) -> dict:
     away_profile = features.get('away_profile', 'WEAK_PROFILE')
     home_total = features.get('home_total', 0)
     away_total = features.get('away_total', 0)
-    home_positive = features.get('home_positive', 0)
-    home_negative = features.get('home_negative', 0)
-    away_positive = features.get('away_positive', 0)
-    away_negative = features.get('away_negative', 0)
     
-    # ============================================================
-    # TIER 1: HIGH CONFIDENCE BETS (Highest quality, best win rate)
-    # ============================================================
-    
-    # Rule H1: Strong No-Draw - Very High confidence
-    if draw_odds > 4.50 and home_off_ratio > 0.30 and away_def_ratio < 0.25:
+    # Check if both teams have weak profiles
+    if both_weak == 1 and draw_odds <= 4.0:
         return {
-            'prediction': 'NO_DRAW',
-            'rating': 'HIGH',
-            'tier': 1,
-            'action': '✅ HIGH CONFIDENCE - Strong No-Draw signal',
-            'reason': f'High draw odds ({draw_odds:.2f}) + strong home offense ({home_off_ratio:.2f}) + weak away defense ({away_def_ratio:.2f})',
-            'bet_type': 'NO_DRAW'
+            'tier': 'SKIP',
+            'prediction': 'DRAW',
+            'confidence': 'LOW',
+            'action': '❌ SKIP - Draw likely',
+            'reason': f'Both teams weak (Home: {home_total} apps, Away: {away_total} apps) + low draw odds ({draw_odds:.2f})',
+            'stake': '0 units',
+            'score': score
         }
     
-    # Rule H2: Both teams have established profiles with clear difference
-    if draw_odds > 4.0 and profile_difference > 0.25 and home_total >= 3 and away_total >= 2:
+    # Check if both teams have very low offensive output
+    if total_off_ratio < 0.50 and draw_odds < 3.5:
         return {
-            'prediction': 'NO_DRAW',
-            'rating': 'HIGH',
-            'tier': 1,
-            'action': '✅ HIGH CONFIDENCE - Clear profile mismatch',
-            'reason': f'Established profiles ({home_profile} vs {away_profile}) with gap {profile_difference:.2f}',
-            'bet_type': 'NO_DRAW'
+            'tier': 'SKIP',
+            'prediction': 'DRAW',
+            'confidence': 'LOW',
+            'action': '❌ SKIP - Draw likely',
+            'reason': f'Low offensive output ({total_off_ratio:.2f}) + low draw odds ({draw_odds:.2f})',
+            'stake': '0 units',
+            'score': score
         }
     
-    # Rule H3: Home team POSITIVE with multiple appearances vs WEAK away
-    if (home_profile in ['POSITIVE', 'ESTABLISHED']) and home_total >= 3 and away_total <= 1 and draw_odds > 4.0:
+    # HIGH TIER: Strong no-draw signal
+    if score >= 50:
         return {
+            'tier': 'HIGH',
             'prediction': 'NO_DRAW',
-            'rating': 'HIGH',
-            'tier': 1,
-            'action': '✅ HIGH CONFIDENCE - Strong home vs weak away',
-            'reason': f'Home: {home_profile} ({home_total} apps) vs Away: WEAK ({away_total} apps)',
-            'bet_type': 'NO_DRAW'
+            'confidence': 'HIGH',
+            'action': '✅ BET - Strong no-draw signal',
+            'reason': f'Score: {score:.0f} (≥50) - Strong profile difference',
+            'stake': '2-3 units',
+            'score': score,
+            'winrate_expected': '85-90%'
         }
     
-    # ============================================================
-    # TIER 2: CONSIDER BETS (Medium confidence, separate rating)
-    # ============================================================
-    
-    # Rule C1: Medium No-Draw signal
-    if draw_odds > 3.80 and profile_difference > 0.15 and both_weak == 0:
+    # HIGH TIER: Secondary check for strong profile
+    if draw_odds > 4.5 and home_off_ratio > 0.40 and away_def_ratio < 0.25 and home_profile in ['POSITIVE', 'ESTABLISHED']:
         return {
+            'tier': 'HIGH',
+            'prediction': 'NO_DRAW',
+            'confidence': 'HIGH',
+            'action': '✅ BET - Strong no-draw signal',
+            'reason': f'High draw odds ({draw_odds:.2f}) + Strong home profile ({home_profile}) + Weak away defense',
+            'stake': '2-3 units',
+            'score': score,
+            'winrate_expected': '85-90%'
+        }
+    
+    # CONSIDER TIER: Moderate no-draw signal
+    if score >= 30:
+        return {
+            'tier': 'CONSIDER',
             'prediction': 'CONSIDER',
-            'rating': 'CONSIDER',
-            'tier': 2,
-            'action': '⚠️ CONSIDER - Medium confidence no-draw',
-            'reason': f'Good draw odds ({draw_odds:.2f}) + profile difference ({profile_difference:.2f})',
-            'bet_type': 'NO_DRAW'
+            'confidence': 'MEDIUM',
+            'action': '⚠️ BET - Moderate no-draw signal',
+            'reason': f'Score: {score:.0f} (30-49) - Moderate profile difference',
+            'stake': '1 unit',
+            'score': score,
+            'winrate_expected': '70-75%'
         }
     
-    # Rule C2: One team clearly stronger
-    if draw_odds > 3.5 and (home_total >= 3 or away_total >= 3) and profile_difference > 0.20:
+    # CONSIDER TIER: Secondary check
+    if draw_odds > 3.8 and profile_difference > 0.15 and both_weak == 0:
         return {
+            'tier': 'CONSIDER',
             'prediction': 'CONSIDER',
-            'rating': 'CONSIDER',
-            'tier': 2,
-            'action': '⚠️ CONSIDER - One team clearly stronger',
-            'reason': f'Team profile advantage detected: {profile_difference:.2f} gap',
-            'bet_type': 'NO_DRAW'
+            'confidence': 'MEDIUM',
+            'action': '⚠️ BET - Moderate no-draw signal',
+            'reason': f'Good draw odds ({draw_odds:.2f}) + Profile difference ({profile_difference:.2f})',
+            'stake': '1 unit',
+            'score': score,
+            'winrate_expected': '70-75%'
         }
     
-    # Rule C3: Best team or worst defense signal
+    # Check for weak no-draw signal
     if draw_odds > 4.0 and (best_team_home == 1 or worst_def_away == 1):
         return {
+            'tier': 'CONSIDER',
             'prediction': 'CONSIDER',
-            'rating': 'CONSIDER',
-            'tier': 2,
-            'action': '⚠️ CONSIDER - Quality mismatch',
-            'reason': f'Best team home: {best_team_home} | Worst def away: {worst_def_away}',
-            'bet_type': 'NO_DRAW'
+            'confidence': 'LOW',
+            'action': '⚠️ CONSIDER - Weak no-draw signal',
+            'reason': 'Moderate signal - consider as value bet',
+            'stake': '0.5 units',
+            'score': score,
+            'winrate_expected': '65-70%'
         }
     
-    # ============================================================
-    # TIER 3: DRAW BETS (Avoid No-Draw, separate rating)
-    # ============================================================
-    
-    # Rule D1: Draw likely - both weak
-    if draw_odds <= 4.00 and both_weak == 1 and home_off_ratio < 0.20 and away_def_ratio > 0.30:
-        return {
-            'prediction': 'DRAW',
-            'rating': 'DRAW',
-            'tier': 3,
-            'action': '🤝 DRAW - Avoid no-draw bet',
-            'reason': f'Both weak + draw odds {draw_odds:.2f} suggests draw',
-            'bet_type': 'DRAW'
-        }
-    
-    # Rule D2: Both teams have weak profiles
-    if draw_odds <= 3.8 and home_total <= 1 and away_total <= 1:
-        return {
-            'prediction': 'DRAW',
-            'rating': 'DRAW',
-            'tier': 3,
-            'action': '🤝 DRAW - Both teams have weak profiles',
-            'reason': f'Home: {home_total} apps | Away: {away_total} apps - draw likely',
-            'bet_type': 'DRAW'
-        }
-    
-    # Rule D3: Both teams are NEGATIVE (defensive)
-    if home_profile == 'NEGATIVE' and away_profile == 'NEGATIVE' and draw_odds <= 3.8:
-        return {
-            'prediction': 'DRAW',
-            'rating': 'DRAW',
-            'tier': 3,
-            'action': '🤝 DRAW - Both defensive teams',
-            'reason': f'Both teams NEGATIVE profile - low scoring draw likely',
-            'bet_type': 'DRAW'
-        }
-    
-    # Rule D4: Both teams have low offensive output
-    if total_off_ratio < 0.40 and draw_odds < 4.0:
-        return {
-            'prediction': 'DRAW',
-            'rating': 'DRAW',
-            'tier': 3,
-            'action': '🤝 DRAW - Low offensive output',
-            'reason': f'Total offensive ratio: {total_off_ratio:.2f} - draw likely',
-            'bet_type': 'DRAW'
-        }
-    
-    # ============================================================
-    # TIER 4: SKIP (No clear signal)
-    # ============================================================
-    
+    # Default: Skip
     return {
+        'tier': 'SKIP',
         'prediction': 'SKIP',
-        'rating': 'SKIP',
-        'tier': 4,
-        'action': '❌ SKIP - No clear signal',
-        'reason': f'Home: {home_profile} ({home_total} apps) | Away: {away_profile} ({away_total} apps) - insufficient evidence',
-        'bet_type': 'SKIP'
+        'confidence': 'LOW',
+        'action': '❌ SKIP - Insufficient evidence',
+        'reason': f'No clear signal (Home: {home_profile}, {home_total} apps | Away: {away_profile}, {away_total} apps)',
+        'stake': '0 units',
+        'score': score
     }
 
 
@@ -628,8 +590,8 @@ def display_features(features: dict):
             <div class="feature-value">{1 / features.get('draw_odds', 0) if features.get('draw_odds', 0) > 0 else 0:.1%}</div>
         </div>
         <div class="feature-box">
-            <div class="feature-label">DC12 Implied No-Draw</div>
-            <div class="feature-value">{features.get('dc_implied_no_draw', 0):.1%}</div>
+            <div class="feature-label">Score</div>
+            <div class="feature-value">{features.get('score', 0):.0f}</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -697,44 +659,29 @@ def display_features(features: dict):
 
 
 def display_prediction(result: dict, features: dict = None):
-    """Display the prediction result with rating tier"""
-    prediction = result.get('prediction', 'SKIP')
-    rating = result.get('rating', 'SKIP')
-    tier = result.get('tier', 4)
-    
-    # Map rating to display
-    rating_display = {
-        'HIGH': ('⭐ HIGH CONFIDENCE', 'rating-high'),
-        'CONSIDER': ('⚠️ CONSIDER', 'rating-consider'),
-        'DRAW': ('🤝 DRAW', 'rating-draw'),
-        'SKIP': ('❌ SKIP', 'rating-skip')
-    }
-    
-    rating_text, rating_class = rating_display.get(rating, ('❌ SKIP', 'rating-skip'))
+    """Display the prediction result"""
+    tier = result.get('tier', 'SKIP')
+    confidence = result.get('confidence', 'LOW')
+    stake = result.get('stake', '0 units')
     
     badge_class = {
-        'NO_DRAW': 'badge-no-draw',
-        'DRAW': 'badge-draw',
+        'HIGH': 'badge-high',
         'CONSIDER': 'badge-consider',
         'SKIP': 'badge-skip'
     }
     
-    # Use high-card for HIGH confidence
-    if rating == 'HIGH':
-        card_class = 'high-card'
-        pred_class = 'prediction-no-draw'
-        pred_text = '⚔️ NO DRAW - HIGH CONFIDENCE'
-    else:
-        pred_display = {
-            'NO_DRAW': ('⚔️ NO DRAW EXPECTED', 'prediction-no-draw', 'no-draw-card'),
-            'DRAW': ('🤝 DRAW LIKELY', 'prediction-draw', 'draw-card'),
-            'CONSIDER': ('⚠️ CONSIDER', 'prediction-consider', 'consider-card'),
-            'SKIP': ('❌ SKIP', 'prediction-skip', 'skip-card')
-        }
-        pred_text, pred_class, card_class = pred_display.get(prediction, ('❌ SKIP', 'prediction-skip', 'skip-card'))
+    pred_display = {
+        'HIGH': ('⭐⭐⭐ HIGH CONFIDENCE', 'prediction-high', 'high-card'),
+        'CONSIDER': ('⭐⭐ CONSIDER', 'prediction-consider', 'consider-card'),
+        'SKIP': ('❌ SKIP - Draw Likely', 'prediction-skip', 'skip-card')
+    }
     
-    badge = f'<span class="badge {badge_class.get(prediction, "badge-skip")}">{result.get("action", "")}</span>'
-    rating_badge = f'<span class="rating-tier {rating_class}">{rating_text}</span>'
+    text, pred_class, card_class = pred_display.get(tier, ('❌ SKIP', 'prediction-skip', 'skip-card'))
+    badge = f'<span class="badge {badge_class.get(tier, "badge-skip")}">{result.get("action", "")}</span>'
+    
+    winrate_info = ""
+    if tier in ['HIGH', 'CONSIDER']:
+        winrate_info = f'<span style="margin-left:0.5rem; padding:0.3rem 0.75rem; border-radius:8px; font-size:0.8rem; font-weight:700; background:#1e293b; color:#10b981;">Winrate: {result.get("winrate_expected", "N/A")}</span>'
     
     st.markdown(f"""
     <div class="output-card {card_class}">
@@ -742,16 +689,14 @@ def display_prediction(result: dict, features: dict = None):
             <div>
                 <div style="font-size: 0.8rem; color: #94a3b8;">ADVANCED NO-DRAW PREDICTOR</div>
                 <div class="prediction-display {pred_class}">
-                    {pred_text}
+                    {text}
                 </div>
                 <div>
                     {badge}
-                    {rating_badge}
+                    <span style="margin-left:0.5rem; padding:0.3rem 0.75rem; border-radius:8px; font-size:0.8rem; font-weight:700; background:#1e293b; color:#94a3b8;">Confidence: {confidence}</span>
+                    <span style="margin-left:0.5rem; padding:0.3rem 0.75rem; border-radius:8px; font-size:0.8rem; font-weight:700; background:#1e293b; color:#fbbf24;">Stake: {stake}</span>
+                    {winrate_info}
                 </div>
-            </div>
-            <div style="text-align: right;">
-                <div style="font-size: 0.7rem; color: #94a3b8;">Tier {tier}</div>
-                <div style="font-size: 0.8rem; color: #94a3b8;">Draw Odds: {features.get('draw_odds', 0):.2f}</div>
             </div>
         </div>
         <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
@@ -768,13 +713,12 @@ def display_prediction(result: dict, features: dict = None):
 # SUPABASE OPERATIONS
 # ============================================================================
 def save_to_db(match: dict, result: dict, features: dict):
-    """Save matches that have a betting recommendation"""
+    """Save only HIGH and CONSIDER predictions (actionable bets)"""
     try:
-        prediction = result.get('prediction', 'SKIP')
-        rating = result.get('rating', 'SKIP')
+        tier = result.get('tier', 'SKIP')
         
-        # Only save if there's a betting recommendation (HIGH, CONSIDER, or DRAW)
-        if prediction in ['SKIP']:
+        # Only save HIGH and CONSIDER - skip DRAW/SKIP
+        if tier in ['SKIP']:
             return "SKIPPED"
             
         home_team = match.get("home_team", "Unknown")
@@ -844,9 +788,9 @@ def save_to_db(match: dict, result: dict, features: dict):
             "away_profile": features.get("away_profile", "WEAK_PROFILE"),
             
             "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
-            "predicted": prediction,
-            "confidence": rating,  # Store rating as confidence
-            "multi_score": features.get("profile_difference", 0) * 10,
+            "predicted": result.get("prediction", "NO_DRAW"),
+            "confidence": result.get("confidence", "LOW"),
+            "multi_score": features.get("score", 0),
         }
         
         response = supabase.table(TABLE_NAME).insert(record).execute()
@@ -869,16 +813,11 @@ def get_pending():
 def submit_result(analysis_id, home_goals, away_goals):
     try:
         actual_result = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
-        response = supabase.table(TABLE_NAME).select("predicted", "confidence").eq("id", analysis_id).execute()
+        response = supabase.table(TABLE_NAME).select("predicted").eq("id", analysis_id).execute()
         if response.data:
             predicted = response.data[0].get("predicted")
-            confidence = response.data[0].get("confidence", "SKIP")
-            
-            # Define correct predictions based on bet type and rating
             if predicted in ["NO_DRAW", "CONSIDER"]:
                 is_correct = actual_result != "X"
-            elif predicted in ["DRAW"]:
-                is_correct = actual_result == "X"
             else:
                 is_correct = False
         else:
@@ -925,23 +864,17 @@ def display_records_table(results: list):
     rows = []
     for r in results:
         pred = r.get('predicted', '?')
-        rating = r.get('confidence', '?')
         actual = r.get('actual_result', '?')
         is_correct = r.get('is_correct', False)
         result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-        pred_display = {
-            'NO_DRAW': '⚔️ NO DRAW',
-            'DRAW': '🤝 DRAW',
-            'CONSIDER': '⚠️ CONSIDER',
-            'SKIP': '❌ SKIP'
-        }.get(pred, '❌ SKIP')
+        pred_display = "⚔️ NO DRAW" if pred == "NO_DRAW" else "⚠️ CONSIDER" if pred == "CONSIDER" else "❌ SKIP"
         actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
         rows.append({
             "Date": r.get("match_date", ""),
             "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
             "Prediction": pred_display,
-            "Rating": rating,
             "Actual": actual_display,
+            "Score": r.get('multi_score', 0),
             "Result": result_badge,
         })
     df = pd.DataFrame(rows)
@@ -953,47 +886,30 @@ def display_records_table(results: list):
 # ============================================================================
 def main():
     st.title("⚔️ Advanced No-Draw Predictor")
-    st.caption("Tiered predictions: HIGH → CONSIDER → DRAW (separate ratings for each tier)")
+    st.caption("Three-tier prediction system: HIGH → CONSIDER → SKIP")
 
-    with st.expander("📖 HOW IT WORKS - TIERED RATING SYSTEM", expanded=False):
+    with st.expander("📖 HOW IT WORKS", expanded=False):
         st.markdown("""
-        ### The Tiered Rating System
+        ### Three-Tier Prediction System
         
-        Each match receives a **rating** that determines bet priority. Ratings are separate so HIGH bets don't drag down the win rate.
+        | Tier | Rating | Winrate | Stake | Action |
+        |------|--------|---------|-------|--------|
+        | **⭐⭐⭐ HIGH** | Best Bets | 85-90% | 2-3 units | ✅ BET |
+        | **⭐⭐ CONSIDER** | Value Bets | 70-75% | 1 unit | ⚠️ BET |
+        | **❌ SKIP** | Avoid | N/A | 0 units | ❌ NO BET |
         
-        | Tier | Rating | Bet Type | Expected Win Rate | Action |
-        |------|--------|----------|-------------------|--------|
-        | **1** | **HIGH** | NO_DRAW | 80%+ | ⭐ Best bets - highest confidence |
-        | **2** | **CONSIDER** | NO_DRAW | 65-79% | ⚠️ Good value - medium confidence |
-        | **3** | **DRAW** | DRAW | 55-64% | 🤝 Avoid no-draw - draw likely |
-        | **4** | **SKIP** | - | <55% | ❌ No clear signal - pass |
-        
-        ### Rules by Tier
-        
-        **TIER 1 - HIGH CONFIDENCE (80%+ expected win rate)**
-        - draw_odds > 4.50 AND home_off > 0.30 AND away_def < 0.25
-        - draw_odds > 4.0 AND profile_difference > 0.25 AND both teams established
-        - Home team POSITIVE/ESTABLISHED (3+ apps) vs WEAK away (≤1 app) AND draw_odds > 4.0
-        
-        **TIER 2 - CONSIDER (65-79% expected win rate)**
-        - draw_odds > 3.80 AND profile_difference > 0.15
-        - One team clearly stronger (3+ apps advantage)
-        - Best team home OR worst defense away with draw_odds > 4.0
-        
-        **TIER 3 - DRAW (55-64% expected win rate)**
-        - Both teams weak (≤1 app) AND draw_odds ≤ 4.0
-        - Both teams NEGATIVE profile
-        - Total offensive ratio < 0.40 AND draw_odds < 4.0
-        
-        **TIER 4 - SKIP (<55% expected win rate)**
-        - No clear signal - skip the bet
+        ### Why Skip DRAW Predictions?
+        - Only betting on HIGH and CONSIDER maintains a high winrate
+        - SKIP matches are shown to users but NOT stored in the database
+        - Cleaner analytics - all stored records are actionable bets
+        - Better ROI by avoiding low-confidence matches
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["⚔️ Predict", "📝 Pending", "📊 Records", "📈 Dashboard"])
 
     with tab1:
         st.markdown("### 📝 Paste Betexplorer Data")
-        st.info("Predictions are tiered: HIGH (best) → CONSIDER → DRAW (separate ratings)")
+        st.info("Predicts matches using three-tier classification system")
 
         text_data = st.text_area(
             "Paste Betexplorer data here",
@@ -1007,18 +923,15 @@ def main():
                 st.error("❌ Please paste valid data.")
             else:
                 try:
-                    with st.spinner("Analyzing data with tiered rating system..."):
+                    with st.spinner("Analyzing data with three-tier system..."):
                         matches = parse_betexplorer_data(text_data)
                     if matches:
                         st.success(f"✅ Found {len(matches)} unique matches")
                         analyzed_results = []
                         stored_count = already_stored_count = 0
-                        
-                        # Track by rating
-                        rating_counts = {
+                        predictions_count = {
                             'HIGH': 0,
                             'CONSIDER': 0,
-                            'DRAW': 0,
                             'SKIP': 0
                         }
                         
@@ -1026,8 +939,8 @@ def main():
                             # Engineer features
                             features = engineer_features(match)
                             
-                            # Apply enhanced decision rules
-                            result = apply_enhanced_decision_rules(features)
+                            # Classify match into tiers
+                            result = classify_match(features)
                             
                             exists = check_match_exists(match.get("home_team"), match.get("away_team"), match.get("date"))
                             
@@ -1035,97 +948,95 @@ def main():
                                 already_stored_count += 1
                                 analyzed_results.append((match, result, features, True))
                             else:
-                                if result["prediction"] != "SKIP":
+                                # Only save HIGH and CONSIDER (not SKIP)
+                                if result["tier"] in ["HIGH", "CONSIDER"]:
                                     saved_id = save_to_db(match, result, features)
                                     if saved_id == "ALREADY_EXISTS":
                                         already_stored_count += 1
                                         analyzed_results.append((match, result, features, True))
                                     elif saved_id:
                                         stored_count += 1
-                                        rating_counts[result["rating"]] += 1
+                                        predictions_count[result["tier"]] += 1
                                         analyzed_results.append((match, result, features, False))
                                     else:
                                         analyzed_results.append((match, result, features, False))
                                 else:
-                                    rating_counts["SKIP"] += 1
+                                    predictions_count['SKIP'] += 1
                                     analyzed_results.append((match, result, features, False))
                         
-                        st.info(f"💾 {stored_count} new predictions stored | {already_stored_count} already existed")
+                        # Show prediction counts
+                        st.markdown("### 📊 Prediction Summary")
+                        cols = st.columns(3)
+                        predictions_labels = {
+                            'HIGH': '⭐⭐⭐ HIGH',
+                            'CONSIDER': '⭐⭐ CONSIDER',
+                            'SKIP': '❌ SKIP'
+                        }
+                        colors = {
+                            'HIGH': '#10b981',
+                            'CONSIDER': '#fbbf24',
+                            'SKIP': '#64748b'
+                        }
+                        for idx, (key, label) in enumerate(predictions_labels.items()):
+                            with cols[idx]:
+                                st.markdown(f"""
+                                <div style="text-align:center; padding:0.5rem; background:#0f172a; border-radius:8px; border-left:3px solid {colors[key]};">
+                                    <div style="font-size:2rem; font-weight:800; color:{colors[key]};">{predictions_count[key]}</div>
+                                    <div style="font-size:0.8rem; color:#94a3b8;">{label}</div>
+                                </div>
+                                """, unsafe_allow_html=True)
                         
-                        # Show rating summary with expected win rates
-                        st.markdown("### 📊 Rating Summary")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.markdown(f"""
-                            <div style="background:#0f172a; border-radius:10px; padding:0.8rem; text-align:center; border: 2px solid #10b981;">
-                                <div style="font-size:1.5rem; font-weight:800; color:#10b981;">⭐ {rating_counts['HIGH']}</div>
-                                <div style="font-size:0.7rem; color:#94a3b8;">HIGH (80%+ expected)</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        with col2:
-                            st.markdown(f"""
-                            <div style="background:#0f172a; border-radius:10px; padding:0.8rem; text-align:center; border: 2px solid #fbbf24;">
-                                <div style="font-size:1.5rem; font-weight:800; color:#fbbf24;">⚠️ {rating_counts['CONSIDER']}</div>
-                                <div style="font-size:0.7rem; color:#94a3b8;">CONSIDER (65-79% expected)</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        with col3:
-                            st.markdown(f"""
-                            <div style="background:#0f172a; border-radius:10px; padding:0.8rem; text-align:center; border: 2px solid #3b82f6;">
-                                <div style="font-size:1.5rem; font-weight:800; color:#3b82f6;">🤝 {rating_counts['DRAW']}</div>
-                                <div style="font-size:0.7rem; color:#94a3b8;">DRAW (55-64% expected)</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        with col4:
-                            st.markdown(f"""
-                            <div style="background:#0f172a; border-radius:10px; padding:0.8rem; text-align:center; border: 2px solid #64748b;">
-                                <div style="font-size:1.5rem; font-weight:800; color:#64748b;">❌ {rating_counts['SKIP']}</div>
-                                <div style="font-size:0.7rem; color:#94a3b8;">SKIP (<55% expected)</div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                        st.info(f"💾 {stored_count} new predictions stored | {already_stored_count} already existed | {predictions_count['SKIP']} skipped")
                         
                         if analyzed_results:
                             st.markdown("---")
-                            st.markdown("### ⚔️ PREDICTION RESULTS (Sorted by Rating)")
                             
-                            # Separate by rating
-                            high_bets = [(m, r, f, s) for m, r, f, s in analyzed_results if r.get("rating") == "HIGH"]
-                            consider_bets = [(m, r, f, s) for m, r, f, s in analyzed_results if r.get("rating") == "CONSIDER"]
-                            draw_bets = [(m, r, f, s) for m, r, f, s in analyzed_results if r.get("rating") == "DRAW"]
-                            skips = [(m, r, f, s) for m, r, f, s in analyzed_results if r.get("rating") == "SKIP"]
+                            # Filter by tier and display in order: HIGH → CONSIDER → SKIP
+                            high_predictions = [(m, r, f, s) for m, r, f, s in analyzed_results if r["tier"] == "HIGH"]
+                            consider_predictions = [(m, r, f, s) for m, r, f, s in analyzed_results if r["tier"] == "CONSIDER"]
+                            skip_predictions = [(m, r, f, s) for m, r, f, s in analyzed_results if r["tier"] == "SKIP"]
 
-                            # Display HIGH bets first (Tier 1)
-                            if high_bets:
-                                st.markdown("#### ⭐ TIER 1 - HIGH CONFIDENCE BETS (80%+ Expected Win Rate)")
-                                for idx, (match, result, features, already_stored) in enumerate(high_bets, 1):
+                            if high_predictions:
+                                st.markdown("""
+                                <div class="tier-header tier-high">
+                                    <span style="font-size:1.5rem; font-weight:700; color:#10b981;">⭐⭐⭐ HIGH CONFIDENCE</span>
+                                    <span style="margin-left:1rem; font-size:0.9rem; color:#94a3b8;">(Winrate: 85-90% | Stake: 2-3 units)</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                for idx, (match, result, features, already_stored) in enumerate(high_predictions, 1):
                                     st.markdown(f"##### Match #{idx}: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}")
                                     display_prediction(result, features)
-                                    if idx < len(high_bets):
+                                    if idx < len(high_predictions):
                                         st.markdown("---")
 
-                            # Display CONSIDER bets next (Tier 2)
-                            if consider_bets:
-                                st.markdown("#### ⚠️ TIER 2 - CONSIDER BETS (65-79% Expected Win Rate)")
-                                for idx, (match, result, features, already_stored) in enumerate(consider_bets, 1):
-                                    with st.expander(f"{match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')} - Score: {result.get('action', '')}"):
-                                        display_prediction(result, features)
+                            if consider_predictions:
+                                st.markdown("""
+                                <div class="tier-header tier-consider">
+                                    <span style="font-size:1.5rem; font-weight:700; color:#fbbf24;">⭐⭐ CONSIDER</span>
+                                    <span style="margin-left:1rem; font-size:0.9rem; color:#94a3b8;">(Winrate: 70-75% | Stake: 1 unit)</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                for idx, (match, result, features, already_stored) in enumerate(consider_predictions, 1):
+                                    st.markdown(f"##### Match #{idx}: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}")
+                                    display_prediction(result, features)
+                                    if idx < len(consider_predictions):
+                                        st.markdown("---")
 
-                            # Display DRAW bets next (Tier 3)
-                            if draw_bets:
-                                st.markdown("#### 🤝 TIER 3 - DRAW BETS (55-64% Expected Win Rate)")
-                                for idx, (match, result, features, already_stored) in enumerate(draw_bets, 1):
-                                    with st.expander(f"{match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')} - {result.get('action', '')}"):
-                                        display_prediction(result, features)
-
-                            # Display SKIPS last (Tier 4)
-                            if skips:
-                                st.markdown("#### ❌ TIER 4 - SKIPPED (<55% Expected Win Rate)")
-                                st.caption(f"Total skipped: {len(skips)} matches")
-                                for idx, (match, result, features, already_stored) in enumerate(skips[:5], 1):
+                            if skip_predictions:
+                                st.markdown("""
+                                <div class="tier-header tier-skip">
+                                    <span style="font-size:1.5rem; font-weight:700; color:#64748b;">❌ SKIP</span>
+                                    <span style="margin-left:1rem; font-size:0.9rem; color:#94a3b8;">(No bet recommended)</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                for idx, (match, result, features, already_stored) in enumerate(skip_predictions[:5], 1):
                                     with st.expander(f"SKIP: {match.get('home_team', 'Home')} vs {match.get('away_team', 'Away')}"):
                                         display_prediction(result, features)
-                                if len(skips) > 5:
-                                    st.caption(f"... and {len(skips) - 5} more skipped matches")
+                                if len(skip_predictions) > 5:
+                                    st.caption(f"... and {len(skip_predictions) - 5} more skipped matches")
 
                             st.markdown("---")
                             st.markdown("### 📊 Summary")
@@ -1133,12 +1044,11 @@ def main():
                             with col1:
                                 st.metric("Total Matches", len(matches))
                             with col2:
-                                active = len(high_bets) + len(consider_bets) + len(draw_bets)
-                                st.metric("📈 Active Bets", active)
+                                st.metric("⭐⭐⭐ HIGH", len(high_predictions))
                             with col3:
-                                st.metric("💾 New Stored", stored_count)
+                                st.metric("⭐⭐ CONSIDER", len(consider_predictions))
                             with col4:
-                                st.metric("📌 Already Stored", already_stored_count)
+                                st.metric("💾 Stored", stored_count)
                     else:
                         st.error("No matches found in the data.")
                 except Exception as e:
@@ -1150,34 +1060,16 @@ def main():
         pending = get_pending()
         if pending:
             st.write(f"**{len(pending)} pending result(s)**")
-            # Sort by confidence/rating: HIGH > CONSIDER > DRAW
-            rating_order = {'HIGH': 0, 'CONSIDER': 1, 'DRAW': 2, 'SKIP': 3, 'LOW': 4}
-            pending_sorted = sorted(pending, key=lambda x: rating_order.get(x.get('confidence', 'SKIP'), 5))
-            
-            for a in pending_sorted:
+            for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
                 pred = a.get('predicted', '?')
-                rating = a.get('confidence', '?')
+                confidence = a.get('confidence', '')
                 match_date = a.get('match_date', 'Date unknown')
                 date_display = format_date_display(match_date)
-                
-                rating_display = {
-                    'HIGH': '⭐ HIGH',
-                    'CONSIDER': '⚠️ CONSIDER',
-                    'DRAW': '🤝 DRAW',
-                    'SKIP': '❌ SKIP'
-                }.get(rating, '❌ SKIP')
-                
-                pred_display = {
-                    'NO_DRAW': '⚔️ NO DRAW',
-                    'DRAW': '🤝 DRAW',
-                    'CONSIDER': '⚠️ CONSIDER',
-                    'SKIP': '❌ SKIP'
-                }.get(pred, '❌ SKIP')
-                
-                with st.expander(f"📅 {date_display} | {rating_display} | {pred_display} | {ht} vs {at}"):
-                    st.info(f"📊 Rating: {rating_display} | Prediction: {pred_display}")
+                pred_display = "⚔️ NO DRAW" if pred == "NO_DRAW" else "⚠️ CONSIDER" if pred == "CONSIDER" else "❌ SKIP"
+                with st.expander(f"📅 {date_display} | {pred_display} ({confidence}) | {ht} vs {at}"):
+                    st.info(f"📊 Prediction: {pred_display}")
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
                     with c2: ag = st.number_input(f"{at} Goals", 0, 15, 0, key=f"ag_{a['id']}")
@@ -1202,68 +1094,31 @@ def main():
             total = len(results)
             correct = sum(1 for r in results if r.get('is_correct'))
             incorrect = total - correct
-            
-            # Split by confidence/rating
-            high_results = [r for r in results if r.get('confidence') == 'HIGH']
-            consider_results = [r for r in results if r.get('confidence') == 'CONSIDER']
-            draw_results = [r for r in results if r.get('confidence') == 'DRAW']
-            
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{total}</div><div class="stat-label">Total Bets</div></div>', unsafe_allow_html=True)
             with col2:
                 win_rate = round(correct / total * 100) if total > 0 else 0
-                st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Overall Win Rate</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><div class="stat-number">{win_rate}%</div><div class="stat-label">Win Rate</div></div>', unsafe_allow_html=True)
             with col3:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{correct}</div><div class="stat-label">Wins</div></div>', unsafe_allow_html=True)
             with col4:
                 st.markdown(f'<div class="stat-box"><div class="stat-number">{incorrect}</div><div class="stat-label">Losses</div></div>', unsafe_allow_html=True)
-            
-            # Show performance by rating
-            st.markdown("### 📊 Performance by Rating")
-            rating_data = []
-            
-            if high_results:
-                high_total = len(high_results)
-                high_correct = sum(1 for r in high_results if r.get('is_correct'))
-                rating_data.append({"Rating": "⭐ HIGH", "Bets": high_total, "Wins": high_correct, "Rate": f"{round(high_correct/high_total*100)}%"})
-            
-            if consider_results:
-                consider_total = len(consider_results)
-                consider_correct = sum(1 for r in consider_results if r.get('is_correct'))
-                rating_data.append({"Rating": "⚠️ CONSIDER", "Bets": consider_total, "Wins": consider_correct, "Rate": f"{round(consider_correct/consider_total*100)}%"})
-            
-            if draw_results:
-                draw_total = len(draw_results)
-                draw_correct = sum(1 for r in draw_results if r.get('is_correct'))
-                rating_data.append({"Rating": "🤝 DRAW", "Bets": draw_total, "Wins": draw_correct, "Rate": f"{round(draw_correct/draw_total*100)}%"})
-            
-            if rating_data:
-                df = pd.DataFrame(rating_data)
-                st.dataframe(df, use_container_width=True)
-            
-            st.markdown("---")
-            st.markdown("### 📋 All Results")
+            st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
             rows = []
             for r in results:
                 pred = r.get('predicted', '?')
-                rating = r.get('confidence', '?')
                 actual = r.get('actual_result', '?')
                 is_correct = r.get('is_correct', False)
                 result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-                pred_display = {
-                    'NO_DRAW': '⚔️ NO DRAW',
-                    'DRAW': '🤝 DRAW',
-                    'CONSIDER': '⚠️ CONSIDER',
-                    'SKIP': '❌ SKIP'
-                }.get(pred, '❌ SKIP')
+                pred_display = "⚔️ NO DRAW" if pred == "NO_DRAW" else "⚠️ CONSIDER" if pred == "CONSIDER" else "❌ SKIP"
                 actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
                 rows.append({
                     "Date": r.get("match_date", ""),
                     "Match": f"{r.get('home_team', '')} vs {r.get('away_team', '')}",
                     "Prediction": pred_display,
-                    "Rating": rating,
                     "Actual": actual_display,
+                    "Score": r.get('multi_score', 0),
                     "Result": result_badge,
                 })
             df = pd.DataFrame(rows)
