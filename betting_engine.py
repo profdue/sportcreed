@@ -34,8 +34,7 @@ st.markdown("""
     .no-draw-card { border-left: 5px solid #10b981; background: linear-gradient(135deg, #0a2a1a 0%, #0a1a0a 100%); }
     .skip-card { border-left: 5px solid #fbbf24; background: linear-gradient(135deg, #2a2a00 0%, #1a1a00 100%); }
     .draw-card { border-left: 5px solid #3b82f6; background: linear-gradient(135deg, #0a1a2a 0%, #0a0a1a 100%); }
-    .over-card { border-left: 5px solid #8b5cf6; background: linear-gradient(135deg, #1a0a2a 0%, #0a0a1a 100%); }
-    .under-card { border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0a00 100%); }
+    .consider-card { border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #2a1a00 0%, #1a0a00 100%); }
     .stButton button { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; font-weight: 700; border-radius: 12px; padding: 0.6rem 1rem; border: none; width: 100%; }
     .stat-box { background: #1e293b; border-radius: 10px; padding: 0.8rem; text-align: center; color: #fff; }
     .stat-number { font-size: 2rem; font-weight: 800; }
@@ -44,14 +43,12 @@ st.markdown("""
     .prediction-no-draw { color: #10b981; }
     .prediction-skip { color: #f59e0b; }
     .prediction-draw { color: #3b82f6; }
-    .prediction-over { color: #8b5cf6; }
-    .prediction-under { color: #f59e0b; }
+    .prediction-consider { color: #fbbf24; }
     .badge { padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
     .badge-no-draw { background: #10b981; color: #000; }
     .badge-skip { background: #f59e0b; color: #000; }
     .badge-draw { background: #3b82f6; color: #fff; }
-    .badge-over { background: #8b5cf6; color: #fff; }
-    .badge-under { background: #f59e0b; color: #000; }
+    .badge-consider { background: #fbbf24; color: #000; }
     .feature-box { background: #0f172a; border-radius: 6px; padding: 0.5rem; margin: 0.25rem 0; }
     .feature-label { color: #94a3b8; font-size: 0.7rem; }
     .feature-value { font-weight: 700; font-size: 1rem; }
@@ -181,6 +178,8 @@ def engineer_features(match_data: dict) -> dict:
         "away_positive": away_profile["positive_count"],
         "away_negative": away_profile["negative_count"],
         "away_total": away_profile["total_appearances"],
+        "home_profile": home_profile,
+        "away_profile": away_profile,
     }
     
     return features
@@ -227,29 +226,29 @@ def apply_decision_rules(features: dict) -> dict:
     # Draw Rule: Avoid betting on No-Draw
     if draw_odds <= 4.00 and both_weak == 1 and home_off_ratio < 0.20 and away_def_ratio > 0.30:
         return {
-            'prediction': 'DRAW_POSSIBLE',
+            'prediction': 'DRAW',
             'confidence': 'MEDIUM',
             'action': '❌ AVOID - Draw likely',
             'reason': 'Low draw odds + both teams weak + defensive mismatch',
             'bet_type': 'DRAW'
         }
     
-    # Over 2.5 Goals Rule
+    # Over 2.5 Goals Rule - Map to NO_DRAW since it's a similar bet
     if draw_odds > 5.0 and total_off_ratio > 0.80:
         return {
-            'prediction': 'OVER_2.5',
+            'prediction': 'NO_DRAW',
             'confidence': 'MEDIUM',
-            'action': '⚽ BET - Over 2.5 goals expected',
+            'action': '⚽ BET - Over 2.5 goals expected (use No-Draw as proxy)',
             'reason': 'High draw odds + high offensive output',
             'bet_type': 'OVER'
         }
     
-    # Under 2.5 Goals Rule
+    # Under 2.5 Goals Rule - Map to DRAW since it's a similar signal
     if draw_odds < 3.5 and total_off_ratio < 0.50:
         return {
-            'prediction': 'UNDER_2.5',
+            'prediction': 'DRAW',
             'confidence': 'MEDIUM',
-            'action': '⚽ BET - Under 2.5 goals expected',
+            'action': '⚽ BET - Under 2.5 goals expected (use Draw as proxy)',
             'reason': 'Low draw odds + low offensive output',
             'bet_type': 'UNDER'
         }
@@ -257,7 +256,7 @@ def apply_decision_rules(features: dict) -> dict:
     # Weak No-Draw signal (consider but low confidence)
     if draw_odds > 4.0 and (best_team_home == 1 or worst_def_away == 1):
         return {
-            'prediction': 'NO_DRAW',
+            'prediction': 'CONSIDER',
             'confidence': 'LOW',
             'action': '⚠️ CONSIDER - Weak no-draw signal',
             'reason': 'Moderate signal - consider as value bet',
@@ -498,7 +497,11 @@ def display_features(features: dict):
             <div class="feature-label">Draw Implied Probability</div>
             <div class="feature-value">{1 / features.get('draw_odds', 0) if features.get('draw_odds', 0) > 0 else 0:.1%}</div>
         </div>
-        </""", unsafe_allow_html=True)
+        <div class="feature-box">
+            <div class="feature-label">DC12 Implied No-Draw</div>
+            <div class="feature-value">{features.get('dc_implied_no_draw', 0):.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col2:
         st.markdown(f"""
@@ -530,6 +533,10 @@ def display_features(features: dict):
             <div class="feature-label">Worst Def Away</div>
             <div class="feature-value">{"✅" if features.get('worst_def_away', 0) == 1 else "❌"}</div>
         </div>
+        <div class="feature-box">
+            <div class="feature-label">Total Offensive Ratio</div>
+            <div class="feature-value">{features.get('total_off_ratio', 0):.2f}</div>
+        </div>
         """, unsafe_allow_html=True)
 
 
@@ -540,22 +547,25 @@ def display_prediction(result: dict, features: dict = None):
     
     badge_class = {
         'NO_DRAW': 'badge-no-draw',
-        'DRAW_POSSIBLE': 'badge-draw',
-        'OVER_2.5': 'badge-over',
-        'UNDER_2.5': 'badge-under',
+        'DRAW': 'badge-draw',
+        'CONSIDER': 'badge-consider',
         'SKIP': 'badge-skip'
     }
     
     pred_display = {
         'NO_DRAW': ('⚔️ NO DRAW EXPECTED', 'prediction-no-draw', 'no-draw-card'),
-        'DRAW_POSSIBLE': ('🤝 DRAW POSSIBLE', 'prediction-draw', 'draw-card'),
-        'OVER_2.5': ('⚽ OVER 2.5 GOALS', 'prediction-over', 'over-card'),
-        'UNDER_2.5': ('⚽ UNDER 2.5 GOALS', 'prediction-under', 'under-card'),
+        'DRAW': ('🤝 DRAW LIKELY', 'prediction-draw', 'draw-card'),
+        'CONSIDER': ('⚠️ CONSIDER', 'prediction-consider', 'consider-card'),
         'SKIP': ('❌ SKIP', 'prediction-skip', 'skip-card')
     }
     
     text, pred_class, card_class = pred_display.get(prediction, ('❌ SKIP', 'prediction-skip', 'skip-card'))
     badge = f'<span class="badge {badge_class.get(prediction, "badge-skip")}">{result.get("action", "")}</span>'
+    
+    # Additional info for over/under bets
+    extra_info = ""
+    if result.get('bet_type') in ['OVER', 'UNDER']:
+        extra_info = f'<br><span style="color:#94a3b8;">Bet Type: {result.get("bet_type")} 2.5 goals</span>'
     
     st.markdown(f"""
     <div class="output-card {card_class}">
@@ -573,6 +583,7 @@ def display_prediction(result: dict, features: dict = None):
         </div>
         <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
             {result.get('reason', '')}
+            {extra_info}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -610,6 +621,7 @@ def save_to_db(match: dict, result: dict, features: dict):
             "match_date": date_part,
             "home_team": home_team,
             "away_team": away_team,
+            "league": match.get("league", "Unknown"),
             "home_odds": match.get("home_odds", 0),
             "draw_odds": match.get("draw_odds", 0),
             "away_odds": match.get("away_odds", 0),
@@ -648,6 +660,14 @@ def save_to_db(match: dict, result: dict, features: dict):
             "both_weak": features.get("both_weak", 0),
             "total_off_ratio": features.get("total_off_ratio", 0),
             
+            # Profile counts
+            "home_positive_count": features.get("home_positive", 0),
+            "home_negative_count": features.get("home_negative", 0),
+            "home_total_appearances": features.get("home_total", 0),
+            "away_positive_count": features.get("away_positive", 0),
+            "away_negative_count": features.get("away_negative", 0),
+            "away_total_appearances": features.get("away_total", 0),
+            
             "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
             "predicted": prediction,
             "confidence": result.get("confidence", "LOW"),
@@ -679,12 +699,10 @@ def submit_result(analysis_id, home_goals, away_goals):
             predicted = response.data[0].get("predicted")
             if predicted in ["NO_DRAW"]:
                 is_correct = actual_result != "X"
-            elif predicted == "DRAW_POSSIBLE":
+            elif predicted in ["DRAW"]:
                 is_correct = actual_result == "X"
-            elif predicted in ["OVER_2.5"]:
-                is_correct = (home_goals + away_goals) > 2.5
-            elif predicted in ["UNDER_2.5"]:
-                is_correct = (home_goals + away_goals) < 2.5
+            elif predicted in ["CONSIDER"]:
+                is_correct = actual_result != "X"
             else:
                 is_correct = False
         else:
@@ -696,7 +714,8 @@ def submit_result(analysis_id, home_goals, away_goals):
             "is_correct": is_correct
         }).eq("id", analysis_id).execute()
         return True
-    except:
+    except Exception as e:
+        st.error(f"Failed to submit result: {e}")
         return False
 
 
@@ -735,9 +754,8 @@ def display_records_table(results: list):
         result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
         pred_display = {
             'NO_DRAW': '⚔️ NO DRAW',
-            'DRAW_POSSIBLE': '🤝 DRAW',
-            'OVER_2.5': '⚽ OVER 2.5',
-            'UNDER_2.5': '⚽ UNDER 2.5',
+            'DRAW': '🤝 DRAW',
+            'CONSIDER': '⚠️ CONSIDER',
             'SKIP': '❌ SKIP'
         }.get(pred, '❌ SKIP')
         actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
@@ -782,8 +800,8 @@ def main():
         1. **Primary No-Draw**: draw_odds > 4.50 AND home_off > 0.30 AND away_def < 0.25
         2. **Secondary No-Draw**: draw_odds > 3.80 AND profile_diff > 0.15 AND NOT both_weak
         3. **Draw Likely**: draw_odds ≤ 4.00 AND both_weak AND home_off < 0.20 AND away_def > 0.30
-        4. **Over 2.5 Goals**: draw_odds > 5.0 AND total_off_ratio > 0.80
-        5. **Under 2.5 Goals**: draw_odds < 3.5 AND total_off_ratio < 0.50
+        4. **Over 2.5 Goals**: draw_odds > 5.0 AND total_off_ratio > 0.80 (maps to NO_DRAW)
+        5. **Under 2.5 Goals**: draw_odds < 3.5 AND total_off_ratio < 0.50 (maps to DRAW)
         """)
 
     tab1, tab2, tab3, tab4 = st.tabs(["⚔️ Predict", "📝 Pending", "📊 Records", "📈 Dashboard"])
@@ -812,9 +830,8 @@ def main():
                         stored_count = already_stored_count = 0
                         predictions_count = {
                             'NO_DRAW': 0,
-                            'DRAW_POSSIBLE': 0,
-                            'OVER_2.5': 0,
-                            'UNDER_2.5': 0,
+                            'DRAW': 0,
+                            'CONSIDER': 0,
                             'SKIP': 0
                         }
                         
@@ -849,12 +866,11 @@ def main():
                         
                         # Show prediction counts
                         st.markdown("### 📊 Prediction Summary")
-                        cols = st.columns(5)
+                        cols = st.columns(4)
                         predictions_labels = {
                             'NO_DRAW': '⚔️ No Draw',
-                            'DRAW_POSSIBLE': '🤝 Draw',
-                            'OVER_2.5': '⚽ Over 2.5',
-                            'UNDER_2.5': '⚽ Under 2.5',
+                            'DRAW': '🤝 Draw',
+                            'CONSIDER': '⚠️ Consider',
                             'SKIP': '❌ Skip'
                         }
                         for idx, (key, label) in enumerate(predictions_labels.items()):
@@ -916,9 +932,8 @@ def main():
                 date_display = format_date_display(match_date)
                 pred_display = {
                     'NO_DRAW': '⚔️ NO DRAW',
-                    'DRAW_POSSIBLE': '🤝 DRAW',
-                    'OVER_2.5': '⚽ OVER 2.5',
-                    'UNDER_2.5': '⚽ UNDER 2.5',
+                    'DRAW': '🤝 DRAW',
+                    'CONSIDER': '⚠️ CONSIDER',
                     'SKIP': '❌ SKIP'
                 }.get(pred, '❌ SKIP')
                 with st.expander(f"📅 {date_display} | {pred_display} ({confidence}) | {ht} vs {at}"):
@@ -966,9 +981,8 @@ def main():
                 result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
                 pred_display = {
                     'NO_DRAW': '⚔️ NO DRAW',
-                    'DRAW_POSSIBLE': '🤝 DRAW',
-                    'OVER_2.5': '⚽ OVER 2.5',
-                    'UNDER_2.5': '⚽ UNDER 2.5',
+                    'DRAW': '🤝 DRAW',
+                    'CONSIDER': '⚠️ CONSIDER',
                     'SKIP': '❌ SKIP'
                 }.get(pred, '❌ SKIP')
                 actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
