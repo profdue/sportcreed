@@ -52,6 +52,12 @@ st.markdown("""
     .feature-box { background: #0f172a; border-radius: 6px; padding: 0.5rem; margin: 0.25rem 0; }
     .feature-label { color: #94a3b8; font-size: 0.7rem; }
     .feature-value { font-weight: 700; font-size: 1rem; }
+    .profile-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+    .profile-positive { background: #10b981; color: #000; }
+    .profile-negative { background: #ef4444; color: #fff; }
+    .profile-mixed { background: #fbbf24; color: #000; }
+    .profile-established { background: #3b82f6; color: #fff; }
+    .profile-weak { background: #64748b; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -136,11 +142,47 @@ def calculate_team_profile(team_data: dict) -> dict:
     }
 
 
+def get_profile_string(profile_data: dict) -> str:
+    """Convert profile data to a string label"""
+    total = profile_data["total_appearances"]
+    pos = profile_data["positive_count"]
+    neg = profile_data["negative_count"]
+    
+    if total == 0:
+        return "WEAK_PROFILE"
+    elif pos >= 2 and neg == 0:
+        return "POSITIVE"
+    elif neg >= 2 and pos == 0:
+        return "NEGATIVE"
+    elif pos >= 2 and neg >= 2:
+        return "MIXED"
+    elif total >= 3:
+        return "ESTABLISHED"
+    else:
+        return "WEAK_PROFILE"
+
+
+def get_profile_color(profile: str) -> str:
+    """Get color for profile display"""
+    colors = {
+        "POSITIVE": "profile-positive",
+        "NEGATIVE": "profile-negative",
+        "MIXED": "profile-mixed",
+        "ESTABLISHED": "profile-established",
+        "WEAK_PROFILE": "profile-weak"
+    }
+    return colors.get(profile, "profile-weak")
+
+
 def engineer_features(match_data: dict) -> dict:
     """Engineer features for the predictive model"""
     
-    home_profile = calculate_team_profile(match_data.get("home_team_data", {}))
-    away_profile = calculate_team_profile(match_data.get("away_team_data", {}))
+    home_profile_data = calculate_team_profile(match_data.get("home_team_data", {}))
+    away_profile_data = calculate_team_profile(match_data.get("away_team_data", {}))
+    
+    # Get profile strings
+    home_profile = get_profile_string(home_profile_data)
+    away_profile = get_profile_string(away_profile_data)
     
     draw_odds = match_data.get("draw_odds", 0)
     home_odds = match_data.get("home_odds", 0)
@@ -152,19 +194,19 @@ def engineer_features(match_data: dict) -> dict:
     dc_implied_no_draw = 1 / dc12_odds if dc12_odds > 0 else 0
     
     # Profile difference
-    profile_difference = home_profile["offensive_ratio"] - away_profile["defensive_ratio"]
+    profile_difference = home_profile_data["offensive_ratio"] - away_profile_data["defensive_ratio"]
     
-    # Both weak indicator
-    both_weak = 1 if (home_profile["total_appearances"] == 0 or home_profile["total_appearances"] <= 1) and \
-                       (away_profile["total_appearances"] == 0 or away_profile["total_appearances"] <= 1) else 0
+    # Both weak indicator - teams with 0-1 appearances are weak
+    both_weak = 1 if (home_profile_data["total_appearances"] <= 1) and \
+                       (away_profile_data["total_appearances"] <= 1) else 0
     
     # Calculate total offensive ratio
-    total_off_ratio = home_profile["offensive_ratio"] + away_profile["offensive_ratio"]
+    total_off_ratio = home_profile_data["offensive_ratio"] + away_profile_data["offensive_ratio"]
     
     features = {
         "draw_odds_implied": draw_implied,
-        "home_off_ratio": home_profile["offensive_ratio"],
-        "away_def_ratio": away_profile["defensive_ratio"],
+        "home_off_ratio": home_profile_data["offensive_ratio"],
+        "away_def_ratio": away_profile_data["defensive_ratio"],
         "profile_difference": profile_difference,
         "both_weak": both_weak,
         "best_team_home": match_data.get("home_team_data", {}).get("best_team", 0),
@@ -172,14 +214,16 @@ def engineer_features(match_data: dict) -> dict:
         "dc_implied_no_draw": dc_implied_no_draw,
         "total_off_ratio": total_off_ratio,
         "draw_odds": draw_odds,
-        "home_positive": home_profile["positive_count"],
-        "home_negative": home_profile["negative_count"],
-        "home_total": home_profile["total_appearances"],
-        "away_positive": away_profile["positive_count"],
-        "away_negative": away_profile["negative_count"],
-        "away_total": away_profile["total_appearances"],
-        "home_profile": home_profile,
-        "away_profile": away_profile,
+        "home_positive": home_profile_data["positive_count"],
+        "home_negative": home_profile_data["negative_count"],
+        "home_total": home_profile_data["total_appearances"],
+        "away_positive": away_profile_data["positive_count"],
+        "away_negative": away_profile_data["negative_count"],
+        "away_total": away_profile_data["total_appearances"],
+        "home_profile": home_profile,  # String
+        "away_profile": away_profile,  # String
+        "home_profile_data": home_profile_data,
+        "away_profile_data": away_profile_data,
     }
     
     return features
@@ -202,6 +246,10 @@ def apply_decision_rules(features: dict) -> dict:
     total_off_ratio = features.get('total_off_ratio', 0)
     best_team_home = features.get('best_team_home', 0)
     worst_def_away = features.get('worst_def_away', 0)
+    home_profile = features.get('home_profile', 'WEAK_PROFILE')
+    away_profile = features.get('away_profile', 'WEAK_PROFILE')
+    home_total = features.get('home_total', 0)
+    away_total = features.get('away_total', 0)
     
     # Primary Rule: Strong No-Draw signal
     if draw_odds > 4.50 and home_off_ratio > 0.30 and away_def_ratio < 0.25:
@@ -209,7 +257,7 @@ def apply_decision_rules(features: dict) -> dict:
             'prediction': 'NO_DRAW',
             'confidence': 'HIGH',
             'action': '✅ BET - No Draw expected (Double Chance 12)',
-            'reason': 'High draw odds + strong home offense + weak away defense',
+            'reason': f'High draw odds + strong home offense ({home_off_ratio:.2f}) + weak away defense ({away_def_ratio:.2f})',
             'bet_type': 'NO_DRAW'
         }
     
@@ -219,7 +267,7 @@ def apply_decision_rules(features: dict) -> dict:
             'prediction': 'NO_DRAW',
             'confidence': 'MEDIUM',
             'action': '✅ BET - No Draw expected (Double Chance 12)',
-            'reason': 'Good draw odds + significant profile difference',
+            'reason': f'Good draw odds + significant profile difference ({profile_difference:.2f})',
             'bet_type': 'NO_DRAW'
         }
     
@@ -239,7 +287,7 @@ def apply_decision_rules(features: dict) -> dict:
             'prediction': 'NO_DRAW',
             'confidence': 'MEDIUM',
             'action': '⚽ BET - Over 2.5 goals expected (use No-Draw as proxy)',
-            'reason': 'High draw odds + high offensive output',
+            'reason': f'High draw odds + high offensive output ({total_off_ratio:.2f})',
             'bet_type': 'OVER'
         }
     
@@ -249,7 +297,7 @@ def apply_decision_rules(features: dict) -> dict:
             'prediction': 'DRAW',
             'confidence': 'MEDIUM',
             'action': '⚽ BET - Under 2.5 goals expected (use Draw as proxy)',
-            'reason': 'Low draw odds + low offensive output',
+            'reason': f'Low draw odds + low offensive output ({total_off_ratio:.2f})',
             'bet_type': 'UNDER'
         }
     
@@ -268,7 +316,7 @@ def apply_decision_rules(features: dict) -> dict:
         'prediction': 'SKIP',
         'confidence': 'LOW',
         'action': '❌ SKIP - Insufficient evidence',
-        'reason': 'No clear signal from decision rules',
+        'reason': f'No clear signal (Home: {home_profile}, {home_total} apps | Away: {away_profile}, {away_total} apps)',
         'bet_type': 'SKIP'
     }
 
@@ -485,6 +533,11 @@ def display_features(features: dict):
     """Display engineered features for a match"""
     st.markdown("### 📊 Feature Analysis")
     
+    home_profile = features.get('home_profile', 'WEAK_PROFILE')
+    away_profile = features.get('away_profile', 'WEAK_PROFILE')
+    home_color = get_profile_color(home_profile)
+    away_color = get_profile_color(away_profile)
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -536,6 +589,32 @@ def display_features(features: dict):
         <div class="feature-box">
             <div class="feature-label">Total Offensive Ratio</div>
             <div class="feature-value">{features.get('total_off_ratio', 0):.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Show profiles
+    st.markdown("### 🏷️ Team Profiles")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"""
+        <div style="background:#0f172a; border-radius:6px; padding:0.5rem;">
+            <span style="font-weight:700;">🏠 Home</span>
+            <span class="profile-badge {home_color}">{home_profile}</span>
+            <span style="font-size:0.7rem; color:#94a3b8; margin-left:0.5rem;">{features.get('home_total', 0)} appearances</span>
+            <div style="font-size:0.7rem; color:#94a3b8;">
+                ✅ {features.get('home_positive', 0)} positive | ❌ {features.get('home_negative', 0)} negative
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div style="background:#0f172a; border-radius:6px; padding:0.5rem;">
+            <span style="font-weight:700;">✈️ Away</span>
+            <span class="profile-badge {away_color}">{away_profile}</span>
+            <span style="font-size:0.7rem; color:#94a3b8; margin-left:0.5rem;">{features.get('away_total', 0)} appearances</span>
+            <div style="font-size:0.7rem; color:#94a3b8;">
+                ✅ {features.get('away_positive', 0)} positive | ❌ {features.get('away_negative', 0)} negative
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -667,6 +746,8 @@ def save_to_db(match: dict, result: dict, features: dict):
             "away_positive_count": features.get("away_positive", 0),
             "away_negative_count": features.get("away_negative", 0),
             "away_total_appearances": features.get("away_total", 0),
+            "home_profile": features.get("home_profile", "WEAK_PROFILE"),
+            "away_profile": features.get("away_profile", "WEAK_PROFILE"),
             
             "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
             "predicted": prediction,
@@ -791,7 +872,7 @@ def main():
         | Home Offensive Ratio | home positive appearances / total |
         | Away Defensive Ratio | away negative appearances / total |
         | Profile Difference | home_off - away_def |
-        | Both Weak | both teams have weak profiles |
+        | Both Weak | both teams have weak profiles (0-1 appearances) |
         | Best Team Home | strong home team flag |
         | Worst Def Away | weak away defense flag |
         
