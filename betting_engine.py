@@ -6,18 +6,6 @@ import re
 import traceback
 import numpy as np
 
-# Try to import sklearn, fall back to simple rules if not available
-try:
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import cross_val_score, StratifiedKFold
-    from sklearn.preprocessing import StandardScaler
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-
-import pickle
-import os
-
 # ============================================================================
 # SUPABASE SETUP
 # ============================================================================
@@ -52,24 +40,18 @@ st.markdown("""
     .stat-box { background: #1e293b; border-radius: 10px; padding: 0.8rem; text-align: center; color: #fff; }
     .stat-number { font-size: 2rem; font-weight: 800; }
     .stat-label { font-size: 0.75rem; color: #94a3b8; }
-    .metric-card { background: #0f172a; border-radius: 10px; padding: 0.75rem; text-align: center; flex: 1; }
-    .metric-value { font-size: 1.5rem; font-weight: 800; }
-    .metric-label { font-size: 0.7rem; color: #94a3b8; }
     .prediction-display { font-size: 2.5rem; font-weight: 800; text-align: center; padding: 0.5rem; }
     .prediction-no-draw { color: #10b981; }
     .prediction-skip { color: #f59e0b; }
     .prediction-draw { color: #3b82f6; }
     .prediction-over { color: #8b5cf6; }
     .prediction-under { color: #f59e0b; }
-    .final-badge { background: #10b981; color: #fff; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; border: 2px solid #10b981; }
-    .no-draw-badge { background: #10b981; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .skip-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .draw-badge { background: #3b82f6; color: #fff; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .over-badge { background: #8b5cf6; color: #fff; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .under-badge { background: #f59e0b; color: #000; padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
-    .factor-row { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #1e293b; }
-    .factor-name { color: #94a3b8; }
-    .factor-value { font-weight: 600; }
+    .badge { padding: 0.3rem 0.75rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; display: inline-block; }
+    .badge-no-draw { background: #10b981; color: #000; }
+    .badge-skip { background: #f59e0b; color: #000; }
+    .badge-draw { background: #3b82f6; color: #fff; }
+    .badge-over { background: #8b5cf6; color: #fff; }
+    .badge-under { background: #f59e0b; color: #000; }
     .feature-box { background: #0f172a; border-radius: 6px; padding: 0.5rem; margin: 0.25rem 0; }
     .feature-label { color: #94a3b8; font-size: 0.7rem; }
     .feature-value { font-weight: 700; font-size: 1rem; }
@@ -147,20 +129,6 @@ def calculate_team_profile(team_data: dict) -> dict:
     offensive_ratio = positive_count / total_appearances if total_appearances > 0 else 0.5
     defensive_ratio = negative_count / total_appearances if total_appearances > 0 else 0.5
     
-    # Determine profile
-    if total_appearances == 0:
-        profile = "WEAK_PROFILE"
-    elif positive_count >= 2 and negative_count == 0:
-        profile = "POSITIVE"
-    elif negative_count >= 2 and positive_count == 0:
-        profile = "NEGATIVE"
-    elif positive_count >= 2 and negative_count >= 2:
-        profile = "MIXED"
-    elif total_appearances >= 3:
-        profile = "ESTABLISHED"
-    else:
-        profile = "WEAK_PROFILE"
-    
     return {
         "positive_count": positive_count,
         "negative_count": negative_count,
@@ -168,7 +136,6 @@ def calculate_team_profile(team_data: dict) -> dict:
         "total_appearances": total_appearances,
         "offensive_ratio": offensive_ratio,
         "defensive_ratio": defensive_ratio,
-        "profile": profile
     }
 
 
@@ -191,19 +158,16 @@ def engineer_features(match_data: dict) -> dict:
     profile_difference = home_profile["offensive_ratio"] - away_profile["defensive_ratio"]
     
     # Both weak indicator
-    both_weak = 1 if (home_profile["profile"] == "WEAK_PROFILE" and away_profile["profile"] == "WEAK_PROFILE") else 0
+    both_weak = 1 if (home_profile["total_appearances"] == 0 or home_profile["total_appearances"] <= 1) and \
+                       (away_profile["total_appearances"] == 0 or away_profile["total_appearances"] <= 1) else 0
     
-    # Calculate total offensive/defensive ratio
-    home_off_ratio = home_profile["offensive_ratio"]
-    away_def_ratio = away_profile["defensive_ratio"]
-    
-    # Over/under indicators
+    # Calculate total offensive ratio
     total_off_ratio = home_profile["offensive_ratio"] + away_profile["offensive_ratio"]
     
     features = {
         "draw_odds_implied": draw_implied,
-        "home_off_ratio": home_off_ratio,
-        "away_def_ratio": away_def_ratio,
+        "home_off_ratio": home_profile["offensive_ratio"],
+        "away_def_ratio": away_profile["defensive_ratio"],
         "profile_difference": profile_difference,
         "both_weak": both_weak,
         "best_team_home": match_data.get("home_team_data", {}).get("best_team", 0),
@@ -211,13 +175,19 @@ def engineer_features(match_data: dict) -> dict:
         "dc_implied_no_draw": dc_implied_no_draw,
         "total_off_ratio": total_off_ratio,
         "draw_odds": draw_odds,
+        "home_positive": home_profile["positive_count"],
+        "home_negative": home_profile["negative_count"],
+        "home_total": home_profile["total_appearances"],
+        "away_positive": away_profile["positive_count"],
+        "away_negative": away_profile["negative_count"],
+        "away_total": away_profile["total_appearances"],
     }
     
     return features
 
 
 # ============================================================================
-# DECISION TREE RULES (Simplified from Logistic Regression)
+# DECISION TREE RULES
 # ============================================================================
 def apply_decision_rules(features: dict) -> dict:
     """
@@ -257,7 +227,7 @@ def apply_decision_rules(features: dict) -> dict:
     # Draw Rule: Avoid betting on No-Draw
     if draw_odds <= 4.00 and both_weak == 1 and home_off_ratio < 0.20 and away_def_ratio > 0.30:
         return {
-            'prediction': 'DRAW',
+            'prediction': 'DRAW_POSSIBLE',
             'confidence': 'MEDIUM',
             'action': '❌ AVOID - Draw likely',
             'reason': 'Low draw odds + both teams weak + defensive mismatch',
@@ -305,14 +275,13 @@ def apply_decision_rules(features: dict) -> dict:
 
 
 # ============================================================================
-# COMPLETE PARSER - Extracts ALL data from ALL pages
+# COMPLETE PARSER
 # ============================================================================
 def parse_betexplorer_data(text: str) -> list:
     """Parse Betexplorer data - extracts matches from ALL pages."""
     matches = []
     lines = text.split('\n')
     
-    # Store data by team name
     team_cache = {}
     match_cache = {}
     current_page_type = None
@@ -432,7 +401,6 @@ def parse_betexplorer_data(text: str) -> list:
                                     team_obj = get_or_create_team(team)
                                     team_obj["appearances"].append(current_page_type)
                                     
-                                    # Update team data based on page type
                                     if current_page_type == 'wins':
                                         team_obj["w_team"] = max(team_obj.get("w_team", 0), streak_value)
                                     elif current_page_type == 'draws':
@@ -479,7 +447,6 @@ def parse_betexplorer_data(text: str) -> list:
                                 team_obj = get_or_create_team(team)
                                 team_obj["appearances"].append(current_page_type)
                                 
-                                # Update team data based on page type
                                 if current_page_type == 'best_teams':
                                     team_obj["best_team"] = 1
                                 elif current_page_type == 'worst_teams':
@@ -502,7 +469,6 @@ def parse_betexplorer_data(text: str) -> list:
         home_team_name = match_data["home_team"]
         away_team_name = match_data["away_team"]
         
-        # Get team data
         home_data = team_cache.get(home_team_name, {})
         away_data = team_cache.get(away_team_name, {})
         
@@ -532,11 +498,7 @@ def display_features(features: dict):
             <div class="feature-label">Draw Implied Probability</div>
             <div class="feature-value">{1 / features.get('draw_odds', 0) if features.get('draw_odds', 0) > 0 else 0:.1%}</div>
         </div>
-        <div class="feature-box">
-            <div class="feature-label">DC12 Odds</div>
-            <div class="feature-value">{features.get('dc_implied_no_draw', 0):.2f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        </""", unsafe_allow_html=True)
     
     with col2:
         st.markdown(f"""
@@ -576,43 +538,24 @@ def display_prediction(result: dict, features: dict = None):
     prediction = result.get('prediction', 'SKIP')
     confidence = result.get('confidence', 'LOW')
     
-    if prediction == 'NO_DRAW':
-        if confidence == 'HIGH':
-            card_class = "no-draw-card"
-            pred_class = "prediction-no-draw"
-            pred_emoji = "⚔️"
-            pred_text = "NO DRAW EXPECTED"
-            badge = f'<span class="no-draw-badge">✅ BET (Double Chance 12)</span>'
-        else:
-            card_class = "consider-card"
-            pred_class = "prediction-consider"
-            pred_emoji = "⚠️"
-            pred_text = "CONSIDER NO DRAW"
-            badge = f'<span class="consider-badge">⚠️ CONSIDER</span>'
-    elif prediction == 'DRAW':
-        card_class = "draw-card"
-        pred_class = "prediction-draw"
-        pred_emoji = "🤝"
-        pred_text = "DRAW LIKELY"
-        badge = f'<span class="draw-badge">🤝 AVOID NO-DRAW</span>'
-    elif prediction == 'OVER_2.5':
-        card_class = "over-card"
-        pred_class = "prediction-over"
-        pred_emoji = "⚽"
-        pred_text = "OVER 2.5 GOALS"
-        badge = f'<span class="over-badge">⚽ BET OVER 2.5</span>'
-    elif prediction == 'UNDER_2.5':
-        card_class = "under-card"
-        pred_class = "prediction-under"
-        pred_emoji = "⚽"
-        pred_text = "UNDER 2.5 GOALS"
-        badge = f'<span class="under-badge">⚽ BET UNDER 2.5</span>'
-    else:
-        card_class = "skip-card"
-        pred_class = "prediction-skip"
-        pred_emoji = "❌"
-        pred_text = "SKIP"
-        badge = f'<span class="skip-badge">❌ SKIP</span>'
+    badge_class = {
+        'NO_DRAW': 'badge-no-draw',
+        'DRAW_POSSIBLE': 'badge-draw',
+        'OVER_2.5': 'badge-over',
+        'UNDER_2.5': 'badge-under',
+        'SKIP': 'badge-skip'
+    }
+    
+    pred_display = {
+        'NO_DRAW': ('⚔️ NO DRAW EXPECTED', 'prediction-no-draw', 'no-draw-card'),
+        'DRAW_POSSIBLE': ('🤝 DRAW POSSIBLE', 'prediction-draw', 'draw-card'),
+        'OVER_2.5': ('⚽ OVER 2.5 GOALS', 'prediction-over', 'over-card'),
+        'UNDER_2.5': ('⚽ UNDER 2.5 GOALS', 'prediction-under', 'under-card'),
+        'SKIP': ('❌ SKIP', 'prediction-skip', 'skip-card')
+    }
+    
+    text, pred_class, card_class = pred_display.get(prediction, ('❌ SKIP', 'prediction-skip', 'skip-card'))
+    badge = f'<span class="badge {badge_class.get(prediction, "badge-skip")}">{result.get("action", "")}</span>'
     
     st.markdown(f"""
     <div class="output-card {card_class}">
@@ -620,17 +563,16 @@ def display_prediction(result: dict, features: dict = None):
             <div>
                 <div style="font-size: 0.8rem; color: #94a3b8;">ADVANCED NO-DRAW PREDICTOR</div>
                 <div class="prediction-display {pred_class}">
-                    {pred_emoji} {pred_text}
+                    {text}
                 </div>
                 <div>
                     {badge}
-                    <span class="final-badge" style="margin-left:0.5rem;">Confidence: {confidence}</span>
+                    <span style="margin-left:0.5rem; padding:0.3rem 0.75rem; border-radius:8px; font-size:0.8rem; font-weight:700; background:#1e293b; color:#94a3b8;">Confidence: {confidence}</span>
                 </div>
             </div>
         </div>
         <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #64748b; border-top: 1px solid #1e293b; padding-top: 0.5rem;">
-            {result.get('action', '')}
-            <br><span style="color:#94a3b8;">{result.get('reason', '')}</span>
+            {result.get('reason', '')}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -663,15 +605,6 @@ def save_to_db(match: dict, result: dict, features: dict):
         # Get team data
         home_data = match.get("home_team_data", {})
         away_data = match.get("away_team_data", {})
-        
-        # Map prediction to valid values for the constraint
-        pred_map = {
-            'NO_DRAW': 'NO_DRAW',
-            'DRAW': 'DRAW_POSSIBLE',  # Map to valid constraint value
-            'OVER_2.5': 'NO_DRAW',  # Map to valid constraint value
-            'UNDER_2.5': 'NO_DRAW',  # Map to valid constraint value
-        }
-        db_prediction = pred_map.get(prediction, 'SKIP')
         
         record = {
             "match_date": date_part,
@@ -716,12 +649,9 @@ def save_to_db(match: dict, result: dict, features: dict):
             "total_off_ratio": features.get("total_off_ratio", 0),
             
             "dc12_odds": 1 / ((1 / match.get("home_odds", 0)) + (1 / match.get("away_odds", 0))) if match.get("home_odds", 0) > 0 and match.get("away_odds", 0) > 0 else 0,
-            "predicted": db_prediction,
+            "predicted": prediction,
             "confidence": result.get("confidence", "LOW"),
-            "multi_score": features.get("profile_difference", 0) * 10,  # Legacy field
-            
-            # Store actual bet type separately
-            "bet_type": prediction,
+            "multi_score": features.get("profile_difference", 0) * 10,
         }
         
         response = supabase.table(TABLE_NAME).insert(record).execute()
@@ -744,18 +674,16 @@ def get_pending():
 def submit_result(analysis_id, home_goals, away_goals):
     try:
         actual_result = "1" if home_goals > away_goals else "2" if away_goals > home_goals else "X"
-        response = supabase.table(TABLE_NAME).select("predicted", "bet_type").eq("id", analysis_id).execute()
+        response = supabase.table(TABLE_NAME).select("predicted").eq("id", analysis_id).execute()
         if response.data:
             predicted = response.data[0].get("predicted")
-            bet_type = response.data[0].get("bet_type", predicted)
-            # Define correct predictions based on bet type
-            if bet_type in ["NO_DRAW"]:
+            if predicted in ["NO_DRAW"]:
                 is_correct = actual_result != "X"
-            elif bet_type == "DRAW":
+            elif predicted == "DRAW_POSSIBLE":
                 is_correct = actual_result == "X"
-            elif bet_type in ["OVER_2.5"]:
+            elif predicted in ["OVER_2.5"]:
                 is_correct = (home_goals + away_goals) > 2.5
-            elif bet_type in ["UNDER_2.5"]:
+            elif predicted in ["UNDER_2.5"]:
                 is_correct = (home_goals + away_goals) < 2.5
             else:
                 is_correct = False
@@ -801,11 +729,17 @@ def display_records_table(results: list):
     st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
     rows = []
     for r in results:
-        pred = r.get('bet_type', r.get('predicted', '?'))
+        pred = r.get('predicted', '?')
         actual = r.get('actual_result', '?')
         is_correct = r.get('is_correct', False)
         result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-        pred_display = "⚔️ NO DRAW" if pred == "NO_DRAW" else "🤝 DRAW" if pred == "DRAW" else "⚽ OVER 2.5" if pred == "OVER_2.5" else "⚽ UNDER 2.5" if pred == "UNDER_2.5" else "❌ SKIP"
+        pred_display = {
+            'NO_DRAW': '⚔️ NO DRAW',
+            'DRAW_POSSIBLE': '🤝 DRAW',
+            'OVER_2.5': '⚽ OVER 2.5',
+            'UNDER_2.5': '⚽ UNDER 2.5',
+            'SKIP': '❌ SKIP'
+        }.get(pred, '❌ SKIP')
         actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
         rows.append({
             "Date": r.get("match_date", ""),
@@ -823,29 +757,25 @@ def display_records_table(results: list):
 # ============================================================================
 def main():
     st.title("⚔️ Advanced No-Draw Predictor")
-    st.caption("Multi-feature prediction using draw odds and team profile ratios")
-
-    if not SKLEARN_AVAILABLE:
-        st.warning("⚠️ scikit-learn not available. Using simplified decision rules.")
+    st.caption("Decision tree-based predictions using draw odds and team profile ratios")
 
     with st.expander("📖 HOW IT WORKS", expanded=False):
         st.markdown("""
-        ### The New Approach
+        ### The Approach
         
-        This system uses **8 engineered features** derived from the raw data.
+        This system uses **decision tree rules** derived from logistic regression analysis on historical matches.
         
         ### Key Features
         
-        | Feature | Description | Importance |
-        |---------|-------------|------------|
-        | Draw Odds Implied | 1 / draw_odds | Highest predictive power |
-        | Home Offensive Ratio | home positive appearances / total | Strength of home attack |
-        | Away Defensive Ratio | away negative appearances / total | Weakness of away defense |
-        | Profile Difference | home_off - away_def | Imbalance indicator |
-        | Both Weak | both teams have weak profiles | Draw indicator |
-        | Best Team Home | binary flag | Strong home team |
-        | Worst Def Away | binary flag | Weak away defense |
-        | DC Implied No-Draw | 1 / double chance odds | Market expectation |
+        | Feature | Description |
+        |---------|-------------|
+        | Draw Odds | 1 / draw_odds - highest predictive power |
+        | Home Offensive Ratio | home positive appearances / total |
+        | Away Defensive Ratio | away negative appearances / total |
+        | Profile Difference | home_off - away_def |
+        | Both Weak | both teams have weak profiles |
+        | Best Team Home | strong home team flag |
+        | Worst Def Away | weak away defense flag |
         
         ### Decision Rules
         
@@ -860,7 +790,7 @@ def main():
 
     with tab1:
         st.markdown("### 📝 Paste Betexplorer Data")
-        st.info("Predicts no-draw using advanced multi-feature analysis")
+        st.info("Predicts no-draw using advanced decision tree rules")
 
         text_data = st.text_area(
             "Paste Betexplorer data here",
@@ -874,7 +804,7 @@ def main():
                 st.error("❌ Please paste valid data.")
             else:
                 try:
-                    with st.spinner("Analyzing data with advanced features..."):
+                    with st.spinner("Analyzing data with decision tree rules..."):
                         matches = parse_betexplorer_data(text_data)
                     if matches:
                         st.success(f"✅ Found {len(matches)} unique matches")
@@ -882,7 +812,7 @@ def main():
                         stored_count = already_stored_count = 0
                         predictions_count = {
                             'NO_DRAW': 0,
-                            'DRAW': 0,
+                            'DRAW_POSSIBLE': 0,
                             'OVER_2.5': 0,
                             'UNDER_2.5': 0,
                             'SKIP': 0
@@ -922,7 +852,7 @@ def main():
                         cols = st.columns(5)
                         predictions_labels = {
                             'NO_DRAW': '⚔️ No Draw',
-                            'DRAW': '🤝 Draw',
+                            'DRAW_POSSIBLE': '🤝 Draw',
                             'OVER_2.5': '⚽ Over 2.5',
                             'UNDER_2.5': '⚽ Under 2.5',
                             'SKIP': '❌ Skip'
@@ -935,7 +865,6 @@ def main():
                             st.markdown("---")
                             st.markdown("### ⚔️ PREDICTION RESULTS")
                             
-                            # Filter out skips for detailed view
                             active_predictions = [(m, r, f, s) for m, r, f, s in analyzed_results if r["prediction"] != "SKIP"]
                             skips = [(m, r, f, s) for m, r, f, s in analyzed_results if r["prediction"] == "SKIP"]
 
@@ -981,13 +910,18 @@ def main():
             for a in pending:
                 ht = a.get('home_team', 'Home')
                 at = a.get('away_team', 'Away')
-                pred = a.get('bet_type', a.get('predicted', '?'))
+                pred = a.get('predicted', '?')
                 confidence = a.get('confidence', '')
                 match_date = a.get('match_date', 'Date unknown')
                 date_display = format_date_display(match_date)
-                pred_display = "⚔️ NO DRAW" if pred == "NO_DRAW" else "🤝 DRAW" if pred == "DRAW" else "⚽ OVER 2.5" if pred == "OVER_2.5" else "⚽ UNDER 2.5" if pred == "UNDER_2.5" else "❌ SKIP"
-                badge = f"{pred_display} ({confidence})"
-                with st.expander(f"📅 {date_display} | {badge} | {ht} vs {at}"):
+                pred_display = {
+                    'NO_DRAW': '⚔️ NO DRAW',
+                    'DRAW_POSSIBLE': '🤝 DRAW',
+                    'OVER_2.5': '⚽ OVER 2.5',
+                    'UNDER_2.5': '⚽ UNDER 2.5',
+                    'SKIP': '❌ SKIP'
+                }.get(pred, '❌ SKIP')
+                with st.expander(f"📅 {date_display} | {pred_display} ({confidence}) | {ht} vs {at}"):
                     st.info(f"📊 Prediction: {pred_display}")
                     c1, c2 = st.columns(2)
                     with c1: hg = st.number_input(f"{ht} Goals", 0, 15, 0, key=f"hg_{a['id']}")
@@ -1026,11 +960,17 @@ def main():
             st.markdown(f"**Overall: {correct} wins | {incorrect} losses**")
             rows = []
             for r in results:
-                pred = r.get('bet_type', r.get('predicted', '?'))
+                pred = r.get('predicted', '?')
                 actual = r.get('actual_result', '?')
                 is_correct = r.get('is_correct', False)
                 result_badge = '🟢 WIN' if is_correct else '🔴 LOSS'
-                pred_display = "⚔️ NO DRAW" if pred == "NO_DRAW" else "🤝 DRAW" if pred == "DRAW" else "⚽ OVER 2.5" if pred == "OVER_2.5" else "⚽ UNDER 2.5" if pred == "UNDER_2.5" else "❌ SKIP"
+                pred_display = {
+                    'NO_DRAW': '⚔️ NO DRAW',
+                    'DRAW_POSSIBLE': '🤝 DRAW',
+                    'OVER_2.5': '⚽ OVER 2.5',
+                    'UNDER_2.5': '⚽ UNDER 2.5',
+                    'SKIP': '❌ SKIP'
+                }.get(pred, '❌ SKIP')
                 actual_display = "🤝 DRAW" if actual == "X" else "🏠 HOME" if actual == "1" else "✈️ AWAY"
                 rows.append({
                     "Date": r.get("match_date", ""),
