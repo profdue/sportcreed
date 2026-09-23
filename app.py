@@ -213,7 +213,7 @@ TABLE_NAME = "match_predictions"
 # CONSTANTS
 # ============================================================================
 EDGE_MIN = 0.05
-EDGE_MAX = 0.30
+EDGE_MAX = 0.20
 EDGE_OU_MIN = 0.08
 SHRINK_WEIGHT = 0.50
 LAST10_WEIGHT = 0.70
