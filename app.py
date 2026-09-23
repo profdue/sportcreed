@@ -1,6 +1,6 @@
 """
 Refined Prediction Strategy — single-file Streamlit app.
-Parser + Predictor + UI all in one.
+Parser + Predictor + Prediction-style UI.
 """
 
 import math
@@ -16,6 +16,168 @@ import streamlit as st
 # PAGE CONFIG
 # ============================================================================
 st.set_page_config(page_title="Refined Predictor", page_icon="⚽", layout="wide")
+
+
+# ============================================================================
+# CUSTOM CSS
+# ============================================================================
+st.markdown("""
+<style>
+    .main .block-container { padding-top: 1.5rem; max-width: 1100px; }
+
+    .team-header {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        border-radius: 16px;
+        padding: 1.5rem 2rem;
+        color: #fff;
+        margin-bottom: 1rem;
+    }
+    .team-names {
+        font-size: 2rem;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        margin: 0;
+    }
+    .team-meta {
+        color: #94a3b8;
+        font-size: 0.9rem;
+        margin-top: 0.25rem;
+    }
+
+    .verdict-bet {
+        background: linear-gradient(135deg, #064e3b 0%, #022c22 100%);
+        border-left: 6px solid #10b981;
+        border-radius: 16px;
+        padding: 1.5rem 1.75rem;
+        margin: 1rem 0;
+    }
+    .verdict-nobet {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border-left: 6px solid #64748b;
+        border-radius: 16px;
+        padding: 1.5rem 1.75rem;
+        margin: 1rem 0;
+    }
+    .verdict-label {
+        font-size: 0.75rem;
+        letter-spacing: 2px;
+        font-weight: 700;
+        color: #6ee7b7;
+        text-transform: uppercase;
+    }
+    .verdict-label-grey {
+        font-size: 0.75rem;
+        letter-spacing: 2px;
+        font-weight: 700;
+        color: #94a3b8;
+        text-transform: uppercase;
+    }
+    .verdict-pick {
+        font-size: 2.4rem;
+        font-weight: 800;
+        color: #fff;
+        margin: 0.35rem 0;
+        line-height: 1.1;
+    }
+    .verdict-noedge {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #cbd5e1;
+        margin: 0.35rem 0;
+    }
+    .verdict-detail {
+        font-size: 1rem;
+        color: #d1fae5;
+        margin-top: 0.5rem;
+    }
+    .verdict-detail-grey {
+        font-size: 0.95rem;
+        color: #94a3b8;
+        margin-top: 0.5rem;
+    }
+
+    .stat-card {
+        background: #0f172a;
+        border-radius: 12px;
+        padding: 1rem;
+        text-align: center;
+        border-top: 3px solid #334155;
+    }
+    .stat-card-home { border-top-color: #10b981; }
+    .stat-card-draw { border-top-color: #fbbf24; }
+    .stat-card-away { border-top-color: #3b82f6; }
+    .stat-value {
+        font-size: 1.9rem;
+        font-weight: 800;
+        color: #fff;
+        line-height: 1;
+    }
+    .stat-label {
+        font-size: 0.78rem;
+        color: #94a3b8;
+        margin-top: 0.4rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .stat-edge {
+        font-size: 0.85rem;
+        font-weight: 700;
+        margin-top: 0.35rem;
+    }
+    .edge-pos { color: #10b981; }
+    .edge-neg { color: #ef4444; }
+    .edge-neutral { color: #94a3b8; }
+
+    .alt-bet {
+        background: #0f172a;
+        border-left: 4px solid #fbbf24;
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.5rem;
+    }
+    .alt-bet-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: #fbbf24;
+    }
+    .alt-bet-meta {
+        font-size: 0.85rem;
+        color: #94a3b8;
+        margin-top: 0.2rem;
+    }
+
+    .section-title {
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        margin: 1.5rem 0 0.75rem 0;
+    }
+
+    .xg-row {
+        background: #0f172a;
+        border-radius: 10px;
+        padding: 0.75rem 1rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.4rem;
+    }
+    .xg-team { color: #cbd5e1; font-weight: 600; }
+    .xg-value { color: #3b82f6; font-weight: 800; font-size: 1.3rem; }
+    .xg-total { color: #94a3b8; font-size: 0.85rem; }
+
+    .stButton button {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white;
+        font-weight: 700;
+        border-radius: 10px;
+        border: none;
+        padding: 0.6rem 1.25rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
 # ============================================================================
@@ -98,6 +260,8 @@ class SportsgamblerParser:
         result["away_team_last10_away"].update(corners["away"])
         return result
 
+    # -- identity -----------------------------------------------------------
+
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
         if len(teams) >= 2:
@@ -140,6 +304,8 @@ class SportsgamblerParser:
         at = (self.away_team or "AWAY").replace(" ", "")[:3].upper()
         dt = (match_date or "").replace("-", "")
         return f"{ht}_{at}_{dt}"
+
+    # -- odds ---------------------------------------------------------------
 
     def _parse_odds(self):
         flat = {
@@ -237,6 +403,8 @@ class SportsgamblerParser:
         try: return int(str(s).strip())
         except (ValueError, TypeError): return 0
 
+    # -- last 10 splits -----------------------------------------------------
+
     def _parse_last10_splits(self, side):
         split = self._empty_split()
         table = self.soup.select_one(".st-table")
@@ -298,6 +466,8 @@ class SportsgamblerParser:
                 out["away"]["corners_against"] = numbers[5]
         return out
 
+    # -- last 5 form --------------------------------------------------------
+
     def _parse_last5_form(self, competition):
         out = {"home_team_points": 0, "away_team_points": 0}
         container = self.soup.select_one("#last-matches #All")
@@ -357,6 +527,8 @@ class SportsgamblerParser:
         if not score_el: return None
         return self._to_int(score_el.get_text(strip=True))
 
+    # -- injuries -----------------------------------------------------------
+
     def _parse_injuries(self):
         out = {"home_key_attackers_out": 0, "home_key_defenders_out": 0, "home_key_midfielders_out": 0,
                "away_key_attackers_out": 0, "away_key_defenders_out": 0, "away_key_midfielders_out": 0}
@@ -375,7 +547,8 @@ class SportsgamblerParser:
                 info_el = row.select_one(".inj-two-info")
                 info = info_el.get_text(strip=True).lower() if info_el else ""
                 if "doubt" in info: continue
-                detail = row.find_next_sibling("div", class_="inj-two-hidden")
+                # FIXED: search inside the row, not the row's sibling
+                detail = row.find("div", class_="inj-two-hidden")
                 position = self._extract_position(detail)
                 importance = self._extract_importance(detail)
                 if importance != "key" or position is None: continue
@@ -403,6 +576,8 @@ class SportsgamblerParser:
         gg = re.search(r"Goals:\s*(\d+)", text)
         if gg: goals = int(gg.group(1))
         return "key" if (matches >= 3 or goals >= 1) else "squad"
+
+    # -- midweek ------------------------------------------------------------
 
     def _parse_midweek(self, match_date_iso):
         out = {"home_team_played": False, "away_team_played": False}
@@ -553,7 +728,6 @@ class RefinedPredictor:
     def select_markets(self, odds, btts_rate=0.5, corner_data=None):
         self.bets = []
         self.skips = []
-        # Match Result
         for outcome, label, ok, pk in [
             ("home_win", "Home", "home_odds", "home_win"),
             ("away_win", "Away", "away_odds", "away_win"),
@@ -564,7 +738,7 @@ class RefinedPredictor:
             prob = self.probabilities.get(pk, 0.0)
             if edge > EDGE_MAX:
                 self.skips.append({"market": f"Match Result: {label}",
-                                   "reason": f"Edge {edge:+.1%} > 30%"})
+                                   "reason": f"Edge {edge:+.1%} > 30% (model error)"})
                 continue
             if edge < EDGE_MIN:
                 self.skips.append({"market": f"Match Result: {label}",
@@ -581,6 +755,21 @@ class RefinedPredictor:
             elif outcome == "draw" and prob >= 0.28:
                 self.bets.append({"market": "Match Result", "selection": "Draw or Underdog +0.25",
                                   "prob": prob, "edge": edge, "odds": odds.get(ok, 0),
+                                  "stake": "1 unit", "confidence": "High"})
+        # Underdog AH
+        hp = self.probabilities.get("home_win", 0)
+        ap = self.probabilities.get("away_win", 0)
+        if hp < ap and ap >= 0.30 and odds.get("home_odds", 0) >= 3.00:
+            edge = hp - 1.0 / odds["home_odds"]
+            if EDGE_MIN < edge < EDGE_MAX:
+                self.bets.append({"market": "Match Result", "selection": "Home +0.75 or +1.0 AH",
+                                  "prob": hp, "edge": edge, "odds": odds["home_odds"],
+                                  "stake": "1 unit", "confidence": "High"})
+        elif ap < hp and hp >= 0.30 and odds.get("away_odds", 0) >= 3.00:
+            edge = ap - 1.0 / odds["away_odds"]
+            if EDGE_MIN < edge < EDGE_MAX:
+                self.bets.append({"market": "Match Result", "selection": "Away +0.75 or +1.0 AH",
+                                  "prob": ap, "edge": edge, "odds": odds["away_odds"],
                                   "stake": "1 unit", "confidence": "High"})
         # BTTS
         if btts_rate > 0.65:
@@ -615,9 +804,9 @@ class RefinedPredictor:
         else:
             self.skips.append({"market": "Over/Under 2.5",
                                "reason": f"Shrunk total {self.shrunk_total:.2f} in neutral zone"})
-        self.skips.append({"market": "Correct Score", "reason": "Never bet"})
+        self.skips.append({"market": "Correct Score", "reason": "Never bet — pure lottery"})
         self.skips.append({"market": "First Goalscorer", "reason": "Never bet"})
-        self.skips.append({"market": "Anytime Goalscorer", "reason": "Avoid"})
+        self.skips.append({"market": "Anytime Goalscorer", "reason": "Avoid — high variance"})
 
     def get_full_analysis(self):
         return {
@@ -689,6 +878,7 @@ def load_parsed_match(parsed: dict) -> dict:
             "home_conceded_corners": h.get("corners_against", 0),
             "away_conceded_corners": a.get("corners_against", 0),
         } if h.get("corners_for") else None,
+        "_parsed": parsed,
     }
 
 
@@ -784,9 +974,12 @@ def submit_result(sb, rid, hg, ag):
         sel = rec.get("selection", "")
         correct = False
         if market == "Match Result":
-            if "Home" in sel: correct = hg > ag if "−" in sel or "-" in sel else hg >= ag
-            elif "Away" in sel: correct = ag > hg if "−" in sel or "-" in sel else ag >= hg
-            elif "Draw" in sel: correct = hg == ag
+            if "Home" in sel:
+                correct = hg > ag if "−" in sel or "-" in sel else hg >= ag
+            elif "Away" in sel:
+                correct = ag > hg if "−" in sel or "-" in sel else ag >= hg
+            elif "Draw" in sel:
+                correct = hg == ag
         elif market == "BTTS":
             correct = (hg >= 1 and ag >= 1) if "Yes" in sel else (hg == 0 or ag == 0)
         elif market == "Over/Under":
@@ -812,10 +1005,181 @@ def get_results(sb):
 
 
 # ============================================================================
-# UI
+# DISPLAY HELPERS
+# ============================================================================
+def edge_class(edge: float) -> str:
+    if edge >= 0.05: return "edge-pos"
+    if edge <= -0.05: return "edge-neg"
+    return "edge-neutral"
+
+
+def render_prediction_card(match, parsed, analysis):
+    """Render the prediction card."""
+
+    # -- Header ------------------------------------------------------------
+    meta_parts = []
+    if match.get("league"): meta_parts.append(match["league"])
+    if parsed.get("venue"): meta_parts.append(parsed["venue"])
+    if match.get("date"): meta_parts.append(match["date"])
+    if parsed.get("kickoff"): meta_parts.append(parsed["kickoff"])
+    meta = "  ·  ".join(meta_parts)
+
+    st.markdown(f"""
+    <div class="team-header">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;">
+            <div>
+                <div class="team-names">{match['home_team']} &nbsp;🆚&nbsp; {match['away_team']}</div>
+                <div class="team-meta">{meta}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # -- Verdict banner ----------------------------------------------------
+    if analysis["bets"]:
+        primary = analysis["bets"][0]
+        st.markdown(f"""
+        <div class="verdict-bet">
+            <div class="verdict-label">⭐ Primary Pick</div>
+            <div class="verdict-pick">{primary['selection']}</div>
+            <div class="verdict-detail">
+                {primary['market']} &nbsp;·&nbsp; @ <strong>{primary['odds']:.2f}</strong>
+                &nbsp;·&nbsp; Edge <strong>{primary['edge']:+.1%}</strong>
+                &nbsp;·&nbsp; Stake <strong>{primary['stake']}</strong>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="verdict-nobet">
+            <div class="verdict-label-grey">Verdict</div>
+            <div class="verdict-noedge">No value edge on any market</div>
+            <div class="verdict-detail-grey">
+                The market has priced this match efficiently. Skip it and move on.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # -- Additional picks --------------------------------------------------
+    if len(analysis["bets"]) > 1:
+        st.markdown('<div class="section-title">Other Picks</div>', unsafe_allow_html=True)
+        for b in analysis["bets"][1:]:
+            st.markdown(f"""
+            <div class="alt-bet">
+                <div class="alt-bet-title">{b['selection']}</div>
+                <div class="alt-bet-meta">
+                    {b['market']} &nbsp;·&nbsp; @ {b['odds']:.2f}
+                    &nbsp;·&nbsp; Edge <strong>{b['edge']:+.1%}</strong>
+                    &nbsp;·&nbsp; {b['stake']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # -- Probabilities -----------------------------------------------------
+    st.markdown('<div class="section-title">Outcome Probabilities</div>', unsafe_allow_html=True)
+    probs = analysis["probabilities"]
+    edges = analysis["edges"]
+
+    def stat_card(col, value, label, edge, css_class):
+        cls = edge_class(edge) if edge is not None else "edge-neutral"
+        edge_str = f"{edge:+.1%}" if edge is not None else "—"
+        col.markdown(f"""
+        <div class="stat-card {css_class}">
+            <div class="stat-value">{value:.1%}</div>
+            <div class="stat-label">{label}</div>
+            <div class="stat-edge {cls}">Edge {edge_str}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    stat_card(c1, probs.get("home_win", 0), "Home Win", edges.get("home_win"), "stat-card-home")
+    stat_card(c2, probs.get("draw", 0), "Draw", edges.get("draw"), "stat-card-draw")
+    stat_card(c3, probs.get("away_win", 0), "Away Win", edges.get("away_win"), "stat-card-away")
+
+    # -- xG panel ----------------------------------------------------------
+    st.markdown('<div class="section-title">Expected Goals Model</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"""
+        <div class="xg-row">
+            <span class="xg-team">🏠 {match['home_team']}</span>
+            <span class="xg-value">{analysis['shrunk_xg_home']:.2f}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="xg-row">
+            <span class="xg-team">✈️ {match['away_team']}</span>
+            <span class="xg-value">{analysis['shrunk_xg_away']:.2f}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class="xg-row">
+            <span class="xg-team">Model Total</span>
+            <span class="xg-value">{analysis['model_total']:.2f}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="xg-row">
+            <span class="xg-team">Market Total</span>
+            <span class="xg-value" style="color:#fbbf24;">{analysis['market_total']:.2f}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.caption(
+        f"Model total shrunk {int(SHRINK_WEIGHT*100)}% toward the market total. "
+        f"Final shrunk total: **{analysis['shrunk_total']:.2f}** goals expected."
+    )
+
+    # -- Other markets -----------------------------------------------------
+    st.markdown('<div class="section-title">Other Markets</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        e = edges.get("btts_yes")
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{probs.get('btts_yes', 0):.1%}</div>
+            <div class="stat-label">BTTS Yes</div>
+            <div class="stat-edge {edge_class(e) if e else 'edge-neutral'}">
+                Edge {f"{e:+.1%}" if e is not None else "—"}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        e = edges.get("over_25")
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{probs.get('over_25', 0):.1%}</div>
+            <div class="stat-label">Over 2.5</div>
+            <div class="stat-edge {edge_class(e) if e else 'edge-neutral'}">
+                Edge {f"{e:+.1%}" if e is not None else "—"}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        e = edges.get("under_25")
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{probs.get('under_25', 0):.1%}</div>
+            <div class="stat-label">Under 2.5</div>
+            <div class="stat-edge {edge_class(e) if e else 'edge-neutral'}">
+                Edge {f"{e:+.1%}" if e is not None else "—"}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # -- Skipped -----------------------------------------------------------
+    with st.expander(f"❌ Skipped markets ({len(analysis['skips'])})"):
+        for s in analysis["skips"]:
+            st.write(f"**{s['market']}** — {s['reason']}")
+
+
+# ============================================================================
+# UI — MAIN
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
+    st.caption("xG-based model with market shrinkage, value checks, and edge discipline")
 
     sb = get_supabase()
     if sb is None:
@@ -823,16 +1187,19 @@ def main():
 
     tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records"])
 
+    # ------------------------------------------------------------------
     with tabs[0]:
         st.markdown("### Paste Sportsgambler HTML")
-        text = st.text_area("HTML", height=250, key="html_input")
+        st.caption("Open a Sportsgambler preview, View Source, copy the HTML, paste below.")
 
-        if st.button("Analyze", type="primary"):
+        text = st.text_area("HTML", height=220, key="html_input", label_visibility="collapsed")
+
+        if st.button("⚽ Generate Prediction", type="primary"):
             if not text or len(text.strip()) < 200:
-                st.error("Please paste a full Sportsgambler page.")
+                st.error("Please paste a full Sportsgambler preview page.")
             else:
                 try:
-                    with st.spinner("Analyzing..."):
+                    with st.spinner("Analysing match..."):
                         parsed = SportsgamblerParser(text).parse()
                         match = load_parsed_match(parsed)
                         p = RefinedPredictor()
@@ -846,28 +1213,8 @@ def main():
                         p.select_markets(edge_odds, match["btts_rate"], match.get("corner_data"))
                         analysis = p.get_full_analysis()
 
-                    st.success(f"✅ {match['home_team']} vs {match['away_team']}")
-
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Model Total xG", f"{analysis['model_total']:.2f}")
-                    c2.metric("Market Total", f"{analysis['market_total']:.2f}")
-                    c3.metric("Shrunk Total", f"{analysis['shrunk_total']:.2f}")
-
-                    probs = analysis["probabilities"]
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("P(Home)", f"{probs.get('home_win', 0):.1%}")
-                    c2.metric("P(Draw)", f"{probs.get('draw', 0):.1%}")
-                    c3.metric("P(Away)", f"{probs.get('away_win', 0):.1%}")
-
-                    st.markdown("### Selected Bets")
-                    if not analysis["bets"]:
-                        st.info("No value bets found.")
-                    for b in analysis["bets"]:
-                        st.success(f"**{b['market']}** — {b['selection']} @ {b['odds']:.2f} | Edge: **{b['edge']:+.1%}** | {b['stake']}")
-
-                    with st.expander("Skipped"):
-                        for s in analysis["skips"]:
-                            st.write(f"**{s['market']}** — {s['reason']}")
+                    st.markdown("---")
+                    render_prediction_card(match, parsed, analysis)
 
                     if sb is not None and analysis["bets"]:
                         saved = 0
@@ -875,14 +1222,15 @@ def main():
                             if save_bet_to_db(sb, match, analysis, b):
                                 saved += 1
                         if saved:
-                            st.success(f"Saved {saved} bet(s).")
+                            st.success(f"💾 Saved {saved} bet(s) to database.")
 
                 except Exception as e:
                     st.error(f"Error: {e}")
                     st.code(traceback.format_exc())
 
+    # ------------------------------------------------------------------
     with tabs[1]:
-        st.subheader("Pending")
+        st.subheader("📝 Pending Bets")
         if sb is None:
             st.info("Supabase not configured.")
         else:
@@ -900,31 +1248,37 @@ def main():
                             st.success("Saved.")
                             st.rerun()
 
+    # ------------------------------------------------------------------
     with tabs[2]:
-        st.subheader("Records")
+        st.subheader("📊 Performance Records")
         if sb is None:
             st.info("Supabase not configured.")
         else:
             results = get_results(sb)
             if not results:
-                st.info("No results yet.")
+                st.info("No results recorded yet.")
             else:
                 total = len(results)
                 wins = sum(1 for r in results if r.get("is_correct"))
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Total", total)
+                c1.metric("Total Bets", total)
                 c2.metric("Win Rate", f"{wins/total*100:.0f}%")
                 c3.metric("Wins", wins)
+
                 df = pd.DataFrame([{
                     "Date": r.get("match_date", ""),
                     "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
+                    "Market": r.get("market", ""),
                     "Selection": r.get("selection", ""),
+                    "Edge": f"{r.get('bet_edge', 0):+.1%}",
+                    "Odds": f"{r.get('bet_odds', 0):.2f}",
+                    "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
                     "Result": "✅" if r.get("is_correct") else "❌",
                 } for r in results])
                 st.dataframe(df, use_container_width=True)
 
 
 # ============================================================================
-# RUN — unconditional, no __main__ guard
+# RUN
 # ============================================================================
 main()
