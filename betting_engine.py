@@ -2,14 +2,17 @@
 betting_engine.py
 =================
 
-Refined Prediction Strategy — core engine.
-- No Streamlit imports.
-- No side effects at import time.
-- All heavy imports (bs4, scipy) are lazy.
-- Safe to import even if optional deps are missing.
+Refined Prediction Strategy — complete engine.
 
-Dependencies (optional but recommended):
-    pip install beautifulsoup4 scipy
+- Parses Sportsgambler HTML into structured data
+- Computes xG from home/away splits
+- Applies form, injury, and fatigue adjustments
+- Shrinks toward market total
+- Runs Poisson to get probabilities
+- Calculates edges and selects markets
+
+Only external dependency: beautifulsoup4 (for HTML parsing).
+Uses pure-Python Poisson if scipy is unavailable.
 """
 
 from __future__ import annotations
@@ -18,26 +21,6 @@ import math
 import re
 from datetime import datetime
 from typing import Optional
-
-
-# ============================================================================
-# FEATURE FLAGS — resolved lazily
-# ============================================================================
-
-def _has_bs4() -> bool:
-    try:
-        import bs4  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-def _has_scipy() -> bool:
-    try:
-        import scipy.stats  # noqa: F401
-        return True
-    except ImportError:
-        return False
 
 
 # ============================================================================
@@ -63,6 +46,26 @@ MIN_XG = 0.10
 
 
 # ============================================================================
+# LAZY IMPORTS
+# ============================================================================
+
+def _has_bs4() -> bool:
+    try:
+        import bs4  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _has_scipy() -> bool:
+    try:
+        import scipy.stats  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+# ============================================================================
 # SPORTSGAMBLER HTML PARSER
 # ============================================================================
 
@@ -73,7 +76,7 @@ class SportsgamblerParser:
         if not _has_bs4():
             raise RuntimeError(
                 "beautifulsoup4 is required for HTML parsing. "
-                "Add 'beautifulsoup4' to your requirements."
+                "Add 'beautifulsoup4' to your requirements.txt."
             )
         from bs4 import BeautifulSoup
         self.soup = BeautifulSoup(html, "html.parser")
@@ -124,7 +127,10 @@ class SportsgamblerParser:
         league = None
         for link in self.soup.select(".t_top .t_info_link"):
             text = link.get_text(strip=True)
-            if re.search(r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Championship|MLS|Cup|Division)", text, re.I):
+            if re.search(
+                r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Championship|MLS|Cup|Division)",
+                text, re.I,
+            ):
                 league = text
                 break
         venue_el = self.soup.select_one(".t_top .t_venue")
@@ -552,10 +558,18 @@ def load_parsed_match(parsed: dict) -> dict:
 
     market_total = derive_market_total(odds.get("over_25"), odds.get("under_25"))
 
-    home_games = max(1, home_l10.get("wins", 0) + home_l10.get("draws", 0) + home_l10.get("losses", 0))
-    away_games = max(1, away_l10.get("wins", 0) + away_l10.get("draws", 0) + away_l10.get("losses", 0))
-    btts_rate = ((home_l10.get("btts_yes", 0) / home_games) +
-                 (away_l10.get("btts_yes", 0) / away_games)) / 2.0
+    home_games = max(
+        1,
+        home_l10.get("wins", 0) + home_l10.get("draws", 0) + home_l10.get("losses", 0),
+    )
+    away_games = max(
+        1,
+        away_l10.get("wins", 0) + away_l10.get("draws", 0) + away_l10.get("losses", 0),
+    )
+    btts_rate = (
+        (home_l10.get("btts_yes", 0) / home_games)
+        + (away_l10.get("btts_yes", 0) / away_games)
+    ) / 2.0
 
     return {
         "home_team": parsed.get("home_team"),
@@ -802,7 +816,10 @@ class RefinedPredictor:
         if _has_scipy():
             from scipy.stats import poisson
             return [float(poisson.pmf(i, lam)) for i in range(k_max + 1)]
-        return [(lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(k_max + 1)]
+        return [
+            (lam ** i) * math.exp(-lam) / math.factorial(i)
+            for i in range(k_max + 1)
+        ]
 
     def calculate_edges(self, odds):
         self.market_probs = {}
@@ -1006,6 +1023,7 @@ class RefinedPredictor:
 # ============================================================================
 
 def analyse_html(html: str):
+    """End-to-end: HTML -> parsed -> predictor -> analysis."""
     parsed = SportsgamblerParser(html).parse()
     match = load_parsed_match(parsed)
 
