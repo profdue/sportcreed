@@ -166,7 +166,19 @@ st.markdown("""
     }
     .xg-team { color: #cbd5e1; font-weight: 600; }
     .xg-value { color: #3b82f6; font-weight: 800; font-size: 1.3rem; }
-    .xg-total { color: #94a3b8; font-size: 0.85rem; }
+
+    .ah-table {
+        background: #0f172a;
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.4rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .ah-line { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
+    .ah-prob { color: #3b82f6; font-weight: 800; font-size: 1.15rem; }
+    .ah-edge { font-weight: 700; font-size: 0.85rem; margin-left: 0.5rem; }
 
     .stButton button {
         background: linear-gradient(135deg, #10b981 0%, #059669 100%);
@@ -181,7 +193,7 @@ st.markdown("""
 
 
 # ============================================================================
-# SUPABASE — lazy, cached, never stops the page
+# SUPABASE
 # ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
@@ -213,9 +225,15 @@ FATIGUE_HOME = 0.05
 FATIGUE_AWAY = 0.10
 MIN_XG = 0.10
 
+# AH rules
+AH_HOME_OUTRIGHT_MIN = 0.45      # Home outright win prob floor for Home AH
+AH_AWAY_OUTRIGHT_MIN = 0.45      # Away outright win prob floor for Away AH
+AH_DRAW_MIN = 0.28               # Draw prob floor
+AH_UNDERDOG_MIN = 0.30           # Underdog win prob floor for +AH bet
+
 
 # ============================================================================
-# PARSER
+# PARSER (unchanged)
 # ============================================================================
 def _has_bs4():
     try:
@@ -260,8 +278,6 @@ class SportsgamblerParser:
         result["away_team_last10_away"].update(corners["away"])
         return result
 
-    # -- identity -----------------------------------------------------------
-
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
         if len(teams) >= 2:
@@ -304,8 +320,6 @@ class SportsgamblerParser:
         at = (self.away_team or "AWAY").replace(" ", "")[:3].upper()
         dt = (match_date or "").replace("-", "")
         return f"{ht}_{at}_{dt}"
-
-    # -- odds ---------------------------------------------------------------
 
     def _parse_odds(self):
         flat = {
@@ -403,8 +417,6 @@ class SportsgamblerParser:
         try: return int(str(s).strip())
         except (ValueError, TypeError): return 0
 
-    # -- last 10 splits -----------------------------------------------------
-
     def _parse_last10_splits(self, side):
         split = self._empty_split()
         table = self.soup.select_one(".st-table")
@@ -466,8 +478,6 @@ class SportsgamblerParser:
                 out["away"]["corners_against"] = numbers[5]
         return out
 
-    # -- last 5 form --------------------------------------------------------
-
     def _parse_last5_form(self, competition):
         out = {"home_team_points": 0, "away_team_points": 0}
         container = self.soup.select_one("#last-matches #All")
@@ -527,8 +537,6 @@ class SportsgamblerParser:
         if not score_el: return None
         return self._to_int(score_el.get_text(strip=True))
 
-    # -- injuries -----------------------------------------------------------
-
     def _parse_injuries(self):
         out = {"home_key_attackers_out": 0, "home_key_defenders_out": 0, "home_key_midfielders_out": 0,
                "away_key_attackers_out": 0, "away_key_defenders_out": 0, "away_key_midfielders_out": 0}
@@ -547,7 +555,6 @@ class SportsgamblerParser:
                 info_el = row.select_one(".inj-two-info")
                 info = info_el.get_text(strip=True).lower() if info_el else ""
                 if "doubt" in info: continue
-                # FIXED: search inside the row, not the row's sibling
                 detail = row.find("div", class_="inj-two-hidden")
                 position = self._extract_position(detail)
                 importance = self._extract_importance(detail)
@@ -576,8 +583,6 @@ class SportsgamblerParser:
         gg = re.search(r"Goals:\s*(\d+)", text)
         if gg: goals = int(gg.group(1))
         return "key" if (matches >= 3 or goals >= 1) else "squad"
-
-    # -- midweek ------------------------------------------------------------
 
     def _parse_midweek(self, match_date_iso):
         out = {"home_team_played": False, "away_team_played": False}
@@ -610,7 +615,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# PREDICTOR
+# PREDICTOR — with improved AH logic
 # ============================================================================
 class RefinedPredictor:
     def __init__(self):
@@ -685,9 +690,12 @@ class RefinedPredictor:
     def run_poisson(self, max_goals=10):
         home_probs = self._pmf(self.shrunk_xg_home, max_goals)
         away_probs = self._pmf(self.shrunk_xg_away, max_goals)
+
         p_home = p_draw = p_away = 0.0
         p_btts_yes = p_btts_no = 0.0
         p_over = p_under = 0.0
+        # For AH settlement (line = 0.5): home wins by 1+ OR draw treated as win
+        # We compute the standard W/D/L first, then derive.
         for h in range(max_goals + 1):
             for a in range(max_goals + 1):
                 prob = home_probs[h] * away_probs[a]
@@ -698,13 +706,60 @@ class RefinedPredictor:
                 else: p_btts_no += prob
                 if h + a > 2.5: p_over += prob
                 else: p_under += prob
+
         total = p_home + p_draw + p_away
         if total > 0:
             p_home /= total; p_draw /= total; p_away /= total
+
+        # AH settlement helpers
+        # Home −0.5 AH: wins if home wins outright
+        # Home −0.25 AH: full win if home wins, half-win if draw half-loss
+        # Home +0.25 AH: half-win if draw, full win if home wins, full loss if home loses
+        # Home +0.5 AH: win if home wins OR draws
+        # Home +0.75 AH: win if home wins or draws; half-loss if loses by 1
+        # Home +1.0 AH: win if home wins or draws; push if loses by 1; loss if loses by 2+
+        p_home_by_1 = p_away_by_1 = p_home_by_2plus = p_away_by_2plus = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                prob = home_probs[h] * away_probs[a]
+                if h - a == 1: p_home_by_1 += prob
+                elif h - a >= 2: p_home_by_2plus += prob
+                elif a - h == 1: p_away_by_1 += prob
+                elif a - h >= 2: p_away_by_2plus += prob
+
+        # Effective win probabilities for various AH lines (treating half-win as 0.5)
+        ah_home = {
+            -0.5: p_home,
+            -0.25: p_home + 0.5 * p_draw,
+            +0.25: p_home + 0.5 * p_draw,   # half-win on draw counts 0.5 win
+            +0.5: p_home + p_draw,
+            +0.75: p_home + p_draw + 0.5 * p_home_by_1,  # not exact but close
+            +1.0: p_home + p_draw,
+        }
+        # For +0.75 the correct effective win = P(win) + P(draw) + 0.5*P(loss by 1)
+        ah_home[+0.75] = p_home + p_draw + 0.5 * p_away_by_1
+        # For +1.0 the correct effective win = P(win) + P(draw) (loss by 1 = push = 0 win)
+        ah_home[+1.0] = p_home + p_draw
+
+        ah_away = {
+            -0.5: p_away,
+            -0.25: p_away + 0.5 * p_draw,
+            +0.25: p_away + 0.5 * p_draw,
+            +0.5: p_away + p_draw,
+            +0.75: p_away + p_draw + 0.5 * p_home_by_1,
+            +1.0: p_away + p_draw,
+        }
+
         self.probabilities = {
-            "home_win": p_home, "draw": p_draw, "away_win": p_away,
-            "btts_yes": p_btts_yes, "btts_no": p_btts_no,
-            "over_25": p_over, "under_25": p_under,
+            "home_win": p_home,
+            "draw": p_draw,
+            "away_win": p_away,
+            "btts_yes": p_btts_yes,
+            "btts_no": p_btts_no,
+            "over_25": p_over,
+            "under_25": p_under,
+            "ah_home": ah_home,
+            "ah_away": ah_away,
         }
 
     @staticmethod
@@ -725,88 +780,280 @@ class RefinedPredictor:
             if not odd_val or odd_val <= 1.01: continue
             self.edges[key] = self.probabilities.get(prob_key, 0.0) - 1.0 / odd_val
 
+    # ------------------------------------------------------------------------
+    # NEW: AH-aware market selection
+    # ------------------------------------------------------------------------
     def select_markets(self, odds, btts_rate=0.5, corner_data=None):
         self.bets = []
         self.skips = []
-        for outcome, label, ok, pk in [
-            ("home_win", "Home", "home_odds", "home_win"),
-            ("away_win", "Away", "away_odds", "away_win"),
-            ("draw", "Draw", "draw_odds", "draw"),
-        ]:
-            edge = self.edges.get(outcome)
-            if edge is None: continue
-            prob = self.probabilities.get(pk, 0.0)
-            if edge > EDGE_MAX:
-                self.skips.append({"market": f"Match Result: {label}",
-                                   "reason": f"Edge {edge:+.1%} > 30% (model error)"})
-                continue
-            if edge < EDGE_MIN:
-                self.skips.append({"market": f"Match Result: {label}",
-                                   "reason": f"Edge {edge:+.1%} < 5%"})
-                continue
-            if outcome == "home_win" and prob >= 0.45:
-                self.bets.append({"market": "Match Result", "selection": "Home −0.25 or −0.5 AH",
-                                  "prob": prob, "edge": edge, "odds": odds.get(ok, 0),
-                                  "stake": "1 unit", "confidence": "High"})
-            elif outcome == "away_win" and prob >= 0.45:
-                self.bets.append({"market": "Match Result", "selection": "Away −0.25 or −0.5 AH",
-                                  "prob": prob, "edge": edge, "odds": odds.get(ok, 0),
-                                  "stake": "1 unit", "confidence": "High"})
-            elif outcome == "draw" and prob >= 0.28:
-                self.bets.append({"market": "Match Result", "selection": "Draw or Underdog +0.25",
-                                  "prob": prob, "edge": edge, "odds": odds.get(ok, 0),
-                                  "stake": "1 unit", "confidence": "High"})
-        # Underdog AH
-        hp = self.probabilities.get("home_win", 0)
-        ap = self.probabilities.get("away_win", 0)
-        if hp < ap and ap >= 0.30 and odds.get("home_odds", 0) >= 3.00:
-            edge = hp - 1.0 / odds["home_odds"]
-            if EDGE_MIN < edge < EDGE_MAX:
-                self.bets.append({"market": "Match Result", "selection": "Home +0.75 or +1.0 AH",
-                                  "prob": hp, "edge": edge, "odds": odds["home_odds"],
-                                  "stake": "1 unit", "confidence": "High"})
-        elif ap < hp and hp >= 0.30 and odds.get("away_odds", 0) >= 3.00:
-            edge = ap - 1.0 / odds["away_odds"]
-            if EDGE_MIN < edge < EDGE_MAX:
-                self.bets.append({"market": "Match Result", "selection": "Away +0.75 or +1.0 AH",
-                                  "prob": ap, "edge": edge, "odds": odds["away_odds"],
-                                  "stake": "1 unit", "confidence": "High"})
+
+        # 1X2 outright (kept for reference — see skips)
+        self._check_outright(odds)
+
+        # AH bets — the primary match-result channel
+        self._check_ah_home(odds)
+        self._check_ah_away(odds)
+        self._check_ah_underdog(odds)
+
         # BTTS
-        if btts_rate > 0.65:
-            edge = self.edges.get("btts_yes")
-            if edge is not None and EDGE_MIN <= edge <= EDGE_MAX:
-                self.bets.append({"market": "BTTS", "selection": "BTTS Yes",
-                                  "prob": self.probabilities["btts_yes"], "edge": edge,
-                                  "odds": odds.get("btts_yes_odds", 0),
-                                  "stake": "1 unit", "confidence": "High"})
-        elif btts_rate < 0.45:
-            edge = self.edges.get("btts_no")
-            if edge is not None and EDGE_MIN <= edge <= EDGE_MAX:
-                self.bets.append({"market": "BTTS", "selection": "BTTS No",
-                                  "prob": self.probabilities["btts_no"], "edge": edge,
-                                  "odds": odds.get("btts_no_odds", 0),
-                                  "stake": "1 unit", "confidence": "High"})
-        # O/U
-        if self.shrunk_total > 3.00:
-            edge = self.edges.get("over_25")
-            if edge is not None and EDGE_OU_MIN <= edge <= EDGE_MAX:
-                self.bets.append({"market": "Over/Under", "selection": "Over 2.5",
-                                  "prob": self.probabilities["over_25"], "edge": edge,
-                                  "odds": odds.get("over_25_odds", 0),
-                                  "stake": "0.5 units", "confidence": "Selective"})
-        elif self.shrunk_total < 2.20:
-            edge = self.edges.get("under_25")
-            if edge is not None and EDGE_OU_MIN <= edge <= EDGE_MAX:
-                self.bets.append({"market": "Over/Under", "selection": "Under 2.5",
-                                  "prob": self.probabilities["under_25"], "edge": edge,
-                                  "odds": odds.get("under_25_odds", 0),
-                                  "stake": "0.5 units", "confidence": "Selective"})
-        else:
-            self.skips.append({"market": "Over/Under 2.5",
-                               "reason": f"Shrunk total {self.shrunk_total:.2f} in neutral zone"})
+        self._check_btts(odds, btts_rate)
+
+        # Over/Under
+        self._check_ou(odds)
+
+        # Corners
+        self._check_corners(corner_data)
+
+        # Never-bet reminders
         self.skips.append({"market": "Correct Score", "reason": "Never bet — pure lottery"})
         self.skips.append({"market": "First Goalscorer", "reason": "Never bet"})
         self.skips.append({"market": "Anytime Goalscorer", "reason": "Avoid — high variance"})
+        return self.bets
+
+    def _check_outright(self, odds):
+        """Log outright edges as skips (informational only)."""
+        for outcome, label in [("home_win", "Home"), ("away_win", "Away"), ("draw", "Draw")]:
+            edge = self.edges.get(outcome)
+            if edge is None:
+                continue
+            prob = self.probabilities.get(outcome, 0.0)
+            self.skips.append({
+                "market": f"Outright 1X2: {label}",
+                "reason": f"P={prob:.1%}, edge {edge:+.1%} (use AH channel for match result)",
+            })
+
+    def _check_ah_home(self, odds):
+        """Home AH bet — value on home avoiding defeat / covering the line."""
+        line = odds.get("ah_home_line")
+        ah_odds = odds.get("ah_home")
+        if line is None or not ah_odds or ah_odds <= 1.01:
+            return
+
+        p_home = self.probabilities.get("home_win", 0.0)
+        p_draw = self.probabilities.get("draw", 0.0)
+
+        # Only fire when home is genuinely strong (>= 45% outright)
+        if p_home < AH_HOME_OUTRIGHT_MIN:
+            self.skips.append({
+                "market": f"Home {line:+g} AH",
+                "reason": f"P(Home)={p_home:.1%} < 45% outright floor",
+            })
+            return
+
+        # Get effective win prob for this AH line
+        effective = self._effective_ah_prob("home", line)
+        if effective is None:
+            return
+
+        implied = 1.0 / ah_odds
+        edge = effective - implied
+
+        if edge > EDGE_MAX:
+            self.skips.append({
+                "market": f"Home {line:+g} AH",
+                "reason": f"Edge {edge:+.1%} > 30% (model error)",
+            })
+            return
+        if edge < EDGE_MIN:
+            self.skips.append({
+                "market": f"Home {line:+g} AH",
+                "reason": f"Edge {edge:+.1%} < 5%",
+            })
+            return
+
+        self.bets.append({
+            "market": "Match Result (AH)",
+            "selection": f"Home {line:+g} AH",
+            "prob": effective,
+            "edge": edge,
+            "odds": ah_odds,
+            "stake": "1 unit",
+            "confidence": "High",
+        })
+
+    def _check_ah_away(self, odds):
+        line = odds.get("ah_away_line")
+        ah_odds = odds.get("ah_away")
+        if line is None or not ah_odds or ah_odds <= 1.01:
+            return
+
+        p_away = self.probabilities.get("away_win", 0.0)
+        if p_away < AH_AWAY_OUTRIGHT_MIN:
+            self.skips.append({
+                "market": f"Away {line:+g} AH",
+                "reason": f"P(Away)={p_away:.1%} < 45% outright floor",
+            })
+            return
+
+        effective = self._effective_ah_prob("away", line)
+        if effective is None:
+            return
+
+        implied = 1.0 / ah_odds
+        edge = effective - implied
+
+        if edge > EDGE_MAX:
+            self.skips.append({
+                "market": f"Away {line:+g} AH",
+                "reason": f"Edge {edge:+.1%} > 30% (model error)",
+            })
+            return
+        if edge < EDGE_MIN:
+            self.skips.append({
+                "market": f"Away {line:+g} AH",
+                "reason": f"Edge {edge:+.1%} < 5%",
+            })
+            return
+
+        self.bets.append({
+            "market": "Match Result (AH)",
+            "selection": f"Away {line:+g} AH",
+            "prob": effective,
+            "edge": edge,
+            "odds": ah_odds,
+            "stake": "1 unit",
+            "confidence": "High",
+        })
+
+    def _check_ah_underdog(self, odds):
+        """Underdog +AH value: strong win prob at good price."""
+        p_home = self.probabilities.get("home_win", 0.0)
+        p_away = self.probabilities.get("away_win", 0.0)
+
+        # Identify which side is the underdog (lower win prob but >= 30%)
+        if p_home < p_away and p_home >= AH_UNDERDOG_MIN:
+            side, line = "home", odds.get("ah_home_line")
+            ah_odds = odds.get("ah_home")
+        elif p_away < p_home and p_away >= AH_UNDERDOG_MIN:
+            side, line = "away", odds.get("ah_away_line")
+            ah_odds = odds.get("ah_away")
+        else:
+            return
+
+        if line is None or not ah_odds or ah_odds <= 1.01:
+            return
+
+        effective = self._effective_ah_prob(side, line)
+        if effective is None:
+            return
+
+        implied = 1.0 / ah_odds
+        edge = effective - implied
+
+        # Only fire if it's a positive handicap with genuine value
+        if line <= 0:
+            return
+        if not (EDGE_MIN < edge < EDGE_MAX):
+            return
+
+        # Avoid duplicating the home/away AH bet
+        for existing in self.bets:
+            if f"{side.capitalize()} {line:+g}" in existing["selection"]:
+                return
+
+        self.bets.append({
+            "market": "Match Result (AH)",
+            "selection": f"{side.capitalize()} {line:+g} AH (underdog)",
+            "prob": effective,
+            "edge": edge,
+            "odds": ah_odds,
+            "stake": "0.5 units",
+            "confidence": "Selective",
+        })
+
+    def _effective_ah_prob(self, side, line):
+        """Return effective win probability for a given AH line."""
+        ah = self.probabilities.get(f"ah_{side}", {})
+        # Match the closest line
+        candidates = sorted(ah.keys(), key=lambda k: abs(k - line))
+        if not candidates:
+            return None
+        closest = candidates[0]
+        if abs(closest - line) > 0.01:
+            # We don't have the exact line — approximate
+            p_win = self.probabilities.get(f"{side}_win", 0.0)
+            p_draw = self.probabilities.get("draw", 0.0)
+            if line >= 0.5:
+                return p_win + p_draw
+            if line >= 0.25:
+                return p_win + 0.5 * p_draw
+            if line >= -0.25:
+                return p_win + 0.5 * p_draw
+            return p_win
+        return ah[closest]
+
+    def _check_btts(self, odds, btts_rate):
+        if btts_rate > 0.65:
+            edge = self.edges.get("btts_yes")
+            if edge is not None and EDGE_MIN <= edge <= EDGE_MAX:
+                self.bets.append({
+                    "market": "BTTS", "selection": "BTTS Yes",
+                    "prob": self.probabilities["btts_yes"], "edge": edge,
+                    "odds": odds.get("btts_yes_odds", 0),
+                    "stake": "1 unit", "confidence": "High",
+                })
+        elif btts_rate < 0.45:
+            edge = self.edges.get("btts_no")
+            if edge is not None and EDGE_MIN <= edge <= EDGE_MAX:
+                self.bets.append({
+                    "market": "BTTS", "selection": "BTTS No",
+                    "prob": self.probabilities["btts_no"], "edge": edge,
+                    "odds": odds.get("btts_no_odds", 0),
+                    "stake": "1 unit", "confidence": "High",
+                })
+
+    def _check_ou(self, odds):
+        if self.shrunk_total > 3.00:
+            edge = self.edges.get("over_25")
+            if edge is not None and EDGE_OU_MIN <= edge <= EDGE_MAX:
+                self.bets.append({
+                    "market": "Over/Under", "selection": "Over 2.5 (small stake)",
+                    "prob": self.probabilities["over_25"], "edge": edge,
+                    "odds": odds.get("over_25_odds", 0),
+                    "stake": "0.5 units", "confidence": "Selective",
+                })
+            else:
+                self.skips.append({
+                    "market": "Over/Under 2.5 (Over)",
+                    "reason": f"Total > 3.00 fired but edge {edge:+.1%} < 8%" if edge is not None else "Total > 3.00 fired but no edge data",
+                })
+        elif self.shrunk_total < 2.20:
+            edge = self.edges.get("under_25")
+            if edge is not None and EDGE_OU_MIN <= edge <= EDGE_MAX:
+                self.bets.append({
+                    "market": "Over/Under", "selection": "Under 2.5 (small stake)",
+                    "prob": self.probabilities["under_25"], "edge": edge,
+                    "odds": odds.get("under_25_odds", 0),
+                    "stake": "0.5 units", "confidence": "Selective",
+                })
+            else:
+                self.skips.append({
+                    "market": "Over/Under 2.5 (Under)",
+                    "reason": f"Total < 2.20 fired but edge {edge:+.1%} < 8%" if edge is not None else "Total < 2.20 fired but no edge data",
+                })
+        else:
+            self.skips.append({
+                "market": "Over/Under 2.5",
+                "reason": f"Shrunk total {self.shrunk_total:.2f} in neutral zone (2.20–3.00)",
+            })
+
+    def _check_corners(self, corner_data):
+        if not corner_data:
+            return
+        if corner_data.get("home_avg_corners", 0) >= 5.5 and corner_data.get("away_conceded_corners", 0) >= 5.0:
+            self.bets.append({
+                "market": "Corners", "selection": "Home Over 4.5 corners",
+                "prob": 0.55, "edge": 0.05,
+                "odds": corner_data.get("home_corners_over") or 0,
+                "stake": "0.5 units", "confidence": "Selective",
+            })
+        if corner_data.get("away_avg_corners", 0) >= 5.5 and corner_data.get("home_conceded_corners", 0) >= 5.0:
+            self.bets.append({
+                "market": "Corners", "selection": "Away Over 4.5 corners",
+                "prob": 0.55, "edge": 0.05,
+                "odds": corner_data.get("away_corners_over") or 0,
+                "stake": "0.5 units", "confidence": "Selective",
+            })
 
     def get_full_analysis(self):
         return {
@@ -821,7 +1068,7 @@ class RefinedPredictor:
 
 
 # ============================================================================
-# HELPERS
+# HELPERS (unchanged)
 # ============================================================================
 def load_parsed_match(parsed: dict) -> dict:
     odds = parsed.get("odds", {}) or {}
@@ -871,6 +1118,10 @@ def load_parsed_match(parsed: dict) -> dict:
             "btts_no_odds": odds.get("btts_no") or 2.00,
             "over_25_odds": odds.get("over_25") or 1.90,
             "under_25_odds": odds.get("under_25") or 1.90,
+            "ah_home_line": odds.get("ah_home_line"),
+            "ah_home": odds.get("ah_home"),
+            "ah_away_line": odds.get("ah_away_line"),
+            "ah_away": odds.get("ah_away"),
         },
         "corner_data": {
             "home_avg_corners": h.get("corners_for", 0),
@@ -920,7 +1171,7 @@ def parse_match_date(d):
 
 
 # ============================================================================
-# DB OPERATIONS
+# DB OPERATIONS (unchanged)
 # ============================================================================
 def save_bet_to_db(sb, match, analysis, bet):
     if sb is None: return None
@@ -973,7 +1224,18 @@ def submit_result(sb, rid, hg, ag):
         market = rec.get("market", "")
         sel = rec.get("selection", "")
         correct = False
-        if market == "Match Result":
+        # AH settlement
+        if market == "Match Result (AH)":
+            m = re.search(r"(Home|Away)\s+([+-]?[\d.]+)\s+AH", sel)
+            if m:
+                side = m.group(1).lower()
+                line = float(m.group(2))
+                margin = (hg - ag) if side == "home" else (ag - hg)
+                adjusted = margin + line
+                if adjusted > 0: correct = True
+                elif adjusted == 0: correct = None  # push / half-win
+                else: correct = False
+        elif market == "Match Result":
             if "Home" in sel:
                 correct = hg > ag if "−" in sel or "-" in sel else hg >= ag
             elif "Away" in sel:
@@ -1007,16 +1269,15 @@ def get_results(sb):
 # ============================================================================
 # DISPLAY HELPERS
 # ============================================================================
-def edge_class(edge: float) -> str:
+def edge_class(edge):
+    if edge is None: return "edge-neutral"
     if edge >= 0.05: return "edge-pos"
     if edge <= -0.05: return "edge-neg"
     return "edge-neutral"
 
 
 def render_prediction_card(match, parsed, analysis):
-    """Render the prediction card."""
-
-    # -- Header ------------------------------------------------------------
+    # Header
     meta_parts = []
     if match.get("league"): meta_parts.append(match["league"])
     if parsed.get("venue"): meta_parts.append(parsed["venue"])
@@ -1026,16 +1287,12 @@ def render_prediction_card(match, parsed, analysis):
 
     st.markdown(f"""
     <div class="team-header">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;">
-            <div>
-                <div class="team-names">{match['home_team']} &nbsp;🆚&nbsp; {match['away_team']}</div>
-                <div class="team-meta">{meta}</div>
-            </div>
-        </div>
+        <div class="team-names">{match['home_team']} &nbsp;🆚&nbsp; {match['away_team']}</div>
+        <div class="team-meta">{meta}</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # -- Verdict banner ----------------------------------------------------
+    # Verdict
     if analysis["bets"]:
         primary = analysis["bets"][0]
         st.markdown(f"""
@@ -1060,7 +1317,6 @@ def render_prediction_card(match, parsed, analysis):
         </div>
         """, unsafe_allow_html=True)
 
-    # -- Additional picks --------------------------------------------------
     if len(analysis["bets"]) > 1:
         st.markdown('<div class="section-title">Other Picks</div>', unsafe_allow_html=True)
         for b in analysis["bets"][1:]:
@@ -1075,13 +1331,13 @@ def render_prediction_card(match, parsed, analysis):
             </div>
             """, unsafe_allow_html=True)
 
-    # -- Probabilities -----------------------------------------------------
+    # Probabilities
     st.markdown('<div class="section-title">Outcome Probabilities</div>', unsafe_allow_html=True)
     probs = analysis["probabilities"]
     edges = analysis["edges"]
 
     def stat_card(col, value, label, edge, css_class):
-        cls = edge_class(edge) if edge is not None else "edge-neutral"
+        cls = edge_class(edge)
         edge_str = f"{edge:+.1%}" if edge is not None else "—"
         col.markdown(f"""
         <div class="stat-card {css_class}">
@@ -1096,7 +1352,31 @@ def render_prediction_card(match, parsed, analysis):
     stat_card(c2, probs.get("draw", 0), "Draw", edges.get("draw"), "stat-card-draw")
     stat_card(c3, probs.get("away_win", 0), "Away Win", edges.get("away_win"), "stat-card-away")
 
-    # -- xG panel ----------------------------------------------------------
+    # AH probabilities panel
+    st.markdown('<div class="section-title">Asian Handicap Probabilities</div>', unsafe_allow_html=True)
+    ah_home = probs.get("ah_home", {})
+    ah_away = probs.get("ah_away", {})
+
+    ah_lines = sorted(set(list(ah_home.keys()) + list(ah_away.keys())))
+    if ah_lines:
+        cols = st.columns(min(4, len(ah_lines)))
+        for i, line in enumerate(ah_lines):
+            col = cols[i % len(cols)]
+            p_h = ah_home.get(line)
+            p_a = ah_away.get(line)
+            with col:
+                st.markdown(f"""
+                <div class="ah-table">
+                    <div>
+                        <div class="ah-line">Line {line:+g}</div>
+                        <div class="ah-line" style="font-size:0.7rem;color:#64748b;">
+                            Home: {p_h:.1%} | Away: {p_a:.1%}
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # xG panel
     st.markdown('<div class="section-title">Expected Goals Model</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
@@ -1127,11 +1407,10 @@ def render_prediction_card(match, parsed, analysis):
         """, unsafe_allow_html=True)
 
     st.caption(
-        f"Model total shrunk {int(SHRINK_WEIGHT*100)}% toward the market total. "
-        f"Final shrunk total: **{analysis['shrunk_total']:.2f}** goals expected."
+        f"Model total shrunk 50% toward market. Final shrunk total: **{analysis['shrunk_total']:.2f}** goals expected."
     )
 
-    # -- Other markets -----------------------------------------------------
+    # Other markets
     st.markdown('<div class="section-title">Other Markets</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1140,9 +1419,7 @@ def render_prediction_card(match, parsed, analysis):
         <div class="stat-card">
             <div class="stat-value">{probs.get('btts_yes', 0):.1%}</div>
             <div class="stat-label">BTTS Yes</div>
-            <div class="stat-edge {edge_class(e) if e else 'edge-neutral'}">
-                Edge {f"{e:+.1%}" if e is not None else "—"}
-            </div>
+            <div class="stat-edge {edge_class(e)}">Edge {f"{e:+.1%}" if e is not None else "—"}</div>
         </div>
         """, unsafe_allow_html=True)
     with c2:
@@ -1151,9 +1428,7 @@ def render_prediction_card(match, parsed, analysis):
         <div class="stat-card">
             <div class="stat-value">{probs.get('over_25', 0):.1%}</div>
             <div class="stat-label">Over 2.5</div>
-            <div class="stat-edge {edge_class(e) if e else 'edge-neutral'}">
-                Edge {f"{e:+.1%}" if e is not None else "—"}
-            </div>
+            <div class="stat-edge {edge_class(e)}">Edge {f"{e:+.1%}" if e is not None else "—"}</div>
         </div>
         """, unsafe_allow_html=True)
     with c3:
@@ -1162,24 +1437,22 @@ def render_prediction_card(match, parsed, analysis):
         <div class="stat-card">
             <div class="stat-value">{probs.get('under_25', 0):.1%}</div>
             <div class="stat-label">Under 2.5</div>
-            <div class="stat-edge {edge_class(e) if e else 'edge-neutral'}">
-                Edge {f"{e:+.1%}" if e is not None else "—"}
-            </div>
+            <div class="stat-edge {edge_class(e)}">Edge {f"{e:+.1%}" if e is not None else "—"}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # -- Skipped -----------------------------------------------------------
+    # Skipped
     with st.expander(f"❌ Skipped markets ({len(analysis['skips'])})"):
         for s in analysis["skips"]:
             st.write(f"**{s['market']}** — {s['reason']}")
 
 
 # ============================================================================
-# UI — MAIN
+# MAIN UI
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with market shrinkage, value checks, and edge discipline")
+    st.caption("xG-based model with market shrinkage, AH-aware match result, and value discipline")
 
     sb = get_supabase()
     if sb is None:
@@ -1187,11 +1460,9 @@ def main():
 
     tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records"])
 
-    # ------------------------------------------------------------------
     with tabs[0]:
         st.markdown("### Paste Sportsgambler HTML")
         st.caption("Open a Sportsgambler preview, View Source, copy the HTML, paste below.")
-
         text = st.text_area("HTML", height=220, key="html_input", label_visibility="collapsed")
 
         if st.button("⚽ Generate Prediction", type="primary"):
@@ -1228,7 +1499,6 @@ def main():
                     st.error(f"Error: {e}")
                     st.code(traceback.format_exc())
 
-    # ------------------------------------------------------------------
     with tabs[1]:
         st.subheader("📝 Pending Bets")
         if sb is None:
@@ -1248,7 +1518,6 @@ def main():
                             st.success("Saved.")
                             st.rerun()
 
-    # ------------------------------------------------------------------
     with tabs[2]:
         st.subheader("📊 Performance Records")
         if sb is None:
@@ -1264,7 +1533,6 @@ def main():
                 c1.metric("Total Bets", total)
                 c2.metric("Win Rate", f"{wins/total*100:.0f}%")
                 c3.metric("Wins", wins)
-
                 df = pd.DataFrame([{
                     "Date": r.get("match_date", ""),
                     "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
@@ -1278,7 +1546,4 @@ def main():
                 st.dataframe(df, use_container_width=True)
 
 
-# ============================================================================
-# RUN
-# ============================================================================
 main()
