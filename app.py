@@ -312,6 +312,20 @@ class SportsgamblerParser:
             return 0
 
     def _parse_last10_splits(self, side):
+        """
+        Parse the .st-table row for the given side.
+
+        Column layout in the HTML (with a colspan="2" leading cell):
+          cells[0] = team label (merged)
+          cells[1] = W-D-L
+          cells[2] = avg goals per game (total)
+          cells[3] = GF (goals for)
+          cells[4] = GA (goals against)
+          cells[5] = O2.5 count
+          cells[6] = U2.5 count
+          cells[7] = BTTS Yes count
+          cells[8] = BTTS No count (sometimes absent)
+        """
         split = self._empty_split()
         table = self.soup.select_one(".st-table")
         if table:
@@ -319,17 +333,17 @@ class SportsgamblerParser:
             idx = 0 if side == "home" else 1
             if idx < len(rows):
                 cells = [td.get_text(strip=True) for td in rows[idx].select("td")]
-                if len(cells) >= 9:
+                if len(cells) >= 8:
                     mm = re.match(r"(\d+)-(\d+)-(\d+)", cells[1])
                     if mm:
                         split["wins"] = int(mm.group(1))
                         split["draws"] = int(mm.group(2))
                         split["losses"] = int(mm.group(3))
-                    split["gf_per_game"] = self._to_float(cells[4]) or 0.0
-                    split["ga_per_game"] = self._to_float(cells[5]) or 0.0
-                    split["over25"] = self._to_int(cells[6])
-                    split["under25"] = self._to_int(cells[7])
-                    split["btts_yes"] = self._to_int(cells[8])
+                    split["gf_per_game"] = self._to_float(cells[3]) or 0.0
+                    split["ga_per_game"] = self._to_float(cells[4]) or 0.0
+                    split["over25"] = self._to_int(cells[5])
+                    split["under25"] = self._to_int(cells[6])
+                    split["btts_yes"] = self._to_int(cells[7])
                     return split
         return self._parse_last10_from_keystats(side)
 
@@ -783,7 +797,6 @@ class RefinedPredictor:
         add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes")
         add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no")
 
-        # NOTE: market string is "O/U 2.5" to match DB constraint
         add("O/U 2.5", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over")
         add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under")
 
@@ -1127,7 +1140,6 @@ def write_market_odds(sb, match):
         push("AH", f"Home {o['ah_home_line']:+g}", o["ah_home_line"], o.get("ah_home"))
     if o.get("ah_away_line") is not None:
         push("AH", f"Away {o['ah_away_line']:+g}", o["ah_away_line"], o.get("ah_away"))
-    # NOTE: constraint requires "O/U 2.5", not "O/U"
     push("O/U 2.5", "Over 2.5", 2.5, o.get("over_2.5"))
     push("O/U 2.5", "Under 2.5", 2.5, o.get("under_2.5"))
     push("BTTS", "Yes", None, o.get("btts_yes"))
