@@ -1,14 +1,14 @@
 """
 Refined Prediction Strategy — single-file Streamlit app.
-Parser + Predictor + Ranking selection + Supabase persistence (wide layout).
+Wide `matches` schema: one row per match, all selections as columns.
 
 Requires:
   st.secrets["SUPABASE_URL"]
-  st.secrets["SUPABASE_KEY"]   (service_role / secret key)
+  st.secrets["SUPABASE_KEY"]   (service_role key)
 
 Tables:
-  matches      — one row per match, wide (all selections as columns)
-  reliability  — one row per market type, updated after each result
+  matches       — 1 row per match, ~233 columns
+  reliability   — 10 rows, one per market type
 """
 
 import math
@@ -17,7 +17,6 @@ import traceback
 import base64
 import json
 from datetime import date, datetime
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -71,15 +70,13 @@ st.markdown("""
 # ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
-    diag = {"url": None, "role": None, "key_prefix": None, "key_length": None,
-            "ok": False, "error": None}
+    diag = {"url": None, "role": None, "key_prefix": None, "ok": False, "error": None}
     try:
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         diag["url"] = url
         diag["key_prefix"] = (key[:15] + "...") if key else None
-        diag["key_length"] = len(key) if key else 0
         try:
             parts = key.split(".")
             if len(parts) >= 2:
@@ -122,7 +119,7 @@ RELIABILITY_PRIOR_STRENGTH = 10
 
 
 # ============================================================================
-# PARSER (unchanged from last working version)
+# PARSER
 # ============================================================================
 def _has_bs4():
     try:
@@ -307,9 +304,9 @@ class SportsgamblerParser:
         st-table columns:
           cells[0] = team label
           cells[1] = W-D-L
-          cells[2] = avg goals per game
-          cells[3] = GF
-          cells[4] = GA
+          cells[2] = avg goals per game (total)
+          cells[3] = GF (goals for)
+          cells[4] = GA (goals against)
           cells[5] = O2.5 count
           cells[6] = U2.5 count
           cells[7] = BTTS Yes count
@@ -748,10 +745,6 @@ class RefinedPredictor:
         return ah[closest]
 
     def generate_candidates(self, odds):
-        """
-        Produce 14 candidates. Each candidate has a fixed column key suffix
-        so we can write it to a specific column in matches.
-        """
         cs = []
         P = self.probabilities
 
@@ -768,31 +761,20 @@ class RefinedPredictor:
                 "col_key": col_key,
             })
 
-        # 1X2
         add("1X2", "Home Win", None, P.get("home_win"), odds.get("home"), "1X2_favourite", "1x2_home")
-        add("1X2", "Draw",     None, P.get("draw"),     odds.get("draw"), "1X2_favourite", "1x2_draw")
-        add("1X2", "Away Win", None, P.get("away_win"), odds.get("away"), "1X2_underdog",  "1x2_away")
-
-        # DC
-        add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0),    odds.get("dc_1x"), "DC", "dc_1x")
-        add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0),odds.get("dc_12"), "DC", "dc_12")
-        add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0),    odds.get("dc_x2"), "DC", "dc_x2")
-
-        # DNB
+        add("1X2", "Draw", None, P.get("draw"), odds.get("draw"), "1X2_favourite", "1x2_draw")
+        add("1X2", "Away Win", None, P.get("away_win"), odds.get("away"), "1X2_underdog", "1x2_away")
+        add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0), odds.get("dc_1x"), "DC", "dc_1x")
+        add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0), odds.get("dc_12"), "DC", "dc_12")
+        add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0), odds.get("dc_x2"), "DC", "dc_x2")
         p_h = P.get("home_win", 0); p_a = P.get("away_win", 0)
         if p_h + p_a > 0:
             add("DNB", "Home", None, p_h / (p_h + p_a), odds.get("dnb_home"), "DNB", "dnb_home")
             add("DNB", "Away", None, p_a / (p_h + p_a), odds.get("dnb_away"), "DNB", "dnb_away")
-
-        # BTTS
         add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes", "btts_yes")
-        add("BTTS", "No",  None, P.get("btts_no"),  odds.get("btts_no"),  "BTTS_no",  "btts_no")
-
-        # O/U 2.5
-        add("O/U 2.5", "Over 2.5",  2.5, P.get("over_25"),  odds.get("over_2.5"),  "O/U_2.5_over",  "ou_over")
+        add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no", "btts_no")
+        add("O/U 2.5", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over", "ou_over")
         add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under", "ou_under")
-
-        # AH
         ah_h_line = odds.get("ah_home_line")
         if ah_h_line is not None:
             p = self._effective_ah_prob("home", ah_h_line)
@@ -958,6 +940,43 @@ DEFAULT_RELIABILITY = {
     "DC": 0.6, "DNB": 0.6,
 }
 
+# For each column suffix, the reliability key it maps to (for WON/LOST/PUSH aggregation).
+COL_TO_REL = {
+    "1x2_home":  "1X2_favourite",
+    "1x2_draw":  "1X2_favourite",
+    "1x2_away":  "1X2_underdog",
+    "dc_1x":     "DC",
+    "dc_12":     "DC",
+    "dc_x2":     "DC",
+    "dnb_home":  "DNB",
+    "dnb_away":  "DNB",
+    "btts_yes":  "BTTS_yes",
+    "btts_no":   "BTTS_no",
+    "ou_over":   "O/U_2.5_over",
+    "ou_under":  "O/U_2.5_under",
+    # AH handled dynamically based on line sign
+}
+
+# Market / selection for each column, used to settle outcomes.
+COL_TO_MARKET_SELECTION = {
+    "1x2_home":  ("1X2",     "Home Win"),
+    "1x2_draw":  ("1X2",     "Draw"),
+    "1x2_away":  ("1X2",     "Away Win"),
+    "dc_1x":     ("DC",      "1X"),
+    "dc_12":     ("DC",      "12"),
+    "dc_x2":     ("DC",      "X2"),
+    "dnb_home":  ("DNB",     "Home"),
+    "dnb_away":  ("DNB",     "Away"),
+    "btts_yes":  ("BTTS",    "Yes"),
+    "btts_no":   ("BTTS",    "No"),
+    "ou_over":   ("O/U 2.5", "Over 2.5"),
+    "ou_under":  ("O/U 2.5", "Under 2.5"),
+    "ah_home":   ("AH",      None),  # built dynamically from line
+    "ah_away":   ("AH",      None),
+}
+
+ALL_COL_KEYS = list(COL_TO_MARKET_SELECTION.keys())
+
 
 def get_reliability(sb):
     out = dict(DEFAULT_RELIABILITY)
@@ -985,9 +1004,6 @@ def seed_reliability(sb):
         return False, str(e)
 
 
-# ============================================================================
-# OUTCOME SETTLEMENT
-# ============================================================================
 def settle_candidate(market, selection, line, hg, ag):
     total = hg + ag
     if market == "1X2":
@@ -1022,78 +1038,43 @@ def settle_candidate(market, selection, line, hg, ag):
     return None
 
 
-# Map col_key -> (market, selection) for the wide layout.
-COL_KEY_TO_MARKET_SELECTION = {
-    "1x2_home":  ("1X2",     "Home Win"),
-    "1x2_draw":  ("1X2",     "Draw"),
-    "1x2_away":  ("1X2",     "Away Win"),
-    "dc_1x":     ("DC",      "1X"),
-    "dc_12":     ("DC",      "12"),
-    "dc_x2":     ("DC",      "X2"),
-    "dnb_home":  ("DNB",     "Home"),
-    "dnb_away":  ("DNB",     "Away"),
-    "btts_yes":  ("BTTS",    "Yes"),
-    "btts_no":   ("BTTS",    "No"),
-    "ou_over":   ("O/U 2.5", "Over 2.5"),
-    "ou_under":  ("O/U 2.5", "Under 2.5"),
-    "ah_home":   ("AH",      None),  # selection built dynamically from line
-    "ah_away":   ("AH",      None),
-}
-
-COL_KEY_TO_RELIABILITY_KEY = {
-    "1x2_home":  "1X2_favourite",
-    "1x2_draw":  "1X2_favourite",
-    "1x2_away":  "1X2_underdog",
-    "dc_1x":     "DC",
-    "dc_12":     "DC",
-    "dc_x2":     "DC",
-    "dnb_home":  "DNB",
-    "dnb_away":  "DNB",
-    "btts_yes":  "BTTS_yes",
-    "btts_no":   "BTTS_no",
-    "ou_over":   "O/U_2.5_over",
-    "ou_under":  "O/U_2.5_under",
-    "ah_home":   "AH_positive",   # sign-adjusted when reading row
-    "ah_away":   "AH_positive",
-}
-
-
 def update_reliability(sb):
     """
-    Read every match row where outcomes are set, aggregate WON/LOST/PUSH
-    per reliability_key, recompute Bayesian weights, upsert to reliability.
+    Read every matches row where outcome columns are populated,
+    aggregate WON/LOST/PUSH per reliability key, and upsert weights.
     """
     if sb is None:
         return False, "no client"
     try:
-        resp = sb.table("matches").select(
-            "ah_home_line,ah_away_line,"
-            "outcome_1x2_home,outcome_1x2_draw,outcome_1x2_away,"
-            "outcome_dc_1x,outcome_dc_12,outcome_dc_x2,"
-            "outcome_dnb_home,outcome_dnb_away,"
-            "outcome_btts_yes,outcome_btts_no,"
-            "outcome_ou_over,outcome_ou_under,"
-            "outcome_ah_home,outcome_ah_away"
-        ).not_.is_("outcome_1x2_home", "null").execute()
+        # Fetch just the columns we need
+        cols = ["ah_home_line", "ah_away_line"]
+        for ck in ALL_COL_KEYS:
+            cols.append(f"outcome_{ck}")
+        col_csv = ",".join(cols)
+        resp = sb.table("matches").select(col_csv).not_.is_("outcome_1x2_home", "null").execute()
         rows = resp.data or []
 
         groups = {k: {"wins": 0, "losses": 0, "pushes": 0} for k in DEFAULT_RELIABILITY}
 
         for r in rows:
-            ah_h_line = r.get("ah_home_line")
-            ah_a_line = r.get("ah_away_line")
-
-            col_to_key = dict(COL_KEY_TO_RELIABILITY_KEY)
-
-            # Adjust AH reliability keys based on line sign
-            if ah_h_line is not None:
-                col_to_key["ah_home"] = "AH_positive" if float(ah_h_line) >= 0 else "AH_negative"
-            if ah_a_line is not None:
-                col_to_key["ah_away"] = "AH_positive" if float(ah_a_line) >= 0 else "AH_negative"
-
-            for col_key, rel_key in col_to_key.items():
-                outcome = r.get(f"outcome_{col_key}")
-                if outcome == "WON":    groups[rel_key]["wins"] += 1
+            ah_h = r.get("ah_home_line")
+            ah_a = r.get("ah_away_line")
+            for ck, rel_key_static in COL_TO_REL.items():
+                outcome = r.get(f"outcome_{ck}")
+                if outcome == "WON": groups[rel_key_static]["wins"] += 1
+                elif outcome == "LOST": groups[rel_key_static]["losses"] += 1
+                elif outcome == "PUSH": groups[rel_key_static]["pushes"] += 1
+            # AH handled dynamically
+            if ah_h is not None:
+                rel_key = "AH_positive" if float(ah_h) >= 0 else "AH_negative"
+                outcome = r.get("outcome_ah_home")
+                if outcome == "WON": groups[rel_key]["wins"] += 1
+                elif outcome == "LOST": groups[rel_key]["losses"] += 1
+                elif outcome == "PUSH": groups[rel_key]["pushes"] += 1
+            if ah_a is not None:
+                rel_key = "AH_positive" if float(ah_a) >= 0 else "AH_negative"
+                outcome = r.get("outcome_ah_away")
+                if outcome == "WON": groups[rel_key]["wins"] += 1
                 elif outcome == "LOST": groups[rel_key]["losses"] += 1
                 elif outcome == "PUSH": groups[rel_key]["pushes"] += 1
 
@@ -1117,13 +1098,9 @@ def update_reliability(sb):
 
 
 # ============================================================================
-# SUPABASE WRITES — WIDE
+# SUPABASE WRITE — wide row
 # ============================================================================
 def write_match(sb, match, analysis):
-    """
-    One row per match. All odds, probabilities, edges, conviction, scores,
-    and the picked selection are columns.
-    """
     if sb is None:
         return False, "no client"
     try:
@@ -1132,7 +1109,6 @@ def write_match(sb, match, analysis):
         inj = match["_parsed"]["injuries"]
 
         rec = {
-            # ----- identity -----
             "match_id": match["match_id"],
             "match_date": match["date"],
             "kickoff": match.get("kickoff"),
@@ -1140,8 +1116,6 @@ def write_match(sb, match, analysis):
             "home_team": match.get("home_team"),
             "away_team": match.get("away_team"),
             "venue": match.get("venue"),
-
-            # ----- last-10 splits -----
             "home_gf_per_game_last10": match["home_data"].get("home_goals_scored_last10"),
             "home_ga_per_game_last10": match["home_data"].get("home_goals_conceded_last10"),
             "away_gf_per_game_last10": match["away_data"].get("away_goals_scored_last10"),
@@ -1156,14 +1130,6 @@ def write_match(sb, match, analysis):
             "away_losses_last10": away_ah.get("losses"),
             "away_over25_last10": away_ah.get("over25"),
             "away_btts_yes_last10": away_ah.get("btts_yes"),
-
-            # ----- season splits -----
-            "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
-            "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
-            "away_gf_per_game_season": match["away_data"].get("away_goals_scored_season"),
-            "away_ga_per_game_season": match["away_data"].get("away_goals_conceded_season"),
-
-            # ----- form / fatigue / injuries -----
             "home_last5_points": match["home_data"].get("last5_points"),
             "away_last5_points": match["away_data"].get("last5_points"),
             "home_last_match_date": match.get("home_last_match_date"),
@@ -1176,12 +1142,12 @@ def write_match(sb, match, analysis):
             "away_key_attackers_out": inj.get("away_key_attackers_out", 0),
             "away_key_defenders_out": inj.get("away_key_defenders_out", 0),
             "away_key_midfielders_out": inj.get("away_key_midfielders_out", 0),
-
-            # ----- sample size -----
             "home_current_season_games": match.get("home_current_games"),
             "away_current_season_games": match.get("away_current_games"),
-
-            # ----- model outputs -----
+            "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
+            "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
+            "away_gf_per_game_season": match["away_data"].get("away_goals_scored_season"),
+            "away_ga_per_game_season": match["away_data"].get("away_goals_conceded_season"),
             "model_xg_home_raw": analysis["model_xg_home"],
             "model_xg_away_raw": analysis["model_xg_away"],
             "model_xg_home_shrunk": analysis["shrunk_xg_home"],
@@ -1198,47 +1164,60 @@ def write_match(sb, match, analysis):
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
         }
 
-        # ----- per-candidate columns -----
-        # Initialize every selection column to None, then fill from candidates.
-        for col_key in COL_KEY_TO_MARKET_SELECTION:
-            rec[f"odds_{col_key}"] = None
-            rec[f"prob_{col_key}"] = None
-            rec[f"edge_{col_key}"] = None
-            rec[f"conviction_{col_key}"] = None
-            rec[f"score_{col_key}"] = None
-            rec[f"outcome_{col_key}"] = None
-
-        # AH lines
+        # Line helpers
         rec["ah_home_line"] = match["odds"].get("ah_home_line")
         rec["ah_away_line"] = match["odds"].get("ah_away_line")
+        rec["line_ou_over"] = 2.5
+        rec["line_ou_under"] = 2.5
+
+        # Fill per-selection columns from candidates
+        for ck in ALL_COL_KEYS:
+            rec[f"odds_{ck}"] = None
+            rec[f"implied_prob_{ck}"] = None
+            rec[f"prob_{ck}"] = None
+            rec[f"edge_{ck}"] = None
+            rec[f"conviction_{ck}"] = None
+            rec[f"reliability_{ck}"] = None
+            rec[f"score_{ck}"] = None
+            rec[f"rank_{ck}"] = None
+            rec[f"was_bet_{ck}"] = False
+            rec[f"stake_{ck}"] = None
+            rec[f"outcome_{ck}"] = None
 
         for c in analysis["candidates"]:
             ck = c["col_key"]
             rec[f"odds_{ck}"] = c["odds"]
+            rec[f"implied_prob_{ck}"] = c["implied_prob"]
             rec[f"prob_{ck}"] = c["model_prob"]
             rec[f"edge_{ck}"] = c["edge"]
             rec[f"conviction_{ck}"] = c["conviction"]
+            rec[f"reliability_{ck}"] = c["reliability"]
             rec[f"score_{ck}"] = c["score"]
+            rec[f"rank_{ck}"] = c["rank_in_match"]
 
-        # ----- picked selection -----
+        # Picked selection
         if analysis["bets"]:
             top = analysis["bets"][0]
-            # find the candidate that matches
-            picked_c = next((c for c in analysis["candidates"]
-                             if c["market"] == top["market"] and c["selection"] == top["selection"]), None)
-            rec["picked_market"] = top["market"]
-            rec["picked_selection"] = top["selection"]
-            rec["picked_line"] = picked_c["line"] if picked_c else None
-            rec["picked_odds"] = top["odds"]
-            rec["picked_model_prob"] = top["prob"]
-            rec["picked_implied_prob"] = (1.0 / top["odds"]) if top["odds"] else None
-            rec["picked_edge"] = top["edge"]
-            rec["picked_conviction"] = picked_c["conviction"] if picked_c else None
-            rec["picked_reliability"] = picked_c["reliability"] if picked_c else None
-            rec["picked_score"] = top["score"]
-            m = re.match(r"([\d.]+)", top.get("stake", "0"))
-            rec["picked_stake"] = float(m.group(1)) if m else None
-            rec["picked_outcome"] = None
+            top_c = next((c for c in analysis["candidates"]
+                          if c["market"] == top["market"] and c["selection"] == top["selection"]), None)
+            if top_c:
+                ck = top_c["col_key"]
+                rec[f"was_bet_{ck}"] = True
+                m = re.match(r"([\d.]+)", top.get("stake", "0"))
+                stake_val = float(m.group(1)) if m else None
+                rec[f"stake_{ck}"] = stake_val
+                rec["picked_market"] = top["market"]
+                rec["picked_selection"] = top["selection"]
+                rec["picked_line"] = top_c["line"]
+                rec["picked_odds"] = top["odds"]
+                rec["picked_model_prob"] = top["prob"]
+                rec["picked_implied_prob"] = 1.0 / top["odds"] if top["odds"] else None
+                rec["picked_edge"] = top["edge"]
+                rec["picked_conviction"] = top_c["conviction"]
+                rec["picked_reliability"] = top_c["reliability"]
+                rec["picked_score"] = top["score"]
+                rec["picked_stake"] = stake_val
+                rec["picked_outcome"] = None
 
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
         return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates)"
@@ -1247,35 +1226,24 @@ def write_match(sb, match, analysis):
 
 
 def record_outcome(sb, match_id, hg, ag):
-    """
-    Fetch the match row, settle every selection, write back the outcome columns
-    and the picked outcome, then update reliability.
-    """
     if sb is None:
         return False, "no client"
     try:
-        # Fetch the match row
-        resp = sb.table("matches").select("*").eq("match_id", match_id).execute()
+        # Fetch row to get AH lines and picked info
+        resp = sb.table("matches").select(
+            "ah_home_line,ah_away_line,picked_market,picked_selection"
+        ).eq("match_id", match_id).execute()
         if not resp.data:
             return False, f"match_id {match_id} not found"
         m = resp.data[0]
 
-        updates = {
-            "actual_home_goals": hg,
-            "actual_away_goals": ag,
-        }
-
+        updates = {"actual_home_goals": hg, "actual_away_goals": ag}
         ah_h_line = m.get("ah_home_line")
         ah_a_line = m.get("ah_away_line")
 
-        for col_key, (market, selection) in COL_KEY_TO_MARKET_SELECTION.items():
-            outcome_col = f"outcome_{col_key}"
-            if m.get(outcome_col) is not None:
-                continue  # already settled
-
-            # Build the settlement selection string.
+        for ck, (market, selection) in COL_TO_MARKET_SELECTION.items():
             if market == "AH":
-                if col_key == "ah_home":
+                if ck == "ah_home":
                     if ah_h_line is None: continue
                     sel = f"Home {float(ah_h_line):+g}"
                 else:
@@ -1283,35 +1251,26 @@ def record_outcome(sb, match_id, hg, ag):
                     sel = f"Away {float(ah_a_line):+g}"
             else:
                 sel = selection
-
             outcome = settle_candidate(market, sel, None, hg, ag)
             if outcome:
-                updates[outcome_col] = outcome
+                updates[f"outcome_{ck}"] = outcome
 
-        # Picked outcome — pick the top-ranked selection by picked_market/picked_selection
+        # Picked outcome
         pm = m.get("picked_market")
         ps = m.get("picked_selection")
         if pm and ps:
-            # find the matching col_key
-            picked_col = None
-            for col_key, (mk, sel) in COL_KEY_TO_MARKET_SELECTION.items():
+            picked_ck = None
+            for ck, (mk, s) in COL_TO_MARKET_SELECTION.items():
                 if mk == pm:
                     if mk == "AH":
-                        # ps looks like "Home +0.25" or "Away -0.25"
-                        if col_key == "ah_home" and ps.startswith("Home"):
-                            picked_col = col_key
-                        elif col_key == "ah_away" and ps.startswith("Away"):
-                            picked_col = col_key
-                    elif sel == ps:
-                        picked_col = col_key
-            if picked_col:
-                outcome = updates.get(f"outcome_{picked_col}")
-                if outcome:
-                    updates["picked_outcome"] = outcome
+                        if ck == "ah_home" and ps.startswith("Home"): picked_ck = ck
+                        elif ck == "ah_away" and ps.startswith("Away"): picked_ck = ck
+                    elif s == ps:
+                        picked_ck = ck
+            if picked_ck and f"outcome_{picked_ck}" in updates:
+                updates["picked_outcome"] = updates[f"outcome_{picked_ck}"]
 
         sb.table("matches").update(updates).eq("match_id", match_id).execute()
-
-        # Update reliability
         ok, msg = update_reliability(sb)
         return True, f"settled; reliability: {msg}"
     except Exception as e:
@@ -1400,11 +1359,11 @@ def render_prediction_card(match, parsed, analysis):
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with ranking selection — wide matches table")
+    st.caption("xG-based model with ranking selection — wide matches schema")
 
     get_supabase.clear()
-
     sb, diag = get_supabase()
+
     with st.expander("🔍 Supabase connection", expanded=False):
         st.code(f"""
 URL:        {diag.get('url')}
@@ -1460,7 +1419,7 @@ Error:      {diag.get('error')}
                             ok_w, msg_w = write_match(sb, match, analysis)
                             st.code(f"write_match:  ok={ok_w}\n              msg={msg_w}", language="text")
                             if ok_w:
-                                st.success("💾 Saved to Supabase (1 row).")
+                                st.success("💾 Saved to Supabase (1 row, all columns).")
                             else:
                                 st.error("⚠️ Save failed — see message above.")
 
