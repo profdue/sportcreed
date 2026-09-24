@@ -4,7 +4,7 @@ Parser + Predictor + Ranking selection + Supabase persistence.
 
 Requires:
   st.secrets["SUPABASE_URL"]
-  st.secrets["SUPABASE_KEY"]   (service_role key recommended)
+  st.secrets["SUPABASE_KEY"]   (service_role / secret key — bypasses RLS)
 """
 
 import math
@@ -63,44 +63,37 @@ st.markdown("""
 
 
 # ============================================================================
-# DEBUG HELPER
-# ============================================================================
-def debug_section(title: str):
-    st.markdown(f"### 🔍 {title}")
-
-def debug_kv(label: str, value):
-    st.code(f"{label}: {value}", language="text")
-
-def debug_error(label: str, err: Exception):
-    st.error(f"{label}: {err}")
-    st.code(traceback.format_exc(), language="python")
-
-
-# ============================================================================
 # SUPABASE
 # ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
     """
-    Returns (client, diagnostics_dict) where diagnostics tells us
-    which key is loaded and what role it has.
+    Returns (client, diag_dict).
+    diag_dict tells us which key the app actually loaded.
+    Cache is cleared at app startup via get_supabase.clear() in main().
     """
-    diag = {"url": None, "role": None, "key_prefix": None, "ok": False, "error": None}
+    diag = {"url": None, "role": None, "key_prefix": None, "key_length": None,
+            "ok": False, "error": None}
     try:
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         diag["url"] = url
-        diag["key_prefix"] = key[:12] + "..." if key else None
+        diag["key_prefix"] = (key[:15] + "...") if key else None
+        diag["key_length"] = len(key) if key else 0
 
-        # Decode JWT payload to reveal the role
+        # Try JWT decode (works for eyJ... keys; fails for sb_... keys)
         try:
-            payload = key.split(".")[1]
-            payload += "=" * (-len(payload) % 4)
-            decoded = json.loads(base64.urlsafe_b64decode(payload))
-            diag["role"] = decoded.get("role")
+            parts = key.split(".")
+            if len(parts) >= 2:
+                payload = parts[1]
+                payload += "=" * (-len(payload) % 4)
+                decoded = json.loads(base64.urlsafe_b64decode(payload))
+                diag["role"] = decoded.get("role")
+            else:
+                diag["role"] = "not_jwt"
         except Exception as e:
-            diag["role"] = f"decode_failed: {e}"
+            diag["role"] = f"decode_error: {e}"
 
         diag["ok"] = True
         return create_client(url, key), diag
@@ -1338,20 +1331,35 @@ def main():
     st.title("⚽ Refined Prediction Strategy")
     st.caption("xG-based model with ranking selection and Supabase persistence")
 
+    # --- CRITICAL: clear cached Supabase client so a changed key is picked up ---
+    get_supabase.clear()
+
     # === DEBUG: Supabase connection ===
     sb, diag = get_supabase()
     with st.expander("🔍 Supabase connection", expanded=False):
         st.code(f"""
 URL:        {diag.get('url')}
 Key prefix: {diag.get('key_prefix')}
+Key length: {diag.get('key_length')}
 Role:       {diag.get('role')}
 Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
-        if diag.get("role") == "anon":
-            st.warning("⚠️ The key is `anon`. RLS will block inserts. Use the `service_role` key instead.")
-        elif diag.get("role") == "service_role":
-            st.success("✅ The key is `service_role`. RLS is bypassed.")
+
+        prefix = (diag.get("key_prefix") or "")
+        if prefix.startswith("sb_publishable"):
+            st.error("⚠️ The key is `sb_publishable_...`. This is the anon key. RLS WILL block writes. Use the secret key (`sb_secret_...`).")
+        elif prefix.startswith("sb_secret"):
+            st.success("✅ The key is `sb_secret_...`. Service-role equivalent. RLS is bypassed.")
+        elif prefix.startswith("eyJ"):
+            if diag.get("role") == "service_role":
+                st.success("✅ The key is a JWT with role=service_role. RLS is bypassed.")
+            elif diag.get("role") == "anon":
+                st.error("⚠️ The key is a JWT with role=anon. RLS WILL block writes.")
+            else:
+                st.warning(f"⚠️ JWT key with unknown role: {diag.get('role')}")
+        else:
+            st.warning("⚠️ Unknown key format.")
 
     if sb is None:
         st.info("ℹ️ Supabase not configured — predictions work, persistence disabled.")
@@ -1411,7 +1419,8 @@ Error:      {diag.get('error')}
                                 st.error("⚠️ Save incomplete — see diagnostics above.")
 
                 except Exception as e:
-                    debug_error("Prediction pipeline failed", e)
+                    st.error(f"Prediction pipeline failed: {e}")
+                    st.code(traceback.format_exc(), language="python")
 
     # ---- Pending ---------------------------------------------------------
     with tabs[1]:
