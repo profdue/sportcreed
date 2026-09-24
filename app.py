@@ -2,20 +2,16 @@
 Refined Prediction Strategy — single-file Streamlit app.
 Parser + Predictor + Ranking selection + Supabase persistence.
 
-Tables used:
-  matches       — one row per match
-  market_odds   — 14 rows per match (every offered price)
-  candidates    — one row per candidate (per market_odds row)
-  reliability   — one row per market type, updated after each result
-
 Requires:
-  st.secrets["SUPABASE_URL"]  — your project URL
-  st.secrets["SUPABASE_KEY"]  — the service_role key (bypasses RLS)
+  st.secrets["SUPABASE_URL"]
+  st.secrets["SUPABASE_KEY"]   (service_role key recommended)
 """
 
 import math
 import re
 import traceback
+import base64
+import json
 from datetime import date, datetime
 from typing import Optional
 
@@ -67,22 +63,54 @@ st.markdown("""
 
 
 # ============================================================================
+# DEBUG HELPER
+# ============================================================================
+def debug_section(title: str):
+    st.markdown(f"### 🔍 {title}")
+
+def debug_kv(label: str, value):
+    st.code(f"{label}: {value}", language="text")
+
+def debug_error(label: str, err: Exception):
+    st.error(f"{label}: {err}")
+    st.code(traceback.format_exc(), language="python")
+
+
+# ============================================================================
 # SUPABASE
 # ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
+    """
+    Returns (client, diagnostics_dict) where diagnostics tells us
+    which key is loaded and what role it has.
+    """
+    diag = {"url": None, "role": None, "key_prefix": None, "ok": False, "error": None}
     try:
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
+        diag["url"] = url
+        diag["key_prefix"] = key[:12] + "..." if key else None
+
+        # Decode JWT payload to reveal the role
+        try:
+            payload = key.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            decoded = json.loads(base64.urlsafe_b64decode(payload))
+            diag["role"] = decoded.get("role")
+        except Exception as e:
+            diag["role"] = f"decode_failed: {e}"
+
+        diag["ok"] = True
+        return create_client(url, key), diag
     except Exception as e:
-        st.warning(f"Supabase init failed: {e}")
-        return None
+        diag["error"] = str(e)
+        return None, diag
 
 
 # ============================================================================
-# CONSTANTS — unchanged from existing strategy
+# CONSTANTS
 # ============================================================================
 EDGE_MIN = 0.05
 EDGE_MAX = 0.20
@@ -100,7 +128,6 @@ TRUST_FULL_SAMPLE = 8
 TRUST_MIN_WEIGHT = 0.25
 MAX_EFFECTIVE_SHRINK = 0.90
 
-# Ranking layer
 MIN_SCORE = 0.01
 STAKE_TIER_HIGH = 0.05
 STAKE_TIER_MED = 0.02
@@ -316,7 +343,6 @@ class SportsgamblerParser:
                     split["over25"] = self._to_int(cells[6])
                     split["under25"] = self._to_int(cells[7])
                     split["btts_yes"] = self._to_int(cells[8])
-                    split["btts_no"] = self._to_int(cells[9]) if len(cells) > 9 else 0
                     return split
         return self._parse_last10_from_keystats(side)
 
@@ -949,26 +975,27 @@ def get_reliability(sb):
         resp = sb.table("reliability").select("market,weight").execute()
         for row in resp.data or []:
             out[row["market"]] = float(row["weight"])
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"Reliability read failed: {e}")
     return out
 
 
-def seed_reliability(sb) -> bool:
-    if sb is None: return False
+def seed_reliability(sb):
+    if sb is None:
+        return False, "no client"
     try:
         rows = [{"market": k, "weight": v, "prior_weight": v,
                  "prior_strength": RELIABILITY_PRIOR_STRENGTH}
                 for k, v in DEFAULT_RELIABILITY.items()]
-        sb.table("reliability").upsert(rows, on_conflict="market").execute()
-        return True
+        resp = sb.table("reliability").upsert(rows, on_conflict="market").execute()
+        return True, f"{len(resp.data or [])} rows upserted"
     except Exception as e:
-        st.warning(f"Reliability seed failed: {e}")
-        return False
+        return False, str(e)
 
 
-def update_reliability(sb) -> bool:
-    if sb is None: return False
+def update_reliability(sb):
+    if sb is None:
+        return False, "no client"
     try:
         resp = sb.table("candidates").select(
             "market,selection,line,outcome"
@@ -983,6 +1010,7 @@ def update_reliability(sb) -> bool:
             elif r["outcome"] == "LOST": groups[key]["losses"] += 1
             elif r["outcome"] == "PUSH": groups[key]["pushes"] += 1
 
+        updated = 0
         for key, counts in groups.items():
             prior = DEFAULT_RELIABILITY.get(key, 0.5)
             w_, l_, p_ = counts["wins"], counts["losses"], counts["pushes"]
@@ -994,10 +1022,10 @@ def update_reliability(sb) -> bool:
                 "wins": w_, "losses": l_, "pushes": p_, "total": total,
                 "prior_weight": prior, "prior_strength": RELIABILITY_PRIOR_STRENGTH,
             }, on_conflict="market").execute()
-        return True
+            updated += 1
+        return True, f"{updated} markets updated"
     except Exception as e:
-        st.warning(f"Reliability update failed: {e}")
-        return False
+        return False, str(e)
 
 
 def _rel_key_for_candidate(r):
@@ -1019,9 +1047,9 @@ def _rel_key_for_candidate(r):
 # ============================================================================
 # SUPABASE WRITES
 # ============================================================================
-def write_match(sb, match, analysis) -> bool:
+def write_match(sb, match, analysis):
     if sb is None:
-        return False
+        return False, "no client"
     try:
         home_ah = match["_parsed"]["home_team_last10_home"]
         away_ah = match["_parsed"]["away_team_last10_away"]
@@ -1042,13 +1070,11 @@ def write_match(sb, match, analysis) -> bool:
             "home_draws_last10": home_ah.get("draws"),
             "home_losses_last10": home_ah.get("losses"),
             "home_over25_last10": home_ah.get("over25"),
-            "home_under25_last10": home_ah.get("under25"),
             "home_btts_yes_last10": home_ah.get("btts_yes"),
             "away_wins_last10": away_ah.get("wins"),
             "away_draws_last10": away_ah.get("draws"),
             "away_losses_last10": away_ah.get("losses"),
             "away_over25_last10": away_ah.get("over25"),
-            "away_under25_last10": away_ah.get("under25"),
             "away_btts_yes_last10": away_ah.get("btts_yes"),
             "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
             "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
@@ -1082,18 +1108,16 @@ def write_match(sb, match, analysis) -> bool:
             "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
             "model_prob_over_25": analysis["probabilities"].get("over_25"),
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
-            "model_ah_probs": {},
         }
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
-        return True
+        return True, f"match_id={rec['match_id']}"
     except Exception as e:
-        st.warning(f"Match write failed: {e}")
-        return False
+        return False, str(e)
 
 
-def write_market_odds(sb, match) -> bool:
+def write_market_odds(sb, match):
     if sb is None:
-        return False
+        return False, "no client"
     rows = []
     mid = match["match_id"]
     o = match["odds"]
@@ -1121,20 +1145,19 @@ def write_market_odds(sb, match) -> bool:
     push("BTTS", "No", None, o.get("btts_no"))
 
     if not rows:
-        return False
+        return False, "no rows to write"
     try:
         sb.table("market_odds").upsert(
             rows, on_conflict="match_id,market,selection,line"
         ).execute()
-        return True
+        return True, f"{len(rows)} rows"
     except Exception as e:
-        st.warning(f"Market odds write failed: {e}")
-        return False
+        return False, str(e)
 
 
-def write_candidates(sb, match, analysis) -> bool:
+def write_candidates(sb, match, analysis):
     if sb is None:
-        return False
+        return False, "no client"
     mid = match["match_id"]
     rows = []
     primary = analysis["bets"][0] if analysis["bets"] else None
@@ -1162,15 +1185,14 @@ def write_candidates(sb, match, analysis) -> bool:
             "odds": c["odds"],
         })
     if not rows:
-        return False
+        return False, "no rows to write"
     try:
         sb.table("candidates").upsert(
             rows, on_conflict="match_id,market,selection,line"
         ).execute()
-        return True
+        return True, f"{len(rows)} rows"
     except Exception as e:
-        st.warning(f"Candidates write failed: {e}")
-        return False
+        return False, str(e)
 
 
 # ============================================================================
@@ -1210,24 +1232,26 @@ def settle_candidate(market, selection, line, hg, ag):
     return None
 
 
-def record_outcome(sb, match_id, hg, ag) -> bool:
-    if sb is None: return False
+def record_outcome(sb, match_id, hg, ag):
+    if sb is None:
+        return False, "no client"
     try:
         sb.table("matches").update({
             "actual_home_goals": hg, "actual_away_goals": ag,
         }).eq("match_id", match_id).execute()
 
         resp = sb.table("candidates").select("id,market,selection,line").eq("match_id", match_id).execute()
+        settled = 0
         for c in resp.data or []:
             outcome = settle_candidate(c["market"], c["selection"], c.get("line"), hg, ag)
             if outcome:
                 sb.table("candidates").update({"outcome": outcome}).eq("id", c["id"]).execute()
+                settled += 1
 
-        update_reliability(sb)
-        return True
+        ok, msg = update_reliability(sb)
+        return True, f"{settled} candidates settled; reliability: {msg}"
     except Exception as e:
-        st.error(f"Outcome recording failed: {e}")
-        return False
+        return False, str(e)
 
 
 # ============================================================================
@@ -1314,11 +1338,27 @@ def main():
     st.title("⚽ Refined Prediction Strategy")
     st.caption("xG-based model with ranking selection and Supabase persistence")
 
-    sb = get_supabase()
+    # === DEBUG: Supabase connection ===
+    sb, diag = get_supabase()
+    with st.expander("🔍 Supabase connection", expanded=False):
+        st.code(f"""
+URL:        {diag.get('url')}
+Key prefix: {diag.get('key_prefix')}
+Role:       {diag.get('role')}
+Connected:  {diag.get('ok')}
+Error:      {diag.get('error')}
+        """, language="text")
+        if diag.get("role") == "anon":
+            st.warning("⚠️ The key is `anon`. RLS will block inserts. Use the `service_role` key instead.")
+        elif diag.get("role") == "service_role":
+            st.success("✅ The key is `service_role`. RLS is bypassed.")
+
     if sb is None:
         st.info("ℹ️ Supabase not configured — predictions work, persistence disabled.")
     else:
-        seed_reliability(sb)
+        ok, msg = seed_reliability(sb)
+        with st.expander("🔍 Reliability seed", expanded=False):
+            st.code(f"ok={ok}\nmsg={msg}", language="text")
 
     tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records", "🎛️ Reliability"])
 
@@ -1354,18 +1394,24 @@ def main():
                     st.markdown("---")
                     render_prediction_card(match, parsed, analysis)
 
-                    if sb is not None:
-                        ok_m = write_match(sb, match, analysis)
-                        ok_o = write_market_odds(sb, match)
-                        ok_c = write_candidates(sb, match, analysis)
-                        if ok_m and ok_o and ok_c:
-                            st.success("💾 Saved to Supabase.")
+                    # === DEBUG: write attempts ===
+                    with st.expander("🔍 Save to Supabase", expanded=True):
+                        if sb is None:
+                            st.info("Supabase not configured — nothing saved.")
                         else:
-                            st.error("⚠️ Save incomplete — see warnings above.")
+                            r1_ok, r1_msg = write_match(sb, match, analysis)
+                            st.code(f"write_match:        ok={r1_ok}\n                    msg={r1_msg}", language="text")
+                            r2_ok, r2_msg = write_market_odds(sb, match)
+                            st.code(f"write_market_odds:  ok={r2_ok}\n                    msg={r2_msg}", language="text")
+                            r3_ok, r3_msg = write_candidates(sb, match, analysis)
+                            st.code(f"write_candidates:   ok={r3_ok}\n                    msg={r3_msg}", language="text")
+                            if r1_ok and r2_ok and r3_ok:
+                                st.success("💾 Saved to Supabase.")
+                            else:
+                                st.error("⚠️ Save incomplete — see diagnostics above.")
 
                 except Exception as e:
-                    st.error(f"Error: {e}")
-                    st.code(traceback.format_exc())
+                    debug_error("Prediction pipeline failed", e)
 
     # ---- Pending ---------------------------------------------------------
     with tabs[1]:
@@ -1390,9 +1436,12 @@ def main():
                     hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{mid}")
                     ag = c2.number_input("Away goals", 0, 15, 0, key=f"ag_{mid}")
                     if st.button("Submit result", key=f"sub_{mid}"):
-                        if record_outcome(sb, mid, hg, ag):
-                            st.success("Recorded.")
+                        ok, msg = record_outcome(sb, mid, hg, ag)
+                        if ok:
+                            st.success(msg)
                             st.rerun()
+                        else:
+                            st.error(msg)
 
     # ---- Records ---------------------------------------------------------
     with tabs[2]:
