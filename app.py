@@ -7,6 +7,10 @@ Tables used:
   market_odds   — 14 rows per match (every offered price)
   candidates    — one row per candidate (per market_odds row)
   reliability   — one row per market type, updated after each result
+
+Requires:
+  st.secrets["SUPABASE_URL"]  — your project URL
+  st.secrets["SUPABASE_KEY"]  — the service_role key (bypasses RLS)
 """
 
 import math
@@ -129,7 +133,7 @@ class SportsgamblerParser:
         match_date, kickoff = self._parse_datetime()
         competition, venue = self._parse_league_venue()
 
-        result = {
+        return {
             "match_id": self._make_match_id(match_date),
             "match_date": match_date,
             "kickoff": kickoff,
@@ -148,7 +152,6 @@ class SportsgamblerParser:
             "away_current_season_games": self._parse_current_season_games_from_table("away"),
             "last_match_dates": self._parse_last_match_dates(),
         }
-        return result
 
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
@@ -315,7 +318,6 @@ class SportsgamblerParser:
                     split["btts_yes"] = self._to_int(cells[8])
                     split["btts_no"] = self._to_int(cells[9]) if len(cells) > 9 else 0
                     return split
-
         return self._parse_last10_from_keystats(side)
 
     def _parse_last10_from_keystats(self, side):
@@ -752,31 +754,25 @@ class RefinedPredictor:
                 "conviction": conviction, "odds": odd, "reliability_key": reliability_key,
             })
 
-        # 1X2
         add("1X2", "Home Win", None, P.get("home_win"), odds.get("home"), "1X2_favourite")
         add("1X2", "Draw", None, P.get("draw"), odds.get("draw"), "1X2_favourite")
         add("1X2", "Away Win", None, P.get("away_win"), odds.get("away"), "1X2_underdog")
 
-        # DC
         add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0), odds.get("dc_1x"), "DC")
         add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0), odds.get("dc_12"), "DC")
         add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0), odds.get("dc_x2"), "DC")
 
-        # DNB
         p_h = P.get("home_win", 0); p_a = P.get("away_win", 0)
         if p_h + p_a > 0:
             add("DNB", "Home", None, p_h / (p_h + p_a), odds.get("dnb_home"), "DNB")
             add("DNB", "Away", None, p_a / (p_h + p_a), odds.get("dnb_away"), "DNB")
 
-        # BTTS
         add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes")
         add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no")
 
-        # O/U 2.5
         add("O/U", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over")
         add("O/U", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under")
 
-        # AH
         ah_h_line = odds.get("ah_home_line")
         if ah_h_line is not None:
             p = self._effective_ah_prob("home", ah_h_line)
@@ -958,20 +954,21 @@ def get_reliability(sb):
     return out
 
 
-def seed_reliability(sb):
-    if sb is None: return
+def seed_reliability(sb) -> bool:
+    if sb is None: return False
     try:
         rows = [{"market": k, "weight": v, "prior_weight": v,
                  "prior_strength": RELIABILITY_PRIOR_STRENGTH}
                 for k, v in DEFAULT_RELIABILITY.items()]
         sb.table("reliability").upsert(rows, on_conflict="market").execute()
+        return True
     except Exception as e:
         st.warning(f"Reliability seed failed: {e}")
+        return False
 
 
-def update_reliability(sb):
-    """Recompute weights from candidate outcomes using Bayesian update."""
-    if sb is None: return
+def update_reliability(sb) -> bool:
+    if sb is None: return False
     try:
         resp = sb.table("candidates").select(
             "market,selection,line,outcome"
@@ -997,8 +994,10 @@ def update_reliability(sb):
                 "wins": w_, "losses": l_, "pushes": p_, "total": total,
                 "prior_weight": prior, "prior_strength": RELIABILITY_PRIOR_STRENGTH,
             }, on_conflict="market").execute()
+        return True
     except Exception as e:
         st.warning(f"Reliability update failed: {e}")
+        return False
 
 
 def _rel_key_for_candidate(r):
@@ -1020,8 +1019,9 @@ def _rel_key_for_candidate(r):
 # ============================================================================
 # SUPABASE WRITES
 # ============================================================================
-def write_match(sb, match, analysis):
-    if sb is None: return
+def write_match(sb, match, analysis) -> bool:
+    if sb is None:
+        return False
     try:
         home_ah = match["_parsed"]["home_team_last10_home"]
         away_ah = match["_parsed"]["away_team_last10_away"]
@@ -1044,14 +1044,12 @@ def write_match(sb, match, analysis):
             "home_over25_last10": home_ah.get("over25"),
             "home_under25_last10": home_ah.get("under25"),
             "home_btts_yes_last10": home_ah.get("btts_yes"),
-            "home_btts_no_last10": home_ah.get("btts_no"),
             "away_wins_last10": away_ah.get("wins"),
             "away_draws_last10": away_ah.get("draws"),
             "away_losses_last10": away_ah.get("losses"),
             "away_over25_last10": away_ah.get("over25"),
             "away_under25_last10": away_ah.get("under25"),
             "away_btts_yes_last10": away_ah.get("btts_yes"),
-            "away_btts_no_last10": away_ah.get("btts_no"),
             "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
             "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
             "away_gf_per_game_season": match["away_data"].get("away_goals_scored_season"),
@@ -1087,12 +1085,15 @@ def write_match(sb, match, analysis):
             "model_ah_probs": {},
         }
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
+        return True
     except Exception as e:
         st.warning(f"Match write failed: {e}")
+        return False
 
 
-def write_market_odds(sb, match):
-    if sb is None: return
+def write_market_odds(sb, match) -> bool:
+    if sb is None:
+        return False
     rows = []
     mid = match["match_id"]
     o = match["odds"]
@@ -1119,17 +1120,21 @@ def write_market_odds(sb, match):
     push("BTTS", "Yes", None, o.get("btts_yes"))
     push("BTTS", "No", None, o.get("btts_no"))
 
-    if not rows: return
+    if not rows:
+        return False
     try:
         sb.table("market_odds").upsert(
             rows, on_conflict="match_id,market,selection,line"
         ).execute()
+        return True
     except Exception as e:
         st.warning(f"Market odds write failed: {e}")
+        return False
 
 
-def write_candidates(sb, match, analysis):
-    if sb is None: return
+def write_candidates(sb, match, analysis) -> bool:
+    if sb is None:
+        return False
     mid = match["match_id"]
     rows = []
     primary = analysis["bets"][0] if analysis["bets"] else None
@@ -1156,13 +1161,16 @@ def write_candidates(sb, match, analysis):
             "stake": stake,
             "odds": c["odds"],
         })
-    if not rows: return
+    if not rows:
+        return False
     try:
         sb.table("candidates").upsert(
             rows, on_conflict="match_id,market,selection,line"
         ).execute()
+        return True
     except Exception as e:
         st.warning(f"Candidates write failed: {e}")
+        return False
 
 
 # ============================================================================
@@ -1202,8 +1210,8 @@ def settle_candidate(market, selection, line, hg, ag):
     return None
 
 
-def record_outcome(sb, match_id, hg, ag):
-    if sb is None: return
+def record_outcome(sb, match_id, hg, ag) -> bool:
+    if sb is None: return False
     try:
         sb.table("matches").update({
             "actual_home_goals": hg, "actual_away_goals": ag,
@@ -1216,8 +1224,10 @@ def record_outcome(sb, match_id, hg, ag):
                 sb.table("candidates").update({"outcome": outcome}).eq("id", c["id"]).execute()
 
         update_reliability(sb)
+        return True
     except Exception as e:
         st.error(f"Outcome recording failed: {e}")
+        return False
 
 
 # ============================================================================
@@ -1345,10 +1355,13 @@ def main():
                     render_prediction_card(match, parsed, analysis)
 
                     if sb is not None:
-                        write_match(sb, match, analysis)
-                        write_market_odds(sb, match)
-                        write_candidates(sb, match, analysis)
-                        st.success("💾 Saved to Supabase.")
+                        ok_m = write_match(sb, match, analysis)
+                        ok_o = write_market_odds(sb, match)
+                        ok_c = write_candidates(sb, match, analysis)
+                        if ok_m and ok_o and ok_c:
+                            st.success("💾 Saved to Supabase.")
+                        else:
+                            st.error("⚠️ Save incomplete — see warnings above.")
 
                 except Exception as e:
                     st.error(f"Error: {e}")
@@ -1377,9 +1390,9 @@ def main():
                     hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{mid}")
                     ag = c2.number_input("Away goals", 0, 15, 0, key=f"ag_{mid}")
                     if st.button("Submit result", key=f"sub_{mid}"):
-                        record_outcome(sb, mid, hg, ag)
-                        st.success("Recorded.")
-                        st.rerun()
+                        if record_outcome(sb, mid, hg, ag):
+                            st.success("Recorded.")
+                            st.rerun()
 
     # ---- Records ---------------------------------------------------------
     with tabs[2]:
@@ -1401,19 +1414,17 @@ def main():
                 total = len(rows)
                 wins = sum(1 for r in rows if r["outcome"] == "WON")
                 losses = sum(1 for r in rows if r["outcome"] == "LOST")
-                pushes = sum(1 for r in rows if r["outcome"] == "PUSH")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Settled", total)
                 c2.metric("Wins", wins)
                 c3.metric("Losses", losses)
                 c4.metric("Win rate", f"{wins/(wins+losses)*100:.0f}%" if (wins+losses) else "—")
 
-                # Fired bets only
                 fired = [r for r in rows if r.get("was_bet")]
                 if fired:
                     fw = sum(1 for r in fired if r["outcome"] == "WON")
                     fl = sum(1 for r in fired if r["outcome"] == "LOST")
-                    st.markdown(f"**Fired bets:** {len(fired)} · Win rate: {fw/(fw+fl)*100:.0f}%")
+                    st.markdown(f"**Fired bets:** {len(fired)} · Win rate: {fw/(fw+fl)*100:.0f}%" if (fw+fl) else f"**Fired bets:** {len(fired)}")
 
                 df = pd.DataFrame([{
                     "Match": r["match_id"],
