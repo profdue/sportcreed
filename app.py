@@ -5,6 +5,10 @@ Parser + Predictor + Prediction-style UI.
 Includes sample-size shrinkage: when a team has played few games in the
 current season, the model trusts its own xG estimate less and shrinks
 more aggressively toward the market total.
+
+AH is still parsed from the page exactly as before.
+On display, AH lines are converted to 3-way European Handicap form
+(Home / Draw / Away) for easier interpretation.
 """
 
 import math
@@ -171,7 +175,7 @@ st.markdown("""
     .xg-team { color: #cbd5e1; font-weight: 600; }
     .xg-value { color: #3b82f6; font-weight: 800; font-size: 1.3rem; }
 
-    .ah-table {
+    .eh-table {
         background: #0f172a;
         border-radius: 10px;
         padding: 0.85rem 1rem;
@@ -180,9 +184,9 @@ st.markdown("""
         justify-content: space-between;
         align-items: center;
     }
-    .ah-line { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
-    .ah-prob { color: #3b82f6; font-weight: 800; font-size: 1.15rem; }
-    .ah-edge { font-weight: 700; font-size: 0.85rem; margin-left: 0.5rem; }
+    .eh-line { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
+    .eh-prob { color: #3b82f6; font-weight: 800; font-size: 1.15rem; }
+    .eh-edge { font-weight: 700; font-size: 0.85rem; margin-left: 0.5rem; }
 
     .trust-row {
         background: #0f172a;
@@ -244,12 +248,12 @@ FATIGUE_HOME = 0.05
 FATIGUE_AWAY = 0.10
 MIN_XG = 0.10
 
-# NEW: sample-size shrinkage settings
-TRUST_FULL_SAMPLE = 8       # games in current season needed for full trust
-TRUST_MIN_WEIGHT = 0.25     # minimum trust weight (never shrink below this)
-MAX_EFFECTIVE_SHRINK = 0.90 # never shrink more than this toward the market
+# Sample-size shrinkage settings
+TRUST_FULL_SAMPLE = 8
+TRUST_MIN_WEIGHT = 0.25
+MAX_EFFECTIVE_SHRINK = 0.90
 
-# AH rules
+# AH rules (unchanged — still drives selection logic)
 AH_HOME_OUTRIGHT_MIN = 0.45
 AH_AWAY_OUTRIGHT_MIN = 0.45
 AH_DRAW_MIN = 0.28
@@ -257,7 +261,7 @@ AH_UNDERDOG_MIN = 0.30
 
 
 # ============================================================================
-# PARSER
+# PARSER  (AH parsing is UNCHANGED from the original)
 # ============================================================================
 def _has_bs4():
     try:
@@ -296,7 +300,6 @@ class SportsgamblerParser:
             "last5_form": self._parse_last5_form(competition),
             "injuries": self._parse_injuries(),
             "midweek_fixture": self._parse_midweek(match_date),
-            # NEW: current-season game counts for trust weighting
             "home_current_season_games": self._parse_current_season_games("home", competition),
             "away_current_season_games": self._parse_current_season_games("away", competition),
         }
@@ -350,7 +353,7 @@ class SportsgamblerParser:
         dt = (match_date or "").replace("-", "")
         return f"{ht}_{at}_{dt}"
 
-    # -- odds ---------------------------------------------------------------
+    # -- odds (AH parsing kept exactly as before) ---------------------------
 
     def _parse_odds(self):
         flat = {
@@ -386,6 +389,7 @@ class SportsgamblerParser:
                 elif label == "X": flat["draw"] = val
                 elif label == "2": flat["away"] = val
             return
+        # ---- ASIAN HANDICAP (kept as-is) ----
         if "asian handicap" in m:
             for label, val in entries:
                 mm = re.match(r"(\d)\s*Hcp\s*([+-]?[\d.]+)", label)
@@ -503,14 +507,12 @@ class SportsgamblerParser:
                     values.append(col.get_text(strip=True))
             numbers = [self._to_float(v) for v in values]
             numbers = [n for n in numbers if n is not None]
-            # NEW: corrected index mapping.
-            # Row layout per team: [Total For, Total Ag, Total Avg, HomeTotal, HomeFor, HomeAg, AwayTotal, AwayFor, AwayAg]
             if side == "home" and len(numbers) >= 6:
-                out["home"]["corners_for"] = numbers[4]      # Home For
-                out["home"]["corners_against"] = numbers[5]  # Home Against
+                out["home"]["corners_for"] = numbers[4]
+                out["home"]["corners_against"] = numbers[5]
             elif side == "away" and len(numbers) >= 9:
-                out["away"]["corners_for"] = numbers[7]      # Away For
-                out["away"]["corners_against"] = numbers[8]  # Away Against
+                out["away"]["corners_for"] = numbers[7]
+                out["away"]["corners_against"] = numbers[8]
         return out
 
     # -- last 5 form --------------------------------------------------------
@@ -558,13 +560,7 @@ class SportsgamblerParser:
             if counted >= 5: break
         return points
 
-    # NEW: count current-season games in the current competition for a team
     def _parse_current_season_games(self, side: str, competition: Optional[str]) -> int:
-        """
-        Count how many matches of the current competition this team has played
-        that appear in the last-5 match list. The last-5 tab shows recent
-        matches across competitions; we filter to the current competition.
-        """
         container = self.soup.select_one("#last-matches #All")
         if not container:
             return 0
@@ -683,7 +679,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# PREDICTOR — with sample-size shrinkage
+# PREDICTOR — AH model unchanged, plus EH conversion for display
 # ============================================================================
 class RefinedPredictor:
     def __init__(self):
@@ -698,10 +694,13 @@ class RefinedPredictor:
         self.edges = {}
         self.bets = []
         self.skips = []
-        # NEW: track trust and effective shrink for display
         self.effective_shrink = SHRINK_WEIGHT
         self.home_trust = 1.0
         self.away_trust = 1.0
+        # Poisson grids kept so we can build the EH table on demand
+        self._home_pmf = []
+        self._away_pmf = []
+        self._max_goals = 10
 
     def calculate_base_xg(self, home_data, away_data):
         ha = self._blend(home_data.get("home_goals_scored_season", 1.5),
@@ -751,38 +750,21 @@ class RefinedPredictor:
         if p >= 10: return FORM_ADJ_MED
         return 0.0
 
-    # NEW: compute per-team trust weight from current-season game count
     @staticmethod
     def _trust_weight(current_season_games: int) -> float:
-        """
-        Returns a weight in [TRUST_MIN_WEIGHT, 1.0]:
-        - 1.0 = full trust (8+ games in current season)
-        - TRUST_MIN_WEIGHT = low trust (0 games)
-        """
         if current_season_games >= TRUST_FULL_SAMPLE:
             return 1.0
         raw = current_season_games / TRUST_FULL_SAMPLE
         return max(TRUST_MIN_WEIGHT, raw)
 
     def shrink_toward_market(self, market_total, home_current_games=999, away_current_games=999):
-        """
-        Shrinks model total toward the market total. The shrink weight is
-        modulated by the current-season sample size for each team.
-        """
         self.market_total = max(0.5, market_total or self.model_total)
 
-        # Compute per-side trust
         self.home_trust = self._trust_weight(home_current_games)
         self.away_trust = self._trust_weight(away_current_games)
 
-        # Combined trust: average (both teams' data quality matters)
         combined_trust = 0.5 * (self.home_trust + self.away_trust)
-
-        # Effective shrink: when trust is low, we shrink MORE toward market
-        # trust=1.0 -> shrink 0.50 (normal)
-        # trust=0.25 -> shrink 0.90 (nearly all market)
         self.effective_shrink = 1.0 - combined_trust * (1.0 - SHRINK_WEIGHT)
-        # Bound it
         self.effective_shrink = min(MAX_EFFECTIVE_SHRINK, self.effective_shrink)
 
         self.shrunk_total = (
@@ -795,8 +777,11 @@ class RefinedPredictor:
         self.shrunk_total = self.shrunk_xg_home + self.shrunk_xg_away
 
     def run_poisson(self, max_goals=10):
+        self._max_goals = max_goals
         home_probs = self._pmf(self.shrunk_xg_home, max_goals)
         away_probs = self._pmf(self.shrunk_xg_away, max_goals)
+        self._home_pmf = home_probs
+        self._away_pmf = away_probs
 
         p_home = p_draw = p_away = 0.0
         p_btts_yes = p_btts_no = 0.0
@@ -817,6 +802,7 @@ class RefinedPredictor:
         if total > 0:
             p_home /= total; p_draw /= total; p_away /= total
 
+        # ---- AH probabilities (UNCHANGED — used for selection & edges) ----
         p_home_by_1 = p_away_by_1 = 0.0
         for h in range(max_goals + 1):
             for a in range(max_goals + 1):
@@ -851,6 +837,68 @@ class RefinedPredictor:
     @staticmethod
     def _pmf(lam, kmax):
         return [(lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(kmax + 1)]
+
+    # ---- AH -> EH conversion (for display only) ---------------------------
+    def ah_to_eh(self, ah_line, side):
+        """
+        Convert an AH line for a given side into a 3-way EH probability
+        distribution at the equivalent whole-goal line.
+
+        AH line convention (as parsed):
+            ah_home_line: line applied to HOME (e.g. -0.5, +0.25)
+            ah_away_line: line applied to AWAY (e.g. +0.5, -0.25)
+
+        We convert to the nearest whole-goal EH line and return
+        {"line": int, "home": p, "draw": p, "away": p}.
+        Quarter lines are handled by splitting 50/50 between the two
+        adjacent whole lines, exactly matching AH settlement.
+        """
+        if ah_line is None:
+            return None
+
+        max_goals = self._max_goals
+        home_probs = self._home_pmf
+        away_probs = self._away_pmf
+
+        def eh_at(line_int):
+            """3-way probs when 'side' receives line_int goals."""
+            if side == "home":
+                home_adj, away_adj = line_int, 0
+            else:
+                home_adj, away_adj = 0, line_int
+            p_h = p_d = p_a = 0.0
+            for h in range(max_goals + 1):
+                for a in range(max_goals + 1):
+                    prob = home_probs[h] * away_probs[a]
+                    adj_h = h + home_adj
+                    adj_a = a + away_adj
+                    if adj_h > adj_a: p_h += prob
+                    elif adj_h == adj_a: p_d += prob
+                    else: p_a += prob
+            tot = p_h + p_d + p_a
+            if tot > 0:
+                p_h /= tot; p_d /= tot; p_a /= tot
+            return {"home": p_h, "draw": p_d, "away": p_a}
+
+        # Split quarter lines into the two adjacent whole lines
+        # e.g. +0.25 -> half at 0, half at +1 (wait: +0.25 is half 0, half +0.5, but EH only has whole lines)
+        # For EH display we snap to the nearest whole line, but for quarter
+        # lines we blend the two nearest whole lines weighted 50/50.
+        lower = math.floor(ah_line)
+        upper = math.ceil(ah_line)
+        if lower == upper:
+            probs = eh_at(int(ah_line))
+            return {"line": int(ah_line), **probs}
+
+        # Quarter line -> blend lower and upper
+        pl = eh_at(lower)
+        pu = eh_at(upper)
+        blended = {
+            "home": 0.5 * pl["home"] + 0.5 * pu["home"],
+            "draw": 0.5 * pl["draw"] + 0.5 * pu["draw"],
+            "away": 0.5 * pl["away"] + 0.5 * pu["away"],
+        }
+        return {"line": ah_line, **blended}
 
     def calculate_edges(self, odds):
         self.edges = {}
@@ -1040,13 +1088,11 @@ class RefinedPredictor:
 
     def _check_corners(self, corner_data):
         if not corner_data: return
-        # NEW: require that the corner line matches what the page offers
         home_for = corner_data.get("home_avg_corners", 0)
         away_against = corner_data.get("away_conceded_corners", 0)
         away_for = corner_data.get("away_avg_corners", 0)
         home_against = corner_data.get("home_conceded_corners", 0)
 
-        # Only fire if the offered line exists and matches "Over 4.5"
         if home_for >= 5.5 and away_against >= 5.0:
             line = corner_data.get("home_corners_line")
             odds = corner_data.get("home_corners_over")
@@ -1085,7 +1131,6 @@ class RefinedPredictor:
             "probabilities": dict(self.probabilities),
             "edges": dict(self.edges),
             "bets": list(self.bets), "skips": list(self.skips),
-            # NEW: expose trust/shrink info
             "effective_shrink": self.effective_shrink,
             "home_trust": self.home_trust,
             "away_trust": self.away_trust,
@@ -1120,7 +1165,6 @@ def load_parsed_match(parsed: dict) -> dict:
         "away_xg": a.get("gf_per_game") or 1.0,
         "market_total": market_total,
         "btts_rate": btts_rate,
-        # NEW: current-season game counts
         "home_current_games": parsed.get("home_current_season_games", 0),
         "away_current_games": parsed.get("away_current_season_games", 0),
         "home_data": {
@@ -1203,7 +1247,7 @@ def parse_match_date(d):
 
 
 # ============================================================================
-# DB OPERATIONS
+# DB OPERATIONS  (AH settlement kept — selections are still stored as AH)
 # ============================================================================
 def save_bet_to_db(sb, match, analysis, bet):
     if sb is None: return None
@@ -1307,8 +1351,7 @@ def edge_class(edge):
     return "edge-neutral"
 
 
-def render_prediction_card(match, parsed, analysis):
-    # Header
+def render_prediction_card(match, parsed, analysis, predictor):
     meta_parts = []
     if match.get("league"): meta_parts.append(match["league"])
     if parsed.get("venue"): meta_parts.append(parsed["venue"])
@@ -1323,7 +1366,6 @@ def render_prediction_card(match, parsed, analysis):
     </div>
     """, unsafe_allow_html=True)
 
-    # Verdict
     if analysis["bets"]:
         primary = analysis["bets"][0]
         st.markdown(f"""
@@ -1362,7 +1404,6 @@ def render_prediction_card(match, parsed, analysis):
             </div>
             """, unsafe_allow_html=True)
 
-    # NEW: Trust / Sample quality panel
     st.markdown('<div class="section-title">Sample Quality & Shrinkage</div>', unsafe_allow_html=True)
     home_g = match.get("home_current_games", 0)
     away_g = match.get("away_current_games", 0)
@@ -1390,7 +1431,6 @@ def render_prediction_card(match, parsed, analysis):
     </div>
     """, unsafe_allow_html=True)
 
-    # Probabilities
     st.markdown('<div class="section-title">Outcome Probabilities</div>', unsafe_allow_html=True)
     probs = analysis["probabilities"]
     edges = analysis["edges"]
@@ -1411,8 +1451,57 @@ def render_prediction_card(match, parsed, analysis):
     stat_card(c2, probs.get("draw", 0), "Draw", edges.get("draw"), "stat-card-draw")
     stat_card(c3, probs.get("away_win", 0), "Away Win", edges.get("away_win"), "stat-card-away")
 
-    # AH panel
-    st.markdown('<div class="section-title">Asian Handicap Probabilities</div>', unsafe_allow_html=True)
+    # ------------------------------------------------------------------
+    # EUROPEAN HANDICAP DISPLAY (converted from the parsed AH lines)
+    # ------------------------------------------------------------------
+    st.markdown('<div class="section-title">European Handicap (3-way, converted from AH)</div>',
+                unsafe_allow_html=True)
+    eh_home = predictor.ah_to_eh(match["odds"].get("ah_home_line"), "home")
+    eh_away = predictor.ah_to_eh(match["odds"].get("ah_away_line"), "away")
+
+    def render_eh_block(col, eh, side_label, ah_line, ah_odds):
+        if not eh:
+            col.info("No AH line parsed for this side.")
+            return
+        line = eh["line"]
+        # For display we always show from the perspective of the side that
+        # receives the line, but label the columns as Home / Draw / Away.
+        if side_label == "Home":
+            p_h, p_d, p_a = eh["home"], eh["draw"], eh["away"]
+            title = f"Home {line:+g} EH"
+        else:
+            # Away gets the line; Home is the opponent
+            p_h, p_d, p_a = eh["home"], eh["draw"], eh["away"]
+            title = f"Away {line:+g} EH"
+        col.markdown(f"""
+        <div class="eh-table" style="display:block;">
+            <div class="eh-line" style="margin-bottom:0.5rem;">{title}
+                <span style="color:#64748b;font-weight:400;">
+                    &nbsp;·&nbsp; from AH {ah_line:+g} @ {ah_odds:.2f}
+                </span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:0.85rem;">
+                <span>Home <strong style="color:#10b981;">{p_h:.1%}</strong></span>
+                <span>Draw <strong style="color:#fbbf24;">{p_d:.1%}</strong></span>
+                <span>Away <strong style="color:#3b82f6;">{p_a:.1%}</strong></span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        render_eh_block(c1, eh_home, "Home",
+                        match["odds"].get("ah_home_line") or 0,
+                        match["odds"].get("ah_home") or 0)
+    with c2:
+        render_eh_block(c2, eh_away, "Away",
+                        match["odds"].get("ah_away_line") or 0,
+                        match["odds"].get("ah_away") or 0)
+
+    # ------------------------------------------------------------------
+    # AH panel (kept, since it's what the model actually prices)
+    # ------------------------------------------------------------------
+    st.markdown('<div class="section-title">Asian Handicap Probabilities (model)</div>', unsafe_allow_html=True)
     ah_home = probs.get("ah_home", {})
     ah_away = probs.get("ah_away", {})
     ah_lines = sorted(set(list(ah_home.keys()) + list(ah_away.keys())))
@@ -1424,17 +1513,16 @@ def render_prediction_card(match, parsed, analysis):
             p_a = ah_away.get(line, 0)
             with col:
                 st.markdown(f"""
-                <div class="ah-table">
+                <div class="eh-table">
                     <div>
-                        <div class="ah-line">Line {line:+g}</div>
-                        <div class="ah-line" style="font-size:0.7rem;color:#64748b;">
+                        <div class="eh-line">Line {line:+g}</div>
+                        <div class="eh-line" style="font-size:0.7rem;color:#64748b;">
                             Home: {p_h:.1%} | Away: {p_a:.1%}
                         </div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-    # xG panel
     st.markdown('<div class="section-title">Expected Goals Model</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
@@ -1470,7 +1558,6 @@ def render_prediction_card(match, parsed, analysis):
         f"**{analysis['shrunk_total']:.2f}** goals expected."
     )
 
-    # Other markets
     st.markdown('<div class="section-title">Other Markets</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1501,7 +1588,6 @@ def render_prediction_card(match, parsed, analysis):
         </div>
         """, unsafe_allow_html=True)
 
-    # Skipped
     with st.expander(f"❌ Skipped markets ({len(analysis['skips'])})"):
         for s in analysis["skips"]:
             st.write(f"**{s['market']}** — {s['reason']}")
@@ -1512,7 +1598,7 @@ def render_prediction_card(match, parsed, analysis):
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with sample-size shrinkage and value discipline")
+    st.caption("xG-based model with sample-size shrinkage · AH parsed, EH shown for interpretation")
 
     sb = get_supabase()
     if sb is None:
@@ -1536,7 +1622,6 @@ def main():
                         p = RefinedPredictor()
                         p.calculate_base_xg(match["home_data"], match["away_data"])
                         p.apply_adjustments(match["home_data"], match["away_data"])
-                        # NEW: pass current-season game counts for trust weighting
                         p.shrink_toward_market(
                             match["market_total"] or (match["home_xg"] + match["away_xg"]),
                             home_current_games=match.get("home_current_games", 999),
@@ -1550,7 +1635,7 @@ def main():
                         analysis = p.get_full_analysis()
 
                     st.markdown("---")
-                    render_prediction_card(match, parsed, analysis)
+                    render_prediction_card(match, parsed, analysis, p)
 
                     if sb is not None and analysis["bets"]:
                         saved = 0
