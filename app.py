@@ -4,7 +4,7 @@ Parser + Predictor + Ranking selection + Supabase persistence.
 
 Requires:
   st.secrets["SUPABASE_URL"]
-  st.secrets["SUPABASE_KEY"]   (service_role / secret key — bypasses RLS)
+  st.secrets["SUPABASE_KEY"]   (service_role / secret key)
 """
 
 import math
@@ -67,11 +67,6 @@ st.markdown("""
 # ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
-    """
-    Returns (client, diag_dict).
-    diag_dict tells us which key the app actually loaded.
-    Cache is cleared at app startup via get_supabase.clear() in main().
-    """
     diag = {"url": None, "role": None, "key_prefix": None, "key_length": None,
             "ok": False, "error": None}
     try:
@@ -82,7 +77,6 @@ def get_supabase():
         diag["key_prefix"] = (key[:15] + "...") if key else None
         diag["key_length"] = len(key) if key else 0
 
-        # Try JWT decode (works for eyJ... keys; fails for sb_... keys)
         try:
             parts = key.split(".")
             if len(parts) >= 2:
@@ -789,8 +783,9 @@ class RefinedPredictor:
         add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes")
         add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no")
 
-        add("O/U", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over")
-        add("O/U", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under")
+        # NOTE: market string is "O/U 2.5" to match DB constraint
+        add("O/U 2.5", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over")
+        add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under")
 
         ah_h_line = odds.get("ah_home_line")
         if ah_h_line is not None:
@@ -1029,7 +1024,7 @@ def _rel_key_for_candidate(r):
         return "AH_positive" if float(line) >= 0 else "AH_negative"
     if market == "BTTS":
         return "BTTS_yes" if "Yes" in r.get("selection", "") else "BTTS_no"
-    if market == "O/U":
+    if market == "O/U 2.5":
         return "O/U_2.5_over" if "Over" in r.get("selection", "") else "O/U_2.5_under"
     if market == "DC": return "DC"
     if market == "DNB": return "DNB"
@@ -1132,8 +1127,9 @@ def write_market_odds(sb, match):
         push("AH", f"Home {o['ah_home_line']:+g}", o["ah_home_line"], o.get("ah_home"))
     if o.get("ah_away_line") is not None:
         push("AH", f"Away {o['ah_away_line']:+g}", o["ah_away_line"], o.get("ah_away"))
-    push("O/U", "Over 2.5", 2.5, o.get("over_2.5"))
-    push("O/U", "Under 2.5", 2.5, o.get("under_2.5"))
+    # NOTE: constraint requires "O/U 2.5", not "O/U"
+    push("O/U 2.5", "Over 2.5", 2.5, o.get("over_2.5"))
+    push("O/U 2.5", "Under 2.5", 2.5, o.get("under_2.5"))
     push("BTTS", "Yes", None, o.get("btts_yes"))
     push("BTTS", "No", None, o.get("btts_no"))
 
@@ -1209,7 +1205,7 @@ def settle_candidate(market, selection, line, hg, ag):
         yes = (hg >= 1 and ag >= 1)
         if selection == "Yes": return "WON" if yes else "LOST"
         if selection == "No": return "WON" if not yes else "LOST"
-    if market == "O/U":
+    if market == "O/U 2.5":
         if "Over" in selection: return "WON" if total > 2.5 else "LOST"
         if "Under" in selection: return "WON" if total < 2.5 else "LOST"
     if market == "AH":
@@ -1331,10 +1327,8 @@ def main():
     st.title("⚽ Refined Prediction Strategy")
     st.caption("xG-based model with ranking selection and Supabase persistence")
 
-    # --- CRITICAL: clear cached Supabase client so a changed key is picked up ---
     get_supabase.clear()
 
-    # === DEBUG: Supabase connection ===
     sb, diag = get_supabase()
     with st.expander("🔍 Supabase connection", expanded=False):
         st.code(f"""
@@ -1346,21 +1340,6 @@ Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
 
-        prefix = (diag.get("key_prefix") or "")
-        if prefix.startswith("sb_publishable"):
-            st.error("⚠️ The key is `sb_publishable_...`. This is the anon key. RLS WILL block writes. Use the secret key (`sb_secret_...`).")
-        elif prefix.startswith("sb_secret"):
-            st.success("✅ The key is `sb_secret_...`. Service-role equivalent. RLS is bypassed.")
-        elif prefix.startswith("eyJ"):
-            if diag.get("role") == "service_role":
-                st.success("✅ The key is a JWT with role=service_role. RLS is bypassed.")
-            elif diag.get("role") == "anon":
-                st.error("⚠️ The key is a JWT with role=anon. RLS WILL block writes.")
-            else:
-                st.warning(f"⚠️ JWT key with unknown role: {diag.get('role')}")
-        else:
-            st.warning("⚠️ Unknown key format.")
-
     if sb is None:
         st.info("ℹ️ Supabase not configured — predictions work, persistence disabled.")
     else:
@@ -1370,7 +1349,6 @@ Error:      {diag.get('error')}
 
     tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records", "🎛️ Reliability"])
 
-    # ---- Predict ---------------------------------------------------------
     with tabs[0]:
         st.markdown("### Paste Sportsgambler HTML")
         text = st.text_area("HTML", height=220, key="html_input", label_visibility="collapsed")
@@ -1402,7 +1380,6 @@ Error:      {diag.get('error')}
                     st.markdown("---")
                     render_prediction_card(match, parsed, analysis)
 
-                    # === DEBUG: write attempts ===
                     with st.expander("🔍 Save to Supabase", expanded=True):
                         if sb is None:
                             st.info("Supabase not configured — nothing saved.")
@@ -1422,7 +1399,6 @@ Error:      {diag.get('error')}
                     st.error(f"Prediction pipeline failed: {e}")
                     st.code(traceback.format_exc(), language="python")
 
-    # ---- Pending ---------------------------------------------------------
     with tabs[1]:
         st.subheader("📝 Pending Matches")
         if sb is None:
@@ -1452,7 +1428,6 @@ Error:      {diag.get('error')}
                         else:
                             st.error(msg)
 
-    # ---- Records ---------------------------------------------------------
     with tabs[2]:
         st.subheader("📊 Performance")
         if sb is None:
@@ -1496,7 +1471,6 @@ Error:      {diag.get('error')}
                 } for r in rows[:200]])
                 st.dataframe(df, use_container_width=True)
 
-    # ---- Reliability -----------------------------------------------------
     with tabs[3]:
         st.subheader("🎛️ Reliability Weights")
         if sb is None:
