@@ -1,10 +1,14 @@
 """
 Refined Prediction Strategy — single-file Streamlit app.
-Parser + Predictor + Ranking selection + Supabase persistence.
+Parser + Predictor + Ranking selection + Supabase persistence (wide layout).
 
 Requires:
   st.secrets["SUPABASE_URL"]
   st.secrets["SUPABASE_KEY"]   (service_role / secret key)
+
+Tables:
+  matches      — one row per match, wide (all selections as columns)
+  reliability  — one row per market type, updated after each result
 """
 
 import math
@@ -76,7 +80,6 @@ def get_supabase():
         diag["url"] = url
         diag["key_prefix"] = (key[:15] + "...") if key else None
         diag["key_length"] = len(key) if key else 0
-
         try:
             parts = key.split(".")
             if len(parts) >= 2:
@@ -88,7 +91,6 @@ def get_supabase():
                 diag["role"] = "not_jwt"
         except Exception as e:
             diag["role"] = f"decode_error: {e}"
-
         diag["ok"] = True
         return create_client(url, key), diag
     except Exception as e:
@@ -99,9 +101,6 @@ def get_supabase():
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-EDGE_MIN = 0.05
-EDGE_MAX = 0.20
-EDGE_OU_MIN = 0.08
 SHRINK_WEIGHT = 0.50
 LAST10_WEIGHT = 0.70
 SEASON_WEIGHT = 0.30
@@ -123,7 +122,7 @@ RELIABILITY_PRIOR_STRENGTH = 10
 
 
 # ============================================================================
-# PARSER
+# PARSER (unchanged from last working version)
 # ============================================================================
 def _has_bs4():
     try:
@@ -146,7 +145,6 @@ class SportsgamblerParser:
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
         competition, venue = self._parse_league_venue()
-
         return {
             "match_id": self._make_match_id(match_date),
             "match_date": match_date,
@@ -239,30 +237,25 @@ class SportsgamblerParser:
 
     def _apply_market(self, flat, market, entries):
         m = market.lower()
-
         if "full-time result" in m:
             for label, val in entries:
                 if label == "1": flat["home"] = val
                 elif label == "X": flat["draw"] = val
                 elif label == "2": flat["away"] = val
             return
-
         if "half-time result" in m:
             return
-
         if "double chance" in m:
             for label, val in entries:
                 if label == "1X": flat["dc_1x"] = val
                 elif label == "12": flat["dc_12"] = val
                 elif label == "X2": flat["dc_x2"] = val
             return
-
         if "draw no bet" in m:
             for label, val in entries:
                 if label == "1": flat["dnb_home"] = val
                 elif label == "2": flat["dnb_away"] = val
             return
-
         if "asian handicap" in m:
             for label, val in entries:
                 mm = re.match(r"(\d)\s*Hcp\s*([+-]?[\d.]+)", label)
@@ -277,7 +270,6 @@ class SportsgamblerParser:
                     flat["ah_away_line"] = line
                     flat["ah_away"] = val
             return
-
         if "total goals" in m:
             for label, val in entries:
                 mm = re.match(r"(Over|Under)\s+([\d.]+)", label, re.I)
@@ -290,7 +282,6 @@ class SportsgamblerParser:
                     else:
                         flat["under_2.5"] = val
             return
-
         if "both teams to score" in m:
             for label, val in entries:
                 if label.lower() == "yes": flat["btts_yes"] = val
@@ -313,18 +304,15 @@ class SportsgamblerParser:
 
     def _parse_last10_splits(self, side):
         """
-        Parse the .st-table row for the given side.
-
-        Column layout in the HTML (with a colspan="2" leading cell):
-          cells[0] = team label (merged)
+        st-table columns:
+          cells[0] = team label
           cells[1] = W-D-L
-          cells[2] = avg goals per game (total)
-          cells[3] = GF (goals for)
-          cells[4] = GA (goals against)
+          cells[2] = avg goals per game
+          cells[3] = GF
+          cells[4] = GA
           cells[5] = O2.5 count
           cells[6] = U2.5 count
           cells[7] = BTTS Yes count
-          cells[8] = BTTS No count (sometimes absent)
         """
         split = self._empty_split()
         table = self.soup.select_one(".st-table")
@@ -699,11 +687,9 @@ class RefinedPredictor:
     def run_poisson(self, max_goals=10):
         home_probs = self._pmf(self.shrunk_xg_home, max_goals)
         away_probs = self._pmf(self.shrunk_xg_away, max_goals)
-
         p_home = p_draw = p_away = 0.0
         p_btts_yes = p_btts_no = 0.0
         p_over = p_under = 0.0
-
         for h in range(max_goals + 1):
             for a in range(max_goals + 1):
                 prob = home_probs[h] * away_probs[a]
@@ -714,18 +700,15 @@ class RefinedPredictor:
                 else: p_btts_no += prob
                 if h + a > 2.5: p_over += prob
                 else: p_under += prob
-
         total = p_home + p_draw + p_away
         if total > 0:
             p_home /= total; p_draw /= total; p_away /= total
-
         p_home_by_1 = p_away_by_1 = 0.0
         for h in range(max_goals + 1):
             for a in range(max_goals + 1):
                 prob = home_probs[h] * away_probs[a]
                 if h - a == 1: p_home_by_1 += prob
                 elif a - h == 1: p_away_by_1 += prob
-
         ah_home = {
             -0.5: p_home, -0.25: p_home + 0.5 * p_draw,
             +0.25: p_home + 0.5 * p_draw, +0.5: p_home + p_draw,
@@ -738,7 +721,6 @@ class RefinedPredictor:
             +0.75: p_away + p_draw + 0.5 * p_home_by_1,
             +1.0: p_away + p_draw,
         }
-
         self.probabilities = {
             "home_win": p_home, "draw": p_draw, "away_win": p_away,
             "btts_yes": p_btts_yes, "btts_no": p_btts_no,
@@ -766,10 +748,14 @@ class RefinedPredictor:
         return ah[closest]
 
     def generate_candidates(self, odds):
+        """
+        Produce 14 candidates. Each candidate has a fixed column key suffix
+        so we can write it to a specific column in matches.
+        """
         cs = []
         P = self.probabilities
 
-        def add(market, selection, line, model_prob, odd, reliability_key):
+        def add(market, selection, line, model_prob, odd, reliability_key, col_key):
             if not odd or odd <= 1.01 or model_prob is None:
                 return
             implied = 1.0 / odd
@@ -779,37 +765,44 @@ class RefinedPredictor:
                 "market": market, "selection": selection, "line": line,
                 "model_prob": model_prob, "implied_prob": implied, "edge": edge,
                 "conviction": conviction, "odds": odd, "reliability_key": reliability_key,
+                "col_key": col_key,
             })
 
-        add("1X2", "Home Win", None, P.get("home_win"), odds.get("home"), "1X2_favourite")
-        add("1X2", "Draw", None, P.get("draw"), odds.get("draw"), "1X2_favourite")
-        add("1X2", "Away Win", None, P.get("away_win"), odds.get("away"), "1X2_underdog")
+        # 1X2
+        add("1X2", "Home Win", None, P.get("home_win"), odds.get("home"), "1X2_favourite", "1x2_home")
+        add("1X2", "Draw",     None, P.get("draw"),     odds.get("draw"), "1X2_favourite", "1x2_draw")
+        add("1X2", "Away Win", None, P.get("away_win"), odds.get("away"), "1X2_underdog",  "1x2_away")
 
-        add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0), odds.get("dc_1x"), "DC")
-        add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0), odds.get("dc_12"), "DC")
-        add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0), odds.get("dc_x2"), "DC")
+        # DC
+        add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0),    odds.get("dc_1x"), "DC", "dc_1x")
+        add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0),odds.get("dc_12"), "DC", "dc_12")
+        add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0),    odds.get("dc_x2"), "DC", "dc_x2")
 
+        # DNB
         p_h = P.get("home_win", 0); p_a = P.get("away_win", 0)
         if p_h + p_a > 0:
-            add("DNB", "Home", None, p_h / (p_h + p_a), odds.get("dnb_home"), "DNB")
-            add("DNB", "Away", None, p_a / (p_h + p_a), odds.get("dnb_away"), "DNB")
+            add("DNB", "Home", None, p_h / (p_h + p_a), odds.get("dnb_home"), "DNB", "dnb_home")
+            add("DNB", "Away", None, p_a / (p_h + p_a), odds.get("dnb_away"), "DNB", "dnb_away")
 
-        add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes")
-        add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no")
+        # BTTS
+        add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes", "btts_yes")
+        add("BTTS", "No",  None, P.get("btts_no"),  odds.get("btts_no"),  "BTTS_no",  "btts_no")
 
-        add("O/U 2.5", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over")
-        add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under")
+        # O/U 2.5
+        add("O/U 2.5", "Over 2.5",  2.5, P.get("over_25"),  odds.get("over_2.5"),  "O/U_2.5_over",  "ou_over")
+        add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under", "ou_under")
 
+        # AH
         ah_h_line = odds.get("ah_home_line")
         if ah_h_line is not None:
             p = self._effective_ah_prob("home", ah_h_line)
             key = "AH_positive" if ah_h_line >= 0 else "AH_negative"
-            add("AH", f"Home {ah_h_line:+g}", ah_h_line, p, odds.get("ah_home"), key)
+            add("AH", f"Home {ah_h_line:+g}", ah_h_line, p, odds.get("ah_home"), key, "ah_home")
         ah_a_line = odds.get("ah_away_line")
         if ah_a_line is not None:
             p = self._effective_ah_prob("away", ah_a_line)
             key = "AH_positive" if ah_a_line >= 0 else "AH_negative"
-            add("AH", f"Away {ah_a_line:+g}", ah_a_line, p, odds.get("ah_away"), key)
+            add("AH", f"Away {ah_a_line:+g}", ah_a_line, p, odds.get("ah_away"), key, "ah_away")
 
         self.candidates = cs
 
@@ -871,9 +864,7 @@ def load_parsed_match(parsed: dict) -> dict:
     inj = parsed.get("injuries", {}) or {}
     mid = parsed.get("midweek_fixture", {}) or {}
     lmd = parsed.get("last_match_dates", {}) or {}
-
     market_total = derive_market_total(odds.get("over_2.5"), odds.get("under_2.5"))
-
     return {
         "match_id": parsed.get("match_id"),
         "home_team": parsed.get("home_team"),
@@ -994,208 +985,6 @@ def seed_reliability(sb):
         return False, str(e)
 
 
-def update_reliability(sb):
-    if sb is None:
-        return False, "no client"
-    try:
-        resp = sb.table("candidates").select(
-            "market,selection,line,outcome"
-        ).not_.is_("outcome", "null").execute()
-        rows = resp.data or []
-        groups = {}
-        for r in rows:
-            key = _rel_key_for_candidate(r)
-            if key not in groups:
-                groups[key] = {"wins": 0, "losses": 0, "pushes": 0}
-            if r["outcome"] == "WON": groups[key]["wins"] += 1
-            elif r["outcome"] == "LOST": groups[key]["losses"] += 1
-            elif r["outcome"] == "PUSH": groups[key]["pushes"] += 1
-
-        updated = 0
-        for key, counts in groups.items():
-            prior = DEFAULT_RELIABILITY.get(key, 0.5)
-            w_, l_, p_ = counts["wins"], counts["losses"], counts["pushes"]
-            total = w_ + l_ + p_
-            if total == 0: continue
-            weight = (w_ + prior * RELIABILITY_PRIOR_STRENGTH) / (total + RELIABILITY_PRIOR_STRENGTH)
-            sb.table("reliability").upsert({
-                "market": key, "weight": weight,
-                "wins": w_, "losses": l_, "pushes": p_, "total": total,
-                "prior_weight": prior, "prior_strength": RELIABILITY_PRIOR_STRENGTH,
-            }, on_conflict="market").execute()
-            updated += 1
-        return True, f"{updated} markets updated"
-    except Exception as e:
-        return False, str(e)
-
-
-def _rel_key_for_candidate(r):
-    market = r.get("market", "")
-    if market == "AH":
-        line = r.get("line")
-        if line is None: return "AH_negative"
-        return "AH_positive" if float(line) >= 0 else "AH_negative"
-    if market == "BTTS":
-        return "BTTS_yes" if "Yes" in r.get("selection", "") else "BTTS_no"
-    if market == "O/U 2.5":
-        return "O/U_2.5_over" if "Over" in r.get("selection", "") else "O/U_2.5_under"
-    if market == "DC": return "DC"
-    if market == "DNB": return "DNB"
-    if market == "1X2": return "1X2_favourite"
-    return "DC"
-
-
-# ============================================================================
-# SUPABASE WRITES
-# ============================================================================
-def write_match(sb, match, analysis):
-    if sb is None:
-        return False, "no client"
-    try:
-        home_ah = match["_parsed"]["home_team_last10_home"]
-        away_ah = match["_parsed"]["away_team_last10_away"]
-        inj = match["_parsed"]["injuries"]
-        rec = {
-            "match_id": match["match_id"],
-            "match_date": match["date"],
-            "kickoff": match.get("kickoff"),
-            "league": match.get("league"),
-            "home_team": match.get("home_team"),
-            "away_team": match.get("away_team"),
-            "venue": match.get("venue"),
-            "home_gf_per_game_last10": match["home_data"].get("home_goals_scored_last10"),
-            "home_ga_per_game_last10": match["home_data"].get("home_goals_conceded_last10"),
-            "away_gf_per_game_last10": match["away_data"].get("away_goals_scored_last10"),
-            "away_ga_per_game_last10": match["away_data"].get("away_goals_conceded_last10"),
-            "home_wins_last10": home_ah.get("wins"),
-            "home_draws_last10": home_ah.get("draws"),
-            "home_losses_last10": home_ah.get("losses"),
-            "home_over25_last10": home_ah.get("over25"),
-            "home_btts_yes_last10": home_ah.get("btts_yes"),
-            "away_wins_last10": away_ah.get("wins"),
-            "away_draws_last10": away_ah.get("draws"),
-            "away_losses_last10": away_ah.get("losses"),
-            "away_over25_last10": away_ah.get("over25"),
-            "away_btts_yes_last10": away_ah.get("btts_yes"),
-            "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
-            "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
-            "away_gf_per_game_season": match["away_data"].get("away_goals_scored_season"),
-            "away_ga_per_game_season": match["away_data"].get("away_goals_conceded_season"),
-            "home_last5_points": match["home_data"].get("last5_points"),
-            "away_last5_points": match["away_data"].get("last5_points"),
-            "home_last_match_date": match.get("home_last_match_date"),
-            "away_last_match_date": match.get("away_last_match_date"),
-            "home_played_midweek": match["home_data"].get("played_midweek"),
-            "away_played_midweek": match["away_data"].get("played_midweek"),
-            "home_key_attackers_out": inj.get("home_key_attackers_out", 0),
-            "home_key_defenders_out": inj.get("home_key_defenders_out", 0),
-            "home_key_midfielders_out": inj.get("home_key_midfielders_out", 0),
-            "away_key_attackers_out": inj.get("away_key_attackers_out", 0),
-            "away_key_defenders_out": inj.get("away_key_defenders_out", 0),
-            "away_key_midfielders_out": inj.get("away_key_midfielders_out", 0),
-            "home_current_season_games": match.get("home_current_games"),
-            "away_current_season_games": match.get("away_current_games"),
-            "model_xg_home_raw": analysis["model_xg_home"],
-            "model_xg_away_raw": analysis["model_xg_away"],
-            "model_xg_home_shrunk": analysis["shrunk_xg_home"],
-            "model_xg_away_shrunk": analysis["shrunk_xg_away"],
-            "model_total_raw": analysis["model_total"],
-            "model_total_shrunk": analysis["shrunk_total"],
-            "shrink_weight_applied": analysis["effective_shrink"],
-            "market_total": analysis["market_total"],
-            "model_prob_home": analysis["probabilities"].get("home_win"),
-            "model_prob_draw": analysis["probabilities"].get("draw"),
-            "model_prob_away": analysis["probabilities"].get("away_win"),
-            "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
-            "model_prob_over_25": analysis["probabilities"].get("over_25"),
-            "model_prob_under_25": analysis["probabilities"].get("under_25"),
-        }
-        sb.table("matches").upsert(rec, on_conflict="match_id").execute()
-        return True, f"match_id={rec['match_id']}"
-    except Exception as e:
-        return False, str(e)
-
-
-def write_market_odds(sb, match):
-    if sb is None:
-        return False, "no client"
-    rows = []
-    mid = match["match_id"]
-    o = match["odds"]
-
-    def push(market, selection, line, odd):
-        if odd and odd > 1.01:
-            rows.append({"match_id": mid, "market": market,
-                         "selection": selection, "line": line, "odds": odd})
-
-    push("1X2", "Home Win", None, o.get("home"))
-    push("1X2", "Draw", None, o.get("draw"))
-    push("1X2", "Away Win", None, o.get("away"))
-    push("DC", "1X", None, o.get("dc_1x"))
-    push("DC", "12", None, o.get("dc_12"))
-    push("DC", "X2", None, o.get("dc_x2"))
-    push("DNB", "Home", None, o.get("dnb_home"))
-    push("DNB", "Away", None, o.get("dnb_away"))
-    if o.get("ah_home_line") is not None:
-        push("AH", f"Home {o['ah_home_line']:+g}", o["ah_home_line"], o.get("ah_home"))
-    if o.get("ah_away_line") is not None:
-        push("AH", f"Away {o['ah_away_line']:+g}", o["ah_away_line"], o.get("ah_away"))
-    push("O/U 2.5", "Over 2.5", 2.5, o.get("over_2.5"))
-    push("O/U 2.5", "Under 2.5", 2.5, o.get("under_2.5"))
-    push("BTTS", "Yes", None, o.get("btts_yes"))
-    push("BTTS", "No", None, o.get("btts_no"))
-
-    if not rows:
-        return False, "no rows to write"
-    try:
-        sb.table("market_odds").upsert(
-            rows, on_conflict="match_id,market,selection,line"
-        ).execute()
-        return True, f"{len(rows)} rows"
-    except Exception as e:
-        return False, str(e)
-
-
-def write_candidates(sb, match, analysis):
-    if sb is None:
-        return False, "no client"
-    mid = match["match_id"]
-    rows = []
-    primary = analysis["bets"][0] if analysis["bets"] else None
-    for i, c in enumerate(analysis["candidates"], start=1):
-        was_bet = bool(primary and primary["selection"] == c["selection"]
-                       and primary["market"] == c["market"])
-        stake = None
-        if was_bet and primary:
-            m = re.match(r"([\d.]+)", primary.get("stake", "0"))
-            stake = float(m.group(1)) if m else 1.0
-        rows.append({
-            "match_id": mid,
-            "market": c["market"],
-            "selection": c["selection"],
-            "line": c["line"],
-            "model_prob": c["model_prob"],
-            "implied_prob": c["implied_prob"],
-            "edge": c["edge"],
-            "conviction": c["conviction"],
-            "reliability": c["reliability"],
-            "score": c["score"],
-            "rank_in_match": i,
-            "was_bet": was_bet,
-            "stake": stake,
-            "odds": c["odds"],
-        })
-    if not rows:
-        return False, "no rows to write"
-    try:
-        sb.table("candidates").upsert(
-            rows, on_conflict="match_id,market,selection,line"
-        ).execute()
-        return True, f"{len(rows)} rows"
-    except Exception as e:
-        return False, str(e)
-
-
 # ============================================================================
 # OUTCOME SETTLEMENT
 # ============================================================================
@@ -1233,24 +1022,298 @@ def settle_candidate(market, selection, line, hg, ag):
     return None
 
 
-def record_outcome(sb, match_id, hg, ag):
+# Map col_key -> (market, selection) for the wide layout.
+COL_KEY_TO_MARKET_SELECTION = {
+    "1x2_home":  ("1X2",     "Home Win"),
+    "1x2_draw":  ("1X2",     "Draw"),
+    "1x2_away":  ("1X2",     "Away Win"),
+    "dc_1x":     ("DC",      "1X"),
+    "dc_12":     ("DC",      "12"),
+    "dc_x2":     ("DC",      "X2"),
+    "dnb_home":  ("DNB",     "Home"),
+    "dnb_away":  ("DNB",     "Away"),
+    "btts_yes":  ("BTTS",    "Yes"),
+    "btts_no":   ("BTTS",    "No"),
+    "ou_over":   ("O/U 2.5", "Over 2.5"),
+    "ou_under":  ("O/U 2.5", "Under 2.5"),
+    "ah_home":   ("AH",      None),  # selection built dynamically from line
+    "ah_away":   ("AH",      None),
+}
+
+COL_KEY_TO_RELIABILITY_KEY = {
+    "1x2_home":  "1X2_favourite",
+    "1x2_draw":  "1X2_favourite",
+    "1x2_away":  "1X2_underdog",
+    "dc_1x":     "DC",
+    "dc_12":     "DC",
+    "dc_x2":     "DC",
+    "dnb_home":  "DNB",
+    "dnb_away":  "DNB",
+    "btts_yes":  "BTTS_yes",
+    "btts_no":   "BTTS_no",
+    "ou_over":   "O/U_2.5_over",
+    "ou_under":  "O/U_2.5_under",
+    "ah_home":   "AH_positive",   # sign-adjusted when reading row
+    "ah_away":   "AH_positive",
+}
+
+
+def update_reliability(sb):
+    """
+    Read every match row where outcomes are set, aggregate WON/LOST/PUSH
+    per reliability_key, recompute Bayesian weights, upsert to reliability.
+    """
     if sb is None:
         return False, "no client"
     try:
-        sb.table("matches").update({
-            "actual_home_goals": hg, "actual_away_goals": ag,
-        }).eq("match_id", match_id).execute()
+        resp = sb.table("matches").select(
+            "ah_home_line,ah_away_line,"
+            "outcome_1x2_home,outcome_1x2_draw,outcome_1x2_away,"
+            "outcome_dc_1x,outcome_dc_12,outcome_dc_x2,"
+            "outcome_dnb_home,outcome_dnb_away,"
+            "outcome_btts_yes,outcome_btts_no,"
+            "outcome_ou_over,outcome_ou_under,"
+            "outcome_ah_home,outcome_ah_away"
+        ).not_.is_("outcome_1x2_home", "null").execute()
+        rows = resp.data or []
 
-        resp = sb.table("candidates").select("id,market,selection,line").eq("match_id", match_id).execute()
-        settled = 0
-        for c in resp.data or []:
-            outcome = settle_candidate(c["market"], c["selection"], c.get("line"), hg, ag)
+        groups = {k: {"wins": 0, "losses": 0, "pushes": 0} for k in DEFAULT_RELIABILITY}
+
+        for r in rows:
+            ah_h_line = r.get("ah_home_line")
+            ah_a_line = r.get("ah_away_line")
+
+            col_to_key = dict(COL_KEY_TO_RELIABILITY_KEY)
+
+            # Adjust AH reliability keys based on line sign
+            if ah_h_line is not None:
+                col_to_key["ah_home"] = "AH_positive" if float(ah_h_line) >= 0 else "AH_negative"
+            if ah_a_line is not None:
+                col_to_key["ah_away"] = "AH_positive" if float(ah_a_line) >= 0 else "AH_negative"
+
+            for col_key, rel_key in col_to_key.items():
+                outcome = r.get(f"outcome_{col_key}")
+                if outcome == "WON":    groups[rel_key]["wins"] += 1
+                elif outcome == "LOST": groups[rel_key]["losses"] += 1
+                elif outcome == "PUSH": groups[rel_key]["pushes"] += 1
+
+        updated = 0
+        for key, counts in groups.items():
+            prior = DEFAULT_RELIABILITY.get(key, 0.5)
+            w_, l_, p_ = counts["wins"], counts["losses"], counts["pushes"]
+            total = w_ + l_ + p_
+            if total == 0:
+                continue
+            weight = (w_ + prior * RELIABILITY_PRIOR_STRENGTH) / (total + RELIABILITY_PRIOR_STRENGTH)
+            sb.table("reliability").upsert({
+                "market": key, "weight": weight,
+                "wins": w_, "losses": l_, "pushes": p_, "total": total,
+                "prior_weight": prior, "prior_strength": RELIABILITY_PRIOR_STRENGTH,
+            }, on_conflict="market").execute()
+            updated += 1
+        return True, f"{updated} markets updated"
+    except Exception as e:
+        return False, str(e)
+
+
+# ============================================================================
+# SUPABASE WRITES — WIDE
+# ============================================================================
+def write_match(sb, match, analysis):
+    """
+    One row per match. All odds, probabilities, edges, conviction, scores,
+    and the picked selection are columns.
+    """
+    if sb is None:
+        return False, "no client"
+    try:
+        home_ah = match["_parsed"]["home_team_last10_home"]
+        away_ah = match["_parsed"]["away_team_last10_away"]
+        inj = match["_parsed"]["injuries"]
+
+        rec = {
+            # ----- identity -----
+            "match_id": match["match_id"],
+            "match_date": match["date"],
+            "kickoff": match.get("kickoff"),
+            "league": match.get("league"),
+            "home_team": match.get("home_team"),
+            "away_team": match.get("away_team"),
+            "venue": match.get("venue"),
+
+            # ----- last-10 splits -----
+            "home_gf_per_game_last10": match["home_data"].get("home_goals_scored_last10"),
+            "home_ga_per_game_last10": match["home_data"].get("home_goals_conceded_last10"),
+            "away_gf_per_game_last10": match["away_data"].get("away_goals_scored_last10"),
+            "away_ga_per_game_last10": match["away_data"].get("away_goals_conceded_last10"),
+            "home_wins_last10": home_ah.get("wins"),
+            "home_draws_last10": home_ah.get("draws"),
+            "home_losses_last10": home_ah.get("losses"),
+            "home_over25_last10": home_ah.get("over25"),
+            "home_btts_yes_last10": home_ah.get("btts_yes"),
+            "away_wins_last10": away_ah.get("wins"),
+            "away_draws_last10": away_ah.get("draws"),
+            "away_losses_last10": away_ah.get("losses"),
+            "away_over25_last10": away_ah.get("over25"),
+            "away_btts_yes_last10": away_ah.get("btts_yes"),
+
+            # ----- season splits -----
+            "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
+            "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
+            "away_gf_per_game_season": match["away_data"].get("away_goals_scored_season"),
+            "away_ga_per_game_season": match["away_data"].get("away_goals_conceded_season"),
+
+            # ----- form / fatigue / injuries -----
+            "home_last5_points": match["home_data"].get("last5_points"),
+            "away_last5_points": match["away_data"].get("last5_points"),
+            "home_last_match_date": match.get("home_last_match_date"),
+            "away_last_match_date": match.get("away_last_match_date"),
+            "home_played_midweek": match["home_data"].get("played_midweek"),
+            "away_played_midweek": match["away_data"].get("played_midweek"),
+            "home_key_attackers_out": inj.get("home_key_attackers_out", 0),
+            "home_key_defenders_out": inj.get("home_key_defenders_out", 0),
+            "home_key_midfielders_out": inj.get("home_key_midfielders_out", 0),
+            "away_key_attackers_out": inj.get("away_key_attackers_out", 0),
+            "away_key_defenders_out": inj.get("away_key_defenders_out", 0),
+            "away_key_midfielders_out": inj.get("away_key_midfielders_out", 0),
+
+            # ----- sample size -----
+            "home_current_season_games": match.get("home_current_games"),
+            "away_current_season_games": match.get("away_current_games"),
+
+            # ----- model outputs -----
+            "model_xg_home_raw": analysis["model_xg_home"],
+            "model_xg_away_raw": analysis["model_xg_away"],
+            "model_xg_home_shrunk": analysis["shrunk_xg_home"],
+            "model_xg_away_shrunk": analysis["shrunk_xg_away"],
+            "model_total_raw": analysis["model_total"],
+            "model_total_shrunk": analysis["shrunk_total"],
+            "shrink_weight_applied": analysis["effective_shrink"],
+            "market_total": analysis["market_total"],
+            "model_prob_home": analysis["probabilities"].get("home_win"),
+            "model_prob_draw": analysis["probabilities"].get("draw"),
+            "model_prob_away": analysis["probabilities"].get("away_win"),
+            "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
+            "model_prob_over_25": analysis["probabilities"].get("over_25"),
+            "model_prob_under_25": analysis["probabilities"].get("under_25"),
+        }
+
+        # ----- per-candidate columns -----
+        # Initialize every selection column to None, then fill from candidates.
+        for col_key in COL_KEY_TO_MARKET_SELECTION:
+            rec[f"odds_{col_key}"] = None
+            rec[f"prob_{col_key}"] = None
+            rec[f"edge_{col_key}"] = None
+            rec[f"conviction_{col_key}"] = None
+            rec[f"score_{col_key}"] = None
+            rec[f"outcome_{col_key}"] = None
+
+        # AH lines
+        rec["ah_home_line"] = match["odds"].get("ah_home_line")
+        rec["ah_away_line"] = match["odds"].get("ah_away_line")
+
+        for c in analysis["candidates"]:
+            ck = c["col_key"]
+            rec[f"odds_{ck}"] = c["odds"]
+            rec[f"prob_{ck}"] = c["model_prob"]
+            rec[f"edge_{ck}"] = c["edge"]
+            rec[f"conviction_{ck}"] = c["conviction"]
+            rec[f"score_{ck}"] = c["score"]
+
+        # ----- picked selection -----
+        if analysis["bets"]:
+            top = analysis["bets"][0]
+            # find the candidate that matches
+            picked_c = next((c for c in analysis["candidates"]
+                             if c["market"] == top["market"] and c["selection"] == top["selection"]), None)
+            rec["picked_market"] = top["market"]
+            rec["picked_selection"] = top["selection"]
+            rec["picked_line"] = picked_c["line"] if picked_c else None
+            rec["picked_odds"] = top["odds"]
+            rec["picked_model_prob"] = top["prob"]
+            rec["picked_implied_prob"] = (1.0 / top["odds"]) if top["odds"] else None
+            rec["picked_edge"] = top["edge"]
+            rec["picked_conviction"] = picked_c["conviction"] if picked_c else None
+            rec["picked_reliability"] = picked_c["reliability"] if picked_c else None
+            rec["picked_score"] = top["score"]
+            m = re.match(r"([\d.]+)", top.get("stake", "0"))
+            rec["picked_stake"] = float(m.group(1)) if m else None
+            rec["picked_outcome"] = None
+
+        sb.table("matches").upsert(rec, on_conflict="match_id").execute()
+        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates)"
+    except Exception as e:
+        return False, str(e)
+
+
+def record_outcome(sb, match_id, hg, ag):
+    """
+    Fetch the match row, settle every selection, write back the outcome columns
+    and the picked outcome, then update reliability.
+    """
+    if sb is None:
+        return False, "no client"
+    try:
+        # Fetch the match row
+        resp = sb.table("matches").select("*").eq("match_id", match_id).execute()
+        if not resp.data:
+            return False, f"match_id {match_id} not found"
+        m = resp.data[0]
+
+        updates = {
+            "actual_home_goals": hg,
+            "actual_away_goals": ag,
+        }
+
+        ah_h_line = m.get("ah_home_line")
+        ah_a_line = m.get("ah_away_line")
+
+        for col_key, (market, selection) in COL_KEY_TO_MARKET_SELECTION.items():
+            outcome_col = f"outcome_{col_key}"
+            if m.get(outcome_col) is not None:
+                continue  # already settled
+
+            # Build the settlement selection string.
+            if market == "AH":
+                if col_key == "ah_home":
+                    if ah_h_line is None: continue
+                    sel = f"Home {float(ah_h_line):+g}"
+                else:
+                    if ah_a_line is None: continue
+                    sel = f"Away {float(ah_a_line):+g}"
+            else:
+                sel = selection
+
+            outcome = settle_candidate(market, sel, None, hg, ag)
             if outcome:
-                sb.table("candidates").update({"outcome": outcome}).eq("id", c["id"]).execute()
-                settled += 1
+                updates[outcome_col] = outcome
 
+        # Picked outcome — pick the top-ranked selection by picked_market/picked_selection
+        pm = m.get("picked_market")
+        ps = m.get("picked_selection")
+        if pm and ps:
+            # find the matching col_key
+            picked_col = None
+            for col_key, (mk, sel) in COL_KEY_TO_MARKET_SELECTION.items():
+                if mk == pm:
+                    if mk == "AH":
+                        # ps looks like "Home +0.25" or "Away -0.25"
+                        if col_key == "ah_home" and ps.startswith("Home"):
+                            picked_col = col_key
+                        elif col_key == "ah_away" and ps.startswith("Away"):
+                            picked_col = col_key
+                    elif sel == ps:
+                        picked_col = col_key
+            if picked_col:
+                outcome = updates.get(f"outcome_{picked_col}")
+                if outcome:
+                    updates["picked_outcome"] = outcome
+
+        sb.table("matches").update(updates).eq("match_id", match_id).execute()
+
+        # Update reliability
         ok, msg = update_reliability(sb)
-        return True, f"{settled} candidates settled; reliability: {msg}"
+        return True, f"settled; reliability: {msg}"
     except Exception as e:
         return False, str(e)
 
@@ -1337,7 +1400,7 @@ def render_prediction_card(match, parsed, analysis):
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with ranking selection and Supabase persistence")
+    st.caption("xG-based model with ranking selection — wide matches table")
 
     get_supabase.clear()
 
@@ -1346,8 +1409,6 @@ def main():
         st.code(f"""
 URL:        {diag.get('url')}
 Key prefix: {diag.get('key_prefix')}
-Key length: {diag.get('key_length')}
-Role:       {diag.get('role')}
 Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
@@ -1396,16 +1457,12 @@ Error:      {diag.get('error')}
                         if sb is None:
                             st.info("Supabase not configured — nothing saved.")
                         else:
-                            r1_ok, r1_msg = write_match(sb, match, analysis)
-                            st.code(f"write_match:        ok={r1_ok}\n                    msg={r1_msg}", language="text")
-                            r2_ok, r2_msg = write_market_odds(sb, match)
-                            st.code(f"write_market_odds:  ok={r2_ok}\n                    msg={r2_msg}", language="text")
-                            r3_ok, r3_msg = write_candidates(sb, match, analysis)
-                            st.code(f"write_candidates:   ok={r3_ok}\n                    msg={r3_msg}", language="text")
-                            if r1_ok and r2_ok and r3_ok:
-                                st.success("💾 Saved to Supabase.")
+                            ok_w, msg_w = write_match(sb, match, analysis)
+                            st.code(f"write_match:  ok={ok_w}\n              msg={msg_w}", language="text")
+                            if ok_w:
+                                st.success("💾 Saved to Supabase (1 row).")
                             else:
-                                st.error("⚠️ Save incomplete — see diagnostics above.")
+                                st.error("⚠️ Save failed — see message above.")
 
                 except Exception as e:
                     st.error(f"Prediction pipeline failed: {e}")
@@ -1418,7 +1475,7 @@ Error:      {diag.get('error')}
         else:
             try:
                 resp = sb.table("matches").select(
-                    "match_id,match_date,home_team,away_team"
+                    "match_id,match_date,home_team,away_team,picked_market,picked_selection,picked_odds"
                 ).is_("actual_home_goals", "null").execute()
                 pending = resp.data or []
             except Exception as e:
@@ -1428,7 +1485,8 @@ Error:      {diag.get('error')}
                 st.info("No pending matches.")
             for m in pending:
                 mid = m["match_id"]
-                with st.expander(f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')}"):
+                pick_str = f"{m.get('picked_market','')} — {m.get('picked_selection','')} @ {m.get('picked_odds', 0):.2f}"
+                with st.expander(f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')} · {pick_str}"):
                     c1, c2 = st.columns(2)
                     hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{mid}")
                     ag = c2.number_input("Away goals", 0, 15, 0, key=f"ag_{mid}")
@@ -1446,40 +1504,36 @@ Error:      {diag.get('error')}
             st.info("Supabase not configured.")
         else:
             try:
-                resp = sb.table("candidates").select(
-                    "match_id,market,selection,odds,edge,score,outcome,was_bet"
-                ).not_.is_("outcome", "null").execute()
+                resp = sb.table("matches").select(
+                    "match_id,match_date,home_team,away_team,"
+                    "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
+                    "picked_outcome,actual_home_goals,actual_away_goals"
+                ).not_.is_("picked_outcome", "null").execute()
                 rows = resp.data or []
             except Exception as e:
                 st.error(f"Query failed: {e}")
                 rows = []
             if not rows:
-                st.info("No results recorded yet.")
+                st.info("No settled picks yet.")
             else:
                 total = len(rows)
-                wins = sum(1 for r in rows if r["outcome"] == "WON")
-                losses = sum(1 for r in rows if r["outcome"] == "LOST")
+                wins = sum(1 for r in rows if r.get("picked_outcome") == "WON")
+                losses = sum(1 for r in rows if r.get("picked_outcome") == "LOST")
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Settled", total)
+                c1.metric("Settled picks", total)
                 c2.metric("Wins", wins)
                 c3.metric("Losses", losses)
                 c4.metric("Win rate", f"{wins/(wins+losses)*100:.0f}%" if (wins+losses) else "—")
 
-                fired = [r for r in rows if r.get("was_bet")]
-                if fired:
-                    fw = sum(1 for r in fired if r["outcome"] == "WON")
-                    fl = sum(1 for r in fired if r["outcome"] == "LOST")
-                    st.markdown(f"**Fired bets:** {len(fired)} · Win rate: {fw/(fw+fl)*100:.0f}%" if (fw+fl) else f"**Fired bets:** {len(fired)}")
-
                 df = pd.DataFrame([{
-                    "Match": r["match_id"],
-                    "Market": r["market"],
-                    "Selection": r["selection"],
-                    "Odds": f"{r.get('odds', 0):.2f}",
-                    "Edge": f"{(r.get('edge') or 0):+.1%}",
-                    "Score": f"{(r.get('score') or 0):.4f}",
-                    "Bet": "✅" if r.get("was_bet") else "",
-                    "Result": r["outcome"],
+                    "Date": r.get("match_date", ""),
+                    "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
+                    "Pick": f"{r.get('picked_market','')} — {r.get('picked_selection','')}",
+                    "Odds": f"{r.get('picked_odds', 0):.2f}",
+                    "Edge": f"{(r.get('picked_edge') or 0):+.1%}",
+                    "Score": f"{(r.get('picked_score') or 0):.4f}",
+                    "Result": r.get("picked_outcome", ""),
+                    "Actual": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
                 } for r in rows[:200]])
                 st.dataframe(df, use_container_width=True)
 
