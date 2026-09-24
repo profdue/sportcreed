@@ -7,9 +7,8 @@ season, the model trusts its own xG estimate less and shrinks more
 aggressively toward the market total.
 
 AH is parsed from Sportsgambler exactly as before.
-On display, the AH line is rounded to the nearest whole number and shown
-as a 3-way European Handicap table (Handicap / 1H / XH / 2H), matching
-SportyBet's display format.
+On display, the AH line is rounded AWAY FROM ZERO to the nearest whole
+number and shown as a 3-way European Handicap table (Handicap / 1H / XH / 2H).
 """
 
 import math
@@ -176,7 +175,7 @@ st.markdown("""
     .xg-team { color: #cbd5e1; font-weight: 600; }
     .xg-value { color: #3b82f6; font-weight: 800; font-size: 1.3rem; }
 
-    /* European Handicap (SportyBet-style 3-way) */
+    /* European Handicap (3-way) */
     .eh-table {
         background: #0f172a;
         border-radius: 10px;
@@ -897,39 +896,27 @@ class RefinedPredictor:
         return [(lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(kmax + 1)]
 
     # ------------------------------------------------------------------------
-    # AH -> EH conversion (display only). Produces SportyBet-style table:
-    #     Handicap   1H      XH      2H
-    #     0:2        p1      pX      p2
+    # AH -> EH conversion (display only). Whole-number EH line, shown as
+    # "home_hcp:away_hcp" with one side at 0.
     # ------------------------------------------------------------------------
     def ah_to_eh(self, ah_home_line, ah_away_line):
         """
-        Convert Sportsgambler's Asian Handicap lines into a 3-way European
-        Handicap table, formatted exactly like SportyBet displays it:
+        Convert Sportsgambler's Asian Handicap line into a 3-way European
+        Handicap table.
 
-            Handicap   1H      XH      2H
-            0:2        <p1>    <pX>    <p2>
-            2:0        ...
-            0:0        ...
-            0:1        ...
-            1:0        ...
+        Rule:
+            Take the AH line (Home perspective) and round AWAY FROM ZERO
+            to the nearest whole number. This ensures quarter lines never
+            collapse to 0 (which would duplicate the plain 1X2 market).
 
-        Sportsgambler AH convention:
-            ah_home_line: goals added to HOME (e.g. -0.25, +0.75)
-            ah_away_line: goals added to AWAY (e.g. +0.25, -0.75)
+            AH +0.25  ->  EH +1  ->  display "1:0"
+            AH -0.25  ->  EH -1  ->  display "0:1"
+            AH +0.75  ->  EH +1  ->  display "1:0"
+            AH -1.75  ->  EH -2  ->  display "0:2"
+            AH  0.00  ->  EH  0  ->  display "0:0"
 
-        Conversion rule:
-            EH line = round(AH home line) to nearest whole number.
-            Positive => Home receives goals.
-            Negative => Home gives goals (so Away receives).
-
-        Display convention (matches SportyBet):
-            home_hcp : away_hcp  -> one side is 0, the other is |line|.
-            e.g. home_hcp=0, away_hcp=2  ->  "0:2"
-                 home_hcp=2, away_hcp=0  ->  "2:0"
-                 home_hcp=0, away_hcp=0  ->  "0:0"
-
-        Returns dict with home_hcp, away_hcp, handicap_str,
-        home (P 1H), draw (P XH), away (P 2H), and source AH lines.
+        Display convention: home_hcp:away_hcp, one side is 0, other is
+        |line|.  e.g. "1:0", "0:1", "2:0", "0:2", "3:0", "0:3".
         """
         if ah_home_line is None and ah_away_line is None:
             return None
@@ -939,8 +926,13 @@ class RefinedPredictor:
         else:
             ah_line = -ah_away_line
 
-        signed_home_hcp = int(round(ah_line))
+        # Round AWAY FROM ZERO so +/-0.25, +/-0.5, +/-0.75 all become +/-1
+        if ah_line == 0:
+            signed_home_hcp = 0
+        else:
+            signed_home_hcp = int(math.copysign(math.ceil(abs(ah_line)), ah_line))
 
+        # Normalise for display: one side positive, other 0
         if signed_home_hcp >= 0:
             home_hcp = signed_home_hcp
             away_hcp = 0
@@ -948,6 +940,7 @@ class RefinedPredictor:
             home_hcp = 0
             away_hcp = -signed_home_hcp
 
+        # Compute 3-way probabilities at (home_hcp, away_hcp)
         home_probs = self._home_pmf
         away_probs = self._away_pmf
         max_goals = self._max_goals
@@ -1533,9 +1526,9 @@ def render_prediction_card(match, parsed, analysis, predictor):
     stat_card(c3, probs.get("away_win", 0), "Away Win", edges.get("away_win"), "stat-card-away")
 
     # ------------------------------------------------------------------
-    # EUROPEAN HANDICAP — SportyBet-style 3-way display
+    # EUROPEAN HANDICAP — 3-way display at whole-number line
     #   Handicap   1H      XH      2H
-    #   0:2        p1      pX      p2
+    #   1:0        p1      pX      p2
     # ------------------------------------------------------------------
     st.markdown('<div class="section-title">European Handicap (3-Way)</div>',
                 unsafe_allow_html=True)
