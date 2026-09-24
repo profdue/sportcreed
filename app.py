@@ -300,17 +300,6 @@ class SportsgamblerParser:
             return 0
 
     def _parse_last10_splits(self, side):
-        """
-        st-table columns:
-          cells[0] = team label
-          cells[1] = W-D-L
-          cells[2] = avg goals per game (total)
-          cells[3] = GF (goals for)
-          cells[4] = GA (goals against)
-          cells[5] = O2.5 count
-          cells[6] = U2.5 count
-          cells[7] = BTTS Yes count
-        """
         split = self._empty_split()
         table = self.soup.select_one(".st-table")
         if table:
@@ -940,7 +929,6 @@ DEFAULT_RELIABILITY = {
     "DC": 0.6, "DNB": 0.6,
 }
 
-# For each column suffix, the reliability key it maps to (for WON/LOST/PUSH aggregation).
 COL_TO_REL = {
     "1x2_home":  "1X2_favourite",
     "1x2_draw":  "1X2_favourite",
@@ -954,10 +942,8 @@ COL_TO_REL = {
     "btts_no":   "BTTS_no",
     "ou_over":   "O/U_2.5_over",
     "ou_under":  "O/U_2.5_under",
-    # AH handled dynamically based on line sign
 }
 
-# Market / selection for each column, used to settle outcomes.
 COL_TO_MARKET_SELECTION = {
     "1x2_home":  ("1X2",     "Home Win"),
     "1x2_draw":  ("1X2",     "Draw"),
@@ -971,7 +957,7 @@ COL_TO_MARKET_SELECTION = {
     "btts_no":   ("BTTS",    "No"),
     "ou_over":   ("O/U 2.5", "Over 2.5"),
     "ou_under":  ("O/U 2.5", "Under 2.5"),
-    "ah_home":   ("AH",      None),  # built dynamically from line
+    "ah_home":   ("AH",      None),
     "ah_away":   ("AH",      None),
 }
 
@@ -992,14 +978,35 @@ def get_reliability(sb):
 
 
 def seed_reliability(sb):
+    """
+    Insert only markets that don't yet exist. Never overwrite weight.
+    This preserves the Bayesian-updated weight across app restarts.
+    """
     if sb is None:
         return False, "no client"
     try:
-        rows = [{"market": k, "weight": v, "prior_weight": v,
-                 "prior_strength": RELIABILITY_PRIOR_STRENGTH}
-                for k, v in DEFAULT_RELIABILITY.items()]
-        resp = sb.table("reliability").upsert(rows, on_conflict="market").execute()
-        return True, f"{len(resp.data or [])} rows upserted"
+        existing_resp = sb.table("reliability").select("market").execute()
+        existing = {row["market"] for row in (existing_resp.data or [])}
+
+        new_rows = []
+        for k, v in DEFAULT_RELIABILITY.items():
+            if k not in existing:
+                new_rows.append({
+                    "market": k,
+                    "weight": v,
+                    "prior_weight": v,
+                    "prior_strength": RELIABILITY_PRIOR_STRENGTH,
+                    "wins": 0,
+                    "losses": 0,
+                    "pushes": 0,
+                    "total": 0,
+                })
+
+        if not new_rows:
+            return True, f"all {len(existing)} markets already present, nothing seeded"
+
+        sb.table("reliability").insert(new_rows).execute()
+        return True, f"{len(new_rows)} new markets seeded"
     except Exception as e:
         return False, str(e)
 
@@ -1046,7 +1053,6 @@ def update_reliability(sb):
     if sb is None:
         return False, "no client"
     try:
-        # Fetch just the columns we need
         cols = ["ah_home_line", "ah_away_line"]
         for ck in ALL_COL_KEYS:
             cols.append(f"outcome_{ck}")
@@ -1064,7 +1070,6 @@ def update_reliability(sb):
                 if outcome == "WON": groups[rel_key_static]["wins"] += 1
                 elif outcome == "LOST": groups[rel_key_static]["losses"] += 1
                 elif outcome == "PUSH": groups[rel_key_static]["pushes"] += 1
-            # AH handled dynamically
             if ah_h is not None:
                 rel_key = "AH_positive" if float(ah_h) >= 0 else "AH_negative"
                 outcome = r.get("outcome_ah_home")
@@ -1164,13 +1169,11 @@ def write_match(sb, match, analysis):
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
         }
 
-        # Line helpers
         rec["ah_home_line"] = match["odds"].get("ah_home_line")
         rec["ah_away_line"] = match["odds"].get("ah_away_line")
         rec["line_ou_over"] = 2.5
         rec["line_ou_under"] = 2.5
 
-        # Fill per-selection columns from candidates
         for ck in ALL_COL_KEYS:
             rec[f"odds_{ck}"] = None
             rec[f"implied_prob_{ck}"] = None
@@ -1195,7 +1198,6 @@ def write_match(sb, match, analysis):
             rec[f"score_{ck}"] = c["score"]
             rec[f"rank_{ck}"] = c["rank_in_match"]
 
-        # Picked selection
         if analysis["bets"]:
             top = analysis["bets"][0]
             top_c = next((c for c in analysis["candidates"]
@@ -1229,7 +1231,6 @@ def record_outcome(sb, match_id, hg, ag):
     if sb is None:
         return False, "no client"
     try:
-        # Fetch row to get AH lines and picked info
         resp = sb.table("matches").select(
             "ah_home_line,ah_away_line,picked_market,picked_selection"
         ).eq("match_id", match_id).execute()
@@ -1255,7 +1256,6 @@ def record_outcome(sb, match_id, hg, ag):
             if outcome:
                 updates[f"outcome_{ck}"] = outcome
 
-        # Picked outcome
         pm = m.get("picked_market")
         ps = m.get("picked_selection")
         if pm and ps:
