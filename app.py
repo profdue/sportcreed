@@ -750,20 +750,47 @@ class RefinedPredictor:
                 "col_key": col_key,
             })
 
-        add("1X2", "Home Win", None, P.get("home_win"), odds.get("home"), "1X2_favourite", "1x2_home")
-        add("1X2", "Draw", None, P.get("draw"), odds.get("draw"), "1X2_favourite", "1x2_draw")
-        add("1X2", "Away Win", None, P.get("away_win"), odds.get("away"), "1X2_underdog", "1x2_away")
+        # ------------------------------------------------------------------
+        # 1X2 — determine the favourite by lowest odds, tag only that one
+        #        as 1X2_favourite. All other selections go to 1X2_underdog.
+        # ------------------------------------------------------------------
+        o_home = odds.get("home")
+        o_draw = odds.get("draw")
+        o_away = odds.get("away")
+
+        # Build a list of (selection, prob, odds, col_key)
+        one_x_two = []
+        if o_home: one_x_two.append(("Home Win", P.get("home_win"), o_home, "1x2_home"))
+        if o_draw: one_x_two.append(("Draw",     P.get("draw"),     o_draw, "1x2_draw"))
+        if o_away: one_x_two.append(("Away Win", P.get("away_win"), o_away, "1x2_away"))
+
+        # The favourite is whichever has the lowest decimal odds
+        fav_sel = None
+        if one_x_two:
+            fav_sel = min(one_x_two, key=lambda t: t[2])[0]
+
+        for sel, prob, odd, ck in one_x_two:
+            rel_key = "1X2_favourite" if sel == fav_sel else "1X2_underdog"
+            add("1X2", sel, None, prob, odd, rel_key, ck)
+
+        # ------------------------------------------------------------------
+        # DC, DNB, BTTS, O/U, AH (unchanged)
+        # ------------------------------------------------------------------
         add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0), odds.get("dc_1x"), "DC", "dc_1x")
         add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0), odds.get("dc_12"), "DC", "dc_12")
         add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0), odds.get("dc_x2"), "DC", "dc_x2")
+
         p_h = P.get("home_win", 0); p_a = P.get("away_win", 0)
         if p_h + p_a > 0:
             add("DNB", "Home", None, p_h / (p_h + p_a), odds.get("dnb_home"), "DNB", "dnb_home")
             add("DNB", "Away", None, p_a / (p_h + p_a), odds.get("dnb_away"), "DNB", "dnb_away")
+
         add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes", "btts_yes")
         add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no", "btts_no")
+
         add("O/U 2.5", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over", "ou_over")
         add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under", "ou_under")
+
         ah_h_line = odds.get("ah_home_line")
         if ah_h_line is not None:
             p = self._effective_ah_prob("home", ah_h_line)
@@ -930,9 +957,9 @@ DEFAULT_RELIABILITY = {
 }
 
 COL_TO_REL = {
-    "1x2_home":  "1X2_favourite",
-    "1x2_draw":  "1X2_favourite",
-    "1x2_away":  "1X2_underdog",
+    "1x2_home":  "1X2_favourite",  # overridden at settlement time based on which was favourite
+    "1x2_draw":  "1X2_favourite",  # overridden
+    "1x2_away":  "1X2_favourite",  # overridden
     "dc_1x":     "DC",
     "dc_12":     "DC",
     "dc_x2":     "DC",
@@ -978,10 +1005,7 @@ def get_reliability(sb):
 
 
 def seed_reliability(sb):
-    """
-    Insert only markets that don't yet exist. Never overwrite weight.
-    This preserves the Bayesian-updated weight across app restarts.
-    """
+    """Insert only markets that don't yet exist. Never overwrite weight."""
     if sb is None:
         return False, "no client"
     try:
@@ -992,14 +1016,9 @@ def seed_reliability(sb):
         for k, v in DEFAULT_RELIABILITY.items():
             if k not in existing:
                 new_rows.append({
-                    "market": k,
-                    "weight": v,
-                    "prior_weight": v,
+                    "market": k, "weight": v, "prior_weight": v,
                     "prior_strength": RELIABILITY_PRIOR_STRENGTH,
-                    "wins": 0,
-                    "losses": 0,
-                    "pushes": 0,
-                    "total": 0,
+                    "wins": 0, "losses": 0, "pushes": 0, "total": 0,
                 })
 
         if not new_rows:
@@ -1045,15 +1064,29 @@ def settle_candidate(market, selection, line, hg, ag):
     return None
 
 
+def _determine_1x2_fav_col(odds_home, odds_draw, odds_away):
+    """Return the col_key of the 1X2 favourite (lowest odds), or None."""
+    candidates = []
+    if odds_home: candidates.append((odds_home, "1x2_home"))
+    if odds_draw: candidates.append((odds_draw, "1x2_draw"))
+    if odds_away: candidates.append((odds_away, "1x2_away"))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda t: t[0])[1]
+
+
 def update_reliability(sb):
     """
     Read every matches row where outcome columns are populated,
-    aggregate WON/LOST/PUSH per reliability key, and upsert weights.
+    aggregate WON/LOST/PUSH per reliability key (with 1X2 favourite resolved
+    from odds), and upsert weights.
     """
     if sb is None:
         return False, "no client"
     try:
-        cols = ["ah_home_line", "ah_away_line"]
+        # Fetch odds_1x2_* too so we can determine the favourite per match
+        cols = ["ah_home_line", "ah_away_line",
+                "odds_1x2_home", "odds_1x2_draw", "odds_1x2_away"]
         for ck in ALL_COL_KEYS:
             cols.append(f"outcome_{ck}")
         col_csv = ",".join(cols)
@@ -1065,20 +1098,32 @@ def update_reliability(sb):
         for r in rows:
             ah_h = r.get("ah_home_line")
             ah_a = r.get("ah_away_line")
-            for ck, rel_key_static in COL_TO_REL.items():
+
+            # Determine the 1X2 favourite col for this match
+            fav_col = _determine_1x2_fav_col(
+                r.get("odds_1x2_home"),
+                r.get("odds_1x2_draw"),
+                r.get("odds_1x2_away"),
+            )
+
+            for ck in ALL_COL_KEYS:
                 outcome = r.get(f"outcome_{ck}")
-                if outcome == "WON": groups[rel_key_static]["wins"] += 1
-                elif outcome == "LOST": groups[rel_key_static]["losses"] += 1
-                elif outcome == "PUSH": groups[rel_key_static]["pushes"] += 1
-            if ah_h is not None:
-                rel_key = "AH_positive" if float(ah_h) >= 0 else "AH_negative"
-                outcome = r.get("outcome_ah_home")
-                if outcome == "WON": groups[rel_key]["wins"] += 1
-                elif outcome == "LOST": groups[rel_key]["losses"] += 1
-                elif outcome == "PUSH": groups[rel_key]["pushes"] += 1
-            if ah_a is not None:
-                rel_key = "AH_positive" if float(ah_a) >= 0 else "AH_negative"
-                outcome = r.get("outcome_ah_away")
+                if outcome is None:
+                    continue
+
+                # Resolve the reliability key for this column
+                if ck in ("1x2_home", "1x2_draw", "1x2_away"):
+                    rel_key = "1X2_favourite" if ck == fav_col else "1X2_underdog"
+                elif ck == "ah_home":
+                    rel_key = "AH_positive" if (ah_h is not None and float(ah_h) >= 0) else "AH_negative"
+                elif ck == "ah_away":
+                    rel_key = "AH_positive" if (ah_a is not None and float(ah_a) >= 0) else "AH_negative"
+                else:
+                    rel_key = COL_TO_REL.get(ck)
+
+                if rel_key not in groups:
+                    continue
+
                 if outcome == "WON": groups[rel_key]["wins"] += 1
                 elif outcome == "LOST": groups[rel_key]["losses"] += 1
                 elif outcome == "PUSH": groups[rel_key]["pushes"] += 1
