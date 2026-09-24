@@ -2,13 +2,14 @@
 Refined Prediction Strategy — single-file Streamlit app.
 Parser + Predictor + Prediction-style UI.
 
-Includes sample-size shrinkage: when a team has played few games in the
-current season, the model trusts its own xG estimate less and shrinks
-more aggressively toward the market total.
+Sample-size shrinkage: when a team has played few games in the current
+season, the model trusts its own xG estimate less and shrinks more
+aggressively toward the market total.
 
-AH is still parsed from the page exactly as before.
-On display, AH lines are converted to 3-way European Handicap form
-(Home / Draw / Away) for easier interpretation.
+AH is parsed from Sportsgambler exactly as before.
+On display, the AH line is rounded to the nearest whole number and shown
+as a 3-way European Handicap table (Handicap / 1H / XH / 2H), matching
+SportyBet's display format.
 """
 
 import math
@@ -175,18 +176,77 @@ st.markdown("""
     .xg-team { color: #cbd5e1; font-weight: 600; }
     .xg-value { color: #3b82f6; font-weight: 800; font-size: 1.3rem; }
 
+    /* European Handicap (SportyBet-style 3-way) */
     .eh-table {
         background: #0f172a;
         border-radius: 10px;
-        padding: 0.85rem 1rem;
-        margin-bottom: 0.4rem;
+        padding: 1rem 1.25rem;
+        margin-bottom: 0.6rem;
+        border-left: 4px solid #3b82f6;
+    }
+    .eh-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
+        margin-bottom: 0.75rem;
     }
-    .eh-line { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
-    .eh-prob { color: #3b82f6; font-weight: 800; font-size: 1.15rem; }
-    .eh-edge { font-weight: 700; font-size: 0.85rem; margin-left: 0.5rem; }
+    .eh-line {
+        color: #cbd5e1;
+        font-weight: 700;
+        font-size: 1rem;
+    }
+    .eh-line strong { color: #fff; font-size: 1.15rem; }
+    .eh-source {
+        color: #64748b;
+        font-size: 0.78rem;
+        font-weight: 400;
+    }
+    .eh-cols {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.5rem;
+    }
+    .eh-col {
+        flex: 1;
+        text-align: center;
+        background: #020617;
+        border-radius: 8px;
+        padding: 0.6rem 0.25rem;
+    }
+    .eh-col-label {
+        font-size: 0.7rem;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-weight: 700;
+    }
+    .eh-col-prob {
+        font-size: 1.4rem;
+        font-weight: 800;
+        margin-top: 0.25rem;
+    }
+    .eh-col-1h { color: #10b981; }
+    .eh-col-xh { color: #fbbf24; }
+    .eh-col-2h { color: #3b82f6; }
+    .eh-col-odds {
+        font-size: 0.75rem;
+        color: #94a3b8;
+        margin-top: 0.25rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .ah-chip {
+        background: #0f172a;
+        border-radius: 10px;
+        padding: 0.6rem 0.9rem;
+        margin-bottom: 0.4rem;
+        display: flex;
+        justify-content: space-between;
+    }
+    .ah-chip-label { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
+    .ah-chip-prob { color: #3b82f6; font-weight: 800; font-size: 1.05rem; }
 
     .trust-row {
         background: #0f172a;
@@ -248,12 +308,12 @@ FATIGUE_HOME = 0.05
 FATIGUE_AWAY = 0.10
 MIN_XG = 0.10
 
-# Sample-size shrinkage settings
+# Sample-size shrinkage
 TRUST_FULL_SAMPLE = 8
 TRUST_MIN_WEIGHT = 0.25
 MAX_EFFECTIVE_SHRINK = 0.90
 
-# AH rules (unchanged — still drives selection logic)
+# AH selection rules (drive the model, unchanged)
 AH_HOME_OUTRIGHT_MIN = 0.45
 AH_AWAY_OUTRIGHT_MIN = 0.45
 AH_DRAW_MIN = 0.28
@@ -261,7 +321,7 @@ AH_UNDERDOG_MIN = 0.30
 
 
 # ============================================================================
-# PARSER  (AH parsing is UNCHANGED from the original)
+# PARSER  (Sportsgambler — Asian Handicap kept as-is)
 # ============================================================================
 def _has_bs4():
     try:
@@ -353,7 +413,7 @@ class SportsgamblerParser:
         dt = (match_date or "").replace("-", "")
         return f"{ht}_{at}_{dt}"
 
-    # -- odds (AH parsing kept exactly as before) ---------------------------
+    # -- odds (AH parsing unchanged) ---------------------------------------
 
     def _parse_odds(self):
         flat = {
@@ -389,7 +449,6 @@ class SportsgamblerParser:
                 elif label == "X": flat["draw"] = val
                 elif label == "2": flat["away"] = val
             return
-        # ---- ASIAN HANDICAP (kept as-is) ----
         if "asian handicap" in m:
             for label, val in entries:
                 mm = re.match(r"(\d)\s*Hcp\s*([+-]?[\d.]+)", label)
@@ -697,7 +756,6 @@ class RefinedPredictor:
         self.effective_shrink = SHRINK_WEIGHT
         self.home_trust = 1.0
         self.away_trust = 1.0
-        # Poisson grids kept so we can build the EH table on demand
         self._home_pmf = []
         self._away_pmf = []
         self._max_goals = 10
@@ -802,7 +860,7 @@ class RefinedPredictor:
         if total > 0:
             p_home /= total; p_draw /= total; p_away /= total
 
-        # ---- AH probabilities (UNCHANGED — used for selection & edges) ----
+        # AH probabilities (unchanged — drive selection & edges)
         p_home_by_1 = p_away_by_1 = 0.0
         for h in range(max_goals + 1):
             for a in range(max_goals + 1):
@@ -838,67 +896,88 @@ class RefinedPredictor:
     def _pmf(lam, kmax):
         return [(lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(kmax + 1)]
 
-    # ---- AH -> EH conversion (for display only) ---------------------------
-    def ah_to_eh(self, ah_line, side):
+    # ------------------------------------------------------------------------
+    # AH -> EH conversion (display only). Produces SportyBet-style table:
+    #     Handicap   1H      XH      2H
+    #     0:2        p1      pX      p2
+    # ------------------------------------------------------------------------
+    def ah_to_eh(self, ah_home_line, ah_away_line):
         """
-        Convert an AH line for a given side into a 3-way EH probability
-        distribution at the equivalent whole-goal line.
+        Convert Sportsgambler's Asian Handicap lines into a 3-way European
+        Handicap table, formatted exactly like SportyBet displays it:
 
-        AH line convention (as parsed):
-            ah_home_line: line applied to HOME (e.g. -0.5, +0.25)
-            ah_away_line: line applied to AWAY (e.g. +0.5, -0.25)
+            Handicap   1H      XH      2H
+            0:2        <p1>    <pX>    <p2>
+            2:0        ...
+            0:0        ...
+            0:1        ...
+            1:0        ...
 
-        We convert to the nearest whole-goal EH line and return
-        {"line": int, "home": p, "draw": p, "away": p}.
-        Quarter lines are handled by splitting 50/50 between the two
-        adjacent whole lines, exactly matching AH settlement.
+        Sportsgambler AH convention:
+            ah_home_line: goals added to HOME (e.g. -0.25, +0.75)
+            ah_away_line: goals added to AWAY (e.g. +0.25, -0.75)
+
+        Conversion rule:
+            EH line = round(AH home line) to nearest whole number.
+            Positive => Home receives goals.
+            Negative => Home gives goals (so Away receives).
+
+        Display convention (matches SportyBet):
+            home_hcp : away_hcp  -> one side is 0, the other is |line|.
+            e.g. home_hcp=0, away_hcp=2  ->  "0:2"
+                 home_hcp=2, away_hcp=0  ->  "2:0"
+                 home_hcp=0, away_hcp=0  ->  "0:0"
+
+        Returns dict with home_hcp, away_hcp, handicap_str,
+        home (P 1H), draw (P XH), away (P 2H), and source AH lines.
         """
-        if ah_line is None:
+        if ah_home_line is None and ah_away_line is None:
             return None
 
-        max_goals = self._max_goals
+        if ah_home_line is not None:
+            ah_line = ah_home_line
+        else:
+            ah_line = -ah_away_line
+
+        signed_home_hcp = int(round(ah_line))
+
+        if signed_home_hcp >= 0:
+            home_hcp = signed_home_hcp
+            away_hcp = 0
+        else:
+            home_hcp = 0
+            away_hcp = -signed_home_hcp
+
         home_probs = self._home_pmf
         away_probs = self._away_pmf
+        max_goals = self._max_goals
 
-        def eh_at(line_int):
-            """3-way probs when 'side' receives line_int goals."""
-            if side == "home":
-                home_adj, away_adj = line_int, 0
-            else:
-                home_adj, away_adj = 0, line_int
-            p_h = p_d = p_a = 0.0
-            for h in range(max_goals + 1):
-                for a in range(max_goals + 1):
-                    prob = home_probs[h] * away_probs[a]
-                    adj_h = h + home_adj
-                    adj_a = a + away_adj
-                    if adj_h > adj_a: p_h += prob
-                    elif adj_h == adj_a: p_d += prob
-                    else: p_a += prob
-            tot = p_h + p_d + p_a
-            if tot > 0:
-                p_h /= tot; p_d /= tot; p_a /= tot
-            return {"home": p_h, "draw": p_d, "away": p_a}
+        p_h = p_d = p_a = 0.0
+        for h in range(max_goals + 1):
+            for a in range(max_goals + 1):
+                prob = home_probs[h] * away_probs[a]
+                adj_h = h + home_hcp
+                adj_a = a + away_hcp
+                if adj_h > adj_a:
+                    p_h += prob
+                elif adj_h == adj_a:
+                    p_d += prob
+                else:
+                    p_a += prob
+        tot = p_h + p_d + p_a
+        if tot > 0:
+            p_h /= tot; p_d /= tot; p_a /= tot
 
-        # Split quarter lines into the two adjacent whole lines
-        # e.g. +0.25 -> half at 0, half at +1 (wait: +0.25 is half 0, half +0.5, but EH only has whole lines)
-        # For EH display we snap to the nearest whole line, but for quarter
-        # lines we blend the two nearest whole lines weighted 50/50.
-        lower = math.floor(ah_line)
-        upper = math.ceil(ah_line)
-        if lower == upper:
-            probs = eh_at(int(ah_line))
-            return {"line": int(ah_line), **probs}
-
-        # Quarter line -> blend lower and upper
-        pl = eh_at(lower)
-        pu = eh_at(upper)
-        blended = {
-            "home": 0.5 * pl["home"] + 0.5 * pu["home"],
-            "draw": 0.5 * pl["draw"] + 0.5 * pu["draw"],
-            "away": 0.5 * pl["away"] + 0.5 * pu["away"],
+        return {
+            "home_hcp": home_hcp,
+            "away_hcp": away_hcp,
+            "handicap_str": f"{home_hcp}:{away_hcp}",
+            "home": p_h,
+            "draw": p_d,
+            "away": p_a,
+            "source_ah_home": ah_home_line,
+            "source_ah_away": ah_away_line,
         }
-        return {"line": ah_line, **blended}
 
     def calculate_edges(self, odds):
         self.edges = {}
@@ -1247,7 +1326,7 @@ def parse_match_date(d):
 
 
 # ============================================================================
-# DB OPERATIONS  (AH settlement kept — selections are still stored as AH)
+# DB OPERATIONS  (AH selections still stored & settled as AH)
 # ============================================================================
 def save_bet_to_db(sb, match, analysis, bet):
     if sb is None: return None
@@ -1404,6 +1483,7 @@ def render_prediction_card(match, parsed, analysis, predictor):
             </div>
             """, unsafe_allow_html=True)
 
+    # Sample Quality & Shrinkage
     st.markdown('<div class="section-title">Sample Quality & Shrinkage</div>', unsafe_allow_html=True)
     home_g = match.get("home_current_games", 0)
     away_g = match.get("away_current_games", 0)
@@ -1431,6 +1511,7 @@ def render_prediction_card(match, parsed, analysis, predictor):
     </div>
     """, unsafe_allow_html=True)
 
+    # Outcome Probabilities
     st.markdown('<div class="section-title">Outcome Probabilities</div>', unsafe_allow_html=True)
     probs = analysis["probabilities"]
     edges = analysis["edges"]
@@ -1452,56 +1533,77 @@ def render_prediction_card(match, parsed, analysis, predictor):
     stat_card(c3, probs.get("away_win", 0), "Away Win", edges.get("away_win"), "stat-card-away")
 
     # ------------------------------------------------------------------
-    # EUROPEAN HANDICAP DISPLAY (converted from the parsed AH lines)
+    # EUROPEAN HANDICAP — SportyBet-style 3-way display
+    #   Handicap   1H      XH      2H
+    #   0:2        p1      pX      p2
     # ------------------------------------------------------------------
-    st.markdown('<div class="section-title">European Handicap (3-way, converted from AH)</div>',
+    st.markdown('<div class="section-title">European Handicap (3-Way)</div>',
                 unsafe_allow_html=True)
-    eh_home = predictor.ah_to_eh(match["odds"].get("ah_home_line"), "home")
-    eh_away = predictor.ah_to_eh(match["odds"].get("ah_away_line"), "away")
 
-    def render_eh_block(col, eh, side_label, ah_line, ah_odds):
-        if not eh:
-            col.info("No AH line parsed for this side.")
-            return
-        line = eh["line"]
-        # For display we always show from the perspective of the side that
-        # receives the line, but label the columns as Home / Draw / Away.
-        if side_label == "Home":
-            p_h, p_d, p_a = eh["home"], eh["draw"], eh["away"]
-            title = f"Home {line:+g} EH"
+    eh = predictor.ah_to_eh(
+        match["odds"].get("ah_home_line"),
+        match["odds"].get("ah_away_line"),
+    )
+
+    if eh:
+        source_bits = []
+        if eh.get("source_ah_home") is not None:
+            source_bits.append(f"AH Home {eh['source_ah_home']:+g}")
+        if eh.get("source_ah_away") is not None:
+            source_bits.append(f"AH Away {eh['source_ah_away']:+g}")
+        source_str = " · ".join(source_bits)
+
+        hcp = eh["handicap_str"]
+        p1 = eh["home"]
+        pX = eh["draw"]
+        p2 = eh["away"]
+
+        if eh["home_hcp"] > 0:
+            home_sub = f"{match['home_team']} +{eh['home_hcp']}"
         else:
-            # Away gets the line; Home is the opponent
-            p_h, p_d, p_a = eh["home"], eh["draw"], eh["away"]
-            title = f"Away {line:+g} EH"
-        col.markdown(f"""
-        <div class="eh-table" style="display:block;">
-            <div class="eh-line" style="margin-bottom:0.5rem;">{title}
-                <span style="color:#64748b;font-weight:400;">
-                    &nbsp;·&nbsp; from AH {ah_line:+g} @ {ah_odds:.2f}
-                </span>
+            home_sub = match["home_team"]
+        if eh["away_hcp"] > 0:
+            away_sub = f"{match['away_team']} +{eh['away_hcp']}"
+        else:
+            away_sub = match["away_team"]
+
+        st.markdown(f"""
+        <div class="eh-table">
+            <div class="eh-header">
+                <div class="eh-line">Handicap &nbsp;<strong>{hcp}</strong></div>
+                <div class="eh-source">{source_str}</div>
             </div>
-            <div style="display:flex;justify-content:space-between;font-size:0.85rem;">
-                <span>Home <strong style="color:#10b981;">{p_h:.1%}</strong></span>
-                <span>Draw <strong style="color:#fbbf24;">{p_d:.1%}</strong></span>
-                <span>Away <strong style="color:#3b82f6;">{p_a:.1%}</strong></span>
+            <div class="eh-cols">
+                <div class="eh-col" style="flex:0.8;">
+                    <div class="eh-col-label">Handicap</div>
+                    <div class="eh-col-prob" style="color:#cbd5e1;">{hcp}</div>
+                </div>
+                <div class="eh-col">
+                    <div class="eh-col-label">1H</div>
+                    <div class="eh-col-prob eh-col-1h">{p1:.1%}</div>
+                    <div class="eh-col-odds">{home_sub}</div>
+                </div>
+                <div class="eh-col">
+                    <div class="eh-col-label">XH</div>
+                    <div class="eh-col-prob eh-col-xh">{pX:.1%}</div>
+                    <div class="eh-col-odds">Draw</div>
+                </div>
+                <div class="eh-col">
+                    <div class="eh-col-label">2H</div>
+                    <div class="eh-col-prob eh-col-2h">{p2:.1%}</div>
+                    <div class="eh-col-odds">{away_sub}</div>
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        render_eh_block(c1, eh_home, "Home",
-                        match["odds"].get("ah_home_line") or 0,
-                        match["odds"].get("ah_home") or 0)
-    with c2:
-        render_eh_block(c2, eh_away, "Away",
-                        match["odds"].get("ah_away_line") or 0,
-                        match["odds"].get("ah_away") or 0)
+    else:
+        st.info("No Asian Handicap line parsed — cannot derive a European Handicap table.")
 
     # ------------------------------------------------------------------
-    # AH panel (kept, since it's what the model actually prices)
+    # AH reference chips (compact)
     # ------------------------------------------------------------------
-    st.markdown('<div class="section-title">Asian Handicap Probabilities (model)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Asian Handicap Probabilities (model)</div>',
+                unsafe_allow_html=True)
     ah_home = probs.get("ah_home", {})
     ah_away = probs.get("ah_away", {})
     ah_lines = sorted(set(list(ah_home.keys()) + list(ah_away.keys())))
@@ -1512,17 +1614,18 @@ def render_prediction_card(match, parsed, analysis, predictor):
             p_h = ah_home.get(line, 0)
             p_a = ah_away.get(line, 0)
             with col:
-                st.markdown(f"""
-                <div class="eh-table">
+                col.markdown(f"""
+                <div class="ah-chip">
                     <div>
-                        <div class="eh-line">Line {line:+g}</div>
-                        <div class="eh-line" style="font-size:0.7rem;color:#64748b;">
+                        <div class="ah-chip-label">Line {line:+g}</div>
+                        <div class="ah-chip-label" style="font-size:0.7rem;color:#64748b;">
                             Home: {p_h:.1%} | Away: {p_a:.1%}
                         </div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
+    # xG panel
     st.markdown('<div class="section-title">Expected Goals Model</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
@@ -1558,6 +1661,7 @@ def render_prediction_card(match, parsed, analysis, predictor):
         f"**{analysis['shrunk_total']:.2f}** goals expected."
     )
 
+    # Other markets
     st.markdown('<div class="section-title">Other Markets</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1598,7 +1702,7 @@ def render_prediction_card(match, parsed, analysis, predictor):
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with sample-size shrinkage · AH parsed, EH shown for interpretation")
+    st.caption("xG-based model with sample-size shrinkage · AH parsed, EH shown in 3-way format")
 
     sb = get_supabase()
     if sb is None:
