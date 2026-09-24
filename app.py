@@ -1444,7 +1444,13 @@ Error:      {diag.get('error')}
                 st.info("No pending matches.")
             for m in pending:
                 mid = m["match_id"]
-                pick_str = f"{m.get('picked_market','')} — {m.get('picked_selection','')} @ {m.get('picked_odds', 0):.2f}"
+                pm = m.get("picked_market") or "—"
+                ps = m.get("picked_selection") or "—"
+                po = m.get("picked_odds")
+                if po is not None:
+                    pick_str = f"{pm} — {ps} @ {po:.2f}"
+                else:
+                    pick_str = "no bet — ranked list empty"
                 with st.expander(f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')} · {pick_str}"):
                     c1, c2 = st.columns(2)
                     hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{mid}")
