@@ -1,10 +1,10 @@
 """
-Refined Prediction Strategy — focused on model strengths only.
+Focused Prediction Strategy — 3 markets only.
 
-Kept markets: DC 1X, DC X2, O/U Over 2.5, O/U Under 2.5, AH Positive (home).
-Dropped markets: 1X2 outrights, DNB, BTTS, AH Negative, AH Away.
+Kept markets: O/U Over 2.5, O/U Under 2.5, AH Positive (home).
+DC removed entirely.
 
-Scoring: model_prob × reliability  (no edge, no conviction).
+Scoring: model_prob × reliability.
 
 Requires:
   st.secrets["SUPABASE_URL"]
@@ -21,7 +21,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Refined Predictor", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Focused Predictor", page_icon="⚽", layout="wide")
 
 
 # ============================================================================
@@ -117,8 +117,6 @@ STAKE_TIER_MED = 0.45
 
 # Market-specific minimum probabilities
 MIN_PROB = {
-    "DC_1X":        0.60,
-    "DC_X2":        0.60,
     "OU_over":      0.60,
     "OU_under":     0.60,
     "AH_pos_home":  0.55,
@@ -130,7 +128,7 @@ HOME_BONUS = 0.03
 RELIABILITY_PRIOR_STRENGTH = 10
 
 # The only markets we generate candidates for
-KEPT_MARKETS = ("DC_1X", "DC_X2", "OU_over", "OU_under", "AH_pos_home")
+KEPT_MARKETS = ("OU_over", "OU_under", "AH_pos_home")
 
 
 # ============================================================================
@@ -758,7 +756,7 @@ class RefinedPredictor:
         return ah[closest]
 
     # ------------------------------------------------------------------
-    # CANDIDATE GENERATION — focused on 5 markets only
+    # CANDIDATE GENERATION — 3 markets only. No DC. No 1X2. No DNB. No BTTS.
     # ------------------------------------------------------------------
     def generate_candidates(self, odds):
         cs = []
@@ -782,14 +780,6 @@ class RefinedPredictor:
                 "reliability_key": reliability_key,
                 "col_key": col_key,
             })
-
-        # DC 1X
-        p_1x = P.get("home_win", 0) + P.get("draw", 0)
-        add("DC", "1X", None, p_1x, odds.get("dc_1x"), "DC_1X", "dc_1x")
-
-        # DC X2
-        p_x2 = P.get("draw", 0) + P.get("away_win", 0)
-        add("DC", "X2", None, p_x2, odds.get("dc_x2"), "DC_X2", "dc_x2")
 
         # O/U Over 2.5
         p_over = P.get("over_25", 0)
@@ -960,28 +950,23 @@ def parse_match_date(d):
 
 
 # ============================================================================
-# RELIABILITY — focused on 5 markets
+# RELIABILITY — 3 markets only. DC removed entirely.
 # ============================================================================
 DEFAULT_RELIABILITY = {
-    "DC_1X":        0.65,
-    "DC_X2":        0.65,
     "OU_over":      0.70,
     "OU_under":     0.55,
     "AH_pos_home":  0.65,
 }
 
-# Column → reliability key mapping (kept markets only)
 COL_TO_REL = {
-    "dc_1x":    "DC_1X",
-    "dc_x2":    "DC_X2",
     "ou_over":  "OU_over",
     "ou_under": "OU_under",
     # ah_home handled dynamically by line sign in update_reliability
 }
 
-# Column → (market, selection) mapping — used ONLY by record_outcome for settlement
+# Column → (market, selection) mapping — used ONLY by record_outcome for settlement.
 # All 14 columns are settled so we retain audit data, even though the model
-# only ever generates candidates for the 5 kept markets.
+# only ever generates candidates for 3 markets.
 COL_TO_MARKET_SELECTION = {
     "1x2_home":  ("1X2",     "Home Win"),
     "1x2_draw":  ("1X2",     "Draw"),
@@ -1016,7 +1001,7 @@ def get_reliability(sb):
 
 
 def seed_reliability(sb):
-    """Clean up non-kept markets and seed the 5 focused ones."""
+    """Clean up non-kept markets and seed the 3 focused ones."""
     if sb is None:
         return False, "no client"
     try:
@@ -1057,7 +1042,6 @@ def _settle_ah_outcome(margin, hcp):
     """
     adjusted = margin + hcp
 
-    # Whole and half-number lines
     if hcp in (0, 1, 2, -1, -2):
         if adjusted > 0: return "WON"
         if adjusted < 0: return "LOST"
@@ -1065,7 +1049,6 @@ def _settle_ah_outcome(margin, hcp):
     if hcp in (0.5, 1.5, 2.5, -0.5, -1.5, -2.5):
         return "WON" if adjusted > 0 else "LOST"
 
-    # Quarter lines — split into two half-stakes
     if hcp in (0.25, 0.75, 1.25, 1.75, -0.25, -0.75, -1.25, -1.75):
         lower = hcp - 0.25
         upper = hcp + 0.25
@@ -1083,7 +1066,6 @@ def _settle_ah_outcome(margin, hcp):
         if result == 0.75:  return "HALF_WON"
         if result == 0.25:  return "HALF_LOST"
 
-    # Fallback
     if adjusted > 0: return "WON"
     if adjusted < 0: return "LOST"
     return "PUSH"
@@ -1185,7 +1167,7 @@ def update_reliability(sb):
     try:
         cols = ["ah_home_line"] + [f"outcome_{ck}" for ck in ALL_COL_KEYS]
         col_csv = ",".join(cols)
-        resp = sb.table("matches").select(col_csv).not_.is_("outcome_dc_1x", "null").execute()
+        resp = sb.table("matches").select(col_csv).not_.is_("outcome_ou_over", "null").execute()
         rows = resp.data or []
 
         groups = {k: {"wins": 0.0, "losses": 0.0, "pushes": 0.0} for k in KEPT_MARKETS}
@@ -1209,11 +1191,11 @@ def update_reliability(sb):
                 if rel_key not in groups:
                     continue
 
-                if outcome == "WON":        groups[rel_key]["wins"]   += 1.0
-                elif outcome == "HALF_WON": groups[rel_key]["wins"]   += 0.5
-                elif outcome == "LOST":     groups[rel_key]["losses"] += 1.0
-                elif outcome == "HALF_LOST":groups[rel_key]["losses"] += 0.5
-                elif outcome == "PUSH":     groups[rel_key]["pushes"] += 1.0
+                if outcome == "WON":         groups[rel_key]["wins"]   += 1.0
+                elif outcome == "HALF_WON":  groups[rel_key]["wins"]   += 0.5
+                elif outcome == "LOST":      groups[rel_key]["losses"] += 1.0
+                elif outcome == "HALF_LOST": groups[rel_key]["losses"] += 0.5
+                elif outcome == "PUSH":      groups[rel_key]["pushes"] += 1.0
 
         updated = 0
         for key, counts in groups.items():
@@ -1462,7 +1444,7 @@ def render_prediction_card(match, parsed, analysis):
         <div class="verdict-nobet">
             <div class="verdict-label-grey">Verdict</div>
             <div class="verdict-noedge">No candidate cleared the focus thresholds</div>
-            <div class="verdict-detail-grey">Skip this match — the model found no edge in its 5 core markets.</div>
+            <div class="verdict-detail-grey">Skip this match — the model found no edge in its 3 core markets.</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1513,7 +1495,7 @@ def render_prediction_card(match, parsed, analysis):
 # ============================================================================
 def main():
     st.title("⚽ Focused Prediction Strategy")
-    st.caption("5 markets only · score = model_prob × reliability · strengths-based")
+    st.caption("3 markets only · score = model_prob × reliability · AH Home + O/U 2.5")
 
     get_supabase.clear()
     sb, diag = get_supabase()
@@ -1664,7 +1646,7 @@ Error:      {diag.get('error')}
                 st.dataframe(df, use_container_width=True)
 
     with tabs[3]:
-        st.subheader("🎛️ Reliability Weights — 5 Focused Markets")
+        st.subheader("🎛️ Reliability Weights — 3 Focused Markets")
         if sb is None:
             st.info("Supabase not configured.")
         else:
