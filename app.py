@@ -775,22 +775,65 @@ def _direction_from_model(cand):
     return None
 
 
-def _direction_from_sg(sg_pick):
+def _team_matches_pick(team_name, pick_lower):
+    """
+    Return True if team_name appears in pick_lower.
+    Handles:
+      - full-name substring match
+      - word-level match (len >= 4)
+      - prefix match (first 4 chars of any word >= 4 chars)
+    """
+    if not team_name or not pick_lower:
+        return False
+    t = team_name.lower().strip()
+    if not t:
+        return False
+    # Full name
+    if t in pick_lower:
+        return True
+    # Word-level + prefix
+    for tok in t.split():
+        if len(tok) < 4:
+            continue
+        if tok in pick_lower:
+            return True
+        if tok[:4] in pick_lower:
+            return True
+    return False
+
+
+def _direction_from_sg(sg_pick, home_team=None, away_team=None):
+    """
+    Extract SG's directional intent from pick text.
+    Uses team names when available.
+    """
     if not sg_pick:
         return None
     p = sg_pick.lower()
+
+    # Totals first (highest priority)
     if "over" in p:
         return "HIGH_SCORING"
     if "under" in p:
         return "LOW_SCORING"
     if "btts" in p or "both teams to score" in p:
         return "HIGH_SCORING" if "yes" in p else "LOW_SCORING"
+
+    # Draw → no clear direction
+    if "draw" in p:
+        return None
+
+    # Team-based (handicap, DNB, 1X2, etc.)
+    if _team_matches_pick(home_team, p):
+        return "HOME_FOR"
+    if _team_matches_pick(away_team, p):
+        return "AWAY_FOR"
+
+    # Fallback to keywords
     if "home" in p and "win" in p:
         return "HOME_FOR"
     if "away" in p and "win" in p:
         return "AWAY_FOR"
-    if "draw" in p:
-        return None
     return None
 
 
@@ -1011,8 +1054,8 @@ def settle_sg_pick(pick, home_team, away_team, hg, ag):
     away_lower = (away_team or "").lower()
     home_tokens = [t for t in home_lower.split() if len(t) > 3]
     away_tokens = [t for t in away_lower.split() if len(t) > 3]
-    home_in = any(t in p for t in home_tokens)
-    away_in = any(t in p for t in away_tokens)
+    home_in = any(t in p for t in home_tokens) or any(t[:4] in p for t in home_tokens)
+    away_in = any(t in p for t in away_tokens) or any(t[:4] in p for t in away_tokens)
 
     m = re.search(r"(over|under)\s+([\d.]+)", p)
     if m:
@@ -1418,7 +1461,6 @@ def main():
     st.title("⚽ Focused Predictor v2")
     st.caption("3 markets · score = edge × conviction × reliability · SG direction filter")
 
-    # Connect once per session
     sb, diag = get_supabase()
 
     with st.expander("🔍 Supabase connection", expanded=False):
@@ -1429,7 +1471,6 @@ Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
 
-    # Session state init (once)
     if "html_input" not in st.session_state:
         st.session_state["html_input"] = ""
     if "run_prediction" not in st.session_state:
@@ -1486,7 +1527,12 @@ Error:      {diag.get('error')}
                         candidates = generate_candidates_overhaul(p, match["odds"], reliability)
 
                         sg_pick = match.get("sg_pick")
-                        sg_dir = _direction_from_sg(sg_pick)
+                        # Pass team names so team-based SG picks get correct direction
+                        sg_dir = _direction_from_sg(
+                            sg_pick,
+                            match.get("home_team"),
+                            match.get("away_team"),
+                        )
 
                         picked = None
                         skip_reason = None
@@ -1614,16 +1660,13 @@ Error:      {diag.get('error')}
             if not rows:
                 st.info("No settled matches yet.")
             else:
-                # Split into bets vs skips
                 bets = [r for r in rows if r.get("picked_market")]
                 skips = [r for r in rows if not r.get("picked_market")]
 
-                # Bet metrics
                 bet_wins = sum(1 for r in bets if r.get("picked_outcome") == "WON")
                 bet_losses = sum(1 for r in bets if r.get("picked_outcome") == "LOST")
                 bet_pushes = sum(1 for r in bets if r.get("picked_outcome") == "PUSH")
 
-                # Helper: top candidate
                 def top_candidate_outcome(r):
                     scores = [
                         ("Over 2.5",   r.get("score_ou_over"),    r.get("outcome_ou_over"),    r.get("odds_ou_over")),
@@ -1634,9 +1677,8 @@ Error:      {diag.get('error')}
                     if not scores:
                         return None
                     scores.sort(key=lambda x: x[1], reverse=True)
-                    return scores[0]  # (label, score, outcome, odds)
+                    return scores[0]
 
-                # Skip metrics
                 skip_top_won = 0
                 skip_top_lost = 0
                 skip_top_push = 0
@@ -1652,7 +1694,6 @@ Error:      {diag.get('error')}
                     elif outcome == "PUSH":
                         skip_top_push += 1
 
-                # SG agreement counts
                 agree_n = sum(1 for r in rows if r.get("sg_agreement") == "AGREE")
                 opposed_n = sum(1 for r in rows if r.get("sg_agreement") == "OPPOSED")
                 mixed_n = sum(1 for r in rows if r.get("sg_agreement") == "MIXED")
@@ -1689,7 +1730,6 @@ Error:      {diag.get('error')}
                     st.metric("SG overall win rate",
                               f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%")
 
-                # Full table
                 st.markdown("#### All Settled Matches")
 
                 def build_row(r):
