@@ -1418,7 +1418,6 @@ def main():
     st.title("⚽ Focused Predictor v2")
     st.caption("3 markets · score = edge × conviction × reliability · SG direction filter")
 
-    # Connect once per session
     sb, diag = get_supabase()
 
     with st.expander("🔍 Supabase connection", expanded=False):
@@ -1429,13 +1428,10 @@ Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
 
-    # Session state init (once)
     if "html_input" not in st.session_state:
         st.session_state["html_input"] = ""
     if "run_prediction" not in st.session_state:
         st.session_state["run_prediction"] = False
-    if "last_result" not in st.session_state:
-        st.session_state["last_result"] = None
 
     if sb is None:
         st.info("ℹ️ Supabase not configured — predictions work, persistence disabled.")
@@ -1459,11 +1455,9 @@ Error:      {diag.get('error')}
             label_visibility="collapsed",
         )
 
-        # Two-phase button: click sets flag, next rerun runs pipeline
         if st.button("⚽ Generate Prediction", type="primary", key="btn_generate"):
             st.session_state["run_prediction"] = True
 
-        # Run pipeline when flag is set
         if st.session_state["run_prediction"]:
             st.session_state["run_prediction"] = False
 
@@ -1591,10 +1585,10 @@ Error:      {diag.get('error')}
                             st.error(msg)
 
     # ------------------------------------------------------------------
-    # TAB 2: Records
+    # TAB 2: Records (all settled matches — bets AND skips)
     # ------------------------------------------------------------------
     with tabs[2]:
-        st.subheader("📊 Performance")
+        st.subheader("📊 Performance — All Settled Matches")
         if sb is None:
             st.info("Supabase not configured.")
         else:
@@ -1602,41 +1596,118 @@ Error:      {diag.get('error')}
                 resp = sb.table("matches").select(
                     "match_id,match_date,home_team,away_team,"
                     "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
-                    "picked_outcome,actual_home_goals,actual_away_goals,"
-                    "sg_pick,sg_outcome,sg_agreement"
-                ).not_.is_("picked_outcome", "null").execute()
+                    "picked_outcome,picked_stake,picked_direction,"
+                    "actual_home_goals,actual_away_goals,"
+                    "sg_pick,sg_outcome,sg_agreement,"
+                    "score_ou_over,score_ou_under,score_ah_home,"
+                    "outcome_ou_over,outcome_ou_under,outcome_ah_home,"
+                    "settled_at"
+                ).not_.is_("settled_at", "null").execute()
                 rows = resp.data or []
             except Exception as e:
                 st.error(f"Query failed: {e}")
                 rows = []
 
             if not rows:
-                st.info("No settled picks yet.")
+                st.info("No settled matches yet.")
             else:
-                my_wins = sum(1 for r in rows if r.get("picked_outcome") == "WON")
-                my_losses = sum(1 for r in rows if r.get("picked_outcome") == "LOST")
+                bets = [r for r in rows if r.get("picked_market")]
+                skips = [r for r in rows if not r.get("picked_market")]
+
+                bet_wins = sum(1 for r in bets if r.get("picked_outcome") == "WON")
+                bet_losses = sum(1 for r in bets if r.get("picked_outcome") == "LOST")
+
+                def top_candidate_outcome(r):
+                    scores = [
+                        ("OU_over",     r.get("score_ou_over"),     r.get("outcome_ou_over")),
+                        ("OU_under",    r.get("score_ou_under"),    r.get("outcome_ou_under")),
+                        ("AH_pos_home", r.get("score_ah_home"),     r.get("outcome_ah_home")),
+                    ]
+                    scores = [(k, s, o) for k, s, o in scores if s is not None and o is not None]
+                    if not scores:
+                        return None
+                    scores.sort(key=lambda x: x[1], reverse=True)
+                    return scores[0]
+
+                skip_top_won = 0
+                skip_top_lost = 0
+                for r in skips:
+                    top = top_candidate_outcome(r)
+                    if not top:
+                        continue
+                    if top[2] == "WON":
+                        skip_top_won += 1
+                    elif top[2] == "LOST":
+                        skip_top_lost += 1
+
+                agree_n = sum(1 for r in rows if r.get("sg_agreement") == "AGREE")
+                opposed_n = sum(1 for r in rows if r.get("sg_agreement") == "OPPOSED")
+                mixed_n = sum(1 for r in rows if r.get("sg_agreement") == "MIXED")
                 sg_wins = sum(1 for r in rows if r.get("sg_outcome") == "WON")
                 sg_losses = sum(1 for r in rows if r.get("sg_outcome") == "LOST")
 
+                st.markdown("#### Bets")
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("My settled", my_wins + my_losses)
-                c2.metric("My win rate",
-                          f"{my_wins/(my_wins+my_losses)*100:.0f}%" if (my_wins+my_losses) else "—")
-                c3.metric("SG settled", sg_wins + sg_losses)
-                c4.metric("SG win rate",
-                          f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%" if (sg_wins+sg_losses) else "—")
+                c1.metric("Settled bets", len(bets))
+                c2.metric("Wins", bet_wins)
+                c3.metric("Losses", bet_losses)
+                c4.metric("Win rate",
+                          f"{bet_wins/(bet_wins+bet_losses)*100:.0f}%"
+                          if (bet_wins + bet_losses) else "—")
 
-                df = pd.DataFrame([{
-                    "Date": r.get("match_date", ""),
-                    "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
-                    "My pick": f"{r.get('picked_market','')} — {r.get('picked_selection','')}",
-                    "My result": r.get("picked_outcome", ""),
-                    "SG pick": r.get("sg_pick") or "—",
-                    "SG result": r.get("sg_outcome") or "—",
-                    "Agreement": r.get("sg_agreement", ""),
-                    "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
-                } for r in rows[:200]])
+                st.markdown("#### Skips")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Settled skips", len(skips))
+                c2.metric("Top candidate would have won", skip_top_won)
+                c3.metric("Top candidate would have lost", skip_top_lost)
+                c4.metric("Skip accuracy",
+                          f"{skip_top_lost/(skip_top_lost+skip_top_won)*100:.0f}%"
+                          if (skip_top_lost + skip_top_won) else "—")
+
+                st.markdown("#### SG Agreement Breakdown")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Agree", agree_n)
+                c2.metric("Opposed", opposed_n)
+                c3.metric("Mixed", mixed_n)
+                c4.metric("SG win rate",
+                          f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%"
+                          if (sg_wins + sg_losses) else "—")
+
+                st.markdown("#### All Settled Matches")
+
+                def build_row(r):
+                    if r.get("picked_market"):
+                        pick_str = f"{r['picked_market']} — {r['picked_selection']}"
+                        outcome = r.get("picked_outcome") or "—"
+                        stake = r.get("picked_stake") or 0
+                        note = ""
+                    else:
+                        pick_str = "SKIP"
+                        outcome = "—"
+                        stake = 0
+                        top = top_candidate_outcome(r)
+                        note = f"Top would have: {top[0]} {top[2]}" if top else "no candidate"
+                    return {
+                        "Date": r.get("match_date", ""),
+                        "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
+                        "Pick": pick_str,
+                        "Outcome": outcome,
+                        "Stake": stake,
+                        "Agreement": r.get("sg_agreement", ""),
+                        "SG pick": r.get("sg_pick") or "—",
+                        "SG result": r.get("sg_outcome") or "—",
+                        "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
+                        "Note": note,
+                    }
+
+                df = pd.DataFrame([build_row(r) for r in rows])
                 st.dataframe(df, use_container_width=True)
+
+                st.caption(
+                    "Skips show the outcome of the model's top candidate — "
+                    "the bet that would have been placed. "
+                    "A high 'Top candidate would have lost' count means the skip was correct."
+                )
 
     # ------------------------------------------------------------------
     # TAB 3: Reliability
