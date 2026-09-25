@@ -111,7 +111,6 @@ TRUST_FULL_SAMPLE = 8
 TRUST_MIN_WEIGHT = 0.25
 MAX_EFFECTIVE_SHRINK = 0.90
 
-# Overhaul thresholds
 MIN_PROB = {
     "OU_over":      0.50,
     "OU_under":     0.50,
@@ -754,7 +753,7 @@ class RefinedPredictor:
 
 
 # ============================================================================
-# OVERHAUL — Direction, agreement, candidates
+# OVERHAUL — direction, agreement, candidates
 # ============================================================================
 def _direction_from_model(cand):
     if not cand:
@@ -1419,7 +1418,7 @@ def main():
     st.title("⚽ Focused Predictor v2")
     st.caption("3 markets · score = edge × conviction × reliability · SG direction filter")
 
-    get_supabase.clear()
+    # Connect once per session
     sb, diag = get_supabase()
 
     with st.expander("🔍 Supabase connection", expanded=False):
@@ -1430,6 +1429,14 @@ Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
 
+    # Session state init (once)
+    if "html_input" not in st.session_state:
+        st.session_state["html_input"] = ""
+    if "run_prediction" not in st.session_state:
+        st.session_state["run_prediction"] = False
+    if "last_result" not in st.session_state:
+        st.session_state["last_result"] = None
+
     if sb is None:
         st.info("ℹ️ Supabase not configured — predictions work, persistence disabled.")
     else:
@@ -1439,17 +1446,34 @@ Error:      {diag.get('error')}
 
     tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records", "🎛️ Reliability", "🔬 Research"])
 
+    # ------------------------------------------------------------------
+    # TAB 0: Predict
+    # ------------------------------------------------------------------
     with tabs[0]:
         st.markdown("### Paste Sportsgambler HTML")
-        text = st.text_area("HTML", height=220, key="html_input", label_visibility="collapsed")
 
-        if st.button("⚽ Generate Prediction", type="primary"):
-            if not text or len(text.strip()) < 200:
+        text = st.text_area(
+            "HTML",
+            height=220,
+            key="html_input",
+            label_visibility="collapsed",
+        )
+
+        # Two-phase button: click sets flag, next rerun runs pipeline
+        if st.button("⚽ Generate Prediction", type="primary", key="btn_generate"):
+            st.session_state["run_prediction"] = True
+
+        # Run pipeline when flag is set
+        if st.session_state["run_prediction"]:
+            st.session_state["run_prediction"] = False
+
+            html = st.session_state.get("html_input", "")
+            if not html or len(html.strip()) < 200:
                 st.error("Please paste a full Sportsgambler preview page.")
             else:
                 try:
                     with st.spinner("Analysing match..."):
-                        parsed = SportsgamblerParser(text).parse()
+                        parsed = SportsgamblerParser(html).parse()
                         match = load_parsed_match(parsed)
                         p = RefinedPredictor()
                         p.calculate_base_xg(match["home_data"], match["away_data"])
@@ -1517,6 +1541,9 @@ Error:      {diag.get('error')}
                     st.error(f"Pipeline failed: {e}")
                     st.code(traceback.format_exc(), language="python")
 
+    # ------------------------------------------------------------------
+    # TAB 1: Pending
+    # ------------------------------------------------------------------
     with tabs[1]:
         st.subheader("📝 Pending Matches")
         if sb is None:
@@ -1530,8 +1557,10 @@ Error:      {diag.get('error')}
             except Exception as e:
                 st.error(f"Query failed: {e}")
                 pending = []
+
             if not pending:
                 st.info("No pending matches.")
+
             for m in pending:
                 mid = m["match_id"]
                 pm = m.get("picked_market") or "—"
@@ -1539,20 +1568,31 @@ Error:      {diag.get('error')}
                 po = m.get("picked_odds")
                 pick_str = f"{pm} — {ps} @ {po:.2f}" if po else "no bet"
                 agree = m.get("sg_agreement", "")
+
                 with st.expander(f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')} · {pick_str} · {agree}"):
                     if m.get("sg_pick"):
                         st.caption(f"Sportsgambler pick: {m['sg_pick']}")
+
                     c1, c2 = st.columns(2)
                     hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{mid}")
                     ag = c2.number_input("Away goals", 0, 15, 0, key=f"ag_{mid}")
+
                     if st.button("Submit result", key=f"sub_{mid}"):
-                        ok, msg = record_outcome(sb, mid, hg, ag)
+                        hg_val = st.session_state.get(f"hg_{mid}", hg)
+                        ag_val = st.session_state.get(f"ag_{mid}", ag)
+                        ok, msg = record_outcome(sb, mid, hg_val, ag_val)
                         if ok:
                             st.success(msg)
+                            for k in [f"hg_{mid}", f"ag_{mid}"]:
+                                if k in st.session_state:
+                                    del st.session_state[k]
                             st.rerun()
                         else:
                             st.error(msg)
 
+    # ------------------------------------------------------------------
+    # TAB 2: Records
+    # ------------------------------------------------------------------
     with tabs[2]:
         st.subheader("📊 Performance")
         if sb is None:
@@ -1598,6 +1638,9 @@ Error:      {diag.get('error')}
                 } for r in rows[:200]])
                 st.dataframe(df, use_container_width=True)
 
+    # ------------------------------------------------------------------
+    # TAB 3: Reliability
+    # ------------------------------------------------------------------
     with tabs[3]:
         st.subheader("🎛️ Reliability Weights")
         if sb is None:
@@ -1609,6 +1652,7 @@ Error:      {diag.get('error')}
             except Exception as e:
                 st.error(f"Query failed: {e}")
                 rows = []
+
             if not rows:
                 st.info("No reliability rows yet.")
             else:
@@ -1624,6 +1668,9 @@ Error:      {diag.get('error')}
                 st.dataframe(df, use_container_width=True)
                 st.caption("Weights recomputed from corrected outcomes.")
 
+    # ------------------------------------------------------------------
+    # TAB 4: Research
+    # ------------------------------------------------------------------
     with tabs[4]:
         st.subheader("🔬 Research — Opposition Cases")
         if sb is None:
