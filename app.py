@@ -4,7 +4,7 @@ Focused Predictor v2 — Complete Overhaul
 3 markets: OU_over, OU_under, AH_pos_home.
 Score = edge × conviction × reliability.
 Guards: MIN_PROB, MIN_SCORE, SG direction filter.
-Research: opposition log.
+Research: opposition log + all skip reasons.
 
 Requires:
   st.secrets["SUPABASE_URL"]
@@ -1163,7 +1163,7 @@ def _pcdf(lam, k):
     return sum((lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(k + 1))
 
 
-def write_match(sb, match, candidates, picked, sg_direction, agreement):
+def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_reason):
     if sb is None:
         return False, "no client"
     try:
@@ -1418,6 +1418,7 @@ def main():
     st.title("⚽ Focused Predictor v2")
     st.caption("3 markets · score = edge × conviction × reliability · SG direction filter")
 
+    # Connect once per session
     sb, diag = get_supabase()
 
     with st.expander("🔍 Supabase connection", expanded=False):
@@ -1428,6 +1429,7 @@ Connected:  {diag.get('ok')}
 Error:      {diag.get('error')}
         """, language="text")
 
+    # Session state init (once)
     if "html_input" not in st.session_state:
         st.session_state["html_input"] = ""
     if "run_prediction" not in st.session_state:
@@ -1523,7 +1525,7 @@ Error:      {diag.get('error')}
                                            sg_dir, agreement, skip_reason, analysis)
 
                     if sb is not None:
-                        ok_w, msg_w = write_match(sb, match, candidates, picked, sg_dir, agreement)
+                        ok_w, msg_w = write_match(sb, match, candidates, picked, sg_dir, agreement, skip_reason)
                         with st.expander("🔍 Save to Supabase", expanded=False):
                             st.code(f"write_match:  ok={ok_w}\n              msg={msg_w}", language="text")
                         if ok_w:
@@ -1585,7 +1587,7 @@ Error:      {diag.get('error')}
                             st.error(msg)
 
     # ------------------------------------------------------------------
-    # TAB 2: Records (all settled matches — bets AND skips)
+    # TAB 2: Records — all settled matches (bets AND skips)
     # ------------------------------------------------------------------
     with tabs[2]:
         st.subheader("📊 Performance — All Settled Matches")
@@ -1601,8 +1603,9 @@ Error:      {diag.get('error')}
                     "sg_pick,sg_outcome,sg_agreement,"
                     "score_ou_over,score_ou_under,score_ah_home,"
                     "outcome_ou_over,outcome_ou_under,outcome_ah_home,"
+                    "odds_ou_over,odds_ou_under,odds_ah_home,"
                     "settled_at"
-                ).not_.is_("settled_at", "null").execute()
+                ).not_.is_("settled_at", "null").order("match_date", desc=True).execute()
                 rows = resp.data or []
             except Exception as e:
                 st.error(f"Query failed: {e}")
@@ -1611,40 +1614,49 @@ Error:      {diag.get('error')}
             if not rows:
                 st.info("No settled matches yet.")
             else:
+                # Split into bets vs skips
                 bets = [r for r in rows if r.get("picked_market")]
                 skips = [r for r in rows if not r.get("picked_market")]
 
+                # Bet metrics
                 bet_wins = sum(1 for r in bets if r.get("picked_outcome") == "WON")
                 bet_losses = sum(1 for r in bets if r.get("picked_outcome") == "LOST")
+                bet_pushes = sum(1 for r in bets if r.get("picked_outcome") == "PUSH")
 
+                # Helper: top candidate
                 def top_candidate_outcome(r):
                     scores = [
-                        ("OU_over",     r.get("score_ou_over"),     r.get("outcome_ou_over")),
-                        ("OU_under",    r.get("score_ou_under"),    r.get("outcome_ou_under")),
-                        ("AH_pos_home", r.get("score_ah_home"),     r.get("outcome_ah_home")),
+                        ("Over 2.5",   r.get("score_ou_over"),    r.get("outcome_ou_over"),    r.get("odds_ou_over")),
+                        ("Under 2.5",  r.get("score_ou_under"),   r.get("outcome_ou_under"),   r.get("odds_ou_under")),
+                        ("AH Home",    r.get("score_ah_home"),    r.get("outcome_ah_home"),    r.get("odds_ah_home")),
                     ]
-                    scores = [(k, s, o) for k, s, o in scores if s is not None and o is not None]
+                    scores = [(k, s, o, od) for k, s, o, od in scores if s is not None and o is not None]
                     if not scores:
                         return None
                     scores.sort(key=lambda x: x[1], reverse=True)
-                    return scores[0]
+                    return scores[0]  # (label, score, outcome, odds)
 
+                # Skip metrics
                 skip_top_won = 0
                 skip_top_lost = 0
+                skip_top_push = 0
                 for r in skips:
                     top = top_candidate_outcome(r)
                     if not top:
                         continue
-                    if top[2] == "WON":
+                    outcome = top[2]
+                    if outcome == "WON":
                         skip_top_won += 1
-                    elif top[2] == "LOST":
+                    elif outcome == "LOST":
                         skip_top_lost += 1
+                    elif outcome == "PUSH":
+                        skip_top_push += 1
 
+                # SG agreement counts
                 agree_n = sum(1 for r in rows if r.get("sg_agreement") == "AGREE")
                 opposed_n = sum(1 for r in rows if r.get("sg_agreement") == "OPPOSED")
                 mixed_n = sum(1 for r in rows if r.get("sg_agreement") == "MIXED")
-                sg_wins = sum(1 for r in rows if r.get("sg_outcome") == "WON")
-                sg_losses = sum(1 for r in rows if r.get("sg_outcome") == "LOST")
+                no_sg_n = sum(1 for r in rows if r.get("sg_agreement") == "NO_SG")
 
                 st.markdown("#### Bets")
                 c1, c2, c3, c4 = st.columns(4)
@@ -1658,8 +1670,8 @@ Error:      {diag.get('error')}
                 st.markdown("#### Skips")
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Settled skips", len(skips))
-                c2.metric("Top candidate would have won", skip_top_won)
-                c3.metric("Top candidate would have lost", skip_top_lost)
+                c2.metric("Top candidate would have WON", skip_top_won)
+                c3.metric("Top candidate would have LOST", skip_top_lost)
                 c4.metric("Skip accuracy",
                           f"{skip_top_lost/(skip_top_lost+skip_top_won)*100:.0f}%"
                           if (skip_top_lost + skip_top_won) else "—")
@@ -1669,14 +1681,20 @@ Error:      {diag.get('error')}
                 c1.metric("Agree", agree_n)
                 c2.metric("Opposed", opposed_n)
                 c3.metric("Mixed", mixed_n)
-                c4.metric("SG win rate",
-                          f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%"
-                          if (sg_wins + sg_losses) else "—")
+                c4.metric("No SG", no_sg_n)
 
+                sg_wins = sum(1 for r in rows if r.get("sg_outcome") == "WON")
+                sg_losses = sum(1 for r in rows if r.get("sg_outcome") == "LOST")
+                if sg_wins + sg_losses > 0:
+                    st.metric("SG overall win rate",
+                              f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%")
+
+                # Full table
                 st.markdown("#### All Settled Matches")
 
                 def build_row(r):
-                    if r.get("picked_market"):
+                    is_bet = bool(r.get("picked_market"))
+                    if is_bet:
                         pick_str = f"{r['picked_market']} — {r['picked_selection']}"
                         outcome = r.get("picked_outcome") or "—"
                         stake = r.get("picked_stake") or 0
@@ -1686,17 +1704,21 @@ Error:      {diag.get('error')}
                         outcome = "—"
                         stake = 0
                         top = top_candidate_outcome(r)
-                        note = f"Top would have: {top[0]} {top[2]}" if top else "no candidate"
+                        if top:
+                            label, score, cand_outcome, cand_odds = top
+                            note = f"Top candidate: {label} @ {cand_odds:.2f} — would have {cand_outcome}"
+                        else:
+                            note = "no candidate"
                     return {
                         "Date": r.get("match_date", ""),
                         "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
+                        "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
                         "Pick": pick_str,
                         "Outcome": outcome,
                         "Stake": stake,
                         "Agreement": r.get("sg_agreement", ""),
                         "SG pick": r.get("sg_pick") or "—",
                         "SG result": r.get("sg_outcome") or "—",
-                        "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
                         "Note": note,
                     }
 
@@ -1704,9 +1726,9 @@ Error:      {diag.get('error')}
                 st.dataframe(df, use_container_width=True)
 
                 st.caption(
-                    "Skips show the outcome of the model's top candidate — "
-                    "the bet that would have been placed. "
-                    "A high 'Top candidate would have lost' count means the skip was correct."
+                    "All settled matches (bets and skips) are shown. "
+                    "Skips display what the model's top candidate would have done — "
+                    "a high 'Top candidate would have LOST' count means the skip was correct."
                 )
 
     # ------------------------------------------------------------------
