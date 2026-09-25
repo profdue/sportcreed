@@ -994,6 +994,24 @@ COL_TO_MARKET_SELECTION = {
 ALL_COL_KEYS = list(COL_TO_MARKET_SELECTION.keys())
 
 
+def _safe_float(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(v, default=0):
+    try:
+        if v is None:
+            return default
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def get_reliability(sb):
     out = dict(DEFAULT_RELIABILITY)
     if sb is None:
@@ -1001,7 +1019,10 @@ def get_reliability(sb):
     try:
         resp = sb.table("reliability").select("market,weight").execute()
         for row in resp.data or []:
-            out[row["market"]] = float(row["weight"])
+            market = row.get("market")
+            if not market:
+                continue
+            out[market] = _safe_float(row.get("weight"), DEFAULT_RELIABILITY.get(market, 0.5))
     except Exception as e:
         st.warning(f"Reliability read failed: {e}")
     return out
@@ -1012,7 +1033,7 @@ def seed_reliability(sb):
         return False, "no client"
     try:
         existing_resp = sb.table("reliability").select("market").execute()
-        existing = {row["market"] for row in (existing_resp.data or [])}
+        existing = {row["market"] for row in (existing_resp.data or []) if row.get("market")}
 
         new_rows = []
         for k, v in DEFAULT_RELIABILITY.items():
@@ -1168,9 +1189,9 @@ def update_reliability(sb):
                 if ck in ("1x2_home", "1x2_draw", "1x2_away"):
                     rel_key = "1X2_favourite" if ck == fav_col else "1X2_underdog"
                 elif ck == "ah_home":
-                    rel_key = "AH_positive" if (ah_h is not None and float(ah_h) >= 0) else "AH_negative"
+                    rel_key = "AH_positive" if (ah_h is not None and _safe_float(ah_h) >= 0) else "AH_negative"
                 elif ck == "ah_away":
-                    rel_key = "AH_positive" if (ah_a is not None and float(ah_a) >= 0) else "AH_negative"
+                    rel_key = "AH_positive" if (ah_a is not None and _safe_float(ah_a) >= 0) else "AH_negative"
                 else:
                     rel_key = COL_TO_REL.get(ck)
 
@@ -1636,13 +1657,21 @@ Error:      {diag.get('error')}
                 st.info("No reliability rows. Run a prediction first.")
             else:
                 df = pd.DataFrame([{
-                    "Market": r["market"],
-                    "Weight": f"{r['weight']:.4f}",
-                    "Wins": r["wins"],
-                    "Losses": r["losses"],
-                    "Pushes": r["pushes"],
-                    "Total": r["total"],
-                    "Prior": r["prior_weight"],
+                    "Market": r.get("market", ""),
+                    "Weight": f"{_safe_float(r.get('weight'), 0.0):.4f}",
+                    "Wins":   _safe_int(r.get("wins"), 0),
+                    "Losses": _safe_int(r.get("losses"), 0),
+                    "Pushes": _safe_int(r.get("pushes"), 0),
+                    "Total":  _safe_int(
+                        r.get("total"),
+                        _safe_int(r.get("wins"), 0)
+                        + _safe_int(r.get("losses"), 0)
+                        + _safe_int(r.get("pushes"), 0),
+                    ),
+                    "Prior":  _safe_float(
+                        r.get("prior_weight"),
+                        _safe_float(r.get("weight"), 0.0),
+                    ),
                 } for r in rows])
                 st.dataframe(df, use_container_width=True)
 
