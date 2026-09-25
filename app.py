@@ -1,11 +1,10 @@
 """
-Focused Predictor v2 — Complete Overhaul (with regression fix + maintenance tab)
-================================================================================
+Focused Predictor v2 — Complete Overhaul
+=========================================
 3 markets: OU_over, OU_under, AH_pos_home.
 Score = edge × conviction × reliability.
 Guards: MIN_PROB, MIN_SCORE, SG direction filter.
 Research: opposition log + all skip reasons.
-Maintenance: reconstruct missing model outputs, backfill SG labels, rebuild reliability.
 
 Requires:
   st.secrets["SUPABASE_URL"]
@@ -703,7 +702,8 @@ class RefinedPredictor:
                 else: p_away += prob
                 if h >= 1 and a >= 1: p_btts_yes += prob
                 else: p_btts_no += prob
-                if h + a > 2.5: p_over += prob                else: p_under += prob
+                if h + a > 2.5: p_over += prob
+                else: p_under += prob
         total = p_home + p_draw + p_away
         if total > 0:
             p_home /= total; p_draw /= total; p_away /= total
@@ -932,7 +932,6 @@ def seed_reliability(sb):
 
 
 def update_reliability(sb):
-    """Recompute reliability counts + weights from all settled matches."""
     if sb is None:
         return False, "no client"
     try:
@@ -978,7 +977,6 @@ def update_reliability(sb):
                 "total": float(total),
                 "prior_weight": prior,
                 "prior_strength": RELIABILITY_PRIOR_STRENGTH,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
             }, on_conflict="market").execute()
             updated += 1
         return True, f"{updated} markets updated"
@@ -1097,7 +1095,7 @@ def settle_sg_pick(pick, home_team, away_team, hg, ag):
 
 
 # ============================================================================
-# IO — Write match (REGRESSION FIX: includes all model outputs)
+# IO
 # ============================================================================
 ALL_COL_KEYS = [
     "1x2_home", "1x2_draw", "1x2_away",
@@ -1191,18 +1189,6 @@ def _inj_list(side, inj):
     return out
 
 
-def _inj_list_from_row(side, row):
-    """Rebuild injury list from stored counts in a DB row."""
-    out = []
-    for _ in range(int(row.get(f"{side}_key_attackers_out") or 0)):
-        out.append({"position": "forward", "key": True, "confirmed_out": True})
-    for _ in range(int(row.get(f"{side}_key_defenders_out") or 0)):
-        out.append({"position": "defender", "key": True, "confirmed_out": True})
-    for _ in range(int(row.get(f"{side}_key_midfielders_out") or 0)):
-        out.append({"position": "midfielder", "key": True, "confirmed_out": True})
-    return out
-
-
 def derive_market_total(over_odds, under_odds):
     if not over_odds or not under_odds:
         return None
@@ -1220,10 +1206,7 @@ def _pcdf(lam, k):
     return sum((lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(k + 1))
 
 
-def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_reason, predictor):
-    """
-    Write match record. Includes ALL model outputs (regression fix).
-    """
+def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_reason):
     if sb is None:
         return False, "no client"
     try:
@@ -1231,7 +1214,6 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
         a = match["away_data"]
         odds = match["odds"]
         sg_pick = match.get("sg_pick")
-        p = predictor  # RefinedPredictor instance
 
         rec = {
             "match_id": match["match_id"],
@@ -1242,13 +1224,11 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
             "away_team": match.get("away_team"),
             "venue": match.get("venue"),
 
-            # Last-10 splits
             "home_gf_per_game_last10": h.get("home_goals_scored_last10"),
             "home_ga_per_game_last10": h.get("home_goals_conceded_last10"),
             "away_gf_per_game_last10": a.get("away_goals_scored_last10"),
             "away_ga_per_game_last10": a.get("away_goals_conceded_last10"),
 
-            # Form and context
             "home_last5_points": h.get("last5_points"),
             "away_last5_points": a.get("last5_points"),
             "home_last_match_date": match.get("home_last_match_date"),
@@ -1256,7 +1236,6 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
             "home_played_midweek": h.get("played_midweek"),
             "away_played_midweek": a.get("played_midweek"),
 
-            # Season splits
             "home_current_season_games": match.get("home_current_games"),
             "away_current_season_games": match.get("away_current_games"),
             "home_gf_per_game_season": h.get("home_goals_scored_season"),
@@ -1264,31 +1243,6 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
             "away_gf_per_game_season": a.get("away_goals_scored_season"),
             "away_ga_per_game_season": a.get("away_goals_conceded_season"),
 
-            # Injuries
-            "home_key_attackers_out": sum(1 for i in h.get("injuries", []) if i["position"] == "forward"),
-            "home_key_defenders_out": sum(1 for i in h.get("injuries", []) if i["position"] == "defender"),
-            "home_key_midfielders_out": sum(1 for i in h.get("injuries", []) if i["position"] == "midfielder"),
-            "away_key_attackers_out": sum(1 for i in a.get("injuries", []) if i["position"] == "forward"),
-            "away_key_defenders_out": sum(1 for i in a.get("injuries", []) if i["position"] == "defender"),
-            "away_key_midfielders_out": sum(1 for i in a.get("injuries", []) if i["position"] == "midfielder"),
-
-            # Model outputs (REGRESSION FIX — was missing)
-            "model_xg_home_raw": p.model_xg_home,
-            "model_xg_away_raw": p.model_xg_away,
-            "model_xg_home_shrunk": p.shrunk_xg_home,
-            "model_xg_away_shrunk": p.shrunk_xg_away,
-            "model_total_raw": p.model_total,
-            "model_total_shrunk": p.shrunk_total,
-            "shrink_weight_applied": p.effective_shrink,
-            "market_total": p.market_total,
-            "model_prob_home": p.probabilities.get("home_win"),
-            "model_prob_draw": p.probabilities.get("draw"),
-            "model_prob_away": p.probabilities.get("away_win"),
-            "model_prob_btts_yes": p.probabilities.get("btts_yes"),
-            "model_prob_over_25": p.probabilities.get("over_25"),
-            "model_prob_under_25": p.probabilities.get("under_25"),
-
-            # Market odds + lines
             "ah_home_line": odds.get("ah_home_line"),
             "ah_away_line": odds.get("ah_away_line"),
             "line_ou_over": 2.5,
@@ -1297,13 +1251,11 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
             "odds_ou_under": odds.get("under_2.5"),
             "odds_ah_home": odds.get("ah_home"),
 
-            # SG
             "sg_pick": sg_pick,
             "sg_direction": sg_direction,
             "sg_agreement": agreement,
         }
 
-        # Per-candidate scores
         for c in candidates:
             mk = c["market_key"]
             if mk == "OU_over":
@@ -1313,7 +1265,6 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
             elif mk == "AH_pos_home":
                 rec["score_ah_home"] = c["score"]
 
-        # Picked
         if picked:
             rec["picked_market"] = picked["market"]
             rec["picked_selection"] = picked["selection"]
@@ -1330,7 +1281,6 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
 
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
 
-        # Opposition log
         if agreement == "OPPOSED" and picked:
             sb.table("opposition_log").upsert({
                 "match_id": match["match_id"],
@@ -1348,16 +1298,12 @@ def write_match(sb, match, candidates, picked, sg_direction, agreement, skip_rea
 
 
 def record_outcome(sb, match_id, hg, ag):
-    """
-    Settle outcomes for all 14 markets, update sg_direction/sg_agreement (v2 fix),
-    and refresh reliability.
-    """
     if sb is None:
         return False, "no client"
     try:
         resp = sb.table("matches").select(
             "ah_home_line,ah_away_line,picked_market,picked_selection,"
-            "sg_pick,home_team,away_team,picked_direction"
+            "sg_pick,home_team,away_team"
         ).eq("match_id", match_id).execute()
         if not resp.data:
             return False, f"match_id {match_id} not found"
@@ -1369,11 +1315,9 @@ def record_outcome(sb, match_id, hg, ag):
             "settled_at": datetime.now(timezone.utc).isoformat(),
             "settled_by": "record_outcome_v2",
         }
-
         ah_h_line = m.get("ah_home_line")
         ah_a_line = m.get("ah_away_line")
 
-        # All outcomes
         for ck, (market, selection) in COL_TO_MARKET_SELECTION.items():
             if market == "AH":
                 if ck == "ah_home":
@@ -1388,11 +1332,11 @@ def record_outcome(sb, match_id, hg, ag):
             if outcome:
                 updates[f"outcome_{ck}"] = outcome
 
-        # Picked outcome
         pm = m.get("picked_market")
         ps = m.get("picked_selection")
         if pm and ps:
-            picked_ck = None            for ck, (mk, s) in COL_TO_MARKET_SELECTION.items():
+            picked_ck = None
+            for ck, (mk, s) in COL_TO_MARKET_SELECTION.items():
                 if mk == pm:
                     if mk == "AH":
                         if ck == "ah_home" and ps.startswith("Home"): picked_ck = ck
@@ -1402,27 +1346,14 @@ def record_outcome(sb, match_id, hg, ag):
             if picked_ck and f"outcome_{picked_ck}" in updates:
                 updates["picked_outcome"] = updates[f"outcome_{picked_ck}"]
 
-        # SG outcome + direction (recompute at settlement)
-        sg_pick = m.get("sg_pick")
-        home_team = m.get("home_team")
-        away_team = m.get("away_team")
-
-        sg_outcome = settle_sg_pick(sg_pick, home_team, away_team, hg, ag)
+        sg_outcome = settle_sg_pick(
+            m.get("sg_pick"), m.get("home_team", ""), m.get("away_team", ""), hg, ag,
+        )
         if sg_outcome:
             updates["sg_outcome"] = sg_outcome
 
-        # Recompute sg_direction + sg_agreement (v2 fix)
-        sg_dir_v2 = _direction_from_sg(sg_pick, home_team, away_team)
-        agreement_v2 = _classify_agreement(m.get("picked_direction"), sg_dir_v2)
-        updates["sg_direction"] = sg_dir_v2
-        updates["sg_agreement"] = agreement_v2
-        # Also write v2 columns if they exist
-        updates["sg_direction_v2"] = sg_dir_v2
-        updates["sg_agreement_v2"] = agreement_v2
-
         sb.table("matches").update(updates).eq("match_id", match_id).execute()
 
-        # Opposition log update
         try:
             opp = sb.table("opposition_log").select("id").eq("match_id", match_id).execute()
             if opp.data:
@@ -1431,167 +1362,13 @@ def record_outcome(sb, match_id, hg, ag):
                     opp_updates["model_outcome"] = updates["picked_outcome"]
                 if sg_outcome:
                     opp_updates["sg_outcome"] = sg_outcome
-                if sg_dir_v2:
-                    opp_updates["sg_direction"] = sg_dir_v2
                 if opp_updates:
                     sb.table("opposition_log").update(opp_updates).eq("match_id", match_id).execute()
         except Exception:
             pass
 
-        # Reliability rebuild
         ok, msg = update_reliability(sb)
         return True, f"settled; reliability: {msg}"
-    except Exception as e:
-        return False, str(e)
-
-
-# ============================================================================
-# MAINTENANCE — reconstruct missing model outputs, backfill SG labels
-# ============================================================================
-def reconstruct_missing_model_outputs(sb, dry_run=False):
-    """
-    For every match where model_xg_home_raw IS NULL, re-run the model
-    from stored inputs and write the model outputs back.
-    """
-    if sb is None:
-        return False, "no client"
-    try:
-        resp = sb.table("matches").select("*").execute()
-        rows = resp.data or []
-
-        target_rows = [r for r in rows if r.get("model_xg_home_raw") is None]
-        results = []
-        for r in target_rows:
-            mid = r["match_id"]
-            try:
-                # Rebuild home_data / away_data from stored columns
-                home_data = {
-                    "home_goals_scored_season": r.get("home_gf_per_game_season"),
-                    "home_goals_scored_last10": r.get("home_gf_per_game_last10"),
-                    "home_goals_conceded_season": r.get("home_ga_per_game_season"),
-                    "home_goals_conceded_last10": r.get("home_ga_per_game_last10"),
-                    "last5_points": r.get("home_last5_points"),
-                    "injuries": _inj_list_from_row("home", r),
-                    "played_midweek": r.get("home_played_midweek") or False,
-                }
-                away_data = {
-                    "away_goals_scored_season": r.get("away_gf_per_game_season"),
-                    "away_goals_scored_last10": r.get("away_gf_per_game_last10"),
-                    "away_goals_conceded_season": r.get("away_ga_per_game_season"),
-                    "away_goals_conceded_last10": r.get("away_ga_per_game_last10"),
-                    "last5_points": r.get("away_last5_points"),
-                    "injuries": _inj_list_from_row("away", r),
-                    "played_midweek": r.get("away_played_midweek") or False,
-                }
-
-                # Recompute market total from stored odds
-                market_total = r.get("market_total")
-                if market_total is None:
-                    market_total = derive_market_total(
-                        r.get("odds_ou_over"), r.get("odds_ou_under")
-                    )
-
-                p = RefinedPredictor()
-                p.calculate_base_xg(home_data, away_data)
-                p.apply_adjustments(home_data, away_data)
-                p.shrink_toward_market(
-                    market_total,
-                    home_current_games=r.get("home_current_season_games") or 999,
-                    away_current_games=r.get("away_current_season_games") or 999,
-                )
-                p.run_poisson()
-
-                update_data = {
-                    "model_xg_home_raw": p.model_xg_home,
-                    "model_xg_away_raw": p.model_xg_away,
-                    "model_xg_home_shrunk": p.shrunk_xg_home,
-                    "model_xg_away_shrunk": p.shrunk_xg_away,
-                    "model_total_raw": p.model_total,
-                    "model_total_shrunk": p.shrunk_total,
-                    "shrink_weight_applied": p.effective_shrink,
-                    "market_total": p.market_total,
-                    "model_prob_home": p.probabilities.get("home_win"),
-                    "model_prob_draw": p.probabilities.get("draw"),
-                    "model_prob_away": p.probabilities.get("away_win"),
-                    "model_prob_btts_yes": p.probabilities.get("btts_yes"),
-                    "model_prob_over_25": p.probabilities.get("over_25"),
-                    "model_prob_under_25": p.probabilities.get("under_25"),
-                }
-
-                results.append({
-                    "match_id": mid,
-                    "model_xg_home_shrunk": p.shrunk_xg_home,
-                    "model_xg_away_shrunk": p.shrunk_xg_away,
-                    "model_total_shrunk": p.shrunk_total,
-                    "picked_model_prob_check": r.get("picked_model_prob"),
-                })
-
-                if not dry_run:
-                    sb.table("matches").update(update_data).eq("match_id", mid).execute()
-            except Exception as e:
-                results.append({"match_id": mid, "error": str(e)})
-
-        return True, {
-            "total_matches": len(rows),
-            "reconstructed": len([x for x in results if "error" not in x]),
-            "errored": len([x for x in results if "error" in x]),
-            "results": results,
-            "dry_run": dry_run,
-        }
-    except Exception as e:
-        return False, str(e)
-
-
-def backfill_sg_labels(sb, dry_run=False):
-    """
-    Recompute sg_direction and sg_agreement for every match,
-    plus the v2 columns.
-    """
-    if sb is None:
-        return False, "no client"
-    try:
-        resp = sb.table("matches").select(
-            "match_id,sg_pick,home_team,away_team,picked_direction,"
-            "sg_direction,sg_agreement"
-        ).execute()
-        rows = resp.data or []
-
-        changes = []
-        unchanged = 0
-        for r in rows:
-            mid = r["match_id"]
-            sg_dir = _direction_from_sg(r.get("sg_pick"), r.get("home_team"), r.get("away_team"))
-            agreement = _classify_agreement(r.get("picked_direction"), sg_dir)
-
-            old_dir = r.get("sg_direction")
-            old_agree = r.get("sg_agreement")
-
-            if sg_dir != old_dir or agreement != old_agree:
-                changes.append({
-                    "match_id": mid,
-                    "sg_pick": r.get("sg_pick"),
-                    "old_dir": old_dir,
-                    "new_dir": sg_dir,
-                    "old_agreement": old_agree,
-                    "new_agreement": agreement,
-                })
-                if not dry_run:
-                    sb.table("matches").update({
-                        "sg_direction": sg_dir,
-                        "sg_agreement": agreement,
-                        "sg_direction_v2": sg_dir,
-                        "sg_agreement_v2": agreement,
-                    }).eq("match_id", mid).execute()
-            else:
-                unchanged += 1
-
-        return True, {
-            "total": len(rows),
-            "changed": len(changes),
-            "unchanged": unchanged,
-            "changes": changes,
-            "dry_run": dry_run,
-        }
     except Exception as e:
         return False, str(e)
 
@@ -1706,10 +1483,7 @@ Error:      {diag.get('error')}
         with st.expander("🔍 Reliability seed", expanded=False):
             st.code(f"ok={ok}\nmsg={msg}", language="text")
 
-    tabs = st.tabs([
-        "⚽ Predict", "📝 Pending", "📊 Records", "🎛️ Reliability",
-        "🔬 Research", "🔧 Maintenance"
-    ])
+    tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records", "🎛️ Reliability", "🔬 Research"])
 
     # ------------------------------------------------------------------
     # TAB 0: Predict
@@ -1753,6 +1527,7 @@ Error:      {diag.get('error')}
                         candidates = generate_candidates_overhaul(p, match["odds"], reliability)
 
                         sg_pick = match.get("sg_pick")
+                        # Pass team names so team-based SG picks get correct direction
                         sg_dir = _direction_from_sg(
                             sg_pick,
                             match.get("home_team"),
@@ -1789,10 +1564,6 @@ Error:      {diag.get('error')}
                             "shrunk_xg_away": p.shrunk_xg_away,
                             "shrunk_total": p.shrunk_total,
                             "market_total": p.market_total,
-                            "model_xg_home": p.model_xg_home,
-                            "model_xg_away": p.model_xg_away,
-                            "model_total": p.model_total,
-                            "effective_shrink": p.effective_shrink,
                         }
 
                     st.markdown("---")
@@ -1800,10 +1571,7 @@ Error:      {diag.get('error')}
                                            sg_dir, agreement, skip_reason, analysis)
 
                     if sb is not None:
-                        ok_w, msg_w = write_match(
-                            sb, match, candidates, picked, sg_dir, agreement,
-                            skip_reason, p,
-                        )
+                        ok_w, msg_w = write_match(sb, match, candidates, picked, sg_dir, agreement, skip_reason)
                         with st.expander("🔍 Save to Supabase", expanded=False):
                             st.code(f"write_match:  ok={ok_w}\n              msg={msg_w}", language="text")
                         if ok_w:
@@ -1997,6 +1765,12 @@ Error:      {diag.get('error')}
                 df = pd.DataFrame([build_row(r) for r in rows])
                 st.dataframe(df, use_container_width=True)
 
+                st.caption(
+                    "All settled matches (bets and skips) are shown. "
+                    "Skips display what the model's top candidate would have done — "
+                    "a high 'Top candidate would have LOST' count means the skip was correct."
+                )
+
     # ------------------------------------------------------------------
     # TAB 3: Reliability
     # ------------------------------------------------------------------
@@ -2025,6 +1799,7 @@ Error:      {diag.get('error')}
                     "Prior": r["prior_weight"],
                 } for r in rows])
                 st.dataframe(df, use_container_width=True)
+                st.caption("Weights recomputed from corrected outcomes.")
 
     # ------------------------------------------------------------------
     # TAB 4: Research
@@ -2056,6 +1831,11 @@ Error:      {diag.get('error')}
                 c4.metric("SG win rate",
                           f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%" if (sg_wins+sg_losses) else "—")
 
+                st.caption(
+                    "When the model and Sportsgambler point in opposite directions, "
+                    "track this table to see if a contrarian flip becomes justified."
+                )
+
                 df = pd.DataFrame([{
                     "Date": r.get("logged_at", "")[:10],
                     "Match": r.get("match_id", ""),
@@ -2067,118 +1847,6 @@ Error:      {diag.get('error')}
                     "SG result": r.get("sg_outcome", ""),
                 } for r in rows])
                 st.dataframe(df, use_container_width=True)
-
-    # ------------------------------------------------------------------
-    # TAB 5: Maintenance — reconstruction + backfill
-    # ------------------------------------------------------------------
-    with tabs[5]:
-        st.subheader("🔧 Maintenance")
-        st.caption(
-            "One-time fixes for existing rows. "
-            "The reconstruct action re-runs the model on each match from stored inputs "
-            "to rebuild model xG and probabilities. "
-            "The backfill action recomputes SG direction and agreement for every match."
-        )
-
-        if sb is None:
-            st.info("Supabase not configured.")
-        else:
-            # ---- Reconstruct model outputs ----
-            st.markdown("### 1. Reconstruct Model Outputs")
-            st.write(
-                "Finds every match where `model_xg_home_raw IS NULL` and re-runs the "
-                "Poisson + shrinkage model using the stored inputs. This rebuilds:"
-            )
-            st.write(
-                "- `model_xg_home_raw`, `model_xg_away_raw`\n"
-                "- `model_xg_home_shrunk`, `model_xg_away_shrunk`\n"
-                "- `model_total_raw`, `model_total_shrunk`\n"
-                "- `shrink_weight_applied`, `market_total`\n"
-                "- `model_prob_home`, `model_prob_draw`, `model_prob_away`\n"
-                "- `model_prob_btts_yes`, `model_prob_over_25`, `model_prob_under_25`"
-            )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔍 Dry Run — Reconstruct", key="recon_dry"):
-                    ok, result = reconstruct_missing_model_outputs(sb, dry_run=True)
-                    if ok:
-                        st.json({
-                            "total_matches": result["total_matches"],
-                            "would_reconstruct": result["reconstructed"],
-                            "errored": result["errored"],
-                        })
-                        if result["errored"] > 0:
-                            st.warning("Some matches errored — see results below")
-                            st.dataframe(pd.DataFrame(result["results"]))
-                    else:
-                        st.error(result)
-
-            with col2:
-                if st.button("✅ Apply — Reconstruct", key="recon_apply", type="primary"):
-                    with st.spinner("Reconstructing model outputs..."):
-                        ok, result = reconstruct_missing_model_outputs(sb, dry_run=False)
-                    if ok:
-                        st.success(f"Reconstructed {result['reconstructed']} matches.")
-                        if result["errored"] > 0:
-                            st.warning(f"{result['errored']} matches errored")
-                            st.dataframe(pd.DataFrame(result["results"]))
-                    else:
-                        st.error(result)
-
-            st.markdown("---")
-
-            # ---- Backfill SG labels ----
-            st.markdown("### 2. Backfill SG Direction & Agreement")
-            st.write(
-                "Recomputes `sg_direction`, `sg_agreement`, `sg_direction_v2`, and "
-                "`sg_agreement_v2` for every match using the current team-name matching logic."
-            )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔍 Dry Run — Backfill SG", key="sg_dry"):
-                    ok, result = backfill_sg_labels(sb, dry_run=True)
-                    if ok:
-                        st.json({
-                            "total": result["total"],
-                            "would_change": result["changed"],
-                            "unchanged": result["unchanged"],
-                        })
-                        if result["changes"]:
-                            st.markdown("**Changes to be made:**")
-                            st.dataframe(pd.DataFrame(result["changes"]))
-                    else:
-                        st.error(result)
-
-            with col2:
-                if st.button("✅ Apply — Backfill SG", key="sg_apply", type="primary"):
-                    with st.spinner("Backfilling SG labels..."):
-                        ok, result = backfill_sg_labels(sb, dry_run=False)
-                    if ok:
-                        st.success(f"Updated {result['changed']} of {result['total']} matches.")
-                        if result["changes"]:
-                            st.dataframe(pd.DataFrame(result["changes"]))
-                    else:
-                        st.error(result)
-
-            st.markdown("---")
-
-            # ---- Recompute reliability ----
-            st.markdown("### 3. Recompute Reliability Weights")
-            st.write(
-                "Rebuilds the reliability table from all settled matches. "
-                "Use this after reconstruction or backfill to refresh the weights."
-            )
-
-            if st.button("🔄 Recompute Reliability", key="rel_apply", type="primary"):
-                with st.spinner("Recomputing reliability..."):
-                    ok, msg = update_reliability(sb)
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
 
 
 main()
