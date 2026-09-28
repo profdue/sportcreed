@@ -10,21 +10,18 @@ Tables:
   matches       — 1 row per match, ~235 columns (incl. sg_pick, sg_outcome)
   reliability   — 10 rows, one per market type
 
-NOTE: the Postgres column for the classification is named `match_mode` (not
-`mode`) because `mode` is a reserved word in Postgres (ordered-set aggregate)
-and PostgREST raises 42809 if it appears unquoted in an INSERT/SELECT column
-list.
+DB column naming (matches the actual table):
+  regime                    — WITHSTAND / DEMOLISH / DEMOLISH_LEAN / NO_BET
+  favourite_side            — 'home' | 'away'
+  underdog_side             — 'home' | 'away'
+  favourite_win_prob        — model P(favourite wins)
+  favourite_gf_per_game     — generated (favourite's last-10 GF)
+  underdog_gf_per_game      — generated (underdog's last-10 GF)
+  underdog_ga_per_game      — generated (underdog's last-10 GA)
 
-Fixes applied in this version:
-  1. compute_mode_inputs now derives fav_gf / dog_gf / dog_ga from the teams'
-     actual last-10 goals scored / conceded, not from the model's shrunk xG.
-  2. compute_mode_inputs also records fav_team / dog_team so the card can
-     display real team names instead of role words.
-  3. render_prediction_card shows team names and labels the GF/GA rows
-     correctly.
-  4. write_match persists the corrected role-based values (and optionally
-     fav_team / dog_team if those columns exist).
-  5. get_full_analysis exposes fav_team / dog_team.
+Python-side identifiers keep the short names (fav_side, dog_gf, etc.) so the
+rest of the predictor does not have to change. Only the DB boundary uses the
+long names.
 """
 
 import math
@@ -665,7 +662,7 @@ class RefinedPredictor:
         self.effective_shrink = SHRINK_WEIGHT
         self.home_trust = 1.0
         self.away_trust = 1.0
-        # mode state
+        # mode state (Python-side names; DB names differ)
         self.fav_side = None
         self.dog_side = None
         self.fav_team = None
@@ -819,13 +816,9 @@ class RefinedPredictor:
         Derive fav_side / dog_side / fav_win_prob / fav_gf / dog_gf / dog_ga
         from the teams' actual last-10 GF / GA, then classify the match.
 
-        The role-based GF/GA values are the TEAMS' actual last-10 form, not
-        the model's shrunk xG:
           - fav_gf  = favourite's goals-scored-per-game (last 10)
           - dog_gf  = underdog's goals-scored-per-game (last 10)
           - dog_ga  = underdog's goals-conceded-per-game (last 10)
-
-        Favourite = the side with the higher model win probability.
         """
         P = self.probabilities
         p_home = P.get("home_win", 0.0)
@@ -1562,14 +1555,14 @@ def write_match(sb, match, analysis):
             "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
             "model_prob_over_25": analysis["probabilities"].get("over_25"),
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
-            # mode fields — DB column is `match_mode` (safe name; `mode` is reserved)
-            "match_mode": analysis.get("mode"),
-            "fav_side": analysis.get("fav_side"),
-            "dog_side": analysis.get("dog_side"),
-            "fav_win_prob": analysis.get("fav_win_prob"),
-            "fav_gf": analysis.get("fav_gf"),
-            "dog_gf": analysis.get("dog_gf"),
-            "dog_ga": analysis.get("dog_ga"),
+            # mode fields — DB columns use the favourite_*/underdog_* convention,
+            # and the classification column is `regime`. The three GF/GA columns
+            # are GENERATED ALWAYS AS ... STORED on the DB side, so we do NOT
+            # write them here.
+            "regime": analysis.get("mode"),
+            "favourite_side": analysis.get("fav_side"),
+            "underdog_side": analysis.get("dog_side"),
+            "favourite_win_prob": analysis.get("fav_win_prob"),
         }
 
         rec["ah_home_line"] = match["odds"].get("ah_home_line")
@@ -1649,7 +1642,7 @@ def write_match(sb, match, analysis):
                 rec["secondary_outcome"] = None
 
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
-        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates, mode={analysis.get('mode')})"
+        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates, regime={analysis.get('mode')})"
     except Exception as e:
         return False, str(e)
 
@@ -1662,7 +1655,7 @@ def record_outcome(sb, match_id, hg, ag):
             resp = sb.table("matches").select(
                 "ah_home_line,ah_away_line,picked_market,picked_selection,"
                 "secondary_market,secondary_selection,"
-                "match_mode,sg_pick,home_team,away_team"
+                "regime,sg_pick,home_team,away_team"
             ).eq("match_id", match_id).execute()
         except Exception:
             resp = sb.table("matches").select(
@@ -1779,7 +1772,6 @@ def render_prediction_card(match, parsed, analysis):
         unsafe_allow_html=True,
     )
 
-    # --- Mode inputs: use TEAM NAMES, and the teams' actual last-10 GF/GA ---
     fav_team = analysis.get("fav_team") or "—"
     dog_team = analysis.get("dog_team") or "—"
     fav_side = analysis.get("fav_side") or "—"
@@ -1950,7 +1942,7 @@ Error:      {diag.get('error')}
                         "match_id,match_date,home_team,away_team,"
                         "picked_market,picked_selection,picked_odds,"
                         "secondary_market,secondary_selection,secondary_odds,"
-                        "match_mode,sg_pick"
+                        "regime,sg_pick"
                     ).is_("actual_home_goals", "null").execute()
                 except Exception:
                     resp = sb.table("matches").select(
@@ -1977,7 +1969,7 @@ Error:      {diag.get('error')}
                     so = m.get("secondary_odds")
                     if so is not None:
                         pick_str += f"  |  secondary: {m['secondary_market']} — {m['secondary_selection']} @ {so:.2f}"
-                mode = m.get("match_mode") or ""
+                mode = m.get("regime") or ""
                 header = f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')}"
                 if mode:
                     header += f" · {mode}"
@@ -2004,7 +1996,7 @@ Error:      {diag.get('error')}
             try:
                 try:
                     resp = sb.table("matches").select(
-                        "match_id,match_date,home_team,away_team,match_mode,"
+                        "match_id,match_date,home_team,away_team,regime,"
                         "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
                         "picked_outcome,secondary_market,secondary_selection,secondary_outcome,"
                         "actual_home_goals,actual_away_goals,"
@@ -2040,7 +2032,7 @@ Error:      {diag.get('error')}
                 df = pd.DataFrame([{
                     "Date": r.get("match_date", ""),
                     "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
-                    "Mode": r.get("match_mode") or "",
+                    "Mode": r.get("regime") or "",
                     "My pick": f"{r.get('picked_market','')} — {r.get('picked_selection','')}",
                     "My result": r.get("picked_outcome", ""),
                     "Secondary": (f"{r.get('secondary_market','')} — {r.get('secondary_selection','')}"
