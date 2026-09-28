@@ -1,18 +1,25 @@
 """
-v4 RAW-ONLY Predictor — Streamlit app with HTML parser.
+v4.2.1 RAW-ONLY Predictor — final production version.
 
-All fixes applied (v5 final):
-  #1  kickoff_utc built as full ISO timestamp (was sending "14:00")
-  #2  XI parser scoped to match's own .lineups block (no cross-match leaks)
-  #3  F5 threshold lowered from 6 to 4 (Rennes-Marseille override now triggers)
+Complete fix list:
+  #1  kickoff_utc built as full ISO timestamp
+  #2  XI scoped to #lineups content-block only
+  #3  F1/F5 override threshold >= 4 (was 6)
   #4  calc_f4 — injury-listed player who starts sets doubted_starter
-  #5  _parse_last5 — filtered to league-only for consistency with F1/F3/F6
-  #6  _parse_standings — home_played / away_played populated from main table
-  #7  4-way split parsing — home_home, home_away, away_home, away_away
-  #8  Corners from corner blocks (not .st-table cols 5/6)
-  #9  expected_return parsed from injury row
+  #5  _parse_last5 — NORMALIZED league filter (La Liga / LaLiga fix)
+  #6  _parse_standings — home_played / away_played populated
+  #7  4-way split parsing (home_home, home_away, away_home, away_away)
+  #8  Corners from corner blocks
+  #9  expected_return parsed
   #10 AH / DNB / DC / HT odds parsed
   #11 "Assistors" typo handled
+  #12 _team_matches_strict for injuries (Atletico vs Real fix)
+  #13 Insufficient-data guard (last5 empty or standings missing → NO BET)
+  #14 Doubt-starter forces Over only if expected >= 2.4
+  #15 f5_leader_raw stored (pre-override leader)
+  #16 f1_vs_f2f3_conflict flag logged
+  #17 Schema-aware upsert (auto-filters columns)
+  #18 Single button: Parse → Predict → Save
 """
 
 import os
@@ -23,16 +30,13 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="v4 Raw Predictor",
+    page_title="v4.2.1 Raw Predictor",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-# ============================================================================
-# CSS
-# ============================================================================
 st.markdown("""
 <style>
     .main .block-container { padding-top: 1.5rem; max-width: 1400px; }
@@ -66,9 +70,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ============================================================================
-# SUPABASE
-# ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
     try:
@@ -80,9 +81,6 @@ def get_supabase():
         return None, {"ok": False, "error": str(e)}
 
 
-# ============================================================================
-# PARSER
-# ============================================================================
 def _has_bs4():
     try:
         import bs4
@@ -91,6 +89,9 @@ def _has_bs4():
         return False
 
 
+# ============================================================================
+# PARSER
+# ============================================================================
 class SportsgamblerParser:
     def __init__(self, html: str):
         if not _has_bs4():
@@ -123,7 +124,17 @@ class SportsgamblerParser:
         s = "".join(c for c in s if not unicodedata.combining(c))
         return s.lower().strip()
 
+    @staticmethod
+    def _norm_comp(s):
+        """Normalize competition name: remove spaces, punctuation, lowercase.
+        'La Liga' -> 'laliga' | 'Serie A' -> 'seriea'
+        """
+        if not s:
+            return ""
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
     def _team_matches(self, full_name, table_name):
+        """General lenient team matching."""
         if not full_name or not table_name:
             return False
         a = self._norm(full_name)
@@ -147,6 +158,22 @@ class SportsgamblerParser:
                     return True
         return False
 
+    def _team_matches_strict(self, full_name, header_text):
+        """Strict matching for injury tables.
+
+        Requires the PRIMARY distinctive token (first word > 3 chars) of
+        the team name to appear in the header.
+        """
+        if not full_name or not header_text:
+            return False
+        a = self._norm(full_name)
+        b = self._norm(header_text)
+        a_words = [w for w in a.split() if len(w) > 3]
+        if not a_words:
+            return False
+        primary = a_words[0]
+        return primary in b
+
     # ---------------------------------------------------------------- main
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
@@ -154,14 +181,13 @@ class SportsgamblerParser:
         league, tier, group = self._parse_league()
         venue = self._parse_venue()
 
-        # FIX #1: build full ISO timestamp for kickoff_utc
         kickoff_utc_iso = None
         if match_date and kickoff:
             try:
                 dt = datetime.strptime(f"{match_date} {kickoff}", "%Y-%m-%d %H:%M")
                 kickoff_utc_iso = dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
             except ValueError:
-                kickoff_utc_iso = None
+                pass
 
         record = {
             "match_date": match_date,
@@ -196,7 +222,6 @@ class SportsgamblerParser:
         record["odds"] = self._parse_odds()
         return record
 
-    # --------------------------------------------------------------- teams
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
         if len(teams) >= 2:
@@ -298,7 +323,6 @@ class SportsgamblerParser:
                             if gd_plain is not None:
                                 gd = gd_plain
 
-                # FIX #6: games played = column index 2
                 played = self._to_int(cells[2].get_text(strip=True)) if len(cells) > 2 else None
 
                 if self._team_matches(self.home_team, team_clean):
@@ -320,7 +344,6 @@ class SportsgamblerParser:
                     if gd is not None:
                         out["away_gd"] = gd
 
-        # FIX #7: 4-way split parsing
         self._parse_split_table("#Homeleague", self.home_team, "home_home", out)
         self._parse_split_table("#Awayleague", self.home_team, "home_away", out)
         self._parse_split_table("#Homeleague", self.away_team, "away_home", out)
@@ -385,7 +408,7 @@ class SportsgamblerParser:
 
     # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
-        """FIX #5: filtered to league matches only."""
+        """NORMALIZED league filter: 'La Liga' matches 'LaLiga'."""
         out = []
         container = self.soup.select_one("#last-matches #All")
         if not container:
@@ -396,8 +419,10 @@ class SportsgamblerParser:
         if not block:
             return out
         tracked = (self.home_team if side == "home" else self.away_team) or ""
-        league_name = (self._parse_league()[0] or "").lower()
-        league_short = league_name.split(" - ")[-1].strip() if " - " in league_name else league_name
+
+        league_name = (self._parse_league()[0] or "")
+        league_short = league_name.split(" - ")[-1] if " - " in league_name else league_name
+        league_norm = self._norm_comp(league_short)
 
         for item in block.select("li.team-stat-list-item"):
             if len(out) >= 5:
@@ -405,11 +430,12 @@ class SportsgamblerParser:
             date_el = item.select_one(".team-stats-date")
             date_text = date_el.get_text(strip=True) if date_el else ""
 
-            # League-only filter
             if ":" in date_text:
-                comp = date_text.split(":", 1)[0].strip().lower()
-                if league_short and league_short not in comp and comp not in league_short:
-                    continue
+                comp = date_text.split(":", 1)[0].strip()
+                comp_norm = self._norm_comp(comp)
+                if league_norm and comp_norm:
+                    if league_norm not in comp_norm and comp_norm not in league_norm:
+                        continue
 
             teams = item.select(".team-stats-team")
             if len(teams) < 2:
@@ -505,7 +531,6 @@ class SportsgamblerParser:
             if mm:
                 out[f"{prefix}_top_scorer"] = mm.group(1).strip()
                 out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
-        # FIX #11: "Assistors" typo handled
         m = re.search(r"Top Assis\w+ for .+? this season are (.+?)(?:\.|$)", text)
         if m:
             first = m.group(1).split(",")[0].strip()
@@ -524,7 +549,7 @@ class SportsgamblerParser:
             if not header:
                 continue
             header_text = header.get_text(" ", strip=True)
-            if not self._team_matches(target, header_text):
+            if not self._team_matches_strict(target, header_text):
                 continue
             for row in outline.select(".inj-two-row"):
                 if "inj-two-title" in row.get("class", []):
@@ -546,7 +571,6 @@ class SportsgamblerParser:
                 else:
                     status = "injury"
 
-                # FIX #9: expected_return parsed
                 expected_return = None
                 detail_el = row.select_one(".inj-two-hidden")
                 if detail_el:
@@ -564,20 +588,20 @@ class SportsgamblerParser:
         return out
 
     def _parse_xi(self, side):
-        """FIX #2: scoped to match's own lineups block — no cross-match leaks."""
         out = []
         side_class = "lineups-home" if side == "home" else "lineups-away"
 
-        containers = self.soup.select(".lineups")
-        best_container = None
-        for c in containers:
-            if c.select_one(".lineups-home") and c.select_one(".lineups-away"):
-                best_container = c
-                break
-        if not best_container:
+        content_block = self.soup.select_one(".content-block#lineups")
+        if not content_block:
+            for cb in self.soup.select(".content-block"):
+                if cb.select_one(".lineups-formation") and cb.select_one(".lineups-home"):
+                    content_block = cb
+                    break
+
+        if not content_block:
             return out
 
-        block = best_container.select_one(f".{side_class}")
+        block = content_block.select_one(f".{side_class}")
         if not block:
             return out
 
@@ -597,7 +621,6 @@ class SportsgamblerParser:
                     return m.group(1)
         return None
 
-    # --------------------------------------------------------------- h2h
     def _parse_h2h(self):
         out = {"h2h": [], "h2h_home_wins": 0, "h2h_draws": 0, "h2h_away_wins": 0}
         container = self.soup.select_one("#head-to-head")
@@ -643,7 +666,6 @@ class SportsgamblerParser:
             })
         return out
 
-    # ------------------------------------------------------------- corners
     def _parse_corners(self):
         out = {}
         for side, cid in [("home", "#ht-corners"), ("away", "#at-corners")]:
@@ -662,9 +684,7 @@ class SportsgamblerParser:
                 out[f"{side}_{venue}_last10_corners_against"] = float(m.group(2))
         return out
 
-    # ------------------------------------------------------------- odds
     def _parse_odds(self):
-        """FIX #10: extracts AH, DNB, DC, HT too."""
         odds = {}
         for row in self.soup.select(".nlf_odds_row"):
             title_el = row.select_one(".nfl_odd_title")
@@ -719,7 +739,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# v4 MODEL
+# MODEL
 # ============================================================================
 def calc_f1(row):
     home_pts = row.get("home_points") or 0
@@ -743,7 +763,7 @@ def calc_f1(row):
 
 def calc_f2(last5):
     if not last5:
-        return 7.5
+        return 0
     raw = 0
     for m in last5[:5]:
         r = m.get("result", "L")
@@ -762,7 +782,6 @@ def calc_f3(win_pct, avg_scored, avg_conceded):
 
 
 def calc_f4(top_scorer, top_assister, injuries, xi):
-    """FIX #4: injury-listed player who starts also sets doubted_starter."""
     f4 = 15
     xi = xi or []
     injured = [i.get("player", "") for i in (injuries or []) if i.get("status") == "injury"]
@@ -777,7 +796,6 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
         if name in xi and (name == top_scorer or name == top_assister):
             f4 += 5
             doubted_starter = True
-    # FIX #4: injury-listed player who starts = same as doubt starter
     for name in injured:
         if name in xi and (name == top_scorer or name == top_assister):
             f4 += 5
@@ -801,12 +819,13 @@ def calc_f6(h_avg, a_avg):
 
 
 def apply_override(f1_home, f1_away, f5_home, f5_away):
-    """FIX #3: threshold lowered from 6 to 4."""
     f1_gap = abs(f1_home - f1_away)
     f5_gap = abs(f5_home - f5_away)
+
     f1_leader = "home" if f1_home > f1_away else "away"
-    f5_leader = "home" if f5_home > f5_away else "away"
-    conflict = (f1_leader != f5_leader and f1_gap >= 12 and f5_gap >= 4)
+    f5_leader_raw = "home" if f5_home > f5_away else "away"
+
+    conflict = (f1_leader != f5_leader_raw and f1_gap >= 12 and f5_gap >= 4)
     override = False
     if conflict and f1_gap > f5_gap:
         if f1_leader == "home":
@@ -814,7 +833,7 @@ def apply_override(f1_home, f1_away, f5_home, f5_away):
         else:
             f5_home, f5_away = 0, 10
         override = True
-    return f5_home, f5_away, conflict, override
+    return f5_home, f5_away, conflict, override, f5_leader_raw
 
 
 def calc_expected_total(row):
@@ -826,6 +845,28 @@ def calc_expected_total(row):
 
 
 def predict_v4(row):
+    has_home_last5 = bool(row.get("home_last5"))
+    has_away_last5 = bool(row.get("away_last5"))
+    has_standings = row.get("home_points") is not None and row.get("away_points") is not None
+
+    if not (has_home_last5 and has_away_last5 and has_standings):
+        return {
+            "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
+            "f2_home": 0, "f2_away": 0,
+            "f3_home": 0, "f3_away": 0,
+            "f4_home": 0, "f4_away": 0,
+            "f5_home": 0, "f5_away": 0, "f5_gap": 0, "f5_leader": None,
+            "f5_leader_raw": None,
+            "f6_home": 0, "f6_away": 0,
+            "home_total": 0, "away_total": 0, "total_gap": 0,
+            "f1_f5_conflict": False, "f1_f5_override": False,
+            "f1_vs_f2f3_conflict": False,
+            "away_collapse": False, "doubted_starter": False,
+            "call_1x2": "NO BET (insufficient data)",
+            "call_ou": "No Bet",
+            "expected_total": 0,
+        }
+
     f1_home, f1_away, away_collapse = calc_f1(row)
     f2_home = calc_f2(row.get("home_last5"))
     f2_away = calc_f2(row.get("away_last5"))
@@ -845,7 +886,11 @@ def predict_v4(row):
                                 len(row.get("h2h") or []))
     f6_home, f6_away = calc_f6(row.get("home_last10_avg_scored"),
                                 row.get("away_last10_avg_scored"))
-    f5_home, f5_away, conflict, override = apply_override(f1_home, f1_away, f5_home, f5_away)
+
+    f5_home, f5_away, conflict, override, f5_leader_raw = apply_override(
+        f1_home, f1_away, f5_home, f5_away
+    )
+
     home_total = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
     away_total = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
     gap = abs(home_total - away_total)
@@ -857,6 +902,16 @@ def predict_v4(row):
     else:
         call_1x2 = "NO BET"
 
+    f1_leader_final = "home" if f1_home > f1_away else "away"
+    f2f3_home = f2_home + f3_home
+    f2f3_away = f2_away + f3_away
+    f2f3_leader = "home" if f2f3_home > f2f3_away else "away"
+    f1_vs_f2f3_conflict = (
+        f1_leader_final != f2f3_leader
+        and abs(f1_home - f1_away) >= 12
+        and abs(f2f3_home - f2f3_away) >= 5
+    )
+
     expected = calc_expected_total(row)
     if expected < 2.5:
         call_ou = "Under 2.5"
@@ -864,25 +919,28 @@ def predict_v4(row):
         call_ou = "Over 2.5"
     else:
         call_ou = "No Bet"
-    if away_collapse or doubted_starter:
+
+    if (away_collapse or doubted_starter) and expected >= 2.4:
         call_ou = "Over 2.5"
 
     return {
         "f1_home": round(f1_home, 2), "f1_away": round(f1_away, 2),
         "f1_gap": round(abs(f1_home - f1_away), 2),
-        "f1_leader": "home" if f1_home > f1_away else "away",
+        "f1_leader": f1_leader_final,
         "f2_home": round(f2_home, 2), "f2_away": round(f2_away, 2),
         "f3_home": round(f3_home, 2), "f3_away": round(f3_away, 2),
         "f4_home": round(f4_home, 2), "f4_away": round(f4_away, 2),
         "f5_home": round(f5_home, 2), "f5_away": round(f5_away, 2),
         "f5_gap": round(abs(f5_home - f5_away), 2),
         "f5_leader": "home" if f5_home > f5_away else "away",
+        "f5_leader_raw": f5_leader_raw,
         "f6_home": round(f6_home, 2), "f6_away": round(f6_away, 2),
         "home_total": round(home_total, 2),
         "away_total": round(away_total, 2),
         "total_gap": round(gap, 2),
         "f1_f5_conflict": conflict,
         "f1_f5_override": override,
+        "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
         "away_collapse": away_collapse,
         "doubted_starter": doubted_starter,
         "call_1x2": call_1x2,
@@ -896,7 +954,6 @@ def predict_v4(row):
 # ============================================================================
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_table_columns(_sb, table_name="matches_raw"):
-    """Fetches actual column names from Supabase once, cached for 5 min."""
     try:
         resp = _sb.table(table_name).select("*").limit(1).execute()
         if resp.data:
@@ -911,39 +968,10 @@ def upsert_match(sb, record):
         return False, "no client"
     try:
         real_columns = _get_table_columns(sb)
-
         if real_columns:
             clean = {k: v for k, v in record.items() if k in real_columns}
         else:
-            allowed = {
-                "match_date", "kickoff_utc", "kickoff_local", "league_name", "tier", "group_name",
-                "season", "home_team", "away_team", "venue", "stage", "round",
-                "home_pos", "home_played", "home_points", "home_gd", "home_gf", "home_ga",
-                "away_pos", "away_played", "away_points", "away_gd", "away_gf", "away_ga",
-                "home_away_points", "home_away_played", "away_away_points", "away_away_played",
-                "home_home_points", "home_home_played", "home_home_win_pct",
-                "away_away_win_pct",
-                "home_last5", "away_last5",
-                "home_last10_w", "home_last10_d", "home_last10_l",
-                "home_last10_avg_scored", "home_last10_avg_conceded",
-                "home_last10_corners_for", "home_last10_corners_against",
-                "home_last10_win_pct",
-                "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
-                "away_last10_w", "away_last10_d", "away_last10_l",
-                "away_last10_avg_scored", "away_last10_avg_conceded",
-                "away_last10_corners_for", "away_last10_corners_against",
-                "away_last10_win_pct",
-                "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
-                "home_top_scorer", "home_top_scorer_goals",
-                "home_top_assister", "home_top_assister_assists",
-                "away_top_scorer", "away_top_scorer_goals",
-                "away_top_assister", "away_top_assister_assists",
-                "home_injuries", "away_injuries",
-                "home_xi", "away_xi", "home_formation", "away_formation",
-                "h2h", "h2h_home_wins", "h2h_draws", "h2h_away_wins",
-                "odds",
-            }
-            clean = {k: v for k, v in record.items() if k in allowed}
+            clean = record
 
         for jsonb_field in ["home_last5", "away_last5", "home_injuries",
                             "away_injuries", "h2h", "odds"]:
@@ -993,7 +1021,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2):
     else:
         actual = "Draw"
     is_correct = None
-    if call_1x2 == "NO BET":
+    if call_1x2.startswith("NO BET"):
         is_correct = None
     elif "Straight Win Home" in call_1x2 and actual == "Home":
         is_correct = True
@@ -1047,12 +1075,12 @@ def render_trigger(name, on):
 
 def render_verdict(result):
     call = result.get("call_1x2", "")
-    if call == "NO BET":
+    if call.startswith("NO BET"):
+        detail = "insufficient data" if "insufficient" in call else f"gap {result['total_gap']:.1f} below 15"
         st.markdown(f"""
         <div class="verdict-nobet">
             <div class="verdict-label-grey">1X2 Verdict</div>
-            <div class="verdict-noedge">NO BET — gap {result['total_gap']:.1f} below 15</div>
-            <div class="verdict-detail-grey">Total gap: {result['total_gap']:.1f} (needs 15+ for a call)</div>
+            <div class="verdict-noedge">NO BET — {detail}</div>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1073,28 +1101,28 @@ def render_ou_verdict(result):
     call = result.get("call_ou", "")
     expected = result.get("expected_total", 0)
     if call == "No Bet":
-        st.info(f"🟡 O/U 2.5: **NO BET** — expected total {expected:.2f} (dead zone 2.5–3.3)")
+        st.info(f"🟡 O/U 2.5: **NO BET** — expected {expected:.2f}")
     else:
-        st.success(f"🟢 O/U 2.5: **{call}** — expected total {expected:.2f}")
+        st.success(f"🟢 O/U 2.5: **{call}** — expected {expected:.2f}")
 
 
 # ============================================================================
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v4 Raw Predictor")
-    st.caption("One button. Parse → Predict → Save. Done.")
+    st.title("⚽ v4.2.1 Raw Predictor")
+    st.caption("One button. Parse → Predict → Save. All fixes applied.")
 
     sb, diag = get_supabase()
     if sb is None:
         st.error(f"Supabase connection failed: {diag.get('error')}")
         return
 
-    tabs = st.tabs(["📥 Parse & Save", "⏳ Pending", "📊 Performance", "ℹ️ v4 Spec"])
+    tabs = st.tabs(["📥 Parse & Save", "⏳ Pending", "📊 Performance", "ℹ️ v4.2.1 Spec"])
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Click the button — the app parses, predicts, and saves to Supabase in one action.")
+        st.caption("Click the button — parse, predict, and save happen in one action.")
 
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
@@ -1113,7 +1141,7 @@ def main():
                     st.error("Could not extract team names from HTML.")
                     return
 
-                with st.spinner("Running v4 model..."):
+                with st.spinner("Running v4.2.1 model..."):
                     result = predict_v4(parsed)
 
                 with st.spinner("Saving to Supabase..."):
@@ -1157,23 +1185,16 @@ def main():
                     c1, c2 = st.columns(2)
                     with c1:
                         st.write("**Home**")
-                        st.write(f"Pos: {parsed.get('home_pos')}, Pts: {parsed.get('home_points')}, GD: {parsed.get('home_gd')}, GF: {parsed.get('home_gf')}, GA: {parsed.get('home_ga')}, Played: {parsed.get('home_played')}")
-                        st.write(f"Last5: {parsed.get('home_last5')}")
-                        st.write(f"Last10: W{parsed.get('home_last10_w')} D{parsed.get('home_last10_d')} L{parsed.get('home_last10_l')}")
-                        st.write(f"Home venue avg: {parsed.get('home_home_last10_avg_scored')} / {parsed.get('home_home_last10_avg_conceded')}")
-                        st.write(f"Home win%: {parsed.get('home_home_win_pct')}")
-                        st.write(f"XI: {parsed.get('home_xi')}")
-                        st.write(f"Injuries: {parsed.get('home_injuries')}")
+                        st.write(f"Pos: {parsed.get('home_pos')}, Pts: {parsed.get('home_points')}, GD: {parsed.get('home_gd')}")
+                        st.write(f"Last5 ({len(parsed.get('home_last5') or [])}): {parsed.get('home_last5')}")
+                        st.write(f"XI ({len(parsed.get('home_xi') or [])}): {parsed.get('home_xi')}")
+                        st.write(f"Injuries ({len(parsed.get('home_injuries') or [])}): {parsed.get('home_injuries')}")
                     with c2:
                         st.write("**Away**")
-                        st.write(f"Pos: {parsed.get('away_pos')}, Pts: {parsed.get('away_points')}, GD: {parsed.get('away_gd')}, GF: {parsed.get('away_gf')}, GA: {parsed.get('away_ga')}, Played: {parsed.get('away_played')}")
-                        st.write(f"Last5: {parsed.get('away_last5')}")
-                        st.write(f"Last10: W{parsed.get('away_last10_w')} D{parsed.get('away_last10_d')} L{parsed.get('away_last10_l')}")
-                        st.write(f"Away venue avg: {parsed.get('away_away_last10_avg_scored')} / {parsed.get('away_away_last10_avg_conceded')}")
-                        st.write(f"Away win%: {parsed.get('away_away_win_pct')}")
-                        st.write(f"XI: {parsed.get('away_xi')}")
-                        st.write(f"Injuries: {parsed.get('away_injuries')}")
-                    st.write(f"Splits: home_home {parsed.get('home_home_points')}/{parsed.get('home_home_played')}, home_away {parsed.get('home_away_points')}/{parsed.get('home_away_played')}, away_home {parsed.get('away_home_points')}/{parsed.get('away_home_played')}, away_away {parsed.get('away_away_points')}/{parsed.get('away_away_played')}")
+                        st.write(f"Pos: {parsed.get('away_pos')}, Pts: {parsed.get('away_points')}, GD: {parsed.get('away_gd')}")
+                        st.write(f"Last5 ({len(parsed.get('away_last5') or [])}): {parsed.get('away_last5')}")
+                        st.write(f"XI ({len(parsed.get('away_xi') or [])}): {parsed.get('away_xi')}")
+                        st.write(f"Injuries ({len(parsed.get('away_injuries') or [])}): {parsed.get('away_injuries')}")
                     st.write(f"H2H: {parsed.get('h2h')}")
                     st.write(f"Kickoff UTC: {parsed.get('kickoff_utc')}")
 
@@ -1200,6 +1221,7 @@ def main():
                 st.markdown('<div class="section-title">Modifiers & Overrides</div>', unsafe_allow_html=True)
                 render_trigger("F1 vs F5 Conflict", result["f1_f5_conflict"])
                 render_trigger("F1 vs F5 Override Applied", result["f1_f5_override"])
+                render_trigger("F1 vs F2/F3 Conflict (tracking)", result["f1_vs_f2f3_conflict"])
                 render_trigger("Away Collapse", result["away_collapse"])
                 render_trigger("Doubt Starter IN XI", result["doubted_starter"])
 
@@ -1222,6 +1244,7 @@ def main():
                 if r.get("f1_f5_override"): triggers.append("override")
                 if r.get("away_collapse"): triggers.append("collapse")
                 if r.get("doubted_starter"): triggers.append("doubt")
+                if r.get("f1_vs_f2f3_conflict"): triggers.append("F1/F2F3")
                 trigger_str = f" · {', '.join(triggers)}" if triggers else ""
                 header = f"{r.get('match_date','')} · {r.get('home_team','')} vs {r.get('away_team','')} · {call} (gap {gap}){trigger_str}"
                 with st.expander(header):
@@ -1248,12 +1271,14 @@ def main():
         if not settled:
             st.info("No settled matches yet.")
         else:
-            placed = [r for r in settled if r.get("call_1x2") != "NO BET"]
+            placed = [r for r in settled if not (r.get("call_1x2") or "").startswith("NO BET")]
             correct = sum(1 for r in placed if r.get("is_correct_1x2"))
             override_games = [r for r in settled if r.get("f1_f5_override")]
             override_correct = sum(1 for r in override_games if r.get("is_correct_1x2"))
-            collapse_games = [r for r in settled if r.get("away_collapse")]
+            f1f2f3_games = [r for r in settled if r.get("f1_vs_f2f3_conflict")]
+            f1f2f3_correct = sum(1 for r in f1f2f3_games if r.get("is_correct_1x2"))
             doubt_games = [r for r in settled if r.get("doubted_starter")]
+
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Settled", len(settled))
             c2.metric("Bets placed", len(placed))
@@ -1261,8 +1286,9 @@ def main():
                       f"{correct}/{len(placed)} ({(correct/len(placed)*100):.0f}%)" if placed else "—")
             c4.metric("Override accuracy",
                       f"{override_correct}/{len(override_games)}" if override_games else "—")
+
             c1, c2 = st.columns(2)
-            c1.metric("Away collapse triggers", len(collapse_games))
+            c1.metric("F1/F2F3 conflicts", len(f1f2f3_games))
             c2.metric("Doubt starter triggers", len(doubt_games))
 
             st.markdown('<div class="section-title">All Settled Matches</div>', unsafe_allow_html=True)
@@ -1275,13 +1301,13 @@ def main():
                 "Correct": ("✅" if r.get("is_correct_1x2") else
                             "❌" if r.get("is_correct_1x2") is False else "—"),
                 "Override": "✅" if r.get("f1_f5_override") else "—",
-                "Collapse": "✅" if r.get("away_collapse") else "—",
+                "F1/F2F3": "✅" if r.get("f1_vs_f2f3_conflict") else "—",
                 "Doubt": "✅" if r.get("doubted_starter") else "—",
             } for r in settled])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tabs[3]:
-        st.subheader("v4 Specification")
+        st.subheader("v4.2.1 Specification")
         st.markdown("""
         **100-point model. Only prematch fields. No xG, no possession.**
 
@@ -1301,13 +1327,14 @@ def main():
 
         **Overrides:**
         - F1 vs F5 conflict: F1 gap ≥ 12 AND F5 gap ≥ 4 AND opposite → F1 wins
-        - Away collapse: away team 0 pts from 3+ away games → home +8 F1, force Over 2.5
-        - Doubt starter: key player in XI listed as doubt OR injury → F4 +5, force Over 2.5
+        - Away collapse: 0 away pts from 3+ games → home +8 F1, force Over 2.5
+        - Doubt starter: key player in XI → F4 +5, force Over 2.5 (if expected ≥ 2.4)
 
-        **O/U:** Expected = (HomeH avg scored + AwayA avg conceded + AwayA avg scored + HomeH avg conceded) / 2
-        - < 2.5 → Under
-        - > 3.3 → Over
-        - 2.5–3.3 → No Bet
+        **v4.2.1 additions:**
+        - Normalized league filter (La Liga vs LaLiga)
+        - Skip prediction if last5 empty or standings missing
+        - Log `f1_vs_f2f3_conflict` flag for tracking
+        - Store `f5_leader_raw` (pre-override) for clarity
         """)
 
 
