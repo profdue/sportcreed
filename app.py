@@ -1,89 +1,21 @@
 """
-Refined Prediction Strategy — single-file Streamlit app.
-Wide `matches` schema: one row per match, all selections as columns.
-
-Requires:
-  st.secrets["SUPABASE_URL"]
-  st.secrets["SUPABASE_KEY"]   (service_role key)
-
-Tables:
-  matches       — 1 row per match, ~235 columns (incl. sg_pick, sg_outcome)
-  reliability   — 10 rows, one per market type
-
-DB column naming (matches the actual table):
-  regime                    — 'withstand' | 'demolish' | 'neutral'
-  favourite_side            — 'home' | 'away'
-  underdog_side             — 'home' | 'away'
-  favourite_win_prob        — model P(favourite wins)
-  favourite_gf_per_game     — derived by trigger from favourite side's last-10 GF
-  underdog_gf_per_game      — derived by trigger from underdog side's last-10 GF
-  underdog_ga_per_game      — derived by trigger from underdog side's last-10 GA
-  favourite_team            — GENERATED column (from favourite_side + home/away team)
-  underdog_team             — GENERATED column (from underdog_side + home/away team)
-
-The app uses a four-valued `MatchMode` internally (WITHSTAND / DEMOLISH /
-DEMOLISH_LEAN / NO_BET) but the DB constraint on `regime` only accepts three
-lowercase values, so `REGIME_TO_DB` maps the app vocabulary to the DB's at the
-write boundary.
+v4 RAW-ONLY Predictor — FULL APP
+Components:
+  1. Parser: HTML → matches_raw
+  2. Model:  matches_raw → predictions
+  3. Audit:  actual score → is_correct_1x2
+  4. Display: performance dashboard
 """
 
-import math
+import os
 import re
-import traceback
-import base64
 import json
-from datetime import date, datetime
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Refined Predictor", page_icon="⚽", layout="wide")
-
-
-# ============================================================================
-# CSS
-# ============================================================================
-st.markdown("""
-<style>
-    .main .block-container { padding-top: 1.5rem; max-width: 1100px; }
-    .team-header {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        border-radius: 16px; padding: 1.5rem 2rem; color: #fff; margin-bottom: 1rem;
-    }
-    .team-names { font-size: 2rem; font-weight: 800; margin: 0; }
-    .team-meta { color: #94a3b8; font-size: 0.9rem; margin-top: 0.25rem; }
-    .verdict-bet {
-        background: linear-gradient(135deg, #064e3b 0%, #022c22 100%);
-        border-left: 6px solid #10b981; border-radius: 16px; padding: 1.5rem 1.75rem; margin: 1rem 0;
-    }
-    .verdict-nobet {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-left: 6px solid #64748b; border-radius: 16px; padding: 1.5rem 1.75rem; margin: 1rem 0;
-    }
-    .verdict-label { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700; color: #6ee7b7; text-transform: uppercase; }
-    .verdict-label-grey { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
-    .verdict-pick { font-size: 2.4rem; font-weight: 800; color: #fff; margin: 0.35rem 0; line-height: 1.1; }
-    .verdict-noedge { font-size: 1.6rem; font-weight: 700; color: #cbd5e1; margin: 0.35rem 0; }
-    .verdict-detail { font-size: 1rem; color: #d1fae5; margin-top: 0.5rem; }
-    .verdict-detail-grey { font-size: 0.95rem; color: #94a3b8; margin-top: 0.5rem; }
-    .mode-pill { display:inline-block; padding: 0.35rem 0.9rem; border-radius: 999px; font-weight: 800; font-size: 0.85rem; letter-spacing: 1px; text-transform: uppercase; }
-    .mode-withstand { background:#1e3a8a; color:#bfdbfe; }
-    .mode-demolish { background:#7f1d1d; color:#fecaca; }
-    .mode-lean { background:#78350f; color:#fde68a; }
-    .mode-nobet { background:#1e293b; color:#94a3b8; }
-    .cand-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
-    .cand-label { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
-    .cand-score { color: #3b82f6; font-weight: 800; font-size: 1.1rem; }
-    .cand-detail { color: #64748b; font-size: 0.75rem; }
-    .section-title { font-size: 0.85rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 1.5px; margin: 1.5rem 0 0.75rem 0; }
-    .xg-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem; display: flex; justify-content: space-between; margin-bottom: 0.4rem; }
-    .xg-team { color: #cbd5e1; font-weight: 600; }
-    .xg-value { color: #3b82f6; font-weight: 800; font-size: 1.3rem; }
-    .trust-row { background: #0f172a; border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 0.4rem; font-size: 0.85rem; color: #94a3b8; display: flex; justify-content: space-between; }
-    .trust-value { font-weight: 700; color: #3b82f6; }
-    .stButton button { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; font-weight: 700; border-radius: 10px; border: none; padding: 0.6rem 1.25rem; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="v4 Raw Predictor", page_icon="⚽", layout="wide")
 
 
 # ============================================================================
@@ -91,2008 +23,640 @@ st.markdown("""
 # ============================================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase():
-    diag = {"url": None, "role": None, "key_prefix": None, "ok": False, "error": None}
     try:
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        diag["url"] = url
-        diag["key_prefix"] = (key[:15] + "...") if key else None
-        try:
-            parts = key.split(".")
-            if len(parts) >= 2:
-                payload = parts[1]
-                payload += "=" * (-len(payload) % 4)
-                decoded = json.loads(base64.urlsafe_b64decode(payload))
-                diag["role"] = decoded.get("role")
-            else:
-                diag["role"] = "not_jwt"
-        except Exception as e:
-            diag["role"] = f"decode_error: {e}"
-        diag["ok"] = True
-        return create_client(url, key), diag
+        return create_client(url, key), {"ok": True, "url": url}
     except Exception as e:
-        diag["error"] = str(e)
-        return None, diag
+        return None, {"ok": False, "error": str(e)}
 
 
 # ============================================================================
-# CONSTANTS
+# PARSER: HTML → matches_raw
 # ============================================================================
-SHRINK_WEIGHT = 0.50
-LAST10_WEIGHT = 0.70
-SEASON_WEIGHT = 0.30
-FORM_ADJ_HIGH = 0.15
-FORM_ADJ_MED = 0.10
-INJURY_ADJ = 0.15
-FATIGUE_HOME = 0.05
-FATIGUE_AWAY = 0.10
-MIN_XG = 0.10
-TRUST_FULL_SAMPLE = 8
-TRUST_MIN_WEIGHT = 0.25
-MAX_EFFECTIVE_SHRINK = 0.90
+def parse_html(html: str) -> dict:
+    """Parse Sportsgambler HTML → dict matching matches_raw schema"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
 
-MIN_SCORE = 0.01
-STAKE_TIER_HIGH = 0.05
-STAKE_TIER_MED = 0.02
-EDGE_CAP = 0.15
-RELIABILITY_PRIOR_STRENGTH = 10
+    rec = {}
+
+    # --- FIXTURE ---
+    # Team names
+    teams = soup.select(".t_top .t_teams .t_name strong")
+    if len(teams) >= 2:
+        rec["home_team"] = teams[0].get_text(strip=True)
+        rec["away_team"] = teams[1].get_text(strip=True)
+
+    # Date + kickoff
+    date_el = soup.select_one(".t_top .t_date span:first-child")
+    time_el = soup.select_one(".t_top .t_date .t_time")
+    if date_el:
+        raw = date_el.get_text(strip=True)
+        # e.g. "Sun 20 Sep"
+        m = re.match(r"\w+ (\d+) (\w+)", raw)
+        if m:
+            day, month = m.group(1), m.group(2)
+            year = datetime.now().year
+            try:
+                dt = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
+                rec["match_date"] = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+    if time_el:
+        rec["kickoff_utc"] = time_el.get_text(strip=True)
+
+    # League
+    for link in soup.select(".t_top .t_info_link"):
+        text = link.get_text(strip=True)
+        if text.lower() == "football":
+            continue
+        if re.search(r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Cup)", text, re.I):
+            rec["league_name"] = text
+            break
+
+    # Venue
+    venue_el = soup.select_one(".t_top .t_venue")
+    if venue_el:
+        rec["venue"] = venue_el.get_text(strip=True)
+
+    # --- F1: STANDINGS ---
+    # Look for the league table
+    for table in soup.select("table.leage-table"):
+        rows = table.select("tbody tr")
+        for row in rows:
+            cells = row.select("td")
+            if len(cells) < 8:
+                continue
+            team_name = cells[1].get_text(strip=True)
+            if rec.get("home_team", "").lower() in team_name.lower():
+                rec["home_pos"] = _int(cells[0])
+                rec["home_played"] = _int(cells[2])
+                rec["home_points"] = _int(cells[7])
+                gd = cells[6].get_text(strip=True)
+                rec["home_gd"] = _parse_gd(gd)
+            elif rec.get("away_team", "").lower() in team_name.lower():
+                rec["away_pos"] = _int(cells[0])
+                rec["away_played"] = _int(cells[2])
+                rec["away_points"] = _int(cells[7])
+                gd = cells[6].get_text(strip=True)
+                rec["away_gd"] = _parse_gd(gd)
+
+    # --- F2: LAST 5 FORM ---
+    rec["home_last5"] = _parse_last5(soup, "home")
+    rec["away_last5"] = _parse_last5(soup, "away")
+
+    # --- F3/F6: LAST 10 SPLITS ---
+    _parse_last10_splits(soup, "home", rec)
+    _parse_last10_splits(soup, "away", rec)
+
+    # --- F4: TOP SCORER / ASSISTER / INJURIES / XI ---
+    _parse_players(soup, rec)
+    _parse_injuries(soup, rec)
+    _parse_xi(soup, rec)
+
+    # --- F5: H2H ---
+    rec["h2h"] = _parse_h2h(soup)
+    rec["h2h_home_wins"] = sum(1 for h in rec["h2h"] if h.get("winner") == "home")
+    rec["h2h_away_wins"] = sum(1 for h in rec["h2h"] if h.get("winner") == "away")
+    rec["h2h_draws"] = len(rec["h2h"]) - rec["h2h_home_wins"] - rec["h2h_away_wins"]
+
+    # --- ODDS (optional) ---
+    rec["odds"] = _parse_odds(soup)
+
+    return rec
 
 
-# ============================================================================
-# MODE CLASSIFIER
-# ============================================================================
-class MatchMode:
-    WITHSTAND = "WITHSTAND"
-    DEMOLISH = "DEMOLISH"
-    DEMOLISH_LEAN = "DEMOLISH_LEAN"
-    NO_BET = "NO_BET"
-
-
-# Map the app's four-valued MatchMode onto the DB's three-valued `regime`
-# check constraint: regime in ('withstand','demolish','neutral').
-# DEMOLISH_LEAN -> neutral (weaker signal, closer to no-bet than to a full
-# demolish for reliability-weighting purposes).
-REGIME_TO_DB = {
-    MatchMode.WITHSTAND:     "withstand",
-    MatchMode.DEMOLISH:      "demolish",
-    MatchMode.DEMOLISH_LEAN: "neutral",
-    MatchMode.NO_BET:        "neutral",
-}
-
-
-def classify_mode(model_total_shrunk, fav_win_prob, dog_gf, dog_ga):
-    """
-    Decision tree (applied religiously):
-
-      1. total <= 2.90 AND dog_GF <= 1.5 AND dog_GA <= 1.3 AND fav_win < 0.60
-             -> WITHSTAND
-      2. total >= 3.10 AND fav_win >= 0.60
-             -> DEMOLISH
-      3. total >= 3.10 AND fav_win >= 0.52
-             -> DEMOLISH_LEAN
-      4. else
-             -> NO_BET
-    """
-    if (model_total_shrunk <= 2.90
-            and dog_gf <= 1.5
-            and dog_ga <= 1.3
-            and fav_win_prob < 0.60):
-        return MatchMode.WITHSTAND
-    if model_total_shrunk >= 3.10 and fav_win_prob >= 0.60:
-        return MatchMode.DEMOLISH
-    if model_total_shrunk >= 3.10 and fav_win_prob >= 0.52:
-        return MatchMode.DEMOLISH_LEAN
-    return MatchMode.NO_BET
-
-
-# ============================================================================
-# PARSER
-# ============================================================================
-def _has_bs4():
+def _int(s):
     try:
-        import bs4
-        return True
-    except ImportError:
-        return False
-
-
-class SportsgamblerParser:
-    def __init__(self, html: str):
-        if not _has_bs4():
-            raise RuntimeError("beautifulsoup4 is not installed.")
-        from bs4 import BeautifulSoup
-        self.soup = BeautifulSoup(html, "html.parser")
-        self.home_team = None
-        self.away_team = None
-
-    def parse(self) -> dict:
-        self.home_team, self.away_team = self._parse_teams()
-        match_date, kickoff = self._parse_datetime()
-        competition, venue = self._parse_league_venue()
-        return {
-            "match_id": self._make_match_id(match_date),
-            "match_date": match_date,
-            "kickoff": kickoff,
-            "competition": competition,
-            "home_team": self.home_team,
-            "away_team": self.away_team,
-            "venue": venue,
-            "odds": self._parse_odds(),
-            "home_team_last10_home": self._parse_last10_splits("home"),
-            "away_team_last10_away": self._parse_last10_splits("away"),
-            "season_splits": self._parse_season_splits(),
-            "last5_form": self._parse_last5_form(competition),
-            "injuries": self._parse_injuries(),
-            "midweek_fixture": self._parse_midweek(match_date),
-            "home_current_season_games": self._parse_current_season_games_from_table("home"),
-            "away_current_season_games": self._parse_current_season_games_from_table("away"),
-            "last_match_dates": self._parse_last_match_dates(),
-            "sg_pick": self._parse_sg_pick(),
-        }
-
-    def _parse_teams(self):
-        teams = self.soup.select(".t_top .t_teams .t_name strong")
-        if len(teams) >= 2:
-            return teams[0].get_text(strip=True), teams[1].get_text(strip=True)
-        h1 = self.soup.find("h1", class_="p_title")
-        if h1:
-            m = re.match(r"(.+?)\s+vs\s+(.+?)\s+Prediction", h1.get_text(strip=True))
-            if m:
-                return m.group(1).strip(), m.group(2).strip()
-        return None, None
-
-    def _parse_sg_pick(self):
-        el = self.soup.select_one(".tip--card__title")
-        if not el:
-            return None
-        text = el.get_text(strip=True)
-        text = re.sub(r"\s*@\s*[\d.]+\s*$", "", text).strip()
-        return text or None
-
-    def _parse_league_venue(self):
-        league = None
-        for link in self.soup.select(".t_top .t_info_link"):
-            text = link.get_text(strip=True)
-            if text.lower() == "football":
-                continue
-            if re.search(r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Championship|MLS|Cup|Division|Primera)", text, re.I):
-                league = text
-                break
-        venue_el = self.soup.select_one(".t_top .t_venue")
-        return league, (venue_el.get_text(strip=True) if venue_el else None)
-
-    def _parse_datetime(self):
-        date_el = self.soup.select_one(".t_top .t_date span:first-child")
-        time_el = self.soup.select_one(".t_top .t_date .t_time")
-        raw_date = date_el.get_text(strip=True) if date_el else None
-        kickoff = time_el.get_text(strip=True) if time_el else None
-        iso = None
-        if raw_date:
-            for fmt in ("%a %d %b", "%d %b", "%a %d %B", "%d %B"):
-                try:
-                    dt = datetime.strptime(raw_date, fmt).replace(year=datetime.now().year)
-                    iso = dt.strftime("%Y-%m-%d")
-                    break
-                except ValueError:
-                    continue
-        return iso, kickoff
-
-    def _make_match_id(self, match_date):
-        ht = (self.home_team or "HOME").replace(" ", "")[:3].upper()
-        at = (self.away_team or "AWAY").replace(" ", "")[:3].upper()
-        dt = (match_date or "").replace("-", "")
-        return f"{ht}_{at}_{dt}"
-
-    def _parse_odds(self):
-        flat = {
-            "home": None, "draw": None, "away": None,
-            "dc_1x": None, "dc_12": None, "dc_x2": None,
-            "dnb_home": None, "dnb_away": None,
-            "ah_home_line": None, "ah_home": None,
-            "ah_away_line": None, "ah_away": None,
-            "btts_yes": None, "btts_no": None,
-            "over_2.5": None, "under_2.5": None,
-        }
-        for row in self.soup.select(".nlf_odds_row"):
-            title_el = row.select_one(".nfl_odd_title")
-            if not title_el:
-                continue
-            market = title_el.get_text(strip=True)
-            entries = []
-            for ply in row.select(".nfl_odply"):
-                label_el = ply.select_one(".nfl_ply_t")
-                odds_el = ply.select_one(".nfl_ply_o")
-                if label_el and odds_el:
-                    entries.append((label_el.get_text(strip=True),
-                                    self._to_float(odds_el.get_text(strip=True))))
-            self._apply_market(flat, market, entries)
-        return flat
-
-    def _apply_market(self, flat, market, entries):
-        m = market.lower()
-        if "full-time result" in m:
-            for label, val in entries:
-                if label == "1": flat["home"] = val
-                elif label == "X": flat["draw"] = val
-                elif label == "2": flat["away"] = val
-            return
-        if "half-time result" in m:
-            return
-        if "double chance" in m:
-            for label, val in entries:
-                if label == "1X": flat["dc_1x"] = val
-                elif label == "12": flat["dc_12"] = val
-                elif label == "X2": flat["dc_x2"] = val
-            return
-        if "draw no bet" in m:
-            for label, val in entries:
-                if label == "1": flat["dnb_home"] = val
-                elif label == "2": flat["dnb_away"] = val
-            return
-        if "asian handicap" in m:
-            for label, val in entries:
-                mm = re.match(r"(\d)\s*Hcp\s*([+-]?[\d.]+)", label)
-                if not mm:
-                    continue
-                side = mm.group(1)
-                line = self._to_float(mm.group(2))
-                if side == "1":
-                    flat["ah_home_line"] = line
-                    flat["ah_home"] = val
-                else:
-                    flat["ah_away_line"] = line
-                    flat["ah_away"] = val
-            return
-        if "total goals" in m:
-            for label, val in entries:
-                mm = re.match(r"(Over|Under)\s+([\d.]+)", label, re.I)
-                if not mm:
-                    continue
-                line = mm.group(2)
-                if line == "2.5":
-                    if mm.group(1).lower() == "over":
-                        flat["over_2.5"] = val
-                    else:
-                        flat["under_2.5"] = val
-            return
-        if "both teams to score" in m:
-            for label, val in entries:
-                if label.lower() == "yes": flat["btts_yes"] = val
-                elif label.lower() == "no": flat["btts_no"] = val
-            return
-
-    @staticmethod
-    def _to_float(s):
-        try:
-            return float(str(s).strip())
-        except (ValueError, TypeError):
-            return None
-
-    @staticmethod
-    def _to_int(s):
-        try:
-            return int(str(s).strip())
-        except (ValueError, TypeError):
-            return 0
-
-    def _parse_last10_splits(self, side):
-        split = self._empty_split()
-        table = self.soup.select_one(".st-table")
-        if table:
-            rows = table.select("tbody tr")
-            idx = 0 if side == "home" else 1
-            if idx < len(rows):
-                cells = [td.get_text(strip=True) for td in rows[idx].select("td")]
-                if len(cells) >= 8:
-                    mm = re.match(r"(\d+)-(\d+)-(\d+)", cells[1])
-                    if mm:
-                        split["wins"] = int(mm.group(1))
-                        split["draws"] = int(mm.group(2))
-                        split["losses"] = int(mm.group(3))
-                    split["gf_per_game"] = self._to_float(cells[3]) or 0.0
-                    split["ga_per_game"] = self._to_float(cells[4]) or 0.0
-                    split["over25"] = self._to_int(cells[5])
-                    split["under25"] = self._to_int(cells[6])
-                    split["btts_yes"] = self._to_int(cells[7])
-                    return split
-        return self._parse_last10_from_keystats(side)
-
-    def _parse_last10_from_keystats(self, side):
-        split = self._empty_split()
-        target_id = f"goals-{'hometeam' if side == 'home' else 'awayteam'}"
-        block = self.soup.select_one(f"#{target_id}")
-        if block:
-            text = block.get_text(" ", strip=True)
-            m_gf = re.search(r"average of ([\d.]+) goals scored", text)
-            m_ga = re.search(r"and ([\d.]+) conceded", text)
-            m_o25 = re.search(r"Over 2\.5 Goals in (\d+) of", text)
-            m_btts = re.search(r"BTTS Yes in (\d+) of", text)
-            if m_gf: split["gf_per_game"] = float(m_gf.group(1))
-            if m_ga: split["ga_per_game"] = float(m_ga.group(1))
-            if m_o25: split["over25"] = int(m_o25.group(1))
-            if m_btts: split["btts_yes"] = int(m_btts.group(1))
-            split["under25"] = 10 - split["over25"]
-            split["btts_no"] = 10 - split["btts_yes"]
-        return split
-
-    @staticmethod
-    def _empty_split():
-        return {"wins": 0, "draws": 0, "losses": 0, "gf_per_game": 0.0, "ga_per_game": 0.0,
-                "btts_yes": 0, "btts_no": 0, "over25": 0, "under25": 0}
-
-    def _parse_season_splits(self):
-        home = self._parse_last10_splits("home")
-        away = self._parse_last10_splits("away")
-        return {
-            "home_team_home_gf_pg": home["gf_per_game"],
-            "home_team_home_ga_pg": home["ga_per_game"],
-            "away_team_away_gf_pg": away["gf_per_game"],
-            "away_team_away_ga_pg": away["ga_per_game"],
-        }
-
-    def _parse_last5_form(self, competition):
-        out = {"home_team_points": 0, "away_team_points": 0}
-        container = self.soup.select_one("#last-matches #All")
-        if not container:
-            return out
-        left = container.select_one(".teamstats-left")
-        right = container.select_one(".teamstats-right")
-        out["home_team_points"] = self._sum_points(left, competition)
-        out["away_team_points"] = self._sum_points(right, competition)
-        return out
-
-    def _sum_points(self, container, competition):
-        if not container:
-            return 0
-        tracked_el = container.select_one(".team-stats-team-name strong")
-        tracked = tracked_el.get_text(strip=True).lower() if tracked_el else ""
-        if not tracked:
-            return 0
-        comp_key = self._normalise_competition(competition)
-        points = 0
-        counted = 0
-        for item in container.select("li.team-stat-list-item"):
-            date_el = item.select_one(".team-stats-date")
-            if not date_el:
-                continue
-            date_text = date_el.get_text(strip=True)
-            comp = date_text.split(":", 1)[0].strip().lower() if ":" in date_text else ""
-            if comp_key and comp_key not in comp:
-                continue
-            teams = item.select(".team-stats-team")
-            if len(teams) < 2:
-                continue
-            home_name = teams[0].get_text(" ", strip=True).lower()
-            away_name = teams[1].get_text(" ", strip=True).lower()
-            h_score = self._extract_score(teams[0])
-            a_score = self._extract_score(teams[1])
-            if h_score is None or a_score is None:
-                continue
-            if self._token_overlap(tracked, home_name):
-                if h_score > a_score: points += 3
-                elif h_score == a_score: points += 1
-            elif self._token_overlap(tracked, away_name):
-                if a_score > h_score: points += 3
-                elif a_score == h_score: points += 1
-            else:
-                continue
-            counted += 1
-            if counted >= 5:
-                break
-        return points
-
-    def _parse_last_match_dates(self):
-        out = {"home": None, "away": None}
-        container = self.soup.select_one("#last-matches #All")
-        if not container:
-            return out
-        for side, selector in [("home", ".teamstats-left"), ("away", ".teamstats-right")]:
-            block = container.select_one(selector)
-            if not block:
-                continue
-            first = block.select_one("li.team-stat-list-item")
-            if not first:
-                continue
-            date_el = first.select_one(".team-stats-date")
-            if not date_el:
-                continue
-            mm = re.search(r"(\d{2})/(\d{2})", date_el.get_text(strip=True))
-            if mm:
-                try:
-                    year = datetime.now().year
-                    out[side] = datetime(year, int(mm.group(2)), int(mm.group(1))).strftime("%Y-%m-%d")
-                except ValueError:
-                    pass
-        return out
-
-    @staticmethod
-    def _token_overlap(a, b):
-        return bool(set(a.split()) & set(b.split()))
-
-    @staticmethod
-    def _normalise_competition(name):
-        if not name:
-            return ""
-        name = name.lower()
-        if " - " in name:
-            name = name.split(" - ", 1)[1]
-        return name.strip()
-
-    def _extract_score(self, team_el):
-        score_el = team_el.select_one(".score-right")
-        if not score_el:
-            return None
-        return self._to_int(score_el.get_text(strip=True))
-
-    def _parse_current_season_games_from_table(self, side):
-        team = (self.home_team if side == "home" else self.away_team) or ""
-        team_lower = team.lower()
-        games = None
-        for table in self.soup.select("table.leage-table"):
-            for row in table.select("tbody tr"):
-                cells = row.select("td")
-                if len(cells) < 3:
-                    continue
-                team_cell = cells[1].get_text(strip=True)
-                if self._token_overlap(team_lower, team_cell.lower()):
-                    try:
-                        games = int(cells[2].get_text(strip=True))
-                        break
-                    except ValueError:
-                        continue
-            if games is not None:
-                break
-        if games is not None:
-            return games
-        return self._count_season_games_fallback(side)
-
-    def _count_season_games_fallback(self, side):
-        container = self.soup.select_one("#last-matches #All")
-        if not container:
-            return 0
-        block = container.select_one(".teamstats-left" if side == "home" else ".teamstats-right")
-        if not block:
-            return 0
-        return len(block.select("li.team-stat-list-item"))
-
-    def _parse_injuries(self):
-        out = {"home_key_attackers_out": 0, "home_key_defenders_out": 0, "home_key_midfielders_out": 0,
-               "away_key_attackers_out": 0, "away_key_defenders_out": 0, "away_key_midfielders_out": 0}
-        for outline in self.soup.select(".inj-two-outline"):
-            header = outline.select_one(".light-header strong")
-            if not header:
-                continue
-            header_text = header.get_text(" ", strip=True).lower()
-            side = None
-            if self.home_team and self._token_overlap(self.home_team.lower(), header_text):
-                side = "home"
-            elif self.away_team and self._token_overlap(self.away_team.lower(), header_text):
-                side = "away"
-            if not side:
-                continue
-            for row in outline.select(".inj-two-row"):
-                if "inj-two-title" in row.get("class", []):
-                    continue
-                info_el = row.select_one(".inj-two-info")
-                info = info_el.get_text(strip=True).lower() if info_el else ""
-                if "doubt" in info:
-                    continue
-                detail = row.find("div", class_="inj-two-hidden")
-                position = self._extract_position(detail)
-                importance = self._extract_importance(detail)
-                if importance != "key" or position is None:
-                    continue
-                key = f"{side}_key_{position}s_out"
-                if key in out:
-                    out[key] += 1
-        return out
-
-    @staticmethod
-    def _extract_position(detail_el):
-        if not detail_el:
-            return None
-        text = detail_el.get_text(" ", strip=True).lower()
-        if "forward" in text or "striker" in text or "attacker" in text:
-            return "attacker"
-        if "defender" in text or "goalkeeper" in text:
-            return "defender"
-        if "midfielder" in text:
-            return "midfielder"
+        return int(str(s).strip())
+    except (ValueError, TypeError):
         return None
 
-    @staticmethod
-    def _extract_importance(detail_el):
-        if not detail_el:
-            return "squad"
-        text = detail_el.get_text(" ", strip=True)
-        matches = 0
-        goals = 0
-        mm = re.search(r"Matches:\s*(\d+)", text)
-        if mm:
-            matches = int(mm.group(1))
-        gg = re.search(r"Goals:\s*(\d+)", text)
-        if gg:
-            goals = int(gg.group(1))
-        return "key" if (matches >= 3 or goals >= 1) else "squad"
 
-    def _parse_midweek(self, match_date_iso):
-        out = {"home_team_played": False, "away_team_played": False}
-        if not match_date_iso:
-            return out
+def _parse_gd(s):
+    """Parse '+5' or '-3' or '31:7'"""
+    s = str(s).strip()
+    if ":" in s:
+        parts = s.split(":")
         try:
-            match_dt = datetime.strptime(match_date_iso, "%Y-%m-%d")
+            return int(parts[0]) - int(parts[1])
         except ValueError:
-            return out
-        container = self.soup.select_one("#last-matches #All")
-        if not container:
-            return out
-        left = container.select_one(".teamstats-left")
-        right = container.select_one(".teamstats-right")
-        out["home_team_played"] = self._played_midweek(left, match_dt)
-        out["away_team_played"] = self._played_midweek(right, match_dt)
-        return out
-
-    def _played_midweek(self, container, match_dt):
-        if not container:
-            return False
-        first = container.select_one("li.team-stat-list-item")
-        if not first:
-            return False
-        date_el = first.select_one(".team-stats-date")
-        if not date_el:
-            return False
-        mm = re.search(r"(\d{2})/(\d{2})", date_el.get_text(strip=True))
-        if not mm:
-            return False
-        day, month = int(mm.group(1)), int(mm.group(2))
-        try:
-            last_dt = datetime(match_dt.year, month, day)
-        except ValueError:
-            return False
-        if last_dt > match_dt:
-            try:
-                last_dt = last_dt.replace(year=match_dt.year - 1)
-            except ValueError:
-                return False
-        return 0 <= (match_dt - last_dt).days <= 4
-
-
-# ============================================================================
-# PREDICTOR
-# ============================================================================
-class RefinedPredictor:
-    def __init__(self):
-        self.model_xg_home = 0.0
-        self.model_xg_away = 0.0
-        self.model_total = 0.0
-        self.market_total = 0.0
-        self.shrunk_total = 0.0
-        self.shrunk_xg_home = 0.0
-        self.shrunk_xg_away = 0.0
-        self.probabilities = {}
-        self.candidates = []
-        self.bets = []
-        self.skips = []
-        self.effective_shrink = SHRINK_WEIGHT
-        self.home_trust = 1.0
-        self.away_trust = 1.0
-        # mode state (Python-side short names; DB names differ and are mapped
-        # only at the write boundary in write_match)
-        self.fav_side = None
-        self.dog_side = None
-        self.fav_team = None
-        self.dog_team = None
-        self.fav_win_prob = 0.0
-        self.fav_gf = 0.0
-        self.dog_gf = 0.0
-        self.dog_ga = 0.0
-        self.mode = None
-        self.mode_primary_markets = []
-        self.mode_secondary_markets = []
-        self.suppressed_markets = []
-
-    def calculate_base_xg(self, home_data, away_data):
-        ha = self._blend(home_data.get("home_goals_scored_season", 1.5),
-                         home_data.get("home_goals_scored_last10", 1.5))
-        ad = self._blend(away_data.get("away_goals_conceded_season", 1.5),
-                         away_data.get("away_goals_conceded_last10", 1.5))
-        aa = self._blend(away_data.get("away_goals_scored_season", 1.2),
-                         away_data.get("away_goals_scored_last10", 1.2))
-        hd = self._blend(home_data.get("home_goals_conceded_season", 1.2),
-                         home_data.get("home_goals_conceded_last10", 1.2))
-        self.model_xg_home = max(MIN_XG, (ha + ad) / 2)
-        self.model_xg_away = max(MIN_XG, (aa + hd) / 2)
-        self.model_total = self.model_xg_home + self.model_xg_away
-
-    @staticmethod
-    def _blend(s, l):
-        if s <= 0: return max(MIN_XG, l)
-        if l <= 0: return max(MIN_XG, s)
-        return LAST10_WEIGHT * l + SEASON_WEIGHT * s
-
-    def apply_adjustments(self, home_data, away_data):
-        ha = self._form_adj(home_data.get("last5_points", 7))
-        aa = self._form_adj(away_data.get("last5_points", 7))
-        for inj in home_data.get("injuries", []):
-            if not inj.get("key"): continue
-            w = 1.0 if inj.get("confirmed_out", True) else 0.5
-            if inj["position"] == "forward": ha -= INJURY_ADJ * w
-            elif inj["position"] == "defender": aa += INJURY_ADJ * w
-            elif inj["position"] == "midfielder": ha -= INJURY_ADJ * w * 0.66
-        for inj in away_data.get("injuries", []):
-            if not inj.get("key"): continue
-            w = 1.0 if inj.get("confirmed_out", True) else 0.5
-            if inj["position"] == "forward": aa -= INJURY_ADJ * w
-            elif inj["position"] == "defender": ha += INJURY_ADJ * w
-            elif inj["position"] == "midfielder": aa -= INJURY_ADJ * w * 0.66
-        if home_data.get("played_midweek"): ha -= FATIGUE_HOME
-        if away_data.get("played_midweek"): aa -= FATIGUE_AWAY
-        self.model_xg_home = max(MIN_XG, self.model_xg_home + ha)
-        self.model_xg_away = max(MIN_XG, self.model_xg_away + aa)
-        self.model_total = self.model_xg_home + self.model_xg_away
-
-    @staticmethod
-    def _form_adj(p):
-        if p <= 1: return -FORM_ADJ_HIGH
-        if p <= 3: return -FORM_ADJ_MED
-        if p >= 13: return FORM_ADJ_HIGH
-        if p >= 10: return FORM_ADJ_MED
-        return 0.0
-
-    @staticmethod
-    def _trust_weight(current_season_games):
-        if current_season_games >= TRUST_FULL_SAMPLE:
-            return 1.0
-        raw = current_season_games / TRUST_FULL_SAMPLE
-        return max(TRUST_MIN_WEIGHT, raw)
-
-    def shrink_toward_market(self, market_total, home_current_games=999, away_current_games=999):
-        self.market_total = max(0.5, market_total or self.model_total)
-        self.home_trust = self._trust_weight(home_current_games)
-        self.away_trust = self._trust_weight(away_current_games)
-        combined_trust = 0.5 * (self.home_trust + self.away_trust)
-        self.effective_shrink = 1.0 - combined_trust * (1.0 - SHRINK_WEIGHT)
-        self.effective_shrink = min(MAX_EFFECTIVE_SHRINK, self.effective_shrink)
-        self.shrunk_total = ((1.0 - self.effective_shrink) * self.model_total
-                             + self.effective_shrink * self.market_total)
-        scale = self.shrunk_total / self.model_total if self.model_total > 0 else 1.0
-        self.shrunk_xg_home = max(MIN_XG, self.model_xg_home * scale)
-        self.shrunk_xg_away = max(MIN_XG, self.model_xg_away * scale)
-        self.shrunk_total = self.shrunk_xg_home + self.shrunk_xg_away
-
-    def run_poisson(self, max_goals=10):
-        home_probs = self._pmf(self.shrunk_xg_home, max_goals)
-        away_probs = self._pmf(self.shrunk_xg_away, max_goals)
-        p_home = p_draw = p_away = 0.0
-        p_btts_yes = p_btts_no = 0.0
-        p_over = p_under = 0.0
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                prob = home_probs[h] * away_probs[a]
-                if h > a: p_home += prob
-                elif h == a: p_draw += prob
-                else: p_away += prob
-                if h >= 1 and a >= 1: p_btts_yes += prob
-                else: p_btts_no += prob
-                if h + a > 2.5: p_over += prob
-                else: p_under += prob
-        total = p_home + p_draw + p_away
-        if total > 0:
-            p_home /= total; p_draw /= total; p_away /= total
-        p_home_by_1 = p_away_by_1 = 0.0
-        for h in range(max_goals + 1):
-            for a in range(max_goals + 1):
-                prob = home_probs[h] * away_probs[a]
-                if h - a == 1: p_home_by_1 += prob
-                elif a - h == 1: p_away_by_1 += prob
-        ah_home = {
-            -0.5: p_home, -0.25: p_home + 0.5 * p_draw,
-            +0.25: p_home + 0.5 * p_draw, +0.5: p_home + p_draw,
-            +0.75: p_home + p_draw + 0.5 * p_away_by_1,
-            +1.0: p_home + p_draw,
-        }
-        ah_away = {
-            -0.5: p_away, -0.25: p_away + 0.5 * p_draw,
-            +0.25: p_away + 0.5 * p_draw, +0.5: p_away + p_draw,
-            +0.75: p_away + p_draw + 0.5 * p_home_by_1,
-            +1.0: p_away + p_draw,
-        }
-        self.probabilities = {
-            "home_win": p_home, "draw": p_draw, "away_win": p_away,
-            "btts_yes": p_btts_yes, "btts_no": p_btts_no,
-            "over_25": p_over, "under_25": p_under,
-            "ah_home": ah_home, "ah_away": ah_away,
-        }
-
-    @staticmethod
-    def _pmf(lam, kmax):
-        return [(lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(kmax + 1)]
-
-    def _effective_ah_prob(self, side, line):
-        ah = self.probabilities.get(f"ah_{side}", {})
-        candidates = sorted(ah.keys(), key=lambda k: abs(k - line))
-        if not candidates:
             return None
-        closest = candidates[0]
-        if abs(closest - line) > 0.01:
-            p_win = self.probabilities.get(f"{side}_win", 0.0)
-            p_draw = self.probabilities.get("draw", 0.0)
-            if line >= 0.5: return p_win + p_draw
-            if line >= 0.25: return p_win + 0.5 * p_draw
-            if line >= -0.25: return p_win + 0.5 * p_draw
-            return p_win
-        return ah[closest]
+    try:
+        return int(s.replace("+", ""))
+    except ValueError:
+        return None
 
-    # ------------------------------------------------------------------
-    # MODE INPUTS
-    # ------------------------------------------------------------------
-    def compute_mode_inputs(self, match):
-        """
-        Derive fav_side / dog_side / fav_win_prob / fav_gf / dog_gf / dog_ga
-        from the teams' actual last-10 GF / GA, then classify the match.
 
-          - fav_gf  = favourite's goals-scored-per-game (last 10)
-          - dog_gf  = underdog's goals-scored-per-game (last 10)
-          - dog_ga  = underdog's goals-conceded-per-game (last 10)
-        """
-        P = self.probabilities
-        p_home = P.get("home_win", 0.0)
-        p_away = P.get("away_win", 0.0)
-
-        h = match["home_data"]
-        a = match["away_data"]
-
-        if p_home >= p_away:
-            self.fav_side = "home"
-            self.dog_side = "away"
-            self.fav_team = match.get("home_team")
-            self.dog_team = match.get("away_team")
-            self.fav_win_prob = p_home
-            self.fav_gf = float(h.get("home_goals_scored_last10") or 0.0)
-            self.dog_gf = float(a.get("away_goals_scored_last10") or 0.0)
-            self.dog_ga = float(a.get("away_goals_conceded_last10") or 0.0)
+def _parse_last5(soup, side):
+    """Parse last 5 matches from #last-matches #All"""
+    out = []
+    container = soup.select_one("#last-matches #All")
+    if not container:
+        return out
+    block = container.select_one(f".teamstats-{'left' if side == 'home' else 'right'}")
+    if not block:
+        return out
+    for item in block.select("li.team-stat-list-item")[:5]:
+        date_el = item.select_one(".team-stats-date")
+        teams = item.select(".team-stats-team")
+        if len(teams) < 2:
+            continue
+        home_name = teams[0].get_text(" ", strip=True)
+        away_name = teams[1].get_text(" ", strip=True)
+        h_score = _extract_score(teams[0])
+        a_score = _extract_score(teams[1])
+        # Determine result from tracked team's perspective
+        tracked_el = block.select_one(".team-stats-team-name strong")
+        tracked = tracked_el.get_text(strip=True).lower() if tracked_el else ""
+        is_home = tracked in home_name.lower()
+        if is_home:
+            result = "W" if h_score > a_score else "D" if h_score == a_score else "L"
+            score_for, score_against = h_score, a_score
         else:
-            self.fav_side = "away"
-            self.dog_side = "home"
-            self.fav_team = match.get("away_team")
-            self.dog_team = match.get("home_team")
-            self.fav_win_prob = p_away
-            self.fav_gf = float(a.get("away_goals_scored_last10") or 0.0)
-            self.dog_gf = float(h.get("home_goals_scored_last10") or 0.0)
-            self.dog_ga = float(h.get("home_goals_conceded_last10") or 0.0)
-
-        self.mode = classify_mode(
-            self.shrunk_total,
-            self.fav_win_prob,
-            self.dog_gf,
-            self.dog_ga,
-        )
-        self._set_mode_markets()
-
-    def _set_mode_markets(self):
-        m = self.mode
-        if m == MatchMode.WITHSTAND:
-            dog = "Home" if self.dog_side == "home" else "Away"
-            fav = "Home" if self.fav_side == "home" else "Away"
-            self.mode_primary_markets = [
-                ("AH", f"{dog} +0.75"),
-                ("AH", f"{dog} +1"),
-            ]
-            self.mode_secondary_markets = [
-                ("O/U 2.5", "Under 2.5"),
-            ]
-            self.suppressed_markets = [
-                ("BTTS", "Yes"),
-                ("O/U 2.5", "Over 2.5"),
-                ("1X2", "Home Win" if self.fav_side == "home" else "Away Win"),
-                ("AH", f"{fav} -1.5"),
-            ]
-        elif m == MatchMode.DEMOLISH:
-            fav = "Home" if self.fav_side == "home" else "Away"
-            dog = "Home" if self.dog_side == "home" else "Away"
-            self.mode_primary_markets = [
-                ("AH", f"{fav} -1.5"),
-                ("AH", f"{fav} -1.75"),
-            ]
-            self.mode_secondary_markets = [
-                ("O/U 2.5", "Over 2.5"),
-            ]
-            self.suppressed_markets = [
-                ("1X2", "Home Win" if self.dog_side == "home" else "Away Win"),
-                ("O/U 2.5", "Under 2.5"),
-            ]
-        elif m == MatchMode.DEMOLISH_LEAN:
-            fav = "Home" if self.fav_side == "home" else "Away"
-            self.mode_primary_markets = [
-                ("AH", f"{fav} -1"),
-            ]
-            self.mode_secondary_markets = [
-                ("O/U 2.5", "Over 2.5"),
-            ]
-            self.suppressed_markets = []
-        else:  # NO_BET
-            self.mode_primary_markets = []
-            self.mode_secondary_markets = []
-            self.suppressed_markets = []
-
-    def generate_candidates(self, odds):
-        cs = []
-        P = self.probabilities
-
-        def add(market, selection, line, model_prob, odd, reliability_key, col_key):
-            if not odd or odd <= 1.01 or model_prob is None:
-                return
-            implied = 1.0 / odd
-            edge = model_prob - implied
-            conviction = abs(model_prob - 0.5) * 2
-            cs.append({
-                "market": market, "selection": selection, "line": line,
-                "model_prob": model_prob, "implied_prob": implied, "edge": edge,
-                "conviction": conviction, "odds": odd, "reliability_key": reliability_key,
-                "col_key": col_key,
-            })
-
-        o_home = odds.get("home")
-        o_draw = odds.get("draw")
-        o_away = odds.get("away")
-
-        one_x_two = []
-        if o_home: one_x_two.append(("Home Win", P.get("home_win"), o_home, "1x2_home"))
-        if o_draw: one_x_two.append(("Draw",     P.get("draw"),     o_draw, "1x2_draw"))
-        if o_away: one_x_two.append(("Away Win", P.get("away_win"), o_away, "1x2_away"))
-
-        fav_sel = None
-        if one_x_two:
-            fav_sel = min(one_x_two, key=lambda t: t[2])[0]
-
-        for sel, prob, odd, ck in one_x_two:
-            rel_key = "1X2_favourite" if sel == fav_sel else "1X2_underdog"
-            add("1X2", sel, None, prob, odd, rel_key, ck)
-
-        add("DC", "1X", None, P.get("home_win", 0) + P.get("draw", 0), odds.get("dc_1x"), "DC", "dc_1x")
-        add("DC", "12", None, P.get("home_win", 0) + P.get("away_win", 0), odds.get("dc_12"), "DC", "dc_12")
-        add("DC", "X2", None, P.get("draw", 0) + P.get("away_win", 0), odds.get("dc_x2"), "DC", "dc_x2")
-
-        p_h = P.get("home_win", 0); p_a = P.get("away_win", 0)
-        if p_h + p_a > 0:
-            add("DNB", "Home", None, p_h / (p_h + p_a), odds.get("dnb_home"), "DNB", "dnb_home")
-            add("DNB", "Away", None, p_a / (p_h + p_a), odds.get("dnb_away"), "DNB", "dnb_away")
-
-        add("BTTS", "Yes", None, P.get("btts_yes"), odds.get("btts_yes"), "BTTS_yes", "btts_yes")
-        add("BTTS", "No", None, P.get("btts_no"), odds.get("btts_no"), "BTTS_no", "btts_no")
-
-        add("O/U 2.5", "Over 2.5", 2.5, P.get("over_25"), odds.get("over_2.5"), "O/U_2.5_over", "ou_over")
-        add("O/U 2.5", "Under 2.5", 2.5, P.get("under_25"), odds.get("under_2.5"), "O/U_2.5_under", "ou_under")
-
-        ah_h_line = odds.get("ah_home_line")
-        if ah_h_line is not None:
-            p = self._effective_ah_prob("home", ah_h_line)
-            key = "AH_positive" if ah_h_line >= 0 else "AH_negative"
-            add("AH", f"Home {ah_h_line:+g}", ah_h_line, p, odds.get("ah_home"), key, "ah_home")
-        ah_a_line = odds.get("ah_away_line")
-        if ah_a_line is not None:
-            p = self._effective_ah_prob("away", ah_a_line)
-            key = "AH_positive" if ah_a_line >= 0 else "AH_negative"
-            add("AH", f"Away {ah_a_line:+g}", ah_a_line, p, odds.get("ah_away"), key, "ah_away")
-
-        self.candidates = cs
-
-    @staticmethod
-    def _norm_handicap(s):
-        return re.sub(r"([+-])(\d+)(?![\d.])", r"\1\2.0", s)
-
-    def _selection_matches(self, cand, market, selection):
-        if cand["market"] != market:
-            return False
-        if cand["selection"] == selection:
-            return True
-        return self._norm_handicap(cand["selection"]) == self._norm_handicap(selection)
-
-    def _is_suppressed(self, cand):
-        for market, selection in self.suppressed_markets:
-            if self._selection_matches(cand, market, selection):
-                return True
-        return False
-
-    def _is_primary(self, cand):
-        for market, selection in self.mode_primary_markets:
-            if self._selection_matches(cand, market, selection):
-                return True
-        return False
-
-    def _is_secondary(self, cand):
-        for market, selection in self.mode_secondary_markets:
-            if self._selection_matches(cand, market, selection):
-                return True
-        return False
-
-    def score_and_rank(self, reliability):
-        for c in self.candidates:
-            rel = reliability.get(c["reliability_key"], 0.5)
-            edge_capped = min(max(c["edge"], 0.0), EDGE_CAP)
-            c["reliability"] = rel
-            c["score"] = c["conviction"] * edge_capped * rel
-        self.candidates.sort(key=lambda x: x["score"], reverse=True)
-        for i, c in enumerate(self.candidates, start=1):
-            c["rank_in_match"] = i
-
-    @staticmethod
-    def _stake_for_score(score):
-        if score >= STAKE_TIER_HIGH:
-            return "1 unit"
-        if score >= STAKE_TIER_MED:
-            return "0.5 units"
-        return "0.25 units"
-
-    def select_top(self):
-        self.bets = []; self.skips = []
-
-        if self.mode == MatchMode.NO_BET:
-            if self.dog_gf >= 1.5 and self.fav_gf >= 1.5:
-                btts_yes = next(
-                    (c for c in self.candidates
-                     if c["market"] == "BTTS" and c["selection"] == "Yes"),
-                    None,
-                )
-                if btts_yes and btts_yes["edge"] > 0 and btts_yes["score"] >= MIN_SCORE:
-                    stake = self._stake_for_score(btts_yes["score"])
-                    self.bets.append({
-                        "market": btts_yes["market"], "selection": btts_yes["selection"],
-                        "prob": btts_yes["model_prob"], "edge": btts_yes["edge"],
-                        "odds": btts_yes["odds"], "stake": stake,
-                        "confidence": "NO-BET (BTTS Yes only)", "score": btts_yes["score"],
-                    })
-                    for c in self.candidates:
-                        if c is btts_yes:
-                            continue
-                        self.skips.append({
-                            "market": f"{c['market']} — {c['selection']}",
-                            "reason": f"NO-BET zone — rank {c['rank_in_match']}, score {c['score']:.4f}",
-                        })
-                    return
-            self.skips.append({
-                "market": "ALL",
-                "reason": (f"NO-BET zone (total={self.shrunk_total:.2f}, "
-                           f"fav_win={self.fav_win_prob:.1%}, "
-                           f"dog_GF={self.dog_gf:.2f}, "
-                           f"fav_GF={self.fav_gf:.2f})"),
-            })
-            return
-
-        eligible = []
-        for c in self.candidates:
-            if self._is_suppressed(c):
-                self.skips.append({
-                    "market": f"{c['market']} — {c['selection']}",
-                    "reason": f"Suppressed in {self.mode} mode",
-                })
-                continue
-            is_prim = self._is_primary(c)
-            is_sec = self._is_secondary(c)
-            if not (is_prim or is_sec):
-                self.skips.append({
-                    "market": f"{c['market']} — {c['selection']}",
-                    "reason": (f"Not eligible in {self.mode} mode "
-                               f"(rank {c['rank_in_match']}, score {c['score']:.4f})"),
-                })
-                continue
-            c["_mode_priority"] = 0 if is_prim else 1
-            eligible.append(c)
-
-        if not eligible:
-            self.skips.append({
-                "market": "ALL",
-                "reason": (f"{self.mode} mode — no eligible candidate "
-                           f"(required market odds missing)"),
-            })
-            return
-
-        eligible.sort(key=lambda c: (c["_mode_priority"], -c["score"]))
-
-        top = eligible[0]
-        if top["score"] < MIN_SCORE or top["edge"] <= 0:
-            self.skips.append({
-                "market": f"{top['market']} — {top['selection']}",
-                "reason": (f"{self.mode} mode — top eligible score "
-                           f"{top['score']:.4f} below floor or no edge"),
-            })
-            return
-
-        stake = self._stake_for_score(top["score"])
-        self.bets.append({
-            "market": top["market"], "selection": top["selection"],
-            "prob": top["model_prob"], "edge": top["edge"], "odds": top["odds"],
-            "stake": stake, "confidence": f"{self.mode} primary", "score": top["score"],
+            result = "W" if a_score > h_score else "D" if a_score == h_score else "L"
+            score_for, score_against = a_score, h_score
+        out.append({
+            "date": date_el.get_text(strip=True) if date_el else "",
+            "opp": away_name if is_home else home_name,
+            "result": result,
+            "score_for": score_for,
+            "score_against": score_against,
+            "is_home": is_home,
         })
-        bet_ids = {id(top)}
+    return out
 
-        secondary = next((c for c in eligible if c["_mode_priority"] == 1), None)
-        if secondary and secondary["edge"] > 0 and secondary["score"] >= MIN_SCORE:
-            stake2 = self._stake_for_score(secondary["score"])
-            self.bets.append({
-                "market": secondary["market"], "selection": secondary["selection"],
-                "prob": secondary["model_prob"], "edge": secondary["edge"],
-                "odds": secondary["odds"], "stake": stake2,
-                "confidence": f"{self.mode} secondary", "score": secondary["score"],
-            })
-            bet_ids.add(id(secondary))
 
-        for c in eligible:
-            if id(c) in bet_ids:
+def _extract_score(team_el):
+    score_el = team_el.select_one(".score-right")
+    if not score_el:
+        return 0
+    try:
+        return int(score_el.get_text(strip=True))
+    except ValueError:
+        return 0
+
+
+def _parse_last10_splits(soup, side, rec):
+    """Parse last 10 home/away splits from .st-table"""
+    table = soup.select_one(".st-table")
+    if not table:
+        return
+    rows = table.select("tbody tr")
+    idx = 0 if side == "home" else 1
+    if idx >= len(rows):
+        return
+    cells = [td.get_text(strip=True) for td in rows[idx].select("td")]
+    if len(cells) < 8:
+        return
+    # W-D-L
+    m = re.match(r"(\d+)-(\d+)-(\d+)", cells[1])
+    if m:
+        rec[f"{side}_last10_w"] = int(m.group(1))
+        rec[f"{side}_last10_d"] = int(m.group(2))
+        rec[f"{side}_last10_l"] = int(m.group(3))
+    rec[f"{side}_last10_avg_scored"] = _float(cells[3])
+    rec[f"{side}_last10_avg_conceded"] = _float(cells[4])
+    # Win pct
+    if rec.get(f"{side}_last10_w") is not None:
+        rec[f"{side}_last10_win_pct"] = (rec[f"{side}_last10_w"] / 10) * 100
+
+
+def _float(s):
+    try:
+        return float(str(s).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_players(soup, rec):
+    """Parse top scorer/assister from preview text"""
+    # This is approximate — depends on exact HTML structure
+    # Look for "Top Scorer" or "Players to Watch"
+    text = soup.get_text(" ", strip=True)
+    # Top scorer pattern: "Top scorer: Name (N goals)"
+    for side in ["home", "away"]:
+        # Simplified: use regex on the preview text
+        pass  # Requires specific HTML structure
+
+
+def _parse_injuries(soup, rec):
+    """Parse injuries from .inj-two-outline"""
+    rec["home_injuries"] = []
+    rec["away_injuries"] = []
+    for outline in soup.select(".inj-two-outline"):
+        header = outline.select_one(".light-header strong")
+        if not header:
+            continue
+        header_text = header.get_text(" ", strip=True).lower()
+        side = None
+        if rec.get("home_team", "").lower().split()[0] in header_text:
+            side = "home"
+        elif rec.get("away_team", "").lower().split()[0] in header_text:
+            side = "away"
+        if not side:
+            continue
+        for row in outline.select(".inj-two-row"):
+            if "inj-two-title" in row.get("class", []):
                 continue
-            self.skips.append({
-                "market": f"{c['market']} — {c['selection']}",
-                "reason": f"{self.mode} — rank {c['rank_in_match']}, score {c['score']:.4f}",
-            })
+            player_el = row.select_one(".inj-two-player")
+            info_el = row.select_one(".inj-two-info")
+            if not player_el:
+                continue
+            player = player_el.get_text(strip=True)
+            status = "out"
+            if info_el:
+                info = info_el.get_text(strip=True).lower()
+                if "doubt" in info:
+                    status = "doubt"
+                elif "yellow" in info or "red" in info:
+                    status = "suspended"
+            rec[f"{side}_injuries"].append({"player": player, "status": status})
 
-    def get_full_analysis(self):
-        return {
-            "model_xg_home": self.model_xg_home, "model_xg_away": self.model_xg_away,
-            "model_total": self.model_total, "market_total": self.market_total,
-            "shrunk_xg_home": self.shrunk_xg_home, "shrunk_xg_away": self.shrunk_xg_away,
-            "shrunk_total": self.shrunk_total,
-            "probabilities": dict(self.probabilities),
-            "bets": list(self.bets), "skips": list(self.skips),
-            "candidates": list(self.candidates),
-            "effective_shrink": self.effective_shrink,
-            "home_trust": self.home_trust, "away_trust": self.away_trust,
-            "mode": self.mode,
-            "fav_side": self.fav_side,
-            "dog_side": self.dog_side,
-            "fav_team": self.fav_team,
-            "dog_team": self.dog_team,
-            "fav_win_prob": self.fav_win_prob,
-            "fav_gf": self.fav_gf,
-            "dog_gf": self.dog_gf,
-            "dog_ga": self.dog_ga,
-        }
+
+def _parse_xi(soup, rec):
+    """Parse confirmed XI from .lineups-home / .lineups-away"""
+    rec["home_xi"] = []
+    rec["away_xi"] = []
+    for side, cls in [("home", ".lineups-home"), ("away", ".lineups-away")]:
+        block = soup.select_one(cls)
+        if not block:
+            continue
+        for player in block.select(".lineups-player"):
+            name_el = player.select_one(".player-name")
+            if name_el:
+                rec[f"{side}_xi"].append(name_el.get_text(strip=True))
+    # Formation
+    form_el = soup.select_one(".lineups-toggle-formation")
+    if form_el:
+        rec["home_formation"] = form_el.get_text(strip=True)
+
+
+def _parse_h2h(soup):
+    """Parse H2H from #head-to-head"""
+    out = []
+    container = soup.select_one("#head-to-head")
+    if not container:
+        return out
+    for item in container.select("li.team-stat-list-item"):
+        date_el = item.select_one(".team-stats-date")
+        teams = item.select(".team-stats-team")
+        if len(teams) < 2:
+            continue
+        home_name = teams[0].get_text(" ", strip=True)
+        away_name = teams[1].get_text(" ", strip=True)
+        h_score = _extract_score(teams[0])
+        a_score = _extract_score(teams[1])
+        winner = "home" if h_score > a_score else "away" if a_score > h_score else "draw"
+        out.append({
+            "date": date_el.get_text(strip=True) if date_el else "",
+            "home": home_name,
+            "away": away_name,
+            "score": f"{h_score}-{a_score}",
+            "winner": winner,
+        })
+    return out
+
+
+def _parse_odds(soup):
+    """Parse odds from .nlf_odds_row"""
+    out = []
+    for row in soup.select(".nlf_odds_row"):
+        title_el = row.select_one(".nfl_odd_title")
+        if not title_el:
+            continue
+        market = title_el.get_text(strip=True)
+        for ply in row.select(".nfl_odply"):
+            label_el = ply.select_one(".nfl_ply_t")
+            odds_el = ply.select_one(".nfl_ply_o")
+            if label_el and odds_el:
+                out.append({
+                    "market": market,
+                    "selection": label_el.get_text(strip=True),
+                    "odds": _float(odds_el.get_text(strip=True)),
+                })
+    return out
 
 
 # ============================================================================
-# HELPERS
+# v4 MODEL
 # ============================================================================
-def load_parsed_match(parsed: dict) -> dict:
-    odds = parsed.get("odds", {}) or {}
-    h = parsed.get("home_team_last10_home", {}) or {}
-    a = parsed.get("away_team_last10_away", {}) or {}
-    season = parsed.get("season_splits", {}) or {}
-    form = parsed.get("last5_form", {}) or {}
-    inj = parsed.get("injuries", {}) or {}
-    mid = parsed.get("midweek_fixture", {}) or {}
-    lmd = parsed.get("last_match_dates", {}) or {}
-    market_total = derive_market_total(odds.get("over_2.5"), odds.get("under_2.5"))
+def calc_f1(row):
+    home_pts = row.get("home_points") or 0
+    away_pts = row.get("away_points") or 0
+    home_gd = row.get("home_gd") or 0
+    away_gd = row.get("away_gd") or 0
+    pts_gap = home_pts - away_pts
+    gd_gap = home_gd - away_gd
+    f1_home = 10 + (pts_gap * 1.33) + (gd_gap * 0.66)
+    f1_away = 10 - (pts_gap * 1.33) - (gd_gap * 0.66)
+    f1_home = max(0, min(20, f1_home))
+    f1_away = max(0, min(20, f1_away))
+    away_collapse = False
+    if row.get("away_away_points") == 0 and (row.get("away_away_played") or 0) >= 3:
+        f1_home = min(20, f1_home + 8)
+        away_collapse = True
+    return f1_home, f1_away, away_collapse
+
+
+def calc_f2(last5):
+    if not last5:
+        return 7.5
+    raw = 0
+    for m in last5:
+        r = m.get("result", "L")
+        if r == "W":
+            raw += 5
+            if (m.get("score_for") or 0) >= 3:
+                raw += 1
+        elif r == "D":
+            raw += 2
+        else:
+            if (m.get("score_against") or 0) >= 3:
+                raw -= 1
+    raw = max(0, min(15, raw))
+    return (raw / 15) * 25
+
+
+def calc_f3(win_pct, avg_scored, avg_conceded):
+    win_pts = ((win_pct or 0) / 100) * 10
+    xg_edge = (avg_scored or 0) - (avg_conceded or 0)
+    xg_pts = 5 if xg_edge > 0.5 else 2 if xg_edge > 0 else 0
+    return min(15, win_pts + xg_pts)
+
+
+def calc_f4(top_scorer, top_assister, injuries, xi):
+    f4 = 15
+    injured = [i.get("player", "") for i in (injuries or [])]
+    doubts = [i.get("player", "") for i in (injuries or []) if i.get("status") == "doubt"]
+    xi = xi or []
+    if top_scorer and top_scorer in injured and top_scorer not in xi:
+        f4 -= 5
+    if top_assister and top_assister in injured and top_assister not in xi:
+        f4 -= 4
+    doubted_starter = False
+    for name in doubts:
+        if name in xi and (name == top_scorer or name == top_assister):
+            f4 += 5
+            doubted_starter = True
+    return max(0, min(20, f4)), doubted_starter
+
+
+def calc_f5(h2h_home, h2h_away, h2h_total):
+    if not h2h_total:
+        return 5.0, 5.0
+    return (h2h_home / h2h_total) * 10, (h2h_away / h2h_total) * 10
+
+
+def calc_f6(home_avg, away_avg):
+    if (home_avg or 0) > (away_avg or 0):
+        return 11, 7
+    elif (home_avg or 0) < (away_avg or 0):
+        return 7, 11
+    return 8, 8
+
+
+def apply_override(f1_home, f1_away, f5_home, f5_away):
+    f1_gap = abs(f1_home - f1_away)
+    f5_gap = abs(f5_home - f5_away)
+    f1_leader = "home" if f1_home > f1_away else "away"
+    f5_leader = "home" if f5_home > f5_away else "away"
+    conflict = f1_leader != f5_leader and f1_gap >= 12 and f5_gap >= 6
+    override = False
+    if conflict and f1_gap > f5_gap:
+        if f1_leader == "home":
+            f5_home, f5_away = 10, 0
+        else:
+            f5_home, f5_away = 0, 10
+        override = True
+    return f5_home, f5_away, conflict, override
+
+
+def calc_expected_total(row):
+    h_s = row.get("home_home_last10_avg_scored") or 1.0
+    a_c = row.get("away_away_last10_avg_conceded") or 1.0
+    a_s = row.get("away_away_last10_avg_scored") or 1.0
+    h_c = row.get("home_home_last10_avg_conceded") or 1.0
+    return (h_s + a_c + a_s + h_c) / 2
+
+
+def predict_v4(row):
+    f1_home, f1_away, away_collapse = calc_f1(row)
+    f2_home = calc_f2(row.get("home_last5"))
+    f2_away = calc_f2(row.get("away_last5"))
+    f3_home = calc_f3(row.get("home_home_win_pct"),
+                      row.get("home_home_last10_avg_scored"),
+                      row.get("home_home_last10_avg_conceded"))
+    f3_away = calc_f3(row.get("away_away_win_pct"),
+                      row.get("away_away_last10_avg_scored"),
+                      row.get("away_away_last10_avg_conceded"))
+    f4_home, dh = calc_f4(row.get("home_top_scorer"), row.get("home_top_assister"),
+                          row.get("home_injuries"), row.get("home_xi"))
+    f4_away, da = calc_f4(row.get("away_top_scorer"), row.get("away_top_assister"),
+                          row.get("away_injuries"), row.get("away_xi"))
+    doubted = dh or da
+    f5_home, f5_away = calc_f5(row.get("h2h_home_wins") or 0,
+                               row.get("h2h_away_wins") or 0,
+                               len(row.get("h2h") or []))
+    f6_home, f6_away = calc_f6(row.get("home_last10_avg_scored"),
+                               row.get("away_last10_avg_scored"))
+
+    f5_home, f5_away, conflict, override = apply_override(f1_home, f1_away, f5_home, f5_away)
+
+    home_total = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
+    away_total = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
+    gap = abs(home_total - away_total)
+
+    if gap > 25:
+        call_1x2 = "Straight Win Home" if home_total > away_total else "Straight Win Away"
+    elif gap >= 15:
+        call_1x2 = "Double Chance 1X" if home_total > away_total else "Double Chance X2"
+    else:
+        call_1x2 = "NO BET"
+
+    expected = calc_expected_total(row)
+    if expected < 2.5:
+        call_ou = "Under 2.5"
+    elif expected > 3.3:
+        call_ou = "Over 2.5"
+    else:
+        call_ou = "No Bet"
+    if away_collapse or doubted:
+        call_ou = "Over 2.5"
+
     return {
-        "match_id": parsed.get("match_id"),
-        "home_team": parsed.get("home_team"),
-        "away_team": parsed.get("away_team"),
-        "league": parsed.get("competition"),
-        "date": parsed.get("match_date") or datetime.now().strftime("%Y-%m-%d"),
-        "kickoff": parsed.get("kickoff"),
-        "venue": parsed.get("venue"),
-        "home_current_games": parsed.get("home_current_season_games", 0),
-        "away_current_games": parsed.get("away_current_season_games", 0),
-        "home_last_match_date": lmd.get("home"),
-        "away_last_match_date": lmd.get("away"),
-        "sg_pick": parsed.get("sg_pick"),
-        "home_data": {
-            "home_goals_scored_season": season.get("home_team_home_gf_pg") or h.get("gf_per_game", 1.2),
-            "home_goals_scored_last10": h.get("gf_per_game", 1.2),
-            "home_goals_conceded_season": season.get("home_team_home_ga_pg") or h.get("ga_per_game", 1.2),
-            "home_goals_conceded_last10": h.get("ga_per_game", 1.2),
-            "last5_points": form.get("home_team_points", 7),
-            "injuries": _inj_list("home", inj),
-            "played_midweek": mid.get("home_team_played", False),
-        },
-        "away_data": {
-            "away_goals_scored_season": season.get("away_team_away_gf_pg") or a.get("gf_per_game", 1.0),
-            "away_goals_scored_last10": a.get("gf_per_game", 1.0),
-            "away_goals_conceded_season": season.get("away_team_away_ga_pg") or a.get("ga_per_game", 1.2),
-            "away_goals_conceded_last10": a.get("ga_per_game", 1.2),
-            "last5_points": form.get("away_team_points", 7),
-            "injuries": _inj_list("away", inj),
-            "played_midweek": mid.get("away_team_played", False),
-        },
-        "odds": {
-            "home": odds.get("home"), "draw": odds.get("draw"), "away": odds.get("away"),
-            "dc_1x": odds.get("dc_1x"), "dc_12": odds.get("dc_12"), "dc_x2": odds.get("dc_x2"),
-            "dnb_home": odds.get("dnb_home"), "dnb_away": odds.get("dnb_away"),
-            "ah_home_line": odds.get("ah_home_line"), "ah_home": odds.get("ah_home"),
-            "ah_away_line": odds.get("ah_away_line"), "ah_away": odds.get("ah_away"),
-            "btts_yes": odds.get("btts_yes"), "btts_no": odds.get("btts_no"),
-            "over_2.5": odds.get("over_2.5"), "under_2.5": odds.get("under_2.5"),
-        },
-        "market_total": market_total,
-        "_parsed": parsed,
+        "f1_home": round(f1_home, 2), "f1_away": round(f1_away, 2),
+        "f1_gap": round(abs(f1_home - f1_away), 2),
+        "f1_leader": "home" if f1_home > f1_away else "away",
+        "f2_home": round(f2_home, 2), "f2_away": round(f2_away, 2),
+        "f3_home": round(f3_home, 2), "f3_away": round(f3_away, 2),
+        "f4_home": round(f4_home, 2), "f4_away": round(f4_away, 2),
+        "f5_home": round(f5_home, 2), "f5_away": round(f5_away, 2),
+        "f5_gap": round(abs(f5_home - f5_away), 2),
+        "f5_leader": "home" if f5_home > f5_away else "away",
+        "f6_home": round(f6_home, 2), "f6_away": round(f6_away, 2),
+        "home_total": round(home_total, 2), "away_total": round(away_total, 2),
+        "total_gap": round(gap, 2),
+        "f1_f5_conflict": conflict,
+        "f1_f5_override": override,
+        "away_collapse": away_collapse,
+        "doubted_starter": doubted,
+        "call_1x2": call_1x2,
+        "call_ou": call_ou,
+        "expected_total": round(expected, 2),
     }
 
 
-def _inj_list(side, inj):
-    out = []
-    for _ in range(inj.get(f"{side}_key_attackers_out", 0)):
-        out.append({"position": "forward", "key": True, "confirmed_out": True})
-    for _ in range(inj.get(f"{side}_key_defenders_out", 0)):
-        out.append({"position": "defender", "key": True, "confirmed_out": True})
-    for _ in range(inj.get(f"{side}_key_midfielders_out", 0)):
-        out.append({"position": "midfielder", "key": True, "confirmed_out": True})
-    return out
-
-
-def derive_market_total(over_odds, under_odds):
-    if not over_odds or not under_odds:
-        return None
-    p_over = (1.0 / over_odds) / ((1.0 / over_odds) + (1.0 / under_odds))
-    lo, hi = 0.1, 6.0
-    for _ in range(50):
-        mid = (lo + hi) / 2
-        p = 1.0 - _pcdf(mid, 2)
-        if p < p_over: lo = mid
-        else: hi = mid
-    return round((lo + hi) / 2, 2)
-
-
-def _pcdf(lam, k):
-    return sum((lam ** i) * math.exp(-lam) / math.factorial(i) for i in range(k + 1))
-
-
-def parse_match_date(d):
-    if not d: return datetime(1900, 1, 1)
-    if isinstance(d, (date, datetime)): return datetime(d.year, d.month, d.day)
-    s = str(d).strip()
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
-        try: return datetime.strptime(s, fmt)
-        except ValueError: continue
-    return datetime(1900, 1, 1)
-
-
 # ============================================================================
-# RELIABILITY
+# AUDIT
 # ============================================================================
-DEFAULT_RELIABILITY = {
-    "AH_positive": 1.0, "AH_negative": 0.7,
-    "1X2_favourite": 0.6, "1X2_underdog": 0.8,
-    "BTTS_yes": 0.8, "BTTS_no": 0.5,
-    "O/U_2.5_over": 0.85, "O/U_2.5_under": 0.7,
-    "DC": 0.6, "DNB": 0.6,
-}
-
-COL_TO_REL = {
-    "dc_1x":     "DC",
-    "dc_12":     "DC",
-    "dc_x2":     "DC",
-    "dnb_home":  "DNB",
-    "dnb_away":  "DNB",
-    "btts_yes":  "BTTS_yes",
-    "btts_no":   "BTTS_no",
-    "ou_over":   "O/U_2.5_over",
-    "ou_under":  "O/U_2.5_under",
-}
-
-COL_TO_MARKET_SELECTION = {
-    "1x2_home":  ("1X2",     "Home Win"),
-    "1x2_draw":  ("1X2",     "Draw"),
-    "1x2_away":  ("1X2",     "Away Win"),
-    "dc_1x":     ("DC",      "1X"),
-    "dc_12":     ("DC",      "12"),
-    "dc_x2":     ("DC",      "X2"),
-    "dnb_home":  ("DNB",     "Home"),
-    "dnb_away":  ("DNB",     "Away"),
-    "btts_yes":  ("BTTS",    "Yes"),
-    "btts_no":   ("BTTS",    "No"),
-    "ou_over":   ("O/U 2.5", "Over 2.5"),
-    "ou_under":  ("O/U 2.5", "Under 2.5"),
-    "ah_home":   ("AH",      None),
-    "ah_away":   ("AH",      None),
-}
-
-ALL_COL_KEYS = list(COL_TO_MARKET_SELECTION.keys())
-
-
-def _safe_float(v, default=0.0):
-    try:
-        if v is None:
-            return default
-        return float(v)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_int(v, default=0):
-    try:
-        if v is None:
-            return default
-        return int(v)
-    except (TypeError, ValueError):
-        return default
-
-
-def get_reliability(sb):
-    out = dict(DEFAULT_RELIABILITY)
-    if sb is None:
-        return out
-    try:
-        resp = sb.table("reliability").select("market,weight").execute()
-        for row in resp.data or []:
-            market = row.get("market")
-            if not market:
-                continue
-            out[market] = _safe_float(row.get("weight"), DEFAULT_RELIABILITY.get(market, 0.5))
-    except Exception as e:
-        st.warning(f"Reliability read failed: {e}")
-    return out
-
-
-def seed_reliability(sb):
-    if sb is None:
-        return False, "no client"
-    try:
-        existing_resp = sb.table("reliability").select("market").execute()
-        existing = {row["market"] for row in (existing_resp.data or []) if row.get("market")}
-
-        new_rows = []
-        for k, v in DEFAULT_RELIABILITY.items():
-            if k not in existing:
-                new_rows.append({
-                    "market": k, "weight": v, "prior_weight": v,
-                    "prior_strength": RELIABILITY_PRIOR_STRENGTH,
-                    "wins": 0, "losses": 0, "pushes": 0, "total": 0,
-                })
-
-        if not new_rows:
-            return True, f"all {len(existing)} markets already present, nothing seeded"
-
-        sb.table("reliability").insert(new_rows).execute()
-        return True, f"{len(new_rows)} new markets seeded"
-    except Exception as e:
-        return False, str(e)
-
-
-def settle_candidate(market, selection, line, hg, ag):
-    total = hg + ag
-    if market == "1X2":
-        if selection == "Home Win": return "WON" if hg > ag else "LOST"
-        if selection == "Draw": return "WON" if hg == ag else "LOST"
-        if selection == "Away Win": return "WON" if hg < ag else "LOST"
-    if market == "DC":
-        if selection == "1X": return "WON" if hg >= ag else "LOST"
-        if selection == "X2": return "WON" if hg <= ag else "LOST"
-        if selection == "12": return "WON" if hg != ag else "LOST"
-    if market == "DNB":
-        if hg == ag: return "PUSH"
-        if selection == "Home": return "WON" if hg > ag else "LOST"
-        if selection == "Away": return "WON" if hg < ag else "LOST"
-    if market == "BTTS":
-        yes = (hg >= 1 and ag >= 1)
-        if selection == "Yes": return "WON" if yes else "LOST"
-        if selection == "No": return "WON" if not yes else "LOST"
-    if market == "O/U 2.5":
-        if "Over" in selection: return "WON" if total > 2.5 else "LOST"
-        if "Under" in selection: return "WON" if total < 2.5 else "LOST"
-    if market == "AH":
-        m = re.match(r"(Home|Away)\s+([+-]?[\d.]+)", selection)
-        if m:
-            side = m.group(1).lower()
-            hcp = float(m.group(2))
-            margin = (hg - ag) if side == "home" else (ag - hg)
-            adjusted = margin + hcp
-            if adjusted > 0: return "WON"
-            if adjusted < 0: return "LOST"
-            return "PUSH"
-    return None
-
-
-def settle_sg_pick(pick, home_team, away_team, hg, ag):
-    if not pick:
-        return None
-    p = pick.lower().strip()
-    total = hg + ag
-    home_lower = (home_team or "").lower()
-    away_lower = (away_team or "").lower()
-
-    home_tokens = [t for t in home_lower.split() if len(t) > 3]
-    away_tokens = [t for t in away_lower.split() if len(t) > 3]
-    home_in = any(t in p for t in home_tokens)
-    away_in = any(t in p for t in away_tokens)
-
-    m = re.search(r"(over|under)\s+([\d.]+)", p)
-    if m:
-        line = float(m.group(2))
-        over = m.group(1) == "over"
-        if total == line: return "PUSH"
-        if over: return "WON" if total > line else "LOST"
-        return "WON" if total < line else "LOST"
-
-    if "btts" in p or "both teams to score" in p:
-        both_scored = (hg >= 1 and ag >= 1)
-        if "no" in p: return "WON" if not both_scored else "LOST"
-        return "WON" if both_scored else "LOST"
-
-    if "hcp" in p or "handicap" in p or "ah " in p:
-        lm = re.search(r"([+-][\d.]+)", pick)
-        if not lm:
-            return None
-        line = float(lm.group(1))
-        if home_in and not away_in:
-            margin = (hg - ag) + line
-        elif away_in and not home_in:
-            margin = (ag - hg) + line
-        else:
-            return None
-        if margin > 0: return "WON"
-        if margin < 0: return "LOST"
-        return "PUSH"
-
-    if "draw" in p:
-        return "WON" if hg == ag else "LOST"
-    if home_in and not away_in:
-        return "WON" if hg > ag else "LOST"
-    if away_in and not home_in:
-        return "WON" if hg < ag else "LOST"
-
-    return None
-
-
-def _determine_1x2_fav_col(odds_home, odds_draw, odds_away):
-    candidates = []
-    if odds_home: candidates.append((odds_home, "1x2_home"))
-    if odds_draw: candidates.append((odds_draw, "1x2_draw"))
-    if odds_away: candidates.append((odds_away, "1x2_away"))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda t: t[0])[1]
-
-
-def update_reliability(sb):
-    if sb is None:
-        return False, "no client"
-    try:
-        cols = ["ah_home_line", "ah_away_line",
-                "odds_1x2_home", "odds_1x2_draw", "odds_1x2_away"]
-        for ck in ALL_COL_KEYS:
-            cols.append(f"outcome_{ck}")
-        col_csv = ",".join(cols)
-        resp = sb.table("matches").select(col_csv).not_.is_("outcome_1x2_home", "null").execute()
-        rows = resp.data or []
-
-        groups = {k: {"wins": 0, "losses": 0, "pushes": 0} for k in DEFAULT_RELIABILITY}
-
-        for r in rows:
-            ah_h = r.get("ah_home_line")
-            ah_a = r.get("ah_away_line")
-            fav_col = _determine_1x2_fav_col(
-                r.get("odds_1x2_home"),
-                r.get("odds_1x2_draw"),
-                r.get("odds_1x2_away"),
-            )
-
-            for ck in ALL_COL_KEYS:
-                outcome = r.get(f"outcome_{ck}")
-                if outcome is None:
-                    continue
-
-                if ck in ("1x2_home", "1x2_draw", "1x2_away"):
-                    rel_key = "1X2_favourite" if ck == fav_col else "1X2_underdog"
-                elif ck == "ah_home":
-                    rel_key = "AH_positive" if (ah_h is not None and _safe_float(ah_h) >= 0) else "AH_negative"
-                elif ck == "ah_away":
-                    rel_key = "AH_positive" if (ah_a is not None and _safe_float(ah_a) >= 0) else "AH_negative"
-                else:
-                    rel_key = COL_TO_REL.get(ck)
-
-                if rel_key not in groups:
-                    continue
-
-                if outcome == "WON": groups[rel_key]["wins"] += 1
-                elif outcome == "LOST": groups[rel_key]["losses"] += 1
-                elif outcome == "PUSH": groups[rel_key]["pushes"] += 1
-
-        updated = 0
-        for key, counts in groups.items():
-            prior = DEFAULT_RELIABILITY.get(key, 0.5)
-            w_, l_, p_ = counts["wins"], counts["losses"], counts["pushes"]
-            total = w_ + l_ + p_
-            if total == 0:
-                continue
-            weight = (w_ + prior * RELIABILITY_PRIOR_STRENGTH) / (total + RELIABILITY_PRIOR_STRENGTH)
-            sb.table("reliability").upsert({
-                "market": key, "weight": weight,
-                "wins": w_, "losses": l_, "pushes": p_, "total": total,
-                "prior_weight": prior, "prior_strength": RELIABILITY_PRIOR_STRENGTH,
-            }, on_conflict="market").execute()
-            updated += 1
-        return True, f"{updated} markets updated"
-    except Exception as e:
-        return False, str(e)
-
-
-# ============================================================================
-# SUPABASE WRITE — wide row
-# ============================================================================
-def write_match(sb, match, analysis):
-    if sb is None:
-        return False, "no client"
-    try:
-        home_ah = match["_parsed"]["home_team_last10_home"]
-        away_ah = match["_parsed"]["away_team_last10_away"]
-        inj = match["_parsed"]["injuries"]
-
-        rec = {
-            "match_id": match["match_id"],
-            "match_date": match["date"],
-            "kickoff": match.get("kickoff"),
-            "league": match.get("league"),
-            "home_team": match.get("home_team"),
-            "away_team": match.get("away_team"),
-            "venue": match.get("venue"),
-            "sg_pick": match.get("sg_pick"),
-            "home_gf_per_game_last10": match["home_data"].get("home_goals_scored_last10"),
-            "home_ga_per_game_last10": match["home_data"].get("home_goals_conceded_last10"),
-            "away_gf_per_game_last10": match["away_data"].get("away_goals_scored_last10"),
-            "away_ga_per_game_last10": match["away_data"].get("away_goals_conceded_last10"),
-            "home_wins_last10": home_ah.get("wins"),
-            "home_draws_last10": home_ah.get("draws"),
-            "home_losses_last10": home_ah.get("losses"),
-            "home_over25_last10": home_ah.get("over25"),
-            "home_btts_yes_last10": home_ah.get("btts_yes"),
-            "away_wins_last10": away_ah.get("wins"),
-            "away_draws_last10": away_ah.get("draws"),
-            "away_losses_last10": away_ah.get("losses"),
-            "away_over25_last10": away_ah.get("over25"),
-            "away_btts_yes_last10": away_ah.get("btts_yes"),
-            "home_last5_points": match["home_data"].get("last5_points"),
-            "away_last5_points": match["away_data"].get("last5_points"),
-            "home_last_match_date": match.get("home_last_match_date"),
-            "away_last_match_date": match.get("away_last_match_date"),
-            "home_played_midweek": match["home_data"].get("played_midweek"),
-            "away_played_midweek": match["away_data"].get("played_midweek"),
-            "home_key_attackers_out": inj.get("home_key_attackers_out", 0),
-            "home_key_defenders_out": inj.get("home_key_defenders_out", 0),
-            "home_key_midfielders_out": inj.get("home_key_midfielders_out", 0),
-            "away_key_attackers_out": inj.get("away_key_attackers_out", 0),
-            "away_key_defenders_out": inj.get("away_key_defenders_out", 0),
-            "away_key_midfielders_out": inj.get("away_key_midfielders_out", 0),
-            "home_current_season_games": match.get("home_current_games"),
-            "away_current_season_games": match.get("away_current_games"),
-            "home_gf_per_game_season": match["home_data"].get("home_goals_scored_season"),
-            "home_ga_per_game_season": match["home_data"].get("home_goals_conceded_season"),
-            "away_gf_per_game_season": match["away_data"].get("away_goals_scored_season"),
-            "away_ga_per_game_season": match["away_data"].get("away_goals_conceded_season"),
-            "model_xg_home_raw": analysis["model_xg_home"],
-            "model_xg_away_raw": analysis["model_xg_away"],
-            "model_xg_home_shrunk": analysis["shrunk_xg_home"],
-            "model_xg_away_shrunk": analysis["shrunk_xg_away"],
-            "model_total_raw": analysis["model_total"],
-            "model_total_shrunk": analysis["shrunk_total"],
-            "shrink_weight_applied": analysis["effective_shrink"],
-            "market_total": analysis["market_total"],
-            "model_prob_home": analysis["probabilities"].get("home_win"),
-            "model_prob_draw": analysis["probabilities"].get("draw"),
-            "model_prob_away": analysis["probabilities"].get("away_win"),
-            "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
-            "model_prob_over_25": analysis["probabilities"].get("over_25"),
-            "model_prob_under_25": analysis["probabilities"].get("under_25"),
-            # mode fields — DB columns use the favourite_*/underdog_* convention,
-            # the classification column is `regime`, and the DB check constraint
-            # allows only 'withstand' | 'demolish' | 'neutral'.
-            # favourite_gf_per_game / underdog_gf_per_game / underdog_ga_per_game
-            # are derived by the DB trigger — do not write them here.
-            "regime": REGIME_TO_DB.get(analysis.get("mode")),
-            "favourite_side": analysis.get("fav_side"),
-            "underdog_side": analysis.get("dog_side"),
-            "favourite_win_prob": analysis.get("fav_win_prob"),
-        }
-
-        rec["ah_home_line"] = match["odds"].get("ah_home_line")
-        rec["ah_away_line"] = match["odds"].get("ah_away_line")
-        rec["line_ou_over"] = 2.5
-        rec["line_ou_under"] = 2.5
-
-        for ck in ALL_COL_KEYS:
-            rec[f"odds_{ck}"] = None
-            rec[f"implied_prob_{ck}"] = None
-            rec[f"prob_{ck}"] = None
-            rec[f"edge_{ck}"] = None
-            rec[f"conviction_{ck}"] = None
-            rec[f"reliability_{ck}"] = None
-            rec[f"score_{ck}"] = None
-            rec[f"rank_{ck}"] = None
-            rec[f"was_bet_{ck}"] = False
-            rec[f"stake_{ck}"] = None
-            rec[f"outcome_{ck}"] = None
-
-        for c in analysis["candidates"]:
-            ck = c["col_key"]
-            rec[f"odds_{ck}"] = c["odds"]
-            rec[f"implied_prob_{ck}"] = c["implied_prob"]
-            rec[f"prob_{ck}"] = c["model_prob"]
-            rec[f"edge_{ck}"] = c["edge"]
-            rec[f"conviction_{ck}"] = c["conviction"]
-            rec[f"reliability_{ck}"] = c["reliability"]
-            rec[f"score_{ck}"] = c["score"]
-            rec[f"rank_{ck}"] = c["rank_in_match"]
-
-        for bet in analysis["bets"]:
-            top_c = next((c for c in analysis["candidates"]
-                          if c["market"] == bet["market"]
-                          and c["selection"] == bet["selection"]), None)
-            if not top_c:
-                continue
-            ck = top_c["col_key"]
-            rec[f"was_bet_{ck}"] = True
-            m = re.match(r"([\d.]+)", bet.get("stake", "0"))
-            stake_val = float(m.group(1)) if m else None
-            rec[f"stake_{ck}"] = stake_val
-
-        if analysis["bets"]:
-            primary = analysis["bets"][0]
-            top_c = next((c for c in analysis["candidates"]
-                          if c["market"] == primary["market"]
-                          and c["selection"] == primary["selection"]), None)
-            if top_c:
-                m = re.match(r"([\d.]+)", primary.get("stake", "0"))
-                stake_val = float(m.group(1)) if m else None
-                rec["picked_market"] = primary["market"]
-                rec["picked_selection"] = primary["selection"]
-                rec["picked_line"] = top_c["line"]
-                rec["picked_odds"] = primary["odds"]
-                rec["picked_model_prob"] = primary["prob"]
-                rec["picked_implied_prob"] = 1.0 / primary["odds"] if primary["odds"] else None
-                rec["picked_edge"] = primary["edge"]
-                rec["picked_conviction"] = top_c["conviction"]
-                rec["picked_reliability"] = top_c["reliability"]
-                rec["picked_score"] = primary["score"]
-                rec["picked_stake"] = stake_val
-                rec["picked_outcome"] = None
-
-        if len(analysis["bets"]) > 1:
-            secondary = analysis["bets"][1]
-            sec_c = next((c for c in analysis["candidates"]
-                          if c["market"] == secondary["market"]
-                          and c["selection"] == secondary["selection"]), None)
-            if sec_c:
-                m = re.match(r"([\d.]+)", secondary.get("stake", "0"))
-                sec_stake = float(m.group(1)) if m else None
-                rec["secondary_market"] = secondary["market"]
-                rec["secondary_selection"] = secondary["selection"]
-                rec["secondary_odds"] = secondary["odds"]
-                rec["secondary_stake"] = sec_stake
-                rec["secondary_outcome"] = None
-
-        sb.table("matches").upsert(rec, on_conflict="match_id").execute()
-        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates, regime={rec.get('regime')})"
-    except Exception as e:
-        return False, str(e)
-
-
-def record_outcome(sb, match_id, hg, ag):
-    if sb is None:
-        return False, "no client"
-    try:
-        try:
-            resp = sb.table("matches").select(
-                "ah_home_line,ah_away_line,picked_market,picked_selection,"
-                "secondary_market,secondary_selection,"
-                "regime,sg_pick,home_team,away_team"
-            ).eq("match_id", match_id).execute()
-        except Exception:
-            resp = sb.table("matches").select(
-                "ah_home_line,ah_away_line,picked_market,picked_selection,"
-                "sg_pick,home_team,away_team"
-            ).eq("match_id", match_id).execute()
-
-        if not resp.data:
-            return False, f"match_id {match_id} not found"
-        m = resp.data[0]
-
-        updates = {"actual_home_goals": hg, "actual_away_goals": ag}
-        ah_h_line = m.get("ah_home_line")
-        ah_a_line = m.get("ah_away_line")
-
-        for ck, (market, selection) in COL_TO_MARKET_SELECTION.items():
-            if market == "AH":
-                if ck == "ah_home":
-                    if ah_h_line is None: continue
-                    sel = f"Home {float(ah_h_line):+g}"
-                else:
-                    if ah_a_line is None: continue
-                    sel = f"Away {float(ah_a_line):+g}"
-            else:
-                sel = selection
-            outcome = settle_candidate(market, sel, None, hg, ag)
-            if outcome:
-                updates[f"outcome_{ck}"] = outcome
-
-        def _find_ck(market, selection):
-            for ck, (mk, s) in COL_TO_MARKET_SELECTION.items():
-                if mk != market:
-                    continue
-                if mk == "AH":
-                    if ck == "ah_home" and selection and selection.startswith("Home"):
-                        return ck
-                    if ck == "ah_away" and selection and selection.startswith("Away"):
-                        return ck
-                elif s == selection:
-                    return ck
-            return None
-
-        pm = m.get("picked_market")
-        ps = m.get("picked_selection")
-        if pm and ps:
-            picked_ck = _find_ck(pm, ps)
-            if picked_ck and f"outcome_{picked_ck}" in updates:
-                updates["picked_outcome"] = updates[f"outcome_{picked_ck}"]
-
-        sm = m.get("secondary_market")
-        ss = m.get("secondary_selection")
-        if sm and ss:
-            sec_ck = _find_ck(sm, ss)
-            if sec_ck and f"outcome_{sec_ck}" in updates:
-                updates["secondary_outcome"] = updates[f"outcome_{sec_ck}"]
-
-        sg_outcome = settle_sg_pick(
-            m.get("sg_pick"),
-            m.get("home_team", ""),
-            m.get("away_team", ""),
-            hg, ag,
-        )
-        if sg_outcome:
-            updates["sg_outcome"] = sg_outcome
-
-        try:
-            sb.table("matches").update(updates).eq("match_id", match_id).execute()
-        except Exception:
-            updates.pop("secondary_outcome", None)
-            sb.table("matches").update(updates).eq("match_id", match_id).execute()
-
-        ok, msg = update_reliability(sb)
-        return True, f"settled; reliability: {msg}"
-    except Exception as e:
-        return False, str(e)
-
-
-# ============================================================================
-# DISPLAY
-# ============================================================================
-def _mode_pill(mode):
-    cls = {
-        MatchMode.WITHSTAND: "mode-withstand",
-        MatchMode.DEMOLISH: "mode-demolish",
-        MatchMode.DEMOLISH_LEAN: "mode-lean",
-        MatchMode.NO_BET: "mode-nobet",
-    }.get(mode, "mode-nobet")
-    label = {
-        MatchMode.WITHSTAND: "WITHSTAND",
-        MatchMode.DEMOLISH: "DEMOLISH",
-        MatchMode.DEMOLISH_LEAN: "DEMOLISH-LEAN",
-        MatchMode.NO_BET: "NO-BET ZONE",
-    }.get(mode, "—")
-    return f'<span class="mode-pill {cls}">{label}</span>'
-
-
-def render_prediction_card(match, parsed, analysis):
-    meta_parts = []
-    if match.get("league"): meta_parts.append(match["league"])
-    if parsed.get("venue"): meta_parts.append(parsed["venue"])
-    if match.get("date"): meta_parts.append(match["date"])
-    if parsed.get("kickoff"): meta_parts.append(parsed["kickoff"])
-    meta = "  ·  ".join(meta_parts)
-
-    st.markdown(f"""
-    <div class="team-header">
-        <div class="team-names">{match['home_team']} &nbsp;🆚&nbsp; {match['away_team']}</div>
-        <div class="team-meta">{meta}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown(
-        f'<div style="margin-bottom:0.5rem;">{_mode_pill(analysis.get("mode"))}</div>',
-        unsafe_allow_html=True,
-    )
-
-    fav_team = analysis.get("fav_team") or "—"
-    dog_team = analysis.get("dog_team") or "—"
-    fav_side = analysis.get("fav_side") or "—"
-
-    st.markdown('<div class="section-title">Mode Inputs</div>', unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class="trust-row"><span>shrunk_total</span><span class="trust-value">{analysis['shrunk_total']:.2f}</span></div>
-    <div class="trust-row"><span>Favourite: <strong>{fav_team}</strong> ({fav_side})</span><span class="trust-value">{analysis['fav_win_prob']:.1%} win</span></div>
-    <div class="trust-row"><span>{fav_team} GF (last 10)</span><span class="trust-value">{analysis['fav_gf']:.2f}</span></div>
-    <div class="trust-row"><span>{dog_team} GF (last 10)</span><span class="trust-value">{analysis['dog_gf']:.2f}</span></div>
-    <div class="trust-row"><span>{dog_team} GA (last 10)</span><span class="trust-value">{analysis['dog_ga']:.2f}</span></div>
-    """, unsafe_allow_html=True)
-
-    if analysis["bets"]:
-        primary = analysis["bets"][0]
-        secondary_html = ""
-        if len(analysis["bets"]) > 1:
-            s = analysis["bets"][1]
-            secondary_html = (
-                f'<div class="verdict-detail">↳ Secondary: '
-                f'<strong>{s["selection"]}</strong> ({s["market"]}) '
-                f'@ {s["odds"]:.2f} · Edge {s["edge"]:+.1%} · Stake {s["stake"]}</div>'
-            )
-        st.markdown(f"""
-        <div class="verdict-bet">
-            <div class="verdict-label">⭐ Primary Pick — {primary.get('confidence','')}</div>
-            <div class="verdict-pick">{primary['selection']}</div>
-            <div class="verdict-detail">
-                {primary['market']} &nbsp;·&nbsp; @ <strong>{primary['odds']:.2f}</strong>
-                &nbsp;·&nbsp; Edge <strong>{primary['edge']:+.1%}</strong>
-                &nbsp;·&nbsp; Score <strong>{primary.get('score', 0):.4f}</strong>
-                &nbsp;·&nbsp; Stake <strong>{primary['stake']}</strong>
-            </div>
-            {secondary_html}
-        </div>
-        """, unsafe_allow_html=True)
+def audit_match(sb, match_id, actual_home, actual_away):
+    """Update row with actual score + is_correct_1x2"""
+    resp = sb.table("matches_raw").select("call_1x2").eq("id", match_id).single().execute()
+    row = resp.data
+    call = row.get("call_1x2", "")
+
+    if actual_home > actual_away:
+        actual_1x2 = "Home"
+    elif actual_home < actual_away:
+        actual_1x2 = "Away"
     else:
-        st.markdown(f"""
-        <div class="verdict-nobet">
-            <div class="verdict-label-grey">Verdict — {analysis.get('mode','')}</div>
-            <div class="verdict-noedge">No eligible candidate cleared the floor</div>
-            <div class="verdict-detail-grey">Mode restrictions and/or scoring left no playable edge. Skip this match.</div>
-        </div>
-        """, unsafe_allow_html=True)
+        actual_1x2 = "Draw"
 
-    if match.get("sg_pick"):
-        st.markdown('<div class="section-title">Sportsgambler Pick</div>', unsafe_allow_html=True)
-        st.info(f"🏷️ {match['sg_pick']}")
+    is_correct = None
+    if call == "NO BET":
+        is_correct = None
+    elif "Straight Win Home" in call and actual_1x2 == "Home":
+        is_correct = True
+    elif "Straight Win Away" in call and actual_1x2 == "Away":
+        is_correct = True
+    elif "Double Chance 1X" in call and actual_1x2 in ["Home", "Draw"]:
+        is_correct = True
+    elif "Double Chance X2" in call and actual_1x2 in ["Away", "Draw"]:
+        is_correct = True
+    else:
+        is_correct = False
 
-    st.markdown('<div class="section-title">Top 10 Candidates</div>', unsafe_allow_html=True)
-    for c in analysis["candidates"][:10]:
-        st.markdown(f"""
-        <div class="cand-row">
-            <div>
-                <div class="cand-label">#{c['rank_in_match']} · {c['market']} — {c['selection']}</div>
-                <div class="cand-detail">P={c['model_prob']:.1%} · Imp={c['implied_prob']:.1%} · Edge {c['edge']:+.1%} · Rel={c['reliability']:.2f}</div>
-            </div>
-            <div class="cand-score">{c['score']:.4f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    sb.table("matches_raw").update({
+        "actual_home_goals": actual_home,
+        "actual_away_goals": actual_away,
+        "is_correct_1x2": is_correct,
+    }).eq("id", match_id).execute()
 
-    st.markdown('<div class="section-title">Sample Quality & Shrinkage</div>', unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class="trust-row"><span>🏠 {match['home_team']} — current-season games</span>
-        <span class="trust-value">{match.get('home_current_games', 0)} games · trust {analysis['home_trust']:.0%}</span></div>
-    <div class="trust-row"><span>✈️ {match['away_team']} — current-season games</span>
-        <span class="trust-value">{match.get('away_current_games', 0)} games · trust {analysis['away_trust']:.0%}</span></div>
-    <div class="trust-row"><span>Effective shrinkage toward market</span>
-        <span class="trust-value">{analysis['effective_shrink']:.0%}</span></div>
-    """, unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">Expected Goals Model</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown(f'<div class="xg-row"><span class="xg-team">🏠 {match["home_team"]} (shrunk)</span><span class="xg-value">{analysis["shrunk_xg_home"]:.2f}</span></div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="xg-row"><span class="xg-team">✈️ {match["away_team"]} (shrunk)</span><span class="xg-value">{analysis["shrunk_xg_away"]:.2f}</span></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown(f'<div class="xg-row"><span class="xg-team">Model Total</span><span class="xg-value">{analysis["model_total"]:.2f}</span></div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="xg-row"><span class="xg-team">Market Total</span><span class="xg-value" style="color:#fbbf24;">{analysis["market_total"]:.2f}</span></div>', unsafe_allow_html=True)
-
-    with st.expander(f"❌ Skipped candidates ({len(analysis['skips'])})"):
-        for s in analysis["skips"]:
-            st.write(f"**{s['market']}** — {s['reason']}")
+    return is_correct
 
 
 # ============================================================================
-# MAIN UI
+# UI
 # ============================================================================
 def main():
-    st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with mode-gated ranking — wide matches schema")
+    st.title("⚽ v4 Raw-Only Predictor")
+    st.caption("Parse HTML → Score F1-F6 → Audit results → Track accuracy")
 
-    get_supabase.clear()
     sb, diag = get_supabase()
-
-    with st.expander("🔍 Supabase connection", expanded=False):
-        st.code(f"""
-URL:        {diag.get('url')}
-Key prefix: {diag.get('key_prefix')}
-Connected:  {diag.get('ok')}
-Error:      {diag.get('error')}
-        """, language="text")
-
     if sb is None:
-        st.info("ℹ️ Supabase not configured — predictions work, persistence disabled.")
-    else:
-        ok, msg = seed_reliability(sb)
-        with st.expander("🔍 Reliability seed", expanded=False):
-            st.code(f"ok={ok}\nmsg={msg}", language="text")
+        st.error(f"Supabase failed: {diag.get('error')}")
+        return
 
-    tabs = st.tabs(["⚽ Predict", "📝 Pending", "📊 Records", "🎛️ Reliability"])
+    tabs = st.tabs(["📥 Parse HTML", "🎯 Run Model", "📝 Audit", "📊 Performance"])
 
+    # --- TAB 1: PARSE ---
     with tabs[0]:
-        st.markdown("### Paste Sportsgambler HTML")
-        text = st.text_area("HTML", height=220, key="html_input", label_visibility="collapsed")
-
-        if st.button("⚽ Generate Prediction", type="primary"):
-            if not text or len(text.strip()) < 200:
-                st.error("Please paste a full Sportsgambler preview page.")
+        st.subheader("Parse Sportsgambler HTML → matches_raw")
+        html = st.text_area("Paste HTML", height=300, key="html_input")
+        if st.button("💾 Parse & Save", type="primary"):
+            if not html or len(html) < 200:
+                st.error("Paste a full HTML preview.")
             else:
                 try:
-                    with st.spinner("Analysing match..."):
-                        parsed = SportsgamblerParser(text).parse()
-                        match = load_parsed_match(parsed)
-                        p = RefinedPredictor()
-                        p.calculate_base_xg(match["home_data"], match["away_data"])
-                        p.apply_adjustments(match["home_data"], match["away_data"])
-                        p.shrink_toward_market(
-                            match["market_total"] or (match["home_data"]["home_goals_scored_last10"]
-                                                      + match["away_data"]["away_goals_scored_last10"]),
-                            home_current_games=match.get("home_current_games", 999),
-                            away_current_games=match.get("away_current_games", 999),
-                        )
-                        p.run_poisson()
-                        p.compute_mode_inputs(match)
-                        p.generate_candidates(match["odds"])
-                        reliability = get_reliability(sb)
-                        p.score_and_rank(reliability)
-                        p.select_top()
-                        analysis = p.get_full_analysis()
-
-                    st.markdown("---")
-                    render_prediction_card(match, parsed, analysis)
-
-                    with st.expander("🔍 Save to Supabase", expanded=True):
-                        if sb is None:
-                            st.info("Supabase not configured — nothing saved.")
-                        else:
-                            ok_w, msg_w = write_match(sb, match, analysis)
-                            st.code(f"write_match:  ok={ok_w}\n              msg={msg_w}", language="text")
-                            if ok_w:
-                                st.success("💾 Saved to Supabase (1 row, all columns).")
-                            else:
-                                st.error("⚠️ Save failed — see message above.")
-
+                    rec = parse_html(html)
+                    # Ensure required fields
+                    if not rec.get("match_date") or not rec.get("home_team"):
+                        st.error("Could not extract match_date or team names.")
+                    else:
+                        resp = sb.table("matches_raw").upsert(
+                            rec,
+                            on_conflict="match_date,home_team,away_team"
+                        ).execute()
+                        st.success(f"Saved: {rec['home_team']} vs {rec['away_team']} on {rec['match_date']}")
+                        st.json({k: v for k, v in rec.items() if k not in ["home_last5", "away_last5", "h2h", "odds"]})
                 except Exception as e:
-                    st.error(f"Prediction pipeline failed: {e}")
-                    st.code(traceback.format_exc(), language="python")
+                    st.error(f"Parse failed: {e}")
 
+    # --- TAB 2: MODEL ---
     with tabs[1]:
-        st.subheader("📝 Pending Matches")
-        if sb is None:
-            st.info("Supabase not configured.")
-        else:
+        st.subheader("Run v4 on all unsettled matches")
+        if st.button("▶️ Run v4", type="primary"):
             try:
-                try:
-                    resp = sb.table("matches").select(
-                        "match_id,match_date,home_team,away_team,"
-                        "picked_market,picked_selection,picked_odds,"
-                        "secondary_market,secondary_selection,secondary_odds,"
-                        "regime,sg_pick"
-                    ).is_("actual_home_goals", "null").execute()
-                except Exception:
-                    resp = sb.table("matches").select(
-                        "match_id,match_date,home_team,away_team,"
-                        "picked_market,picked_selection,picked_odds,"
-                        "sg_pick"
-                    ).is_("actual_home_goals", "null").execute()
-                pending = resp.data or []
+                resp = sb.table("matches_raw").select("*").is_("call_1x2", "null").execute()
+                rows = resp.data or []
+                for row in rows:
+                    result = predict_v4(row)
+                    sb.table("matches_raw").update(result).eq("id", row["id"]).execute()
+                st.success(f"Ran v4 on {len(rows)} matches.")
             except Exception as e:
-                st.error(f"Query failed: {e}")
-                pending = []
-            if not pending:
-                st.info("No pending matches.")
-            for m in pending:
-                mid = m["match_id"]
-                pm = m.get("picked_market") or "—"
-                ps = m.get("picked_selection") or "—"
-                po = m.get("picked_odds")
-                if po is not None:
-                    pick_str = f"{pm} — {ps} @ {po:.2f}"
-                else:
-                    pick_str = "no bet — ranked list empty"
-                if m.get("secondary_market") and m.get("secondary_selection"):
-                    so = m.get("secondary_odds")
-                    if so is not None:
-                        pick_str += f"  |  secondary: {m['secondary_market']} — {m['secondary_selection']} @ {so:.2f}"
-                mode = m.get("regime") or ""
-                header = f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')}"
-                if mode:
-                    header += f" · {mode}"
-                header += f" · {pick_str}"
-                with st.expander(header):
-                    if m.get("sg_pick"):
-                        st.caption(f"Sportsgambler pick: {m['sg_pick']}")
-                    c1, c2 = st.columns(2)
-                    hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{mid}")
-                    ag = c2.number_input("Away goals", 0, 15, 0, key=f"ag_{mid}")
-                    if st.button("Submit result", key=f"sub_{mid}"):
-                        ok, msg = record_outcome(sb, mid, hg, ag)
-                        if ok:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
+                st.error(f"Model failed: {e}")
 
+    # --- TAB 3: AUDIT ---
     with tabs[2]:
-        st.subheader("📊 Performance")
-        if sb is None:
-            st.info("Supabase not configured.")
-        else:
-            try:
-                try:
-                    resp = sb.table("matches").select(
-                        "match_id,match_date,home_team,away_team,regime,"
-                        "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
-                        "picked_outcome,secondary_market,secondary_selection,secondary_outcome,"
-                        "actual_home_goals,actual_away_goals,"
-                        "sg_pick,sg_outcome"
-                    ).not_.is_("actual_home_goals", "null").execute()
-                except Exception:
-                    resp = sb.table("matches").select(
-                        "match_id,match_date,home_team,away_team,"
-                        "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
-                        "picked_outcome,"
-                        "actual_home_goals,actual_away_goals,"
-                        "sg_pick,sg_outcome"
-                    ).not_.is_("actual_away_goals", "null").execute()
-                rows = resp.data or []
-            except Exception as e:
-                st.error(f"Query failed: {e}")
-                rows = []
+        st.subheader("Enter actual scores")
+        try:
+            resp = sb.table("matches_raw").select(
+                "id,match_date,home_team,away_team,call_1x2,call_ou"
+            ).is_("actual_home_goals", "null").execute()
+            pending = resp.data or []
+        except Exception as e:
+            st.error(f"Query failed: {e}")
+            pending = []
 
-            if not rows:
-                st.info("No settled picks yet.")
-            else:
-                my_wins = sum(1 for r in rows if r.get("picked_outcome") == "WON")
-                my_losses = sum(1 for r in rows if r.get("picked_outcome") == "LOST")
-                sg_wins = sum(1 for r in rows if r.get("sg_outcome") == "WON")
-                sg_losses = sum(1 for r in rows if r.get("sg_outcome") == "LOST")
+        if not pending:
+            st.info("No pending matches.")
+        for m in pending:
+            with st.expander(f"{m['match_date']} · {m['home_team']} vs {m['away_team']} · {m.get('call_1x2','?')}"):
+                c1, c2 = st.columns(2)
+                hg = c1.number_input("Home goals", 0, 15, 0, key=f"hg_{m['id']}")
+                ag = c2.number_input("Away goals", 0, 15, 0, key=f"ag_{m['id']}")
+                if st.button("Submit", key=f"sub_{m['id']}"):
+                    ok = audit_match(sb, m["id"], hg, ag)
+                    st.success(f"Saved. Correct: {ok}")
+                    st.rerun()
 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("My settled", my_wins + my_losses)
-                c2.metric("My win rate", f"{my_wins/(my_wins+my_losses)*100:.0f}%" if (my_wins+my_losses) else "—")
-                c3.metric("SG settled", sg_wins + sg_losses)
-                c4.metric("SG win rate", f"{sg_wins/(sg_wins+sg_losses)*100:.0f}%" if (sg_wins+sg_losses) else "—")
-
-                df = pd.DataFrame([{
-                    "Date": r.get("match_date", ""),
-                    "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
-                    "Mode": r.get("regime") or "",
-                    "My pick": f"{r.get('picked_market','')} — {r.get('picked_selection','')}",
-                    "My result": r.get("picked_outcome", ""),
-                    "Secondary": (f"{r.get('secondary_market','')} — {r.get('secondary_selection','')}"
-                                  if r.get("secondary_market") else ""),
-                    "Sec. result": r.get("secondary_outcome") or "",
-                    "SG pick": r.get("sg_pick") or "—",
-                    "SG result": r.get("sg_outcome") or "—",
-                    "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
-                } for r in rows[:200]])
-                st.dataframe(df, use_container_width=True)
-
+    # --- TAB 4: PERFORMANCE ---
     with tabs[3]:
-        st.subheader("🎛️ Reliability Weights")
-        if sb is None:
-            st.info("Supabase not configured.")
+        st.subheader("Performance")
+        try:
+            resp = sb.table("matches_raw").select("*").not_.is_("actual_home_goals", "null").execute()
+            settled = resp.data or []
+        except Exception as e:
+            st.error(f"Query failed: {e}")
+            settled = []
+
+        if not settled:
+            st.info("No settled matches.")
         else:
-            try:
-                resp = sb.table("reliability").select("*").execute()
-                rows = resp.data or []
-            except Exception as e:
-                st.error(f"Query failed: {e}")
-                rows = []
-            if not rows:
-                st.info("No reliability rows. Run a prediction first.")
-            else:
-                df = pd.DataFrame([{
-                    "Market": r.get("market", ""),
-                    "Weight": f"{_safe_float(r.get('weight'), 0.0):.4f}",
-                    "Wins":   _safe_int(r.get("wins"), 0),
-                    "Losses": _safe_int(r.get("losses"), 0),
-                    "Pushes": _safe_int(r.get("pushes"), 0),
-                    "Total":  _safe_int(
-                        r.get("total"),
-                        _safe_int(r.get("wins"), 0)
-                        + _safe_int(r.get("losses"), 0)
-                        + _safe_int(r.get("pushes"), 0),
-                    ),
-                    "Prior":  _safe_float(
-                        r.get("prior_weight"),
-                        _safe_float(r.get("weight"), 0.0),
-                    ),
-                } for r in rows])
-                st.dataframe(df, use_container_width=True)
+            placed = [r for r in settled if r.get("call_1x2") != "NO BET"]
+            correct = sum(1 for r in placed if r.get("is_correct_1x2"))
+            override_games = [r for r in settled if r.get("f1_f5_override")]
+            override_correct = sum(1 for r in override_games if r.get("is_correct_1x2"))
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Settled", len(settled))
+            c2.metric("Bets placed", len(placed))
+            c3.metric("1X2 accuracy", f"{correct}/{len(placed)}" if placed else "—")
+            c4.metric("Override accuracy", f"{override_correct}/{len(override_games)}" if override_games else "—")
+
+            df = pd.DataFrame([{
+                "Date": r.get("match_date"),
+                "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
+                "Gap": r.get("total_gap"),
+                "1X2 Call": r.get("call_1x2"),
+                "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
+                "Correct": r.get("is_correct_1x2"),
+                "Override": r.get("f1_f5_override"),
+            } for r in settled])
+            st.dataframe(df, use_container_width=True)
 
 
 main()
