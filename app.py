@@ -1,24 +1,31 @@
 """
-v4.2.1 RAW-ONLY Predictor — final production version.
+v4.3 RAW-ONLY Predictor — universal version.
 
-Complete fix list:
+v4.3 corrections over v4.2.1:
+  #A  F2 smoothing: single ALPHA + PRIOR_RATE (was double-counting)
+  #B  Conflict penalty: shrink gap, no leader flip
+  #C  Time-split validation (walk-forward), no random split
+  #D  Decision rule: gap<12 NO BET, <20 DC, else Straight (was 15/25)
+  #E  Train/Holdout tab comparing v4.2.1 vs v4.3
+
+Retained from v4.2.1:
   #1  kickoff_utc built as full ISO timestamp
   #2  XI scoped to #lineups content-block only
-  #3  F1/F5 override threshold >= 4 (was 6)
+  #3  F1/F5 override threshold >= 4
   #4  calc_f4 — injury-listed player who starts sets doubted_starter
-  #5  _parse_last5 — NORMALIZED league filter (La Liga / LaLiga fix)
+  #5  _parse_last5 — NORMALIZED league filter
   #6  _parse_standings — home_played / away_played populated
-  #7  4-way split parsing (home_home, home_away, away_home, away_away)
+  #7  4-way split parsing
   #8  Corners from corner blocks
   #9  expected_return parsed
   #10 AH / DNB / DC / HT odds parsed
   #11 "Assistors" typo handled
-  #12 _team_matches_strict for injuries (Atletico vs Real fix)
-  #13 Insufficient-data guard (last5 empty or standings missing → NO BET)
+  #12 _team_matches_strict for injuries
+  #13 Insufficient-data guard
   #14 Doubt-starter forces Over only if expected >= 2.4
-  #15 f5_leader_raw stored (pre-override leader)
+  #15 f5_leader_raw stored
   #16 f1_vs_f2f3_conflict flag logged
-  #17 Schema-aware upsert (auto-filters columns)
+  #17 Schema-aware upsert
   #18 Single button: Parse → Predict → Save
 """
 
@@ -30,7 +37,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="v4.2.1 Raw Predictor",
+    page_title="v4.3 Raw Predictor",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -90,7 +97,15 @@ def _has_bs4():
 
 
 # ============================================================================
-# PARSER
+# v4.3 UNIVERSAL CONSTANTS
+# ============================================================================
+ALPHA = 2                 # prior games (single constant for all Fs)
+PRIOR_FORM = 0.4          # prior rate for F2 (W=1, D=0.4)
+PRIOR_H2H = 1.0 / 3.0     # prior for F5 (3 outcomes, neutral = 1/3 each)
+
+
+# ============================================================================
+# PARSER (unchanged from v4.2.1 — all #1-#17 fixes retained)
 # ============================================================================
 class SportsgamblerParser:
     def __init__(self, html: str):
@@ -126,15 +141,11 @@ class SportsgamblerParser:
 
     @staticmethod
     def _norm_comp(s):
-        """Normalize competition name: remove spaces, punctuation, lowercase.
-        'La Liga' -> 'laliga' | 'Serie A' -> 'seriea'
-        """
         if not s:
             return ""
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
     def _team_matches(self, full_name, table_name):
-        """General lenient team matching."""
         if not full_name or not table_name:
             return False
         a = self._norm(full_name)
@@ -159,11 +170,6 @@ class SportsgamblerParser:
         return False
 
     def _team_matches_strict(self, full_name, header_text):
-        """Strict matching for injury tables.
-
-        Requires the PRIMARY distinctive token (first word > 3 chars) of
-        the team name to appear in the header.
-        """
         if not full_name or not header_text:
             return False
         a = self._norm(full_name)
@@ -174,7 +180,6 @@ class SportsgamblerParser:
         primary = a_words[0]
         return primary in b
 
-    # ---------------------------------------------------------------- main
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
@@ -273,7 +278,6 @@ class SportsgamblerParser:
         venue_el = self.soup.select_one(".t_top .t_venue")
         return venue_el.get_text(strip=True) if venue_el else None
 
-    # ----------------------------------------------------------- standings
     def _parse_standings(self):
         out = {}
         main_table = None
@@ -406,9 +410,7 @@ class SportsgamblerParser:
             return int(m.group(1)), int(m.group(2))
         return None
 
-    # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
-        """NORMALIZED league filter: 'La Liga' matches 'LaLiga'."""
         out = []
         container = self.soup.select_one("#last-matches #All")
         if not container:
@@ -473,7 +475,6 @@ class SportsgamblerParser:
             })
         return out
 
-    # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -515,7 +516,6 @@ class SportsgamblerParser:
             out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
-    # ---------------------------------------------------------- players
     def _parse_players(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -739,9 +739,29 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# MODEL
+# v4.3 UNIVERSAL MODEL
 # ============================================================================
+
+def smooth_rate(wins, draws, games):
+    """v4.3: single ALPHA + PRIOR_RATE. No double-counting.
+
+    weighted = W*1 + D*0.4  (max = games)
+    smoothed = (weighted + ALPHA*PRIOR_RATE) / (games + ALPHA)
+
+    Sanity:
+      5W0D0L, ALPHA=2:  (5 + 0.8) / (5+2)  = 5.8/7  = 0.829
+      0W0D5L, ALPHA=2:  (0 + 0.8) / (5+2)  = 0.8/7  = 0.114
+      5W0D0L, *25:      20.7  (not 25 — prior pulls down)
+      0W0D5L, *25:      2.86  (not 0 — prior pulls up)
+    """
+    if games is None or games <= 0:
+        return PRIOR_FORM
+    pts = wins + draws * 0.4
+    return (pts + ALPHA * PRIOR_FORM) / (games + ALPHA)
+
+
 def calc_f1(row):
+    """v4.3: same as v4.2.1 — league momentum."""
     home_pts = row.get("home_points") or 0
     away_pts = row.get("away_points") or 0
     home_gd = row.get("home_gd") or 0
@@ -750,31 +770,29 @@ def calc_f1(row):
     gd_gap = home_gd - away_gd
     f1_home = 10 + (pts_gap * 1.33) + (gd_gap * 0.66)
     f1_away = 10 - (pts_gap * 1.33) - (gd_gap * 0.66)
-    f1_home = max(0, min(20, f1_home))
-    f1_away = max(0, min(20, f1_away))
+    f1_home = max(2, min(18, f1_home))
+    f1_away = max(2, min(18, f1_away))
 
     away_collapse = False
     if (row.get("away_away_points") == 0
             and (row.get("away_away_played") or 0) >= 3):
-        f1_home = min(20, f1_home + 8)
+        f1_home = min(18, f1_home + 8)
         away_collapse = True
     return f1_home, f1_away, away_collapse
 
 
 def calc_f2(last5):
+    """v4.3: smoothed rate * 25. Returns None if empty (forces NO BET upstream)."""
     if not last5:
-        return 0
-    raw = 0
-    for m in last5[:5]:
-        r = m.get("result", "L")
-        if r == "W":
-            raw += 5
-        elif r == "D":
-            raw += 2
-    return max(0, min(25, raw))
+        return None
+    w = sum(1 for m in last5[:5] if m.get("result") == "W")
+    d = sum(1 for m in last5[:5] if m.get("result") == "D")
+    n = min(len(last5), 5)
+    return smooth_rate(w, d, n) * 25
 
 
 def calc_f3(win_pct, avg_scored, avg_conceded):
+    """v4.3: same as v4.2.1 — venue split."""
     win_pts = ((win_pct or 0) / 100) * 10
     edge = (avg_scored or 0) - (avg_conceded or 0)
     xg_pts = 5 if edge > 0.5 else (2 if edge > 0 else 0)
@@ -782,6 +800,7 @@ def calc_f3(win_pct, avg_scored, avg_conceded):
 
 
 def calc_f4(top_scorer, top_assister, injuries, xi):
+    """v4.3: same as v4.2.1 — availability."""
     f4 = 15
     xi = xi or []
     injured = [i.get("player", "") for i in (injuries or []) if i.get("status") == "injury"]
@@ -805,12 +824,19 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
 
 
 def calc_f5(h2h_home_wins, h2h_away_wins, h2h_total):
-    if not h2h_total:
-        return 5.0, 5.0
-    return (h2h_home_wins / h2h_total) * 10, (h2h_away_wins / h2h_total) * 10
+    """v4.3: prior H2H = 1/3. +1 in denominator because 3 outcomes * 1/3 = 1.
+    Scale down if total < 4.
+    """
+    f5_h = (h2h_home_wins + PRIOR_H2H) / (h2h_total + 1) * 10
+    f5_a = (h2h_away_wins + PRIOR_H2H) / (h2h_total + 1) * 10
+    if h2h_total < 4:
+        f5_h = 3.33 + (f5_h - 3.33) * (h2h_total / 4.0)
+        f5_a = 3.33 + (f5_a - 3.33) * (h2h_total / 4.0)
+    return f5_h, f5_a
 
 
 def calc_f6(h_avg, a_avg):
+    """v4.3: same as v4.2.1 — attack profile."""
     if (h_avg or 0) > (a_avg or 0):
         return 11, 7
     elif (h_avg or 0) < (a_avg or 0):
@@ -819,6 +845,7 @@ def calc_f6(h_avg, a_avg):
 
 
 def apply_override(f1_home, f1_away, f5_home, f5_away):
+    """v4.3: F1 vs F5 conflict. F1 wins, F5 reset to 10/0. Unchanged from v4.2.1."""
     f1_gap = abs(f1_home - f1_away)
     f5_gap = abs(f5_home - f5_away)
 
@@ -844,32 +871,32 @@ def calc_expected_total(row):
     return (h1 + a1 + a2 + h2) / 2
 
 
-def predict_v4(row):
+def predict_v4_3(row):
+    """v4.3 universal model.
+
+    Changes vs v4.2.1:
+      - F2 smoothed (see smooth_rate)
+      - F5 prior-corrected
+      - Conflict penalty shrinks gap instead of flat subtraction
+      - Decision rule: gap<12 NO BET, <20 DC, else Straight
+    """
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
+    home_played = row.get("home_played") or 0
+    away_played = row.get("away_played") or 0
 
-    if not (has_home_last5 and has_away_last5 and has_standings):
-        return {
-            "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
-            "f2_home": 0, "f2_away": 0,
-            "f3_home": 0, "f3_away": 0,
-            "f4_home": 0, "f4_away": 0,
-            "f5_home": 0, "f5_away": 0, "f5_gap": 0, "f5_leader": None,
-            "f5_leader_raw": None,
-            "f6_home": 0, "f6_away": 0,
-            "home_total": 0, "away_total": 0, "total_gap": 0,
-            "f1_f5_conflict": False, "f1_f5_override": False,
-            "f1_vs_f2f3_conflict": False,
-            "away_collapse": False, "doubted_starter": False,
-            "call_1x2": "NO BET (insufficient data)",
-            "call_ou": "No Bet",
-            "expected_total": 0,
-        }
+    # Hard filter
+    if not (has_home_last5 and has_away_last5 and has_standings
+            and home_played >= 3 and away_played >= 3):
+        return _empty_prediction("NO BET (insufficient data)")
 
     f1_home, f1_away, away_collapse = calc_f1(row)
     f2_home = calc_f2(row.get("home_last5"))
     f2_away = calc_f2(row.get("away_last5"))
+    if f2_home is None or f2_away is None:
+        return _empty_prediction("NO BET (insufficient form)")
+
     f3_home = calc_f3(row.get("home_home_win_pct"),
                       row.get("home_home_last10_avg_scored"),
                       row.get("home_home_last10_avg_conceded"))
@@ -881,6 +908,7 @@ def predict_v4(row):
     f4_away, doubt_a = calc_f4(row.get("away_top_scorer"), row.get("away_top_assister"),
                                 row.get("away_injuries"), row.get("away_xi"))
     doubted_starter = doubt_h or doubt_a
+
     f5_home, f5_away = calc_f5(row.get("h2h_home_wins") or 0,
                                 row.get("h2h_away_wins") or 0,
                                 len(row.get("h2h") or []))
@@ -891,17 +919,41 @@ def predict_v4(row):
         f1_home, f1_away, f5_home, f5_away
     )
 
-    home_total = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
-    away_total = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
-    gap = abs(home_total - away_total)
+    home_total_raw = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
+    away_total_raw = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
 
-    if gap > 25:
-        call_1x2 = "Straight Win Home" if home_total > away_total else "Straight Win Away"
-    elif gap >= 15:
-        call_1x2 = "Double Chance 1X" if home_total > away_total else "Double Chance X2"
+    # v4.3: conflict penalty SHRINKS GAP — no leader flip
+    leader = "home" if home_total_raw > away_total_raw else "away"
+    raw_gap = abs(home_total_raw - away_total_raw)
+
+    # Count disagreements between leaders of {F1, F2, F3, F5}
+    leaders = {
+        "F1": "home" if f1_home > f1_away else "away",
+        "F2": "home" if f2_home > f2_away else "away",
+        "F3": "home" if f3_home > f3_away else "away",
+        "F5": "home" if f5_home > f5_away else "away",
+    }
+    disagreements = sum(1 for l in leaders.values() if l != leader)
+    shrink = max(0.0, 1.0 - disagreements * 0.15)  # 0% to 60% shrink
+    gap = raw_gap * shrink
+
+    # Keep totals consistent: apply shrink symmetrically around the leader
+    if leader == "home":
+        home_total = home_total_raw
+        away_total = home_total_raw - gap
     else:
-        call_1x2 = "NO BET"
+        away_total = away_total_raw
+        home_total = away_total_raw - gap
 
+    # v4.3 decision rule
+    if gap < 12:
+        call_1x2 = "NO BET"
+    elif gap < 20:
+        call_1x2 = "Double Chance 1X" if leader == "home" else "Double Chance X2"
+    else:
+        call_1x2 = "Straight Win Home" if leader == "home" else "Straight Win Away"
+
+    # F1 vs F2/F3 conflict tracking
     f1_leader_final = "home" if f1_home > f1_away else "away"
     f2f3_home = f2_home + f3_home
     f2f3_away = f2_away + f3_away
@@ -913,9 +965,10 @@ def predict_v4(row):
     )
 
     expected = calc_expected_total(row)
-    if expected < 2.5:
+    # v4.3: <2.4 Under, >3.2 Over (was 2.5/3.3)
+    if expected < 2.4:
         call_ou = "Under 2.5"
-    elif expected > 3.3:
+    elif expected > 3.2:
         call_ou = "Over 2.5"
     else:
         call_ou = "No Bet"
@@ -937,7 +990,10 @@ def predict_v4(row):
         "f6_home": round(f6_home, 2), "f6_away": round(f6_away, 2),
         "home_total": round(home_total, 2),
         "away_total": round(away_total, 2),
+        "raw_gap": round(raw_gap, 2),
         "total_gap": round(gap, 2),
+        "disagreements": disagreements,
+        "shrink_factor": round(shrink, 2),
         "f1_f5_conflict": conflict,
         "f1_f5_override": override,
         "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
@@ -946,6 +1002,135 @@ def predict_v4(row):
         "call_1x2": call_1x2,
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
+        "model_version": "v4.3",
+    }
+
+
+# Legacy v4.2.1 model kept for A/B comparison
+def predict_v4_2_1(row):
+    """Original v4.2.1 for train/holdout comparison. Same as predict_v4 but with old thresholds."""
+    has_home_last5 = bool(row.get("home_last5"))
+    has_away_last5 = bool(row.get("away_last5"))
+    has_standings = row.get("home_points") is not None and row.get("away_points") is not None
+
+    if not (has_home_last5 and has_away_last5 and has_standings):
+        return _empty_prediction("NO BET (insufficient data)")
+
+    f1_home, f1_away, away_collapse = calc_f1(row)
+
+    # Old F2: raw 5/2/0
+    def _f2_old(last5):
+        if not last5:
+            return 0
+        raw = 0
+        for m in last5[:5]:
+            r = m.get("result", "L")
+            if r == "W":
+                raw += 5
+            elif r == "D":
+                raw += 2
+        return max(0, min(25, raw))
+
+    f2_home = _f2_old(row.get("home_last5"))
+    f2_away = _f2_old(row.get("away_last5"))
+    f3_home = calc_f3(row.get("home_home_win_pct"),
+                      row.get("home_home_last10_avg_scored"),
+                      row.get("home_home_last10_avg_conceded"))
+    f3_away = calc_f3(row.get("away_away_win_pct"),
+                      row.get("away_away_last10_avg_scored"),
+                      row.get("away_away_last10_avg_conceded"))
+    f4_home, doubt_h = calc_f4(row.get("home_top_scorer"), row.get("home_top_assister"),
+                                row.get("home_injuries"), row.get("home_xi"))
+    f4_away, doubt_a = calc_f4(row.get("away_top_scorer"), row.get("away_top_assister"),
+                                row.get("away_injuries"), row.get("away_xi"))
+    doubted_starter = doubt_h or doubt_a
+
+    # Old F5: raw ratio
+    def _f5_old(hw, aw, total):
+        if not total:
+            return 5.0, 5.0
+        return (hw / total) * 10, (aw / total) * 10
+
+    f5_home, f5_away = _f5_old(row.get("h2h_home_wins") or 0,
+                                row.get("h2h_away_wins") or 0,
+                                len(row.get("h2h") or []))
+    f6_home, f6_away = calc_f6(row.get("home_last10_avg_scored"),
+                                row.get("away_last10_avg_scored"))
+
+    f5_home, f5_away, conflict, override, f5_leader_raw = apply_override(
+        f1_home, f1_away, f5_home, f5_away
+    )
+
+    home_total = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
+    away_total = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
+    gap = abs(home_total - away_total)
+
+    # Old decision rule: 15/25
+    if gap > 25:
+        call_1x2 = "Straight Win Home" if home_total > away_total else "Straight Win Away"
+    elif gap >= 15:
+        call_1x2 = "Double Chance 1X" if home_total > away_total else "Double Chance X2"
+    else:
+        call_1x2 = "NO BET"
+
+    expected = calc_expected_total(row)
+    if expected < 2.5:
+        call_ou = "Under 2.5"
+    elif expected > 3.3:
+        call_ou = "Over 2.5"
+    else:
+        call_ou = "No Bet"
+    if (away_collapse or doubted_starter) and expected >= 2.4:
+        call_ou = "Over 2.5"
+
+    return {
+        "f1_home": round(f1_home, 2), "f1_away": round(f1_away, 2),
+        "f1_gap": round(abs(f1_home - f1_away), 2),
+        "f1_leader": "home" if f1_home > f1_away else "away",
+        "f2_home": round(f2_home, 2), "f2_away": round(f2_away, 2),
+        "f3_home": round(f3_home, 2), "f3_away": round(f3_away, 2),
+        "f4_home": round(f4_home, 2), "f4_away": round(f4_away, 2),
+        "f5_home": round(f5_home, 2), "f5_away": round(f5_away, 2),
+        "f5_gap": round(abs(f5_home - f5_away), 2),
+        "f5_leader": "home" if f5_home > f5_away else "away",
+        "f5_leader_raw": f5_leader_raw,
+        "f6_home": round(f6_home, 2), "f6_away": round(f6_away, 2),
+        "home_total": round(home_total, 2),
+        "away_total": round(away_total, 2),
+        "raw_gap": round(gap, 2),
+        "total_gap": round(gap, 2),
+        "disagreements": 0,
+        "shrink_factor": 1.0,
+        "f1_f5_conflict": conflict,
+        "f1_f5_override": override,
+        "f1_vs_f2f3_conflict": False,
+        "away_collapse": away_collapse,
+        "doubted_starter": doubted_starter,
+        "call_1x2": call_1x2,
+        "call_ou": call_ou,
+        "expected_total": round(expected, 2),
+        "model_version": "v4.2.1",
+    }
+
+
+def _empty_prediction(reason):
+    return {
+        "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
+        "f2_home": 0, "f2_away": 0,
+        "f3_home": 0, "f3_away": 0,
+        "f4_home": 0, "f4_away": 0,
+        "f5_home": 0, "f5_away": 0, "f5_gap": 0, "f5_leader": None,
+        "f5_leader_raw": None,
+        "f6_home": 0, "f6_away": 0,
+        "home_total": 0, "away_total": 0, "raw_gap": 0, "total_gap": 0,
+        "disagreements": 0, "shrink_factor": 1.0,
+        "f1_f5_conflict": False, "f1_f5_override": False,
+        "f1_vs_f2f3_conflict": False,
+        "away_collapse": False, "doubted_starter": False,
+        "call_1x2": reason,
+        "call_ou": "No Bet",
+        "expected_total": 0,
+        "model_version": "v4.3",
     }
 
 
@@ -1076,22 +1261,26 @@ def render_trigger(name, on):
 def render_verdict(result):
     call = result.get("call_1x2", "")
     if call.startswith("NO BET"):
-        detail = "insufficient data" if "insufficient" in call else f"gap {result['total_gap']:.1f} below 15"
+        if "insufficient" in call:
+            detail = "insufficient data"
+        else:
+            detail = f"gap {result['total_gap']:.1f} below 12"
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">1X2 Verdict</div>
+            <div class="verdict-label-grey">1X2 Verdict (v4.3)</div>
             <div class="verdict-noedge">NO BET — {detail}</div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ 1X2 Verdict</div>
+            <div class="verdict-label">⭐ 1X2 Verdict (v4.3)</div>
             <div class="verdict-pick">{call}</div>
             <div class="verdict-detail">
                 Gap <strong>{result['total_gap']:.1f}</strong>
                 &nbsp;·&nbsp; Home {result['home_total']:.1f}
                 &nbsp;·&nbsp; Away {result['away_total']:.1f}
+                &nbsp;·&nbsp; shrink {result.get('shrink_factor', 1.0):.2f}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1107,26 +1296,188 @@ def render_ou_verdict(result):
 
 
 # ============================================================================
+# TRAIN / HOLDOUT
+# ============================================================================
+HOLDOUT_DATE = "2026-09-19"
+
+
+def _evaluate(rows, model_fn):
+    """Return dict of metrics for a list of settled rows."""
+    placed = []
+    correct = []
+    no_bet = 0
+    for r in rows:
+        pred = model_fn(r)
+        call = pred.get("call_1x2", "NO BET")
+        hg = r.get("actual_home_goals")
+        ag = r.get("actual_away_goals")
+        if hg is None or ag is None:
+            continue
+        if call.startswith("NO BET"):
+            no_bet += 1
+            continue
+        if hg > ag:
+            actual = "Home"
+        elif hg < ag:
+            actual = "Away"
+        else:
+            actual = "Draw"
+        if "Straight Win Home" in call and actual == "Home":
+            correct.append(True)
+        elif "Straight Win Away" in call and actual == "Away":
+            correct.append(True)
+        elif "Double Chance 1X" in call and actual in ("Home", "Draw"):
+            correct.append(True)
+        elif "Double Chance X2" in call and actual in ("Away", "Draw"):
+            correct.append(True)
+        else:
+            correct.append(False)
+        placed.append(pred)
+
+    n = len(placed) + no_bet
+    return {
+        "n_total": n,
+        "n_placed": len(placed),
+        "n_no_bet": no_bet,
+        "no_bet_pct": (no_bet / n * 100) if n else 0,
+        "accuracy": (sum(correct) / len(placed) * 100) if placed else 0,
+        "correct": sum(correct),
+        "avg_gap": (sum(p["total_gap"] for p in placed) / len(placed)) if placed else 0,
+    }
+
+
+def _time_split(rows, holdout_date=HOLDOUT_DATE):
+    train, holdout = [], []
+    for r in rows:
+        d = r.get("match_date") or ""
+        if d < holdout_date:
+            train.append(r)
+        else:
+            holdout.append(r)
+    return train, holdout
+
+
+def render_train_holdout(rows):
+    st.subheader("🧪 Train / Holdout (walk-forward)")
+    st.caption(f"Train: matches before {HOLDOUT_DATE} · Holdout: on/after {HOLDOUT_DATE}")
+    st.info("⚠️ Do NOT tune thresholds after seeing holdout. This is for validation only.")
+
+    settled = [r for r in rows if r.get("actual_home_goals") is not None
+               and r.get("actual_away_goals") is not None]
+    if not settled:
+        st.warning("No settled matches. Enter results in the Pending tab first.")
+        return
+
+    train, holdout = _time_split(settled)
+    st.write(f"Train settled: **{len(train)}** · Holdout settled: **{len(holdout)}**")
+
+    if not holdout:
+        st.warning(f"No holdout matches on/after {HOLDOUT_DATE}.")
+        return
+
+    v421_train = _evaluate(train, predict_v4_2_1)
+    v421_hold = _evaluate(holdout, predict_v4_2_1)
+    v43_train = _evaluate(train, predict_v4_3)
+    v43_hold = _evaluate(holdout, predict_v4_3)
+
+    st.markdown('<div class="section-title">Summary</div>', unsafe_allow_html=True)
+    summary = pd.DataFrame([
+        {
+            "Model": "v4.2.1",
+            "Split": "Train",
+            "Settled": v421_train["n_total"],
+            "Placed": v421_train["n_placed"],
+            "NO BET %": f"{v421_train['no_bet_pct']:.0f}%",
+            "Accuracy": f"{v421_train['accuracy']:.0f}%",
+            "Avg gap": f"{v421_train['avg_gap']:.1f}",
+        },
+        {
+            "Model": "v4.2.1",
+            "Split": "Holdout",
+            "Settled": v421_hold["n_total"],
+            "Placed": v421_hold["n_placed"],
+            "NO BET %": f"{v421_hold['no_bet_pct']:.0f}%",
+            "Accuracy": f"{v421_hold['accuracy']:.0f}%",
+            "Avg gap": f"{v421_hold['avg_gap']:.1f}",
+        },
+        {
+            "Model": "v4.3",
+            "Split": "Train",
+            "Settled": v43_train["n_total"],
+            "Placed": v43_train["n_placed"],
+            "NO BET %": f"{v43_train['no_bet_pct']:.0f}%",
+            "Accuracy": f"{v43_train['accuracy']:.0f}%",
+            "Avg gap": f"{v43_train['avg_gap']:.1f}",
+        },
+        {
+            "Model": "v4.3",
+            "Split": "Holdout",
+            "Settled": v43_hold["n_total"],
+            "Placed": v43_hold["n_placed"],
+            "NO BET %": f"{v43_hold['no_bet_pct']:.0f}%",
+            "Accuracy": f"{v43_hold['accuracy']:.0f}%",
+            "Avg gap": f"{v43_hold['avg_gap']:.1f}",
+        },
+    ])
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="section-title">Verdict</div>', unsafe_allow_html=True)
+    if v43_hold["accuracy"] >= 70 and v43_hold["no_bet_pct"] >= 60:
+        st.success(f"✅ v4.3 holdout {v43_hold['accuracy']:.0f}% with {v43_hold['no_bet_pct']:.0f}% NO BET — real edge.")
+    elif v43_hold["accuracy"] < 58:
+        st.error(f"❌ v4.3 holdout {v43_hold['accuracy']:.0f}% — the 81% was noise.")
+    else:
+        st.warning(f"🟡 v4.3 holdout {v43_hold['accuracy']:.0f}% at {v43_hold['no_bet_pct']:.0f}% NO BET — inconclusive.")
+
+    st.markdown('<div class="section-title">Per-match (holdout)</div>', unsafe_allow_html=True)
+    detail_rows = []
+    for r in holdout:
+        hg = r.get("actual_home_goals")
+        ag = r.get("actual_away_goals")
+        if hg is None or ag is None:
+            continue
+        p = predict_v4_3(r)
+        actual = "Home" if hg > ag else ("Away" if hg < ag else "Draw")
+        detail_rows.append({
+            "Date": r.get("match_date"),
+            "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
+            "Actual": f"{hg}-{ag} ({actual})",
+            "v4.2.1 call": predict_v4_2_1(r)["call_1x2"],
+            "v4.3 call": p["call_1x2"],
+            "v4.3 gap": p["total_gap"],
+            "shrink": p["shrink_factor"],
+        })
+    if detail_rows:
+        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+
+# ============================================================================
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v4.2.1 Raw Predictor")
-    st.caption("One button. Parse → Predict → Save. All fixes applied.")
+    st.title("⚽ v4.3 Raw Predictor")
+    st.caption("Universal model. One button. Parse → Predict → Save.")
 
     sb, diag = get_supabase()
     if sb is None:
         st.error(f"Supabase connection failed: {diag.get('error')}")
         return
 
-    tabs = st.tabs(["📥 Parse & Save", "⏳ Pending", "📊 Performance", "ℹ️ v4.2.1 Spec"])
+    tabs = st.tabs([
+        "📥 Parse & Save",
+        "⏳ Pending",
+        "📊 Performance",
+        "🧪 Train/Holdout",
+        "ℹ️ v4.3 Spec",
+    ])
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Click the button — parse, predict, and save happen in one action.")
+        st.caption("Click the button — parse, predict (v4.3), and save happen in one action.")
 
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
-        if st.button("⚽ Parse, Predict & Save", type="primary"):
+        if st.button("⚽ Parse, Predict & Save (v4.3)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
             else:
@@ -1141,8 +1492,8 @@ def main():
                     st.error("Could not extract team names from HTML.")
                     return
 
-                with st.spinner("Running v4.2.1 model..."):
-                    result = predict_v4(parsed)
+                with st.spinner("Running v4.3 model..."):
+                    result = predict_v4_3(parsed)
 
                 with st.spinner("Saving to Supabase..."):
                     ok, row = upsert_match(sb, parsed)
@@ -1185,33 +1536,34 @@ def main():
                     c1, c2 = st.columns(2)
                     with c1:
                         st.write("**Home**")
-                        st.write(f"Pos: {parsed.get('home_pos')}, Pts: {parsed.get('home_points')}, GD: {parsed.get('home_gd')}")
+                        st.write(f"Pos: {parsed.get('home_pos')}, Pts: {parsed.get('home_points')}, GD: {parsed.get('home_gd')}, Played: {parsed.get('home_played')}")
                         st.write(f"Last5 ({len(parsed.get('home_last5') or [])}): {parsed.get('home_last5')}")
                         st.write(f"XI ({len(parsed.get('home_xi') or [])}): {parsed.get('home_xi')}")
                         st.write(f"Injuries ({len(parsed.get('home_injuries') or [])}): {parsed.get('home_injuries')}")
                     with c2:
                         st.write("**Away**")
-                        st.write(f"Pos: {parsed.get('away_pos')}, Pts: {parsed.get('away_points')}, GD: {parsed.get('away_gd')}")
+                        st.write(f"Pos: {parsed.get('away_pos')}, Pts: {parsed.get('away_points')}, GD: {parsed.get('away_gd')}, Played: {parsed.get('away_played')}")
                         st.write(f"Last5 ({len(parsed.get('away_last5') or [])}): {parsed.get('away_last5')}")
                         st.write(f"XI ({len(parsed.get('away_xi') or [])}): {parsed.get('away_xi')}")
                         st.write(f"Injuries ({len(parsed.get('away_injuries') or [])}): {parsed.get('away_injuries')}")
                     st.write(f"H2H: {parsed.get('h2h')}")
                     st.write(f"Kickoff UTC: {parsed.get('kickoff_utc')}")
 
-                st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
+                st.markdown('<div class="section-title">Factor Breakdown (v4.3)</div>', unsafe_allow_html=True)
                 render_factor_row("F1 League Momentum", result["f1_home"], result["f1_away"], "(20 pts)")
-                render_factor_row("F2 Current Form", result["f2_home"], result["f2_away"], "(25 pts)")
+                render_factor_row("F2 Current Form (smoothed)", result["f2_home"], result["f2_away"], "(25 pts)")
                 render_factor_row("F3 Venue Split", result["f3_home"], result["f3_away"], "(15 pts)")
                 render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(15 pts)")
-                render_factor_row("F5 H2H Psychology", result["f5_home"], result["f5_away"], "(10 pts)")
+                render_factor_row("F5 H2H Psychology (prior-corrected)", result["f5_home"], result["f5_away"], "(10 pts)")
                 render_factor_row("F6 Attack Profile", result["f6_home"], result["f6_away"], "(15 pts)")
 
                 st.markdown(f"""
                 <div class="factor-row" style="background:#1e3a8a;">
                     <div>
-                        <div class="factor-name" style="color:#bfdbfe;">TOTAL</div>
+                        <div class="factor-name" style="color:#bfdbfe;">TOTAL (after shrink)</div>
                         <div style="color:#93c5fd; font-size:0.8rem;">
                             Home {result['home_total']:.1f} · Away {result['away_total']:.1f} · Gap {result['total_gap']:.1f}
+                            · raw {result['raw_gap']:.1f} · shrink {result['shrink_factor']:.2f} ({result['disagreements']} disagreements)
                         </div>
                     </div>
                     <div class="factor-val" style="color:#bfdbfe;">{result['total_gap']:.1f}</div>
@@ -1276,7 +1628,6 @@ def main():
             override_games = [r for r in settled if r.get("f1_f5_override")]
             override_correct = sum(1 for r in override_games if r.get("is_correct_1x2"))
             f1f2f3_games = [r for r in settled if r.get("f1_vs_f2f3_conflict")]
-            f1f2f3_correct = sum(1 for r in f1f2f3_games if r.get("is_correct_1x2"))
             doubt_games = [r for r in settled if r.get("doubted_starter")]
 
             c1, c2, c3, c4 = st.columns(4)
@@ -1307,34 +1658,49 @@ def main():
             st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tabs[3]:
-        st.subheader("v4.2.1 Specification")
-        st.markdown("""
+        rows = load_all(sb)
+        render_train_holdout(rows)
+
+    with tabs[4]:
+        st.subheader("v4.3 Specification")
+        st.markdown(f"""
         **100-point model. Only prematch fields. No xG, no possession.**
 
-        | Factor | Weight | Source |
-        |--------|--------|--------|
-        | F1 League Momentum | 20 | Position, Points, GD |
-        | F2 Current Form Last 5 | 25 | W=5, D=2, L=0, max 25 |
-        | F3 Venue Split | 15 | Win% + goal edge at venue |
-        | F4 Availability | 15 | Injuries (not suspensions) vs Confirmed XI |
-        | F5 H2H Psychology | 10 | H2H W/D/L |
-        | F6 Attack Profile | 15 | Avg goals scored |
+        | Factor | Weight | v4.3 change |
+        |--------|--------|-------------|
+        | F1 League Momentum | 20 | unchanged |
+        | F2 Current Form Last 5 | 25 | **smoothed**: `(W + 0.4D + ALPHA*0.4)/(games+ALPHA) * 25` |
+        | F3 Venue Split | 15 | unchanged |
+        | F4 Availability | 15 | unchanged |
+        | F5 H2H Psychology | 10 | **prior-corrected**: `(W + 1/3)/(total+1) * 10` |
+        | F6 Attack Profile | 15 | unchanged |
 
-        **Decision rule:**
-        - Gap > 25 → Straight Win
-        - Gap 15–25 → Double Chance
-        - Gap < 15 → NO BET
+        **Constants:**
+        - `ALPHA = {ALPHA}` (prior games, single constant for all Fs)
+        - `PRIOR_FORM = {PRIOR_FORM}`
+        - `PRIOR_H2H = 1/3`
 
-        **Overrides:**
-        - F1 vs F5 conflict: F1 gap ≥ 12 AND F5 gap ≥ 4 AND opposite → F1 wins
-        - Away collapse: 0 away pts from 3+ games → home +8 F1, force Over 2.5
-        - Doubt starter: key player in XI → F4 +5, force Over 2.5 (if expected ≥ 2.4)
+        **Decision rule (v4.3):**
+        - Gap < 12 → NO BET
+        - Gap 12–20 → Double Chance
+        - Gap ≥ 20 → Straight Win
 
-        **v4.2.1 additions:**
-        - Normalized league filter (La Liga vs LaLiga)
-        - Skip prediction if last5 empty or standings missing
-        - Log `f1_vs_f2f3_conflict` flag for tracking
-        - Store `f5_leader_raw` (pre-override) for clarity
+        **Conflict penalty (v4.3):**
+        - Count leaders of F1, F2, F3, F5 that disagree with overall leader
+        - `shrink = 1 - disagreements * 0.15` (0% to 60%)
+        - `gap = raw_gap * shrink` — **leader never flips**
+
+        **O/U (v4.3):**
+        - `< 2.4 Under` · `> 3.2 Over` (bookmaker margin, not overfit)
+        - Collapse/doubt forces Over only if expected ≥ 2.4
+
+        **Validation:**
+        - **Time split only**, never random
+        - Train: matches before `{HOLDOUT_DATE}`
+        - Holdout: matches on/after `{HOLDOUT_DATE}`
+        - **Do NOT tune thresholds after seeing holdout**
+
+        **Retained from v4.2.1:** all parser fixes #1–#17, hard filter on empty last5 or `played < 3`, F1/F5 override threshold ≥ 4, `f5_leader_raw` and `f1_vs_f2f3_conflict` logged.
         """)
 
 
