@@ -50,6 +50,11 @@ st.markdown("""
     .verdict-noedge { font-size: 1.6rem; font-weight: 700; color: #cbd5e1; margin: 0.35rem 0; }
     .verdict-detail { font-size: 1rem; color: #d1fae5; margin-top: 0.5rem; }
     .verdict-detail-grey { font-size: 0.95rem; color: #94a3b8; margin-top: 0.5rem; }
+    .mode-pill { display:inline-block; padding: 0.35rem 0.9rem; border-radius: 999px; font-weight: 800; font-size: 0.85rem; letter-spacing: 1px; text-transform: uppercase; }
+    .mode-withstand { background:#1e3a8a; color:#bfdbfe; }
+    .mode-demolish { background:#7f1d1d; color:#fecaca; }
+    .mode-lean { background:#78350f; color:#fde68a; }
+    .mode-nobet { background:#1e293b; color:#94a3b8; }
     .cand-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
     .cand-label { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
     .cand-score { color: #3b82f6; font-weight: 800; font-size: 1.1rem; }
@@ -119,7 +124,42 @@ RELIABILITY_PRIOR_STRENGTH = 10
 
 
 # ============================================================================
-# PARSER
+# MODE CLASSIFIER
+# ============================================================================
+class MatchMode:
+    WITHSTAND = "WITHSTAND"
+    DEMOLISH = "DEMOLISH"
+    DEMOLISH_LEAN = "DEMOLISH_LEAN"
+    NO_BET = "NO_BET"
+
+
+def classify_mode(model_total_shrunk, fav_win_prob, dog_gf, dog_ga):
+    """
+    Decision tree (applied religiously):
+
+      1. total <= 2.90 AND dog_GF <= 1.5 AND dog_GA <= 1.3 AND fav_win < 0.60
+             -> WITHSTAND
+      2. total >= 3.10 AND fav_win >= 0.60
+             -> DEMOLISH
+      3. total >= 3.10 AND fav_win >= 0.52
+             -> DEMOLISH_LEAN
+      4. else
+             -> NO_BET
+    """
+    if (model_total_shrunk <= 2.90
+            and dog_gf <= 1.5
+            and dog_ga <= 1.3
+            and fav_win_prob < 0.60):
+        return MatchMode.WITHSTAND
+    if model_total_shrunk >= 3.10 and fav_win_prob >= 0.60:
+        return MatchMode.DEMOLISH
+    if model_total_shrunk >= 3.10 and fav_win_prob >= 0.52:
+        return MatchMode.DEMOLISH_LEAN
+    return MatchMode.NO_BET
+
+
+# ============================================================================
+# PARSER  (unchanged)
 # ============================================================================
 def _has_bs4():
     try:
@@ -175,10 +215,6 @@ class SportsgamblerParser:
         return None, None
 
     def _parse_sg_pick(self):
-        """
-        Extract Sportsgambler's main match prediction text.
-        Strips the trailing "@ 1.55" odds suffix.
-        """
         el = self.soup.select_one(".tip--card__title")
         if not el:
             return None
@@ -595,7 +631,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# PREDICTOR
+# PREDICTOR  (modified with mode logic)
 # ============================================================================
 class RefinedPredictor:
     def __init__(self):
@@ -613,6 +649,17 @@ class RefinedPredictor:
         self.effective_shrink = SHRINK_WEIGHT
         self.home_trust = 1.0
         self.away_trust = 1.0
+        # mode state
+        self.fav_side = None
+        self.dog_side = None
+        self.fav_win_prob = 0.0
+        self.fav_gf = 0.0
+        self.dog_gf = 0.0
+        self.dog_ga = 0.0
+        self.mode = None
+        self.mode_primary_markets = []
+        self.mode_secondary_markets = []
+        self.suppressed_markets = []
 
     def calculate_base_xg(self, home_data, away_data):
         ha = self._blend(home_data.get("home_goals_scored_season", 1.5),
@@ -746,6 +793,100 @@ class RefinedPredictor:
             return p_win
         return ah[closest]
 
+    # ------------------------------------------------------------------
+    # MODE INPUTS
+    # ------------------------------------------------------------------
+    def compute_mode_inputs(self, match):
+        """
+        Derive fav_win_prob, fav_gf, dog_gf, dog_ga from the shrunk xG and
+        model probabilities, then classify the match into a mode.
+
+        Definitions used (per the brief):
+          - favourite   = side with the higher model win probability
+          - dog_GF      = underdog's shrunk expected goals (attacking output)
+          - dog_GA      = underdog's shrunk expected goals conceded,
+                          proxied by the favourite's shrunk expected goals
+          - fav_win_prob = model probability the favourite wins
+        """
+        P = self.probabilities
+        p_home = P.get("home_win", 0.0)
+        p_away = P.get("away_win", 0.0)
+
+        if p_home >= p_away:
+            self.fav_side = "home"
+            self.dog_side = "away"
+            self.fav_win_prob = p_home
+            self.fav_gf = self.shrunk_xg_home
+            self.dog_gf = self.shrunk_xg_away
+            self.dog_ga = self.shrunk_xg_home
+        else:
+            self.fav_side = "away"
+            self.dog_side = "home"
+            self.fav_win_prob = p_away
+            self.fav_gf = self.shrunk_xg_away
+            self.dog_gf = self.shrunk_xg_home
+            self.dog_ga = self.shrunk_xg_away
+
+        self.mode = classify_mode(
+            self.shrunk_total,
+            self.fav_win_prob,
+            self.dog_gf,
+            self.dog_ga,
+        )
+        self._set_mode_markets()
+
+    def _set_mode_markets(self):
+        """
+        Primary / secondary / suppressed (market, selection) specs per mode.
+        Handicap lines are formatted with :+g in generate_candidates, so
+        "-1.5" appears as "-1.5", "+0.75" as "+0.75", and "-1.0" as "-1".
+        The _selection_matches helper normalises integer vs decimal forms.
+        """
+        m = self.mode
+        if m == MatchMode.WITHSTAND:
+            dog = "Home" if self.dog_side == "home" else "Away"
+            fav = "Home" if self.fav_side == "home" else "Away"
+            self.mode_primary_markets = [
+                ("AH", f"{dog} +0.75"),
+                ("AH", f"{dog} +1"),
+            ]
+            self.mode_secondary_markets = [
+                ("O/U 2.5", "Under 2.5"),
+            ]
+            self.suppressed_markets = [
+                ("BTTS", "Yes"),
+                ("O/U 2.5", "Over 2.5"),
+                ("1X2", "Home Win" if self.fav_side == "home" else "Away Win"),
+                ("AH", f"{fav} -1.5"),
+            ]
+        elif m == MatchMode.DEMOLISH:
+            fav = "Home" if self.fav_side == "home" else "Away"
+            dog = "Home" if self.dog_side == "home" else "Away"
+            self.mode_primary_markets = [
+                ("AH", f"{fav} -1.5"),
+                ("AH", f"{fav} -1.75"),
+            ]
+            self.mode_secondary_markets = [
+                ("O/U 2.5", "Over 2.5"),
+            ]
+            self.suppressed_markets = [
+                ("1X2", "Home Win" if self.dog_side == "home" else "Away Win"),
+                ("O/U 2.5", "Under 2.5"),
+            ]
+        elif m == MatchMode.DEMOLISH_LEAN:
+            fav = "Home" if self.fav_side == "home" else "Away"
+            self.mode_primary_markets = [
+                ("AH", f"{fav} -1"),
+            ]
+            self.mode_secondary_markets = [
+                ("O/U 2.5", "Over 2.5"),
+            ]
+            self.suppressed_markets = []
+        else:  # NO_BET
+            self.mode_primary_markets = []
+            self.mode_secondary_markets = []
+            self.suppressed_markets = []
+
     def generate_candidates(self, odds):
         cs = []
         P = self.probabilities
@@ -763,7 +904,6 @@ class RefinedPredictor:
                 "col_key": col_key,
             })
 
-        # 1X2 — favourite is the selection with the lowest odds
         o_home = odds.get("home")
         o_draw = odds.get("draw")
         o_away = odds.get("away")
@@ -809,6 +949,36 @@ class RefinedPredictor:
 
         self.candidates = cs
 
+    @staticmethod
+    def _norm_handicap(s):
+        """Normalise '+1' / '-1' to '+1.0' / '-1.0' for comparison."""
+        return re.sub(r"([+-])(\d+)(?![\d.])", r"\1\2.0", s)
+
+    def _selection_matches(self, cand, market, selection):
+        if cand["market"] != market:
+            return False
+        if cand["selection"] == selection:
+            return True
+        return self._norm_handicap(cand["selection"]) == self._norm_handicap(selection)
+
+    def _is_suppressed(self, cand):
+        for market, selection in self.suppressed_markets:
+            if self._selection_matches(cand, market, selection):
+                return True
+        return False
+
+    def _is_primary(self, cand):
+        for market, selection in self.mode_primary_markets:
+            if self._selection_matches(cand, market, selection):
+                return True
+        return False
+
+    def _is_secondary(self, cand):
+        for market, selection in self.mode_secondary_markets:
+            if self._selection_matches(cand, market, selection):
+                return True
+        return False
+
     def score_and_rank(self, reliability):
         for c in self.candidates:
             rel = reliability.get(c["reliability_key"], 0.5)
@@ -819,26 +989,115 @@ class RefinedPredictor:
         for i, c in enumerate(self.candidates, start=1):
             c["rank_in_match"] = i
 
+    @staticmethod
+    def _stake_for_score(score):
+        if score >= STAKE_TIER_HIGH:
+            return "1 unit"
+        if score >= STAKE_TIER_MED:
+            return "0.5 units"
+        return "0.25 units"
+
     def select_top(self):
         self.bets = []; self.skips = []
-        if not self.candidates:
+
+        # ---- NO-BET ZONE ----
+        if self.mode == MatchMode.NO_BET:
+            if self.dog_gf >= 1.5 and self.fav_gf >= 1.5:
+                btts_yes = next(
+                    (c for c in self.candidates
+                     if c["market"] == "BTTS" and c["selection"] == "Yes"),
+                    None,
+                )
+                if btts_yes and btts_yes["edge"] > 0 and btts_yes["score"] >= MIN_SCORE:
+                    stake = self._stake_for_score(btts_yes["score"])
+                    self.bets.append({
+                        "market": btts_yes["market"], "selection": btts_yes["selection"],
+                        "prob": btts_yes["model_prob"], "edge": btts_yes["edge"],
+                        "odds": btts_yes["odds"], "stake": stake,
+                        "confidence": "NO-BET (BTTS Yes only)", "score": btts_yes["score"],
+                    })
+                    for c in self.candidates:
+                        if c is btts_yes:
+                            continue
+                        self.skips.append({
+                            "market": f"{c['market']} — {c['selection']}",
+                            "reason": f"NO-BET zone — rank {c['rank_in_match']}, score {c['score']:.4f}",
+                        })
+                    return
+            self.skips.append({
+                "market": "ALL",
+                "reason": (f"NO-BET zone (total={self.shrunk_total:.2f}, "
+                           f"fav_win={self.fav_win_prob:.1%}, "
+                           f"dog_GF={self.dog_gf:.2f}, "
+                           f"fav_GF={self.fav_gf:.2f})"),
+            })
             return
-        top = self.candidates[0]
+
+        # ---- WITHSTAND / DEMOLISH / DEMOLISH-LEAN ----
+        eligible = []
+        for c in self.candidates:
+            if self._is_suppressed(c):
+                self.skips.append({
+                    "market": f"{c['market']} — {c['selection']}",
+                    "reason": f"Suppressed in {self.mode} mode",
+                })
+                continue
+            is_prim = self._is_primary(c)
+            is_sec = self._is_secondary(c)
+            if not (is_prim or is_sec):
+                self.skips.append({
+                    "market": f"{c['market']} — {c['selection']}",
+                    "reason": (f"Not eligible in {self.mode} mode "
+                               f"(rank {c['rank_in_match']}, score {c['score']:.4f})"),
+                })
+                continue
+            c["_mode_priority"] = 0 if is_prim else 1
+            eligible.append(c)
+
+        if not eligible:
+            self.skips.append({
+                "market": "ALL",
+                "reason": (f"{self.mode} mode — no eligible candidate "
+                           f"(required market odds missing)"),
+            })
+            return
+
+        eligible.sort(key=lambda c: (c["_mode_priority"], -c["score"]))
+
+        top = eligible[0]
         if top["score"] < MIN_SCORE or top["edge"] <= 0:
-            self.skips.append({"market": top["market"], "reason": f"Top score {top['score']:.4f} below floor"})
+            self.skips.append({
+                "market": f"{top['market']} — {top['selection']}",
+                "reason": (f"{self.mode} mode — top eligible score "
+                           f"{top['score']:.4f} below floor or no edge"),
+            })
             return
-        if top["score"] >= STAKE_TIER_HIGH: stake = "1 unit"
-        elif top["score"] >= STAKE_TIER_MED: stake = "0.5 units"
-        else: stake = "0.25 units"
+
+        stake = self._stake_for_score(top["score"])
         self.bets.append({
             "market": top["market"], "selection": top["selection"],
             "prob": top["model_prob"], "edge": top["edge"], "odds": top["odds"],
-            "stake": stake, "confidence": "Ranked", "score": top["score"],
+            "stake": stake, "confidence": f"{self.mode} primary", "score": top["score"],
         })
-        for c in self.candidates[1:]:
+        bet_ids = {id(top)}
+
+        secondary = next((c for c in eligible if c["_mode_priority"] == 1), None)
+        if secondary and secondary["edge"] > 0 and secondary["score"] >= MIN_SCORE:
+            stake2 = self._stake_for_score(secondary["score"])
+            self.bets.append({
+                "market": secondary["market"], "selection": secondary["selection"],
+                "prob": secondary["model_prob"], "edge": secondary["edge"],
+                "odds": secondary["odds"], "stake": stake2,
+                "confidence": f"{self.mode} secondary", "score": secondary["score"],
+            })
+            bet_ids.add(id(secondary))
+
+        for c in eligible:
+            if id(c) in bet_ids:
+                continue
             self.skips.append({
                 "market": f"{c['market']} — {c['selection']}",
-                "reason": f"Rank {c['rank_in_match']}, score {c['score']:.4f}"
+                "reason": f"{self.mode} — rank {c['rank_in_match']}, score {c['score']:.4f}",
             })
 
     def get_full_analysis(self):
@@ -852,6 +1111,13 @@ class RefinedPredictor:
             "candidates": list(self.candidates),
             "effective_shrink": self.effective_shrink,
             "home_trust": self.home_trust, "away_trust": self.away_trust,
+            "mode": self.mode,
+            "fav_side": self.fav_side,
+            "dog_side": self.dog_side,
+            "fav_win_prob": self.fav_win_prob,
+            "fav_gf": self.fav_gf,
+            "dog_gf": self.dog_gf,
+            "dog_ga": self.dog_ga,
         }
 
 
@@ -1088,10 +1354,6 @@ def settle_candidate(market, selection, line, hg, ag):
 
 
 def settle_sg_pick(pick, home_team, away_team, hg, ag):
-    """
-    Given Sportsgambler's raw pick text and the actual score, return
-    WON/LOST/PUSH/VOID, or None if we can't parse the format.
-    """
     if not pick:
         return None
     p = pick.lower().strip()
@@ -1099,13 +1361,11 @@ def settle_sg_pick(pick, home_team, away_team, hg, ag):
     home_lower = (home_team or "").lower()
     away_lower = (away_team or "").lower()
 
-    # Team name token matching — needs at least 4-char tokens to avoid "fc", "cf", etc.
     home_tokens = [t for t in home_lower.split() if len(t) > 3]
     away_tokens = [t for t in away_lower.split() if len(t) > 3]
     home_in = any(t in p for t in home_tokens)
     away_in = any(t in p for t in away_tokens)
 
-    # --- O/U ---
     m = re.search(r"(over|under)\s+([\d.]+)", p)
     if m:
         line = float(m.group(2))
@@ -1114,14 +1374,11 @@ def settle_sg_pick(pick, home_team, away_team, hg, ag):
         if over: return "WON" if total > line else "LOST"
         return "WON" if total < line else "LOST"
 
-    # --- BTTS ---
     if "btts" in p or "both teams to score" in p:
         both_scored = (hg >= 1 and ag >= 1)
         if "no" in p: return "WON" if not both_scored else "LOST"
-        # default to Yes if neither explicit
         return "WON" if both_scored else "LOST"
 
-    # --- Asian Handicap ---
     if "hcp" in p or "handicap" in p or "ah " in p:
         lm = re.search(r"([+-][\d.]+)", pick)
         if not lm:
@@ -1137,7 +1394,6 @@ def settle_sg_pick(pick, home_team, away_team, hg, ag):
         if margin < 0: return "LOST"
         return "PUSH"
 
-    # --- 1X2 ---
     if "draw" in p:
         return "WON" if hg == ag else "LOST"
     if home_in and not away_in:
@@ -1287,6 +1543,14 @@ def write_match(sb, match, analysis):
             "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
             "model_prob_over_25": analysis["probabilities"].get("over_25"),
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
+            # mode fields
+            "mode": analysis.get("mode"),
+            "fav_side": analysis.get("fav_side"),
+            "dog_side": analysis.get("dog_side"),
+            "fav_win_prob": analysis.get("fav_win_prob"),
+            "fav_gf": analysis.get("fav_gf"),
+            "dog_gf": analysis.get("dog_gf"),
+            "dog_ga": analysis.get("dog_ga"),
         }
 
         rec["ah_home_line"] = match["odds"].get("ah_home_line")
@@ -1318,31 +1582,58 @@ def write_match(sb, match, analysis):
             rec[f"score_{ck}"] = c["score"]
             rec[f"rank_{ck}"] = c["rank_in_match"]
 
-        if analysis["bets"]:
-            top = analysis["bets"][0]
+        # Mark every bet (primary + secondary) in the wide schema
+        for bet in analysis["bets"]:
             top_c = next((c for c in analysis["candidates"]
-                          if c["market"] == top["market"] and c["selection"] == top["selection"]), None)
+                          if c["market"] == bet["market"]
+                          and c["selection"] == bet["selection"]), None)
+            if not top_c:
+                continue
+            ck = top_c["col_key"]
+            rec[f"was_bet_{ck}"] = True
+            m = re.match(r"([\d.]+)", bet.get("stake", "0"))
+            stake_val = float(m.group(1)) if m else None
+            rec[f"stake_{ck}"] = stake_val
+
+        # Primary pick summary columns (kept for compatibility with Records/Pending)
+        if analysis["bets"]:
+            primary = analysis["bets"][0]
+            top_c = next((c for c in analysis["candidates"]
+                          if c["market"] == primary["market"]
+                          and c["selection"] == primary["selection"]), None)
             if top_c:
-                ck = top_c["col_key"]
-                rec[f"was_bet_{ck}"] = True
-                m = re.match(r"([\d.]+)", top.get("stake", "0"))
+                m = re.match(r"([\d.]+)", primary.get("stake", "0"))
                 stake_val = float(m.group(1)) if m else None
-                rec[f"stake_{ck}"] = stake_val
-                rec["picked_market"] = top["market"]
-                rec["picked_selection"] = top["selection"]
+                rec["picked_market"] = primary["market"]
+                rec["picked_selection"] = primary["selection"]
                 rec["picked_line"] = top_c["line"]
-                rec["picked_odds"] = top["odds"]
-                rec["picked_model_prob"] = top["prob"]
-                rec["picked_implied_prob"] = 1.0 / top["odds"] if top["odds"] else None
-                rec["picked_edge"] = top["edge"]
+                rec["picked_odds"] = primary["odds"]
+                rec["picked_model_prob"] = primary["prob"]
+                rec["picked_implied_prob"] = 1.0 / primary["odds"] if primary["odds"] else None
+                rec["picked_edge"] = primary["edge"]
                 rec["picked_conviction"] = top_c["conviction"]
                 rec["picked_reliability"] = top_c["reliability"]
-                rec["picked_score"] = top["score"]
+                rec["picked_score"] = primary["score"]
                 rec["picked_stake"] = stake_val
                 rec["picked_outcome"] = None
 
+        # Secondary pick summary columns (optional — safe to add; ignored if absent)
+        if len(analysis["bets"]) > 1:
+            secondary = analysis["bets"][1]
+            sec_c = next((c for c in analysis["candidates"]
+                          if c["market"] == secondary["market"]
+                          and c["selection"] == secondary["selection"]), None)
+            if sec_c:
+                m = re.match(r"([\d.]+)", secondary.get("stake", "0"))
+                sec_stake = float(m.group(1)) if m else None
+                rec["secondary_market"] = secondary["market"]
+                rec["secondary_selection"] = secondary["selection"]
+                rec["secondary_odds"] = secondary["odds"]
+                rec["secondary_stake"] = sec_stake
+                rec["secondary_outcome"] = None
+
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
-        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates)"
+        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates, mode={analysis.get('mode')})"
     except Exception as e:
         return False, str(e)
 
@@ -1353,6 +1644,7 @@ def record_outcome(sb, match_id, hg, ag):
     try:
         resp = sb.table("matches").select(
             "ah_home_line,ah_away_line,picked_market,picked_selection,"
+            "secondary_market,secondary_selection,"
             "sg_pick,home_team,away_team"
         ).eq("match_id", match_id).execute()
         if not resp.data:
@@ -1377,21 +1669,33 @@ def record_outcome(sb, match_id, hg, ag):
             if outcome:
                 updates[f"outcome_{ck}"] = outcome
 
+        def _find_ck(market, selection):
+            for ck, (mk, s) in COL_TO_MARKET_SELECTION.items():
+                if mk != market:
+                    continue
+                if mk == "AH":
+                    if ck == "ah_home" and selection and selection.startswith("Home"):
+                        return ck
+                    if ck == "ah_away" and selection and selection.startswith("Away"):
+                        return ck
+                elif s == selection:
+                    return ck
+            return None
+
         pm = m.get("picked_market")
         ps = m.get("picked_selection")
         if pm and ps:
-            picked_ck = None
-            for ck, (mk, s) in COL_TO_MARKET_SELECTION.items():
-                if mk == pm:
-                    if mk == "AH":
-                        if ck == "ah_home" and ps.startswith("Home"): picked_ck = ck
-                        elif ck == "ah_away" and ps.startswith("Away"): picked_ck = ck
-                    elif s == ps:
-                        picked_ck = ck
+            picked_ck = _find_ck(pm, ps)
             if picked_ck and f"outcome_{picked_ck}" in updates:
                 updates["picked_outcome"] = updates[f"outcome_{picked_ck}"]
 
-        # Settle Sportsgambler's pick
+        sm = m.get("secondary_market")
+        ss = m.get("secondary_selection")
+        if sm and ss:
+            sec_ck = _find_ck(sm, ss)
+            if sec_ck and f"outcome_{sec_ck}" in updates:
+                updates["secondary_outcome"] = updates[f"outcome_{sec_ck}"]
+
         sg_outcome = settle_sg_pick(
             m.get("sg_pick"),
             m.get("home_team", ""),
@@ -1411,6 +1715,22 @@ def record_outcome(sb, match_id, hg, ag):
 # ============================================================================
 # DISPLAY
 # ============================================================================
+def _mode_pill(mode):
+    cls = {
+        MatchMode.WITHSTAND: "mode-withstand",
+        MatchMode.DEMOLISH: "mode-demolish",
+        MatchMode.DEMOLISH_LEAN: "mode-lean",
+        MatchMode.NO_BET: "mode-nobet",
+    }.get(mode, "mode-nobet")
+    label = {
+        MatchMode.WITHSTAND: "WITHSTAND",
+        MatchMode.DEMOLISH: "DEMOLISH",
+        MatchMode.DEMOLISH_LEAN: "DEMOLISH-LEAN",
+        MatchMode.NO_BET: "NO-BET ZONE",
+    }.get(mode, "—")
+    return f'<span class="mode-pill {cls}">{label}</span>'
+
+
 def render_prediction_card(match, parsed, analysis):
     meta_parts = []
     if match.get("league"): meta_parts.append(match["league"])
@@ -1426,11 +1746,37 @@ def render_prediction_card(match, parsed, analysis):
     </div>
     """, unsafe_allow_html=True)
 
+    # Mode pill
+    st.markdown(
+        f'<div style="margin-bottom:0.5rem;">{_mode_pill(analysis.get("mode"))}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Mode inputs summary
+    st.markdown('<div class="section-title">Mode Inputs</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="trust-row"><span>shrunk_total</span><span class="trust-value">{analysis['shrunk_total']:.2f}</span></div>
+    <div class="trust-row"><span>favourite</span><span class="trust-value">{analysis.get('fav_side') or '—'}</span></div>
+    <div class="trust-row"><span>fav_win_prob</span><span class="trust-value">{analysis['fav_win_prob']:.1%}</span></div>
+    <div class="trust-row"><span>fav_GF</span><span class="trust-value">{analysis['fav_gf']:.2f}</span></div>
+    <div class="trust-row"><span>dog_GF</span><span class="trust-value">{analysis['dog_gf']:.2f}</span></div>
+    <div class="trust-row"><span>dog_GA</span><span class="trust-value">{analysis['dog_ga']:.2f}</span></div>
+    """, unsafe_allow_html=True)
+
+    # Verdict
     if analysis["bets"]:
         primary = analysis["bets"][0]
+        secondary_html = ""
+        if len(analysis["bets"]) > 1:
+            s = analysis["bets"][1]
+            secondary_html = (
+                f'<div class="verdict-detail">↳ Secondary: '
+                f'<strong>{s["selection"]}</strong> ({s["market"]}) '
+                f'@ {s["odds"]:.2f} · Edge {s["edge"]:+.1%} · Stake {s["stake"]}</div>'
+            )
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ Primary Pick (Ranked #1)</div>
+            <div class="verdict-label">⭐ Primary Pick — {primary.get('confidence','')}</div>
             <div class="verdict-pick">{primary['selection']}</div>
             <div class="verdict-detail">
                 {primary['market']} &nbsp;·&nbsp; @ <strong>{primary['odds']:.2f}</strong>
@@ -1438,19 +1784,20 @@ def render_prediction_card(match, parsed, analysis):
                 &nbsp;·&nbsp; Score <strong>{primary.get('score', 0):.4f}</strong>
                 &nbsp;·&nbsp; Stake <strong>{primary['stake']}</strong>
             </div>
+            {secondary_html}
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown("""
+        st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">Verdict</div>
-            <div class="verdict-noedge">No candidate cleared the ranking floor</div>
-            <div class="verdict-detail-grey">Every market scored below MIN_SCORE. Skip this match.</div>
+            <div class="verdict-label-grey">Verdict — {analysis.get('mode','')}</div>
+            <div class="verdict-noedge">No eligible candidate cleared the floor</div>
+            <div class="verdict-detail-grey">Mode restrictions and/or scoring left no playable edge. Skip this match.</div>
         </div>
         """, unsafe_allow_html=True)
 
     if match.get("sg_pick"):
-        st.markdown(f'<div class="section-title">Sportsgambler Pick</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Sportsgambler Pick</div>', unsafe_allow_html=True)
         st.info(f"🏷️ {match['sg_pick']}")
 
     st.markdown('<div class="section-title">Top 10 Candidates</div>', unsafe_allow_html=True)
@@ -1494,7 +1841,7 @@ def render_prediction_card(match, parsed, analysis):
 # ============================================================================
 def main():
     st.title("⚽ Refined Prediction Strategy")
-    st.caption("xG-based model with ranking selection — wide matches schema")
+    st.caption("xG-based model with mode-gated ranking — wide matches schema")
 
     get_supabase.clear()
     sb, diag = get_supabase()
@@ -1538,6 +1885,7 @@ Error:      {diag.get('error')}
                             away_current_games=match.get("away_current_games", 999),
                         )
                         p.run_poisson()
+                        p.compute_mode_inputs(match)          # <-- NEW
                         p.generate_candidates(match["odds"])
                         reliability = get_reliability(sb)
                         p.score_and_rank(reliability)
@@ -1569,7 +1917,10 @@ Error:      {diag.get('error')}
         else:
             try:
                 resp = sb.table("matches").select(
-                    "match_id,match_date,home_team,away_team,picked_market,picked_selection,picked_odds,sg_pick"
+                    "match_id,match_date,home_team,away_team,"
+                    "picked_market,picked_selection,picked_odds,"
+                    "secondary_market,secondary_selection,secondary_odds,"
+                    "mode,sg_pick"
                 ).is_("actual_home_goals", "null").execute()
                 pending = resp.data or []
             except Exception as e:
@@ -1586,7 +1937,16 @@ Error:      {diag.get('error')}
                     pick_str = f"{pm} — {ps} @ {po:.2f}"
                 else:
                     pick_str = "no bet — ranked list empty"
-                with st.expander(f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')} · {pick_str}"):
+                if m.get("secondary_market") and m.get("secondary_selection"):
+                    so = m.get("secondary_odds")
+                    if so is not None:
+                        pick_str += f"  |  secondary: {m['secondary_market']} — {m['secondary_selection']} @ {so:.2f}"
+                mode = m.get("mode") or ""
+                header = f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')}"
+                if mode:
+                    header += f" · {mode}"
+                header += f" · {pick_str}"
+                with st.expander(header):
                     if m.get("sg_pick"):
                         st.caption(f"Sportsgambler pick: {m['sg_pick']}")
                     c1, c2 = st.columns(2)
@@ -1607,9 +1967,10 @@ Error:      {diag.get('error')}
         else:
             try:
                 resp = sb.table("matches").select(
-                    "match_id,match_date,home_team,away_team,"
+                    "match_id,match_date,home_team,away_team,mode,"
                     "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
-                    "picked_outcome,actual_home_goals,actual_away_goals,"
+                    "picked_outcome,secondary_market,secondary_selection,secondary_outcome,"
+                    "actual_home_goals,actual_away_goals,"
                     "sg_pick,sg_outcome"
                 ).not_.is_("picked_outcome", "null").execute()
                 rows = resp.data or []
@@ -1634,8 +1995,12 @@ Error:      {diag.get('error')}
                 df = pd.DataFrame([{
                     "Date": r.get("match_date", ""),
                     "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
+                    "Mode": r.get("mode") or "",
                     "My pick": f"{r.get('picked_market','')} — {r.get('picked_selection','')}",
                     "My result": r.get("picked_outcome", ""),
+                    "Secondary": (f"{r.get('secondary_market','')} — {r.get('secondary_selection','')}"
+                                  if r.get("secondary_market") else ""),
+                    "Sec. result": r.get("secondary_outcome") or "",
                     "SG pick": r.get("sg_pick") or "—",
                     "SG result": r.get("sg_outcome") or "—",
                     "Score": f"{r.get('actual_home_goals','')}-{r.get('actual_away_goals','')}",
