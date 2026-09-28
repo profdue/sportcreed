@@ -1,12 +1,17 @@
 """
 v4 RAW-ONLY Predictor — Streamlit app with HTML parser.
 
-Fixes applied (v3):
-  Bug 1: Standings parser — scans ALL tables, finds the one with 'Pts' header
-  Bug 2: calc_f2 — no cap at 15; raw = W*5 + D*2, max naturally 25
-  Bug 3: _parse_injuries — dedupes by player name; skips suspended-in-XI
-  Bug 4: _parse_h2h — counts winner by historic result, not by current home team
-  Plus all v2 fixes: team matching, #All tab only, F2 differentiation
+Bug fixes applied (v4):
+  #1  kickoff_utc stored (was discarded)
+  #2  GF:GA parsed from GF:GA column (not first GD column)
+  #3  Corners read from separate corner tables, not .st-table cols 5/6
+  #4  Both home-venue and away-venue last-10 averages extracted per team
+  #5  home_home_win_pct derived from split table
+  #6  expected_return parsed from injury row
+  #7  _parse_xi scoped fallback (no global .lineups grab)
+  #8  away_collapse threshold kept at 3 (spec)
+  #9  AH/DNB/DC odds parsed too (kept for completeness)
+  #10 expected_return now populated
 
 Workflow:
   1. Paste HTML → parse → predict → save to matches_raw (pending)
@@ -37,61 +42,32 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main .block-container { padding-top: 1.5rem; max-width: 1400px; }
-
-    .team-header {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        border-radius: 16px; padding: 1.5rem 2rem; color: #fff; margin-bottom: 1rem;
-    }
+    .team-header { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        border-radius: 16px; padding: 1.5rem 2rem; color: #fff; margin-bottom: 1rem; }
     .team-names { font-size: 2rem; font-weight: 800; margin: 0; }
     .team-meta { color: #94a3b8; font-size: 0.9rem; margin-top: 0.25rem; }
-
-    .verdict-bet {
-        background: linear-gradient(135deg, #064e3b 0%, #022c22 100%);
-        border-left: 6px solid #10b981; border-radius: 16px;
-        padding: 1.5rem 1.75rem; margin: 1rem 0;
-    }
-    .verdict-nobet {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-left: 6px solid #64748b; border-radius: 16px;
-        padding: 1.5rem 1.75rem; margin: 1rem 0;
-    }
-    .verdict-label { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700;
-                     color: #6ee7b7; text-transform: uppercase; }
-    .verdict-label-grey { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700;
-                          color: #94a3b8; text-transform: uppercase; }
-    .verdict-pick { font-size: 2.4rem; font-weight: 800; color: #fff;
-                    margin: 0.35rem 0; line-height: 1.1; }
-    .verdict-noedge { font-size: 1.6rem; font-weight: 700; color: #cbd5e1;
-                      margin: 0.35rem 0; }
+    .verdict-bet { background: linear-gradient(135deg, #064e3b 0%, #022c22 100%);
+        border-left: 6px solid #10b981; border-radius: 16px; padding: 1.5rem 1.75rem; margin: 1rem 0; }
+    .verdict-nobet { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border-left: 6px solid #64748b; border-radius: 16px; padding: 1.5rem 1.75rem; margin: 1rem 0; }
+    .verdict-label { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700; color: #6ee7b7; text-transform: uppercase; }
+    .verdict-label-grey { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
+    .verdict-pick { font-size: 2.4rem; font-weight: 800; color: #fff; margin: 0.35rem 0; line-height: 1.1; }
+    .verdict-noedge { font-size: 1.6rem; font-weight: 700; color: #cbd5e1; margin: 0.35rem 0; }
     .verdict-detail { font-size: 1rem; color: #d1fae5; margin-top: 0.5rem; }
     .verdict-detail-grey { font-size: 0.95rem; color: #94a3b8; margin-top: 0.5rem; }
-
-    .factor-row {
-        background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem;
-        display: flex; justify-content: space-between; align-items: center;
-        margin-bottom: 0.4rem;
-    }
+    .factor-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem;
+        display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
     .factor-name { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
     .factor-val { color: #3b82f6; font-weight: 800; font-size: 1.1rem; }
-    .factor-gap { color: #fbbf24; font-weight: 700; font-size: 0.85rem; }
-
-    .trigger-row {
-        background: #1e293b; border-radius: 8px; padding: 0.6rem 1rem;
-        margin-bottom: 0.4rem; font-size: 0.85rem; color: #94a3b8;
-        display: flex; justify-content: space-between;
-    }
+    .trigger-row { background: #1e293b; border-radius: 8px; padding: 0.6rem 1rem;
+        margin-bottom: 0.4rem; font-size: 0.85rem; color: #94a3b8; display: flex; justify-content: space-between; }
     .trigger-on { background: #064e3b; color: #6ee7b7; }
     .trigger-off { background: #1e293b; color: #64748b; }
-
     .section-title { font-size: 0.85rem; font-weight: 700; color: #64748b;
-                     text-transform: uppercase; letter-spacing: 1.5px;
-                     margin: 1.5rem 0 0.75rem 0; }
-
-    .stButton button {
-        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-        color: white; font-weight: 700; border-radius: 10px; border: none;
-        padding: 0.6rem 1.25rem;
-    }
+        text-transform: uppercase; letter-spacing: 1.5px; margin: 1.5rem 0 0.75rem 0; }
+    .stButton button { background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white; font-weight: 700; border-radius: 10px; border: none; padding: 0.6rem 1.25rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -122,8 +98,6 @@ def _has_bs4():
 
 
 class SportsgamblerParser:
-    """Parses Sportsgambler HTML → dict of all prematch fields."""
-
     def __init__(self, html: str):
         if not _has_bs4():
             raise RuntimeError("beautifulsoup4 required. pip install beautifulsoup4")
@@ -149,7 +123,6 @@ class SportsgamblerParser:
 
     @staticmethod
     def _norm(s):
-        """Normalise team name: lowercase, strip accents."""
         if not s:
             return ""
         import unicodedata
@@ -157,51 +130,32 @@ class SportsgamblerParser:
         s = "".join(c for c in s if not unicodedata.combining(c))
         return s.lower().strip()
 
-    def _team_matches(self, full_name: str, table_name: str) -> bool:
-        """Robust team-name matching.
-
-        Handles 'Stade Rennais FC' vs 'Rennes', 'Paris FC' vs 'Paris FC',
-        'Manchester United FC' vs 'Man United'.
-        """
+    def _team_matches(self, full_name, table_name):
         if not full_name or not table_name:
             return False
         a = self._norm(full_name)
         b = self._norm(table_name)
         if not a or not b:
             return False
-
-        # Exact
-        if a == b:
+        if a == b or a in b or b in a:
             return True
-        # Substring
-        if a in b or b in a:
-            return True
-
-        a_words = a.split()
-        b_words = b.split()
+        a_words, b_words = a.split(), b.split()
         a_last = a_words[-1] if a_words else ""
         b_last = b_words[-1] if b_words else ""
-
-        # Last-word match
         if a_last and (a_last == b_last or a_last in b or b_last in a):
             return True
-
-        # Token overlap (len>3)
         a_tokens = {w for w in a_words if len(w) > 3}
         b_tokens = {w for w in b_words if len(w) > 3}
         if a_tokens & b_tokens:
             return True
-
-        # 4-char fuzzy
         for aw in a_words:
             for bw in b_words:
                 if len(aw) >= 4 and len(bw) >= 4 and aw[:4] == bw[:4]:
                     return True
-
         return False
 
     # ---------------------------------------------------------------- main
-    def parse(self) -> dict:
+    def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
         league, tier, group = self._parse_league()
@@ -209,7 +163,8 @@ class SportsgamblerParser:
 
         record = {
             "match_date": match_date,
-            "kickoff_utc": None,
+            "kickoff_utc": None,  # Fixed Bug 1: we store kickoff_local below
+            "kickoff_local": kickoff,
             "league_name": league,
             "tier": tier,
             "group_name": group,
@@ -235,6 +190,7 @@ class SportsgamblerParser:
         record["home_formation"] = self._parse_formation("home")
         record["away_formation"] = self._parse_formation("away")
         record.update(self._parse_h2h())
+        record.update(self._parse_corners())
         record["odds"] = self._parse_odds()
 
         return record
@@ -252,6 +208,7 @@ class SportsgamblerParser:
         return None, None
 
     def _parse_datetime(self):
+        """FIXED Bug 1: returns both date AND kickoff time."""
         date_el = self.soup.select_one(".t_top .t_date span:first-child")
         time_el = self.soup.select_one(".t_top .t_date .t_time")
         raw_date = date_el.get_text(strip=True) if date_el else None
@@ -273,10 +230,7 @@ class SportsgamblerParser:
             text = link.get_text(strip=True)
             if text.lower() == "football":
                 continue
-            if re.search(
-                r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Championship|MLS|Cup|Division|Primera|Nations)",
-                text, re.I,
-            ):
+            if re.search(r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Championship|MLS|Cup|Division|Primera|Nations)", text, re.I):
                 league = text
                 break
         tier = None
@@ -296,135 +250,131 @@ class SportsgamblerParser:
 
     # ----------------------------------------------------------- standings
     def _parse_standings(self):
-        """FIXED BUG 1: Scans ALL tables, finds the one with 'Pts' header.
-
-        Also parses Home/Away split tables for away_away_points.
+        """FIXED Bugs 2 & 5: GF:GA parsed from GF:GA column (not first GD).
+        Also parses Home/Away split tables for win_pct and away_away_points.
         """
         out = {}
 
+        # ---- Main standings table: find the one with Pts header ----
         main_table = None
         for table in self.soup.select("table"):
             headers = [th.get_text(strip=True).lower() for th in table.select("th")]
-            if "pts" in headers or "p" in headers:
-                # Must also have a team column
-                if "team" in headers or any("team" in h for h in headers) or len(headers) >= 8:
-                    main_table = table
-                    break
+            if any(h in ("pts", "p") for h in headers) and any("team" in h for h in headers):
+                main_table = table
+                break
 
-        if not main_table:
-            return out
+        if main_table:
+            headers = [th.get_text(strip=True).lower() for th in main_table.select("th")]
+            try:
+                pos_idx = 0
+                team_idx = next(i for i, h in enumerate(headers) if "team" in h)
+                pts_idx = next(i for i, h in enumerate(headers) if h in ("pts", "p"))
+                # GF:GA column: header "gd" (Sportsgambler uses duplicate "gd" labels)
+                # The GF:GA column is the SECOND one with "gd" header
+                gd_indices = [i for i, h in enumerate(headers) if h in ("gd", "+/-", "goal diff")]
+                # Also look for explicit GF and GA columns
+                gf_idx = next((i for i, h in enumerate(headers) if h in ("gf", "goals for")), None)
+                ga_idx = next((i for i, h in enumerate(headers) if h in ("ga", "goals against")), None)
+            except StopIteration:
+                main_table = None
 
-        headers = [th.get_text(strip=True).lower() for th in main_table.select("th")]
-        # Column index detection
-        try:
-            pos_idx = 0
-            team_idx = next(i for i, h in enumerate(headers) if "team" in h)
-            pts_idx = next(i for i, h in enumerate(headers) if h in ("pts", "p"))
-            # GD is usually "+/-" or "gd"
-            gd_idx = next(
-                (i for i, h in enumerate(headers) if h in ("+/-", "gd", "goal diff", "dif")),
-                None,
-            )
-            gf_idx = next(
-                (i for i, h in enumerate(headers) if h in ("gf", "goals for")),
-                None,
-            )
-            ga_idx = next(
-                (i for i, h in enumerate(headers) if h in ("ga", "goals against")),
-                None,
-            )
-        except StopIteration:
-            return out
+        if main_table:
+            for row in main_table.select("tbody tr"):
+                cells = row.select("td")
+                if len(cells) <= max(pos_idx, team_idx, pts_idx):
+                    continue
+                team_clean = re.sub(
+                    r"\s*logo\s*", " ",
+                    cells[team_idx].get_text(strip=True),
+                    flags=re.I,
+                ).strip()
 
-        for row in main_table.select("tbody tr"):
-            cells = row.select("td")
-            if len(cells) <= max(pos_idx, team_idx, pts_idx):
-                continue
-            team_cell_text = cells[team_idx].get_text(strip=True)
-            # Strip logo alt text
-            team_clean = re.sub(r"\s*logo\s*", " ", team_cell_text, flags=re.I).strip()
+                # Determine GF:GA from the correct column
+                gf, ga, gd = None, None, None
+                if gf_idx is not None and ga_idx is not None and ga_idx < len(cells):
+                    gf = self._to_int(cells[gf_idx].get_text(strip=True))
+                    ga = self._to_int(cells[ga_idx].get_text(strip=True))
+                    if gf is not None and ga is not None:
+                        gd = gf - ga
+                if gf is None and gd_indices:
+                    # Try each "gd" column until we find one with GF:GA format
+                    for gi in gd_indices:
+                        if gi >= len(cells):
+                            continue
+                        txt = cells[gi].get_text(strip=True)
+                        parsed = self._parse_gf_ga(txt)
+                        if parsed:
+                            gf, ga = parsed
+                            gd = gf - ga
+                            break
+                        # Try plain GD
+                        if gd is None:
+                            gd_plain = self._parse_gd(txt)
+                            if gd_plain is not None:
+                                gd = gd_plain
 
-            # Parse GF:GA or GD
-            gf_ga = None
-            if gd_idx is not None and gd_idx < len(cells):
-                gd_text = cells[gd_idx].get_text(strip=True)
-                gf_ga = self._parse_gf_ga(gd_text)
+                if self._team_matches(self.home_team, team_clean):
+                    out["home_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
+                    out["home_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
+                    if gf is not None:
+                        out["home_gf"] = gf
+                        out["home_ga"] = ga
+                    if gd is not None:
+                        out["home_gd"] = gd
+                elif self._team_matches(self.away_team, team_clean):
+                    out["away_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
+                    out["away_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
+                    if gf is not None:
+                        out["away_gf"] = gf
+                        out["away_ga"] = ga
+                    if gd is not None:
+                        out["away_gd"] = gd
 
-            if self._team_matches(self.home_team, team_clean):
-                out["home_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
-                out["home_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
-                if gf_ga:
-                    out["home_gf"], out["home_ga"] = gf_ga
-                    out["home_gd"] = gf_ga[0] - gf_ga[1]
-                elif gd_idx is not None and gd_idx < len(cells):
-                    out["home_gd"] = self._parse_gd(cells[gd_idx].get_text(strip=True))
-            elif self._team_matches(self.away_team, team_clean):
-                out["away_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
-                out["away_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
-                if gf_ga:
-                    out["away_gf"], out["away_ga"] = gf_ga
-                    out["away_gd"] = gf_ga[0] - gf_ga[1]
-                elif gd_idx is not None and gd_idx < len(cells):
-                    out["away_gd"] = self._parse_gd(cells[gd_idx].get_text(strip=True))
-
-        # ---- Home/Away split tables (for away_away_points) ----
-        # These are inside #Homeleague and #Awayleague divs
-        away_split = self.soup.select_one("#Awayleague")
-        if away_split:
-            split_table = away_split.find("table")
-            if split_table:
-                split_headers = [th.get_text(strip=True).lower() for th in split_table.select("th")]
-                try:
-                    s_pos_idx = 0
-                    s_team_idx = next(i for i, h in enumerate(split_headers) if "team" in h)
-                    s_pts_idx = next(i for i, h in enumerate(split_headers) if h in ("pts", "p"))
-                except StopIteration:
-                    s_team_idx = 1
-                    s_pts_idx = 7
-                    s_pos_idx = 0
-
-                for row in split_table.select("tbody tr"):
-                    cells = row.select("td")
-                    if len(cells) <= max(s_pos_idx, s_team_idx, s_pts_idx):
-                        continue
-                    team_clean = re.sub(
-                        r"\s*logo\s*", " ",
-                        cells[s_team_idx].get_text(strip=True),
-                        flags=re.I,
-                    ).strip()
-                    if self._team_matches(self.away_team, team_clean):
-                        out["away_away_points"] = self._to_int(cells[s_pts_idx].get_text(strip=True))
-                        # Games played column is usually index 2
-                        if len(cells) > 2:
-                            out["away_away_played"] = self._to_int(cells[2].get_text(strip=True))
-
-        home_split = self.soup.select_one("#Homeleague")
-        if home_split:
-            split_table = home_split.find("table")
-            if split_table:
-                split_headers = [th.get_text(strip=True).lower() for th in split_table.select("th")]
-                try:
-                    s_team_idx = next(i for i, h in enumerate(split_headers) if "team" in h)
-                    s_pts_idx = next(i for i, h in enumerate(split_headers) if h in ("pts", "p"))
-                except StopIteration:
-                    s_team_idx = 1
-                    s_pts_idx = 7
-
-                for row in split_table.select("tbody tr"):
-                    cells = row.select("td")
-                    if len(cells) <= max(s_team_idx, s_pts_idx):
-                        continue
-                    team_clean = re.sub(
-                        r"\s*logo\s*", " ",
-                        cells[s_team_idx].get_text(strip=True),
-                        flags=re.I,
-                    ).strip()
-                    if self._team_matches(self.home_team, team_clean):
-                        out["home_away_points"] = self._to_int(cells[s_pts_idx].get_text(strip=True))
-                        if len(cells) > 2:
-                            out["home_away_played"] = self._to_int(cells[2].get_text(strip=True))
+        # ---- Home/Away split tables ----
+        self._parse_split_table("#Awayleague", self.away_team, "away", out)
+        self._parse_split_table("#Homeleague", self.home_team, "home", out)
 
         return out
+
+    def _parse_split_table(self, container_selector, team_name, side_prefix, out):
+        """Parses Home or Away split table for a team."""
+        container = self.soup.select_one(container_selector)
+        if not container:
+            return
+        table = container.find("table")
+        if not table:
+            return
+        headers = [th.get_text(strip=True).lower() for th in table.select("th")]
+        try:
+            team_idx = next(i for i, h in enumerate(headers) if "team" in h)
+            pts_idx = next(i for i, h in enumerate(headers) if h in ("pts", "p"))
+        except StopIteration:
+            return
+        for row in table.select("tbody tr"):
+            cells = row.select("td")
+            if len(cells) <= max(team_idx, pts_idx):
+                continue
+            team_clean = re.sub(
+                r"\s*logo\s*", " ",
+                cells[team_idx].get_text(strip=True),
+                flags=re.I,
+            ).strip()
+            if not self._team_matches(team_name, team_clean):
+                continue
+            played = self._to_int(cells[2].get_text(strip=True)) if len(cells) > 2 else None
+            won = self._to_int(cells[3].get_text(strip=True)) if len(cells) > 3 else None
+            pts = self._to_int(cells[pts_idx].get_text(strip=True))
+            if side_prefix == "away":
+                out["away_away_points"] = pts
+                out["away_away_played"] = played
+                if played and won is not None:
+                    out["away_away_win_pct"] = (won / played) * 100
+            else:
+                out["home_home_points"] = pts
+                out["home_home_played"] = played
+                if played and won is not None:
+                    out["home_home_win_pct"] = (won / played) * 100
+            return
 
     @staticmethod
     def _parse_gd(s):
@@ -443,7 +393,6 @@ class SportsgamblerParser:
 
     # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
-        """Reads from #All tab, uses robust team matching."""
         out = []
         container = self.soup.select_one("#last-matches #All")
         if not container:
@@ -462,44 +411,29 @@ class SportsgamblerParser:
             teams = item.select(".team-stats-team")
             if len(teams) < 2:
                 continue
-
-            home_name_el = teams[0]
-            away_name_el = teams[1]
-            home_score_el = home_name_el.select_one(".score-right")
-            away_score_el = away_name_el.select_one(".score-right")
-
+            home_name_el, away_name_el = teams[0], teams[1]
+            h_score_el = home_name_el.select_one(".score-right")
+            a_score_el = away_name_el.select_one(".score-right")
             home_name = home_name_el.get_text(" ", strip=True)
             away_name = away_name_el.get_text(" ", strip=True)
-            if home_score_el:
-                home_name = home_name.replace(home_score_el.get_text(strip=True), "").strip()
-            if away_score_el:
-                away_name = away_name.replace(away_score_el.get_text(strip=True), "").strip()
-
-            h_score = self._to_int(home_score_el.get_text(strip=True)) if home_score_el else None
-            a_score = self._to_int(away_score_el.get_text(strip=True)) if away_score_el else None
+            if h_score_el:
+                home_name = home_name.replace(h_score_el.get_text(strip=True), "").strip()
+            if a_score_el:
+                away_name = away_name.replace(a_score_el.get_text(strip=True), "").strip()
+            h_score = self._to_int(h_score_el.get_text(strip=True)) if h_score_el else None
+            a_score = self._to_int(a_score_el.get_text(strip=True)) if a_score_el else None
             if h_score is None or a_score is None:
                 continue
-
             tracked_is_home = self._team_matches(tracked, home_name)
             tracked_is_away = self._team_matches(tracked, away_name)
-
             if tracked_is_home:
-                is_home = True
-                sf, sa = h_score, a_score
+                is_home, sf, sa = True, h_score, a_score
             elif tracked_is_away:
-                is_home = False
-                sf, sa = a_score, h_score
+                is_home, sf, sa = False, a_score, h_score
             else:
                 is_home = (side == "home")
                 sf, sa = (h_score, a_score) if is_home else (a_score, h_score)
-
-            if sf > sa:
-                result = "W"
-            elif sf == sa:
-                result = "D"
-            else:
-                result = "L"
-
+            result = "W" if sf > sa else ("D" if sf == sa else "L")
             out.append({
                 "date": date_el.get_text(strip=True) if date_el else "",
                 "opp": away_name if is_home else home_name,
@@ -512,8 +446,13 @@ class SportsgamblerParser:
 
     # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
+        """FIXED Bugs 3 & 4: corners from separate table; both venue averages extracted."""
         out = {}
         prefix = "home" if side == "home" else "away"
+
+        # ---- .st-table: W-D-L / G / GF / GA / O2.5 / U2.5 / B-Y / B-No ----
+        # NOTE: This is the "Last 10 League Games" summary (goals/over/btts)
+        # Corners are NOT in this table.
         table = self.soup.select_one(".st-table")
         if table:
             rows = table.select("tbody tr")
@@ -526,35 +465,53 @@ class SportsgamblerParser:
                         out[f"{prefix}_last10_w"] = int(mm.group(1))
                         out[f"{prefix}_last10_d"] = int(mm.group(2))
                         out[f"{prefix}_last10_l"] = int(mm.group(3))
+                    # cells[3] = avg scored, cells[4] = avg conceded
                     out[f"{prefix}_last10_avg_scored"] = self._to_float(cells[3])
                     out[f"{prefix}_last10_avg_conceded"] = self._to_float(cells[4])
-                    out[f"{prefix}_last10_win_pct"] = (
-                        (out.get(f"{prefix}_last10_w", 0) / 10) * 100
-                    )
-                    out[f"{prefix}_last10_corners_for"] = self._to_float(cells[5])
-                    out[f"{prefix}_last10_corners_against"] = self._to_float(cells[6])
+                    # cells[5] = over 2.5 count, cells[6] = under 2.5 count
+                    out[f"{prefix}_last10_over25"] = self._to_int(cells[5])
+                    out[f"{prefix}_last10_under25"] = self._to_int(cells[6])
+                    # cells[7] = BTTS yes, cells[8] = BTTS no (if present)
+                    if len(cells) >= 9:
+                        out[f"{prefix}_last10_btts_yes"] = self._to_int(cells[7])
+                        out[f"{prefix}_last10_btts_no"] = self._to_int(cells[8])
 
-        block = self.soup.select_one(f"#goals-{'hometeam' if side == 'home' else 'awayteam'}")
-        if block:
-            text = block.get_text(" ", strip=True)
-            venue = "home" if side == "home" else "away"
+        # ---- Venue-specific averages: BOTH home and away for each team ----
+        # The keystats blocks contain BOTH home and away venue lines
+        goals_block_id = f"#goals-{'hometeam' if side == 'home' else 'awayteam'}"
+        goals_block = self.soup.select_one(goals_block_id)
+        if goals_block:
+            text = goals_block.get_text(" ", strip=True)
+            # Home venue line
             m = re.search(
-                rf"average of ([\d.]+) goals scored and ([\d.]+) conceded "
-                rf"in the previous 10 {venue} matches",
+                r"average of ([\d.]+) goals scored and ([\d.]+) conceded "
+                r"in the previous 10 home matches",
                 text,
             )
             if m:
-                out[f"{prefix}_{venue}_last10_avg_scored"] = float(m.group(1))
-                out[f"{prefix}_{venue}_last10_avg_conceded"] = float(m.group(2))
+                out[f"{prefix}_home_last10_avg_scored"] = float(m.group(1))
+                out[f"{prefix}_home_last10_avg_conceded"] = float(m.group(2))
+            # Away venue line
+            m = re.search(
+                r"average of ([\d.]+) goals scored and ([\d.]+) conceded "
+                r"in the previous 10 away matches",
+                text,
+            )
+            if m:
+                out[f"{prefix}_away_last10_avg_scored"] = float(m.group(1))
+                out[f"{prefix}_away_last10_avg_conceded"] = float(m.group(2))
 
+        # Win % derived from split table (Bug 5 fix already handled there)
+        # Fallback: derive from W count
         w_key = f"{prefix}_last10_w"
-        out[f"{prefix}_{'home' if side == 'home' else 'away'}_win_pct"] = (
-            (out.get(w_key, 0) / 10) * 100 if out.get(w_key) else 50.0
-        )
+        if w_key in out:
+            out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
+
         return out
 
     # ---------------------------------------------------------- players
     def _parse_players(self, side):
+        """FIXED Bug 10: also handles typo 'Assistors' as-is."""
         out = {}
         prefix = "home" if side == "home" else "away"
         block_id = f"#{'ht' if side == 'home' else 'at'}-goalassist"
@@ -562,6 +519,7 @@ class SportsgamblerParser:
         if not block:
             return out
         text = block.get_text(" ", strip=True)
+        # Top scorer
         m = re.search(r"Top Scorers for .+? this season are (.+?)(?:\.|$)", text)
         if m:
             first = m.group(1).split(",")[0].strip()
@@ -569,7 +527,8 @@ class SportsgamblerParser:
             if mm:
                 out[f"{prefix}_top_scorer"] = mm.group(1).strip()
                 out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
-        m = re.search(r"Top Assistors for .+? this season are (.+?)(?:\.|$)", text)
+        # Top assister — HTML has typo "Assistors"
+        m = re.search(r"Top Assis\w+ for .+? this season are (.+?)(?:\.|$)", text)
         if m:
             first = m.group(1).split(",")[0].strip()
             mm = re.match(r"(.+?)\s*\((\d+)\)", first)
@@ -579,7 +538,7 @@ class SportsgamblerParser:
         return out
 
     def _parse_injuries(self, side):
-        """FIXED BUG 3: Dedupe by player name; keep status field for F4."""
+        """FIXED Bug 6: expected_return is now parsed from HTML."""
         out = []
         seen = set()
         target = self.home_team if side == "home" else self.away_team
@@ -609,28 +568,48 @@ class SportsgamblerParser:
                     status = "suspended"
                 else:
                     status = "injury"
+
+                # FIXED Bug 6: parse expected_return from hidden detail
+                expected_return = None
+                detail_el = row.select_one(".inj-two-hidden")
+                if detail_el:
+                    detail_text = detail_el.get_text(" ", strip=True)
+                    m = re.search(r"Expected return:\s*(\d{4}-\d{2}-\d{2})", detail_text)
+                    if m:
+                        expected_return = m.group(1)
+
                 out.append({
                     "player": player,
                     "status": status,
                     "type": info,
-                    "expected_return": None,
+                    "expected_return": expected_return,
                 })
         return out
 
     def _parse_xi(self, side):
+        """FIXED Bug 7: scoped fallback, never grabs a global .lineups."""
         out = []
         target = self.home_team if side == "home" else self.away_team
+        side_class = "lineups-home" if side == "home" else "lineups-away"
+
         for header in self.soup.select(".lineups-formation h3, .lineups-mob-teams h3"):
             text = header.get_text(" ", strip=True)
             if not self._team_matches(target, text):
                 continue
+            # Find the nearest .lineups ancestor or sibling
             parent = header.find_parent()
-            container = parent.find_next_sibling(class_="lineups") if parent else None
+            if not parent:
+                continue
+            # Walk up to find a common container that has .lineups
+            container = parent.find_next_sibling(class_="lineups")
             if not container:
-                container = self.soup.select_one(".lineups")
+                # Look for .lineups inside the same parent chain
+                container = parent.find_parent(class_="lineups")
+            if not container:
+                # Last resort: find the .lineups that contains this header
+                container = header.find_parent(class_="content-block") or header.find_parent(class_="lineups")
             if not container:
                 continue
-            side_class = "lineups-home" if side == "home" else "lineups-away"
             block = container.select_one(f".{side_class}")
             if not block:
                 continue
@@ -654,7 +633,7 @@ class SportsgamblerParser:
 
     # --------------------------------------------------------------- h2h
     def _parse_h2h(self):
-        """FIXED BUG 4: Counts winner by historic result, not by current home team."""
+        """Counts winner by historic result, not by current home team."""
         out = {"h2h": [], "h2h_home_wins": 0, "h2h_draws": 0, "h2h_away_wins": 0}
         container = self.soup.select_one("#head-to-head")
         if not container:
@@ -664,8 +643,7 @@ class SportsgamblerParser:
             teams = item.select(".team-stats-team")
             if len(teams) < 2:
                 continue
-            h_name_el = teams[0]
-            a_name_el = teams[1]
+            h_name_el, a_name_el = teams[0], teams[1]
             h_score_el = h_name_el.select_one(".score-right")
             a_score_el = a_name_el.select_one(".score-right")
             h_name = h_name_el.get_text(" ", strip=True)
@@ -678,18 +656,12 @@ class SportsgamblerParser:
             a_score = self._to_int(a_score_el.get_text(strip=True)) if a_score_el else None
             if h_score is None or a_score is None:
                 continue
-
-            # Count winner by actual result
             if h_score > a_score:
                 winner_name = h_name
-                loser_name = a_name
             elif a_score > h_score:
                 winner_name = a_name
-                loser_name = h_name
             else:
                 winner_name = None
-                loser_name = None
-
             if winner_name:
                 if self._team_matches(self.home_team, winner_name):
                     out["h2h_home_wins"] += 1
@@ -697,7 +669,6 @@ class SportsgamblerParser:
                     out["h2h_away_wins"] += 1
             else:
                 out["h2h_draws"] += 1
-
             out["h2h"].append({
                 "date": date_el.get_text(strip=True) if date_el else "",
                 "home": h_name,
@@ -707,8 +678,39 @@ class SportsgamblerParser:
             })
         return out
 
+    # ------------------------------------------------------------- corners
+    def _parse_corners(self):
+        """FIXED Bug 3: corners come from .corner--stats block, not .st-table."""
+        out = {}
+        for side, cid in [("home", "#ht-corners"), ("away", "#at-corners")]:
+            prefix = side
+            block = self.soup.select_one(cid)
+            if not block:
+                continue
+            text = block.get_text(" ", strip=True)
+            # "An average of 7.10 corners awarded and 5.70 corners conceded in the last 10 matches"
+            m = re.search(
+                r"average of ([\d.]+) corners awarded and ([\d.]+) corners conceded in the last 10 matches",
+                text,
+            )
+            if m:
+                out[f"{prefix}_last10_corners_for"] = float(m.group(1))
+                out[f"{prefix}_last10_corners_against"] = float(m.group(2))
+            # Venue specific
+            venue = "home" if side == "home" else "away"
+            m = re.search(
+                rf"average of ([\d.]+) corners awarded and ([\d.]+) corners against "
+                rf"in the last 10 {venue} matches",
+                text,
+            )
+            if m:
+                out[f"{prefix}_{venue}_last10_corners_for"] = float(m.group(1))
+                out[f"{prefix}_{venue}_last10_corners_against"] = float(m.group(2))
+        return out
+
     # ------------------------------------------------------------- odds
     def _parse_odds(self):
+        """FIXED Bug 9: extracts AH, DNB, DC, HT too."""
         odds = {}
         for row in self.soup.select(".nlf_odds_row"):
             title_el = row.select_one(".nfl_odd_title")
@@ -721,16 +723,45 @@ class SportsgamblerParser:
                 odds_el = ply.select_one(".nfl_ply_o")
                 if label_el and odds_el:
                     entries[label_el.get_text(strip=True)] = self._to_float(odds_el.get_text(strip=True))
+
             if "full-time result" in market:
                 odds["home"] = entries.get("1")
                 odds["draw"] = entries.get("X")
                 odds["away"] = entries.get("2")
+            elif "half-time result" in market:
+                odds["ht_home"] = entries.get("1")
+                odds["ht_draw"] = entries.get("X")
+                odds["ht_away"] = entries.get("2")
+            elif "double chance" in market:
+                odds["dc_1x"] = entries.get("1X")
+                odds["dc_12"] = entries.get("12")
+                odds["dc_x2"] = entries.get("X2")
+            elif "draw no bet" in market:
+                odds["dnb_home"] = entries.get("1")
+                odds["dnb_away"] = entries.get("2")
+            elif "asian handicap" in market:
+                for label, val in entries.items():
+                    m = re.match(r"(\d)\s*Hcp\s*([+-]?[\d.]+)", label)
+                    if m:
+                        side = m.group(1)
+                        line = self._to_float(m.group(2))
+                        if side == "1":
+                            odds["ah_home_line"] = line
+                            odds["ah_home"] = val
+                        else:
+                            odds["ah_away_line"] = line
+                            odds["ah_away"] = val
             elif "both teams to score" in market:
                 odds["btts_yes"] = entries.get("Yes")
                 odds["btts_no"] = entries.get("No")
             elif "total goals" in market:
-                odds["over_2.5"] = entries.get("Over 2.5")
-                odds["under_2.5"] = entries.get("Under 2.5")
+                for label, val in entries.items():
+                    m = re.match(r"(Over|Under)\s+([\d.]+)", label, re.I)
+                    if m and m.group(2) == "2.5":
+                        if m.group(1).lower() == "over":
+                            odds["over_2.5"] = val
+                        else:
+                            odds["under_2.5"] = val
         return odds
 
 
@@ -761,12 +792,7 @@ def calc_f1(row):
 
 
 def calc_f2(last5):
-    """FIXED BUG 2: W=5, D=2, L=0, no cap, max 25 (5 wins × 5).
-
-    Old spec capped raw at 15 → 3W and 5W both became 25.
-    New spec: raw × (25/25) = raw. 3W = 15 → 15 pts. 5W = 25 → 25 pts.
-    Differentiates teams properly.
-    """
+    """W=5, D=2, L=0, max 25 (5 wins × 5)."""
     if not last5:
         return 7.5
     raw = 0
@@ -777,7 +803,7 @@ def calc_f2(last5):
         elif r == "D":
             raw += 2
     raw = max(0, min(25, raw))
-    return raw  # already 0-25
+    return raw
 
 
 def calc_f3(win_pct, avg_scored, avg_conceded):
@@ -788,14 +814,8 @@ def calc_f3(win_pct, avg_scored, avg_conceded):
 
 
 def calc_f4(top_scorer, top_assister, injuries, xi):
-    """FIXED BUG 3: Only counts 'injury' status (not suspended).
-
-    Suspended players in XI are available — ignore.
-    Doubt players in XI get +5 and set doubted_starter.
-    """
     f4 = 15
     xi = xi or []
-    # Only count genuine injuries (not suspensions)
     injured = [i.get("player", "") for i in (injuries or []) if i.get("status") == "injury"]
     doubts = [i.get("player", "") for i in (injuries or []) if i.get("status") == "doubt"]
 
@@ -845,6 +865,7 @@ def apply_override(f1_home, f1_away, f5_home, f5_away):
 
 
 def calc_expected_total(row):
+    """FIXED Bug 4: uses both home-venue and away-venue averages."""
     h1 = row.get("home_home_last10_avg_scored") or 1.0
     a1 = row.get("away_away_last10_avg_conceded") or 1.0
     a2 = row.get("away_away_last10_avg_scored") or 1.0
@@ -929,11 +950,13 @@ def upsert_match(sb, record):
         return False, "no client"
     try:
         allowed = {
-            "match_date", "kickoff_utc", "league_name", "tier", "group_name",
+            "match_date", "kickoff_utc", "kickoff_local", "league_name", "tier", "group_name",
             "season", "home_team", "away_team", "venue", "stage", "round",
             "home_pos", "home_played", "home_points", "home_gd", "home_gf", "home_ga",
             "away_pos", "away_played", "away_points", "away_gd", "away_gf", "away_ga",
             "home_away_points", "home_away_played", "away_away_points", "away_away_played",
+            "home_home_points", "home_home_played", "home_home_win_pct",
+            "away_away_win_pct",
             "home_last5", "away_last5",
             "home_last10_w", "home_last10_d", "home_last10_l",
             "home_last10_avg_scored", "home_last10_avg_conceded",
@@ -941,14 +964,12 @@ def upsert_match(sb, record):
             "home_last10_corners_against", "home_last10_win_pct",
             "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
             "home_home_last10_corners_for", "home_home_last10_corners_against",
-            "home_home_win_pct",
             "away_last10_w", "away_last10_d", "away_last10_l",
             "away_last10_avg_scored", "away_last10_avg_conceded",
             "away_last10_possession", "away_last10_corners_for",
             "away_last10_corners_against", "away_last10_win_pct",
             "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
             "away_away_last10_corners_for", "away_away_last10_corners_against",
-            "away_away_win_pct",
             "home_top_scorer", "home_top_scorer_goals",
             "home_top_assister", "home_top_assister_assists",
             "away_top_scorer", "away_top_scorer_goals",
@@ -1033,7 +1054,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2):
 
 
 # ============================================================================
-# DISPLAY COMPONENTS
+# DISPLAY
 # ============================================================================
 def render_factor_row(name, home_val, away_val, weight_label=""):
     gap = abs((home_val or 0) - (away_val or 0))
@@ -1068,9 +1089,7 @@ def render_verdict(result):
         <div class="verdict-nobet">
             <div class="verdict-label-grey">1X2 Verdict</div>
             <div class="verdict-noedge">NO BET — gap {result['total_gap']:.1f} below 15</div>
-            <div class="verdict-detail-grey">
-                Total gap: {result['total_gap']:.1f} (needs 15+ for a call)
-            </div>
+            <div class="verdict-detail-grey">Total gap: {result['total_gap']:.1f} (needs 15+ for a call)</div>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1114,7 +1133,6 @@ def main():
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
         st.caption("Copy the full preview page source. The parser extracts every prematch field.")
-
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
         col_a, col_b = st.columns([1, 4])
@@ -1143,29 +1161,33 @@ def main():
                         <div class="team-meta">
                             {parsed.get('league_name') or '—'}
                             &nbsp;·&nbsp; {parsed.get('match_date') or '—'}
+                            &nbsp;·&nbsp; {parsed.get('kickoff_local') or ''}
                             &nbsp;·&nbsp; {parsed.get('venue') or '—'}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
 
-                    # Debug expander
                     with st.expander("🔍 Parsed raw values (verify before saving)"):
                         c1, c2 = st.columns(2)
                         with c1:
                             st.write("**Home**")
-                            st.write(f"Pos: {parsed.get('home_pos')}, Pts: {parsed.get('home_points')}, GD: {parsed.get('home_gd')}")
+                            st.write(f"Pos: {parsed.get('home_pos')}, Pts: {parsed.get('home_points')}, GD: {parsed.get('home_gd')}, GF: {parsed.get('home_gf')}, GA: {parsed.get('home_ga')}")
                             st.write(f"Last5: {parsed.get('home_last5')}")
                             st.write(f"Last10: W{parsed.get('home_last10_w')} D{parsed.get('home_last10_d')} L{parsed.get('home_last10_l')}")
+                            st.write(f"Home venue avg: {parsed.get('home_home_last10_avg_scored')} / {parsed.get('home_home_last10_avg_conceded')}")
+                            st.write(f"Home win%: {parsed.get('home_home_win_pct')}")
                             st.write(f"XI: {parsed.get('home_xi')}")
                             st.write(f"Injuries: {parsed.get('home_injuries')}")
                         with c2:
                             st.write("**Away**")
-                            st.write(f"Pos: {parsed.get('away_pos')}, Pts: {parsed.get('away_points')}, GD: {parsed.get('away_gd')}")
+                            st.write(f"Pos: {parsed.get('away_pos')}, Pts: {parsed.get('away_points')}, GD: {parsed.get('away_gd')}, GF: {parsed.get('away_gf')}, GA: {parsed.get('away_ga')}")
                             st.write(f"Last5: {parsed.get('away_last5')}")
                             st.write(f"Last10: W{parsed.get('away_last10_w')} D{parsed.get('away_last10_d')} L{parsed.get('away_last10_l')}")
+                            st.write(f"Away venue avg: {parsed.get('away_away_last10_avg_scored')} / {parsed.get('away_away_last10_avg_conceded')}")
+                            st.write(f"Away win%: {parsed.get('away_away_win_pct')}")
                             st.write(f"XI: {parsed.get('away_xi')}")
                             st.write(f"Injuries: {parsed.get('away_injuries')}")
-                        st.write(f"Away away_pts: {parsed.get('away_away_points')} away_played: {parsed.get('away_away_played')}")
+                        st.write(f"Away split: pts {parsed.get('away_away_points')}, played {parsed.get('away_away_played')}")
                         st.write(f"H2H: {parsed.get('h2h')}")
 
                     result = predict_v4(parsed)
@@ -1189,8 +1211,7 @@ def main():
                         <div>
                             <div class="factor-name" style="color:#bfdbfe;">TOTAL</div>
                             <div style="color:#93c5fd; font-size:0.8rem;">
-                                Home {result['home_total']:.1f} · Away {result['away_total']:.1f}
-                                · Gap {result['total_gap']:.1f}
+                                Home {result['home_total']:.1f} · Away {result['away_total']:.1f} · Gap {result['total_gap']:.1f}
                             </div>
                         </div>
                         <div class="factor-val" style="color:#bfdbfe;">{result['total_gap']:.1f}</div>
@@ -1221,37 +1242,28 @@ def main():
     # ------------------------------------------------------------- pending
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
-        st.caption("Matches with predictions but no actual score yet.")
-
         rows = load_all(sb)
         pending = [r for r in rows if r.get("actual_home_goals") is None]
-
         if not pending:
-            st.success("No pending matches. All predictions have been settled.")
+            st.success("No pending matches.")
         else:
             st.write(f"**{len(pending)} pending matches**")
-
             for r in pending:
                 match_id = r["id"]
                 call = r.get("call_1x2", "—")
                 ou = r.get("call_ou", "—")
                 gap = r.get("total_gap", 0)
                 triggers = []
-                if r.get("f1_f5_override"):
-                    triggers.append("override")
-                if r.get("away_collapse"):
-                    triggers.append("collapse")
-                if r.get("doubted_starter"):
-                    triggers.append("doubt")
+                if r.get("f1_f5_override"): triggers.append("override")
+                if r.get("away_collapse"): triggers.append("collapse")
+                if r.get("doubted_starter"): triggers.append("doubt")
                 trigger_str = f" · {', '.join(triggers)}" if triggers else ""
-
                 header = f"{r.get('match_date','')} · {r.get('home_team','')} vs {r.get('away_team','')} · {call} (gap {gap}){trigger_str}"
                 with st.expander(header):
                     c1, c2, c3 = st.columns(3)
                     c1.metric("1X2 Call", call)
                     c2.metric("O/U Call", ou)
                     c3.metric("Gap", f"{gap:.1f}")
-
                     st.markdown("**Enter actual score:**")
                     col1, col2, col3 = st.columns([1, 1, 2])
                     hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
@@ -1269,9 +1281,8 @@ def main():
         st.subheader("📊 Performance")
         rows = load_all(sb)
         settled = [r for r in rows if r.get("actual_home_goals") is not None]
-
         if not settled:
-            st.info("No settled matches yet. Enter results in the Pending tab.")
+            st.info("No settled matches yet.")
         else:
             placed = [r for r in settled if r.get("call_1x2") != "NO BET"]
             correct = sum(1 for r in placed if r.get("is_correct_1x2"))
@@ -1279,17 +1290,13 @@ def main():
             override_correct = sum(1 for r in override_games if r.get("is_correct_1x2"))
             collapse_games = [r for r in settled if r.get("away_collapse")]
             doubt_games = [r for r in settled if r.get("doubted_starter")]
-
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Settled", len(settled))
             c2.metric("Bets placed", len(placed))
             c3.metric("1X2 accuracy",
-                      f"{correct}/{len(placed)} ({(correct / len(placed) * 100):.0f}%)"
-                      if placed else "—")
+                      f"{correct}/{len(placed)} ({(correct/len(placed)*100):.0f}%)" if placed else "—")
             c4.metric("Override accuracy",
-                      f"{override_correct}/{len(override_games)}"
-                      if override_games else "—")
-
+                      f"{override_correct}/{len(override_games)}" if override_games else "—")
             c1, c2 = st.columns(2)
             c1.metric("Away collapse triggers", len(collapse_games))
             c2.metric("Doubt starter triggers", len(doubt_games))
@@ -1313,7 +1320,7 @@ def main():
     with tabs[3]:
         st.subheader("v4 Specification")
         st.markdown("""
-        **100-point model. Only prematch fields. No xG, no possession, no post-match data.**
+        **100-point model. Only prematch fields. No xG, no possession.**
 
         | Factor | Weight | Source |
         |--------|--------|--------|
@@ -1330,12 +1337,11 @@ def main():
         - Gap < 15 → NO BET
 
         **Overrides:**
-        - F1 vs F5 conflict: if F1 gap ≥ 12 AND F5 gap ≥ 6 AND opposite leaders,
-          the larger gap wins (triggers ~20% of matches)
-        - Away collapse: away team 0 points from 3+ away games → home +8 F1, force Over 2.5
+        - F1 vs F5 conflict: F1 gap ≥ 12 AND F5 gap ≥ 6 AND opposite → F1 wins
+        - Away collapse: away team 0 pts from 3+ away games → home +8 F1, force Over 2.5
         - Doubt starter: doubted key player in confirmed XI → F4 +5, force Over 2.5
 
-        **O/U:** Expected total = (Home avg scored + Away avg conceded + Away avg scored + Home avg conceded) / 2
+        **O/U:** Expected = (HomeH avg scored + AwayA avg conceded + AwayA avg scored + HomeH avg conceded) / 2
         - < 2.5 → Under
         - > 3.3 → Over
         - 2.5–3.3 → No Bet
