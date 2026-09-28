@@ -1,14 +1,13 @@
 """
 v4.3 RAW-ONLY Predictor — universal version.
 
-v4.3 corrections over v4.2.1:
-  #A  F2 smoothing: single ALPHA + PRIOR_RATE (was double-counting)
-  #B  Conflict penalty: shrink gap, no leader flip
-  #C  Time-split validation (walk-forward), no random split
-  #D  Decision rule: gap<12 NO BET, <20 DC, else Straight (was 15/25)
-  #E  Train/Holdout tab comparing v4.2.1 vs v4.3
+Parser fixes in this revision:
+  #FIX-1  _norm_comp now strips accents (Série B == Serie B)
+  #FIX-2  _parse_league reads JSON-LD superEvent.name first (canonical short form)
+  #FIX-3  _parse_last5 has a fallback: if strict league filter yields 0, retry without filter
+  #FIX-4  upsert_match guards league_name NOT NULL with "Unknown" fallback
 
-Retained from v4.2.1:
+Retained from v4.2.1 / earlier v4.3:
   #1  kickoff_utc built as full ISO timestamp
   #2  XI scoped to #lineups content-block only
   #3  F1/F5 override threshold >= 4
@@ -27,10 +26,17 @@ Retained from v4.2.1:
   #16 f1_vs_f2f3_conflict flag logged
   #17 Schema-aware upsert
   #18 Single button: Parse → Predict → Save
+  #A  F2 smoothing: single ALPHA + PRIOR_RATE
+  #B  Conflict penalty: shrink gap, no leader flip
+  #C  Time-split validation (walk-forward)
+  #D  Decision rule: gap<12 NO BET, <20 DC, else Straight
+  #E  Train/Holdout tab comparing v4.2.1 vs v4.3
 """
 
+import json
 import os
 import re
+import unicodedata
 from datetime import datetime
 
 import pandas as pd
@@ -105,7 +111,7 @@ PRIOR_H2H = 1.0 / 3.0     # prior for F5 (3 outcomes, neutral = 1/3 each)
 
 
 # ============================================================================
-# PARSER (unchanged from v4.2.1 — all #1-#17 fixes retained)
+# PARSER
 # ============================================================================
 class SportsgamblerParser:
     def __init__(self, html: str):
@@ -134,15 +140,21 @@ class SportsgamblerParser:
     def _norm(s):
         if not s:
             return ""
-        import unicodedata
         s = unicodedata.normalize("NFKD", s)
         s = "".join(c for c in s if not unicodedata.combining(c))
         return s.lower().strip()
 
     @staticmethod
     def _norm_comp(s):
+        """#FIX-1: strip accents so 'Série B' == 'Serie B' == 'serieb'.
+
+        Normalize competition name: remove accents, spaces, punctuation, lowercase.
+        'Série B' -> 'serieb' | 'Serie B' -> 'serieb' | 'La Liga' -> 'laliga'
+        """
         if not s:
             return ""
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(c for c in s if not unicodedata.combining(c))
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
     def _team_matches(self, full_name, table_name):
@@ -180,6 +192,7 @@ class SportsgamblerParser:
         primary = a_words[0]
         return primary in b
 
+    # ---------------------------------------------------------------- main
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
@@ -255,14 +268,46 @@ class SportsgamblerParser:
         return iso, kickoff
 
     def _parse_league(self):
+        """#FIX-2: read league from JSON-LD superEvent.name (canonical short form),
+        fall back to .t_info_link if JSON-LD is missing.
+
+        The short form (e.g. 'Série B') is exactly what appears in the per-match
+        date labels ('Serie B: 19/09'), so downstream matching is reliable.
+        """
         league = None
-        for link in self.soup.select(".t_top .t_info_link"):
-            text = link.get_text(strip=True)
-            if text.lower() == "football":
+
+        # Source 1: JSON-LD superEvent.name
+        for script in self.soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+            except (json.JSONDecodeError, TypeError):
                 continue
-            if re.search(r"(League|Serie|Liga|Bundesliga|Ligue|Premier|Championship|MLS|Cup|Division|Primera|Nations)", text, re.I):
-                league = text
+            graph = data.get("@graph", [])
+            for node in graph:
+                article = node.get("mainEntity")
+                if not isinstance(article, dict):
+                    continue
+                super_event = article.get("superEvent")
+                if isinstance(super_event, dict) and super_event.get("name"):
+                    league = super_event["name"].strip()
+                    break
+            if league:
                 break
+
+        # Source 2 (fallback): .t_info_link
+        if not league:
+            for link in self.soup.select(".t_top .t_info_link"):
+                text = link.get_text(strip=True)
+                if text.lower() == "football":
+                    continue
+                if re.search(
+                    r"(League|Serie|Série|Liga|Bundesliga|Ligue|Premier|"
+                    r"Championship|MLS|Cup|Division|Primera|Nations)",
+                    text, re.I,
+                ):
+                    league = text
+                    break
+
         tier = None
         group = None
         if league:
@@ -272,12 +317,13 @@ class SportsgamblerParser:
             m = re.search(r"Group\s+(\w+)", league)
             if m:
                 group = f"Group {m.group(1)}"
-        return league, tier, group
+        return league or "Unknown", tier, group
 
     def _parse_venue(self):
         venue_el = self.soup.select_one(".t_top .t_venue")
         return venue_el.get_text(strip=True) if venue_el else None
 
+    # ----------------------------------------------------------- standings
     def _parse_standings(self):
         out = {}
         main_table = None
@@ -410,71 +456,92 @@ class SportsgamblerParser:
             return int(m.group(1)), int(m.group(2))
         return None
 
+    # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
-        out = []
+        """#FIX-3: strict league filter first; if it yields 0 matches, retry
+        without the league filter so we never return an empty list when the
+        page clearly has matches.
+        """
         container = self.soup.select_one("#last-matches #All")
         if not container:
             container = self.soup.select_one("#last-matches")
         if not container:
-            return out
+            return []
         block = container.select_one(".teamstats-left" if side == "home" else ".teamstats-right")
         if not block:
-            return out
-        tracked = (self.home_team if side == "home" else self.away_team) or ""
+            return []
 
         league_name = (self._parse_league()[0] or "")
         league_short = league_name.split(" - ")[-1] if " - " in league_name else league_name
         league_norm = self._norm_comp(league_short)
 
-        for item in block.select("li.team-stat-list-item"):
-            if len(out) >= 5:
-                break
-            date_el = item.select_one(".team-stats-date")
-            date_text = date_el.get_text(strip=True) if date_el else ""
+        def collect(apply_league_filter: bool):
+            items = []
+            for item in block.select("li.team-stat-list-item"):
+                if len(items) >= 5:
+                    break
+                parsed = self._parse_last5_item(item, side, apply_league_filter, league_norm)
+                if parsed is not None:
+                    items.append(parsed)
+            return items
 
-            if ":" in date_text:
-                comp = date_text.split(":", 1)[0].strip()
-                comp_norm = self._norm_comp(comp)
-                if league_norm and comp_norm:
-                    if league_norm not in comp_norm and comp_norm not in league_norm:
-                        continue
+        strict = collect(apply_league_filter=True)
+        if strict:
+            return strict
+        # Fallback: ignore league filter if strict found nothing
+        return collect(apply_league_filter=False)
 
-            teams = item.select(".team-stats-team")
-            if len(teams) < 2:
-                continue
-            home_name_el, away_name_el = teams[0], teams[1]
-            h_score_el = home_name_el.select_one(".score-right")
-            a_score_el = away_name_el.select_one(".score-right")
-            home_name = home_name_el.get_text(" ", strip=True)
-            away_name = away_name_el.get_text(" ", strip=True)
-            if h_score_el:
-                home_name = home_name.replace(h_score_el.get_text(strip=True), "").strip()
-            if a_score_el:
-                away_name = away_name.replace(a_score_el.get_text(strip=True), "").strip()
-            h_score = self._to_int(h_score_el.get_text(strip=True)) if h_score_el else None
-            a_score = self._to_int(a_score_el.get_text(strip=True)) if a_score_el else None
-            if h_score is None or a_score is None:
-                continue
-            tracked_is_home = self._team_matches(tracked, home_name)
-            tracked_is_away = self._team_matches(tracked, away_name)
-            if tracked_is_home:
-                is_home, sf, sa = True, h_score, a_score
-            elif tracked_is_away:
-                is_home, sf, sa = False, a_score, h_score
-            else:
-                is_home = (side == "home")
-                sf, sa = (h_score, a_score) if is_home else (a_score, h_score)
-            result = "W" if sf > sa else ("D" if sf == sa else "L")
-            out.append({
-                "date": date_text,
-                "opp": away_name if is_home else home_name,
-                "result": result,
-                "score_for": sf,
-                "score_against": sa,
-                "is_home": is_home,
-            })
-        return out
+    def _parse_last5_item(self, item, side, apply_league_filter, league_norm):
+        """Parse one last-5 list item. Returns dict or None."""
+        tracked = (self.home_team if side == "home" else self.away_team) or ""
 
+        date_el = item.select_one(".team-stats-date")
+        date_text = date_el.get_text(strip=True) if date_el else ""
+
+        if apply_league_filter and ":" in date_text:
+            comp = date_text.split(":", 1)[0].strip()
+            comp_norm = self._norm_comp(comp)
+            if league_norm and comp_norm:
+                if league_norm not in comp_norm and comp_norm not in league_norm:
+                    return None
+
+        teams = item.select(".team-stats-team")
+        if len(teams) < 2:
+            return None
+        home_name_el, away_name_el = teams[0], teams[1]
+        h_score_el = home_name_el.select_one(".score-right")
+        a_score_el = away_name_el.select_one(".score-right")
+        home_name = home_name_el.get_text(" ", strip=True)
+        away_name = away_name_el.get_text(" ", strip=True)
+        if h_score_el:
+            home_name = home_name.replace(h_score_el.get_text(strip=True), "").strip()
+        if a_score_el:
+            away_name = away_name.replace(a_score_el.get_text(strip=True), "").strip()
+        h_score = self._to_int(h_score_el.get_text(strip=True)) if h_score_el else None
+        a_score = self._to_int(a_score_el.get_text(strip=True)) if a_score_el else None
+        if h_score is None or a_score is None:
+            return None
+
+        tracked_is_home = self._team_matches(tracked, home_name)
+        tracked_is_away = self._team_matches(tracked, away_name)
+        if tracked_is_home:
+            is_home, sf, sa = True, h_score, a_score
+        elif tracked_is_away:
+            is_home, sf, sa = False, a_score, h_score
+        else:
+            is_home = (side == "home")
+            sf, sa = (h_score, a_score) if is_home else (a_score, h_score)
+        result = "W" if sf > sa else ("D" if sf == sa else "L")
+        return {
+            "date": date_text,
+            "opp": away_name if is_home else home_name,
+            "result": result,
+            "score_for": sf,
+            "score_against": sa,
+            "is_home": is_home,
+        }
+
+    # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -516,6 +583,7 @@ class SportsgamblerParser:
             out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
+    # ---------------------------------------------------------- players
     def _parse_players(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -743,17 +811,6 @@ class SportsgamblerParser:
 # ============================================================================
 
 def smooth_rate(wins, draws, games):
-    """v4.3: single ALPHA + PRIOR_RATE. No double-counting.
-
-    weighted = W*1 + D*0.4  (max = games)
-    smoothed = (weighted + ALPHA*PRIOR_RATE) / (games + ALPHA)
-
-    Sanity:
-      5W0D0L, ALPHA=2:  (5 + 0.8) / (5+2)  = 5.8/7  = 0.829
-      0W0D5L, ALPHA=2:  (0 + 0.8) / (5+2)  = 0.8/7  = 0.114
-      5W0D0L, *25:      20.7  (not 25 — prior pulls down)
-      0W0D5L, *25:      2.86  (not 0 — prior pulls up)
-    """
     if games is None or games <= 0:
         return PRIOR_FORM
     pts = wins + draws * 0.4
@@ -761,7 +818,6 @@ def smooth_rate(wins, draws, games):
 
 
 def calc_f1(row):
-    """v4.3: same as v4.2.1 — league momentum."""
     home_pts = row.get("home_points") or 0
     away_pts = row.get("away_points") or 0
     home_gd = row.get("home_gd") or 0
@@ -782,7 +838,6 @@ def calc_f1(row):
 
 
 def calc_f2(last5):
-    """v4.3: smoothed rate * 25. Returns None if empty (forces NO BET upstream)."""
     if not last5:
         return None
     w = sum(1 for m in last5[:5] if m.get("result") == "W")
@@ -792,7 +847,6 @@ def calc_f2(last5):
 
 
 def calc_f3(win_pct, avg_scored, avg_conceded):
-    """v4.3: same as v4.2.1 — venue split."""
     win_pts = ((win_pct or 0) / 100) * 10
     edge = (avg_scored or 0) - (avg_conceded or 0)
     xg_pts = 5 if edge > 0.5 else (2 if edge > 0 else 0)
@@ -800,7 +854,6 @@ def calc_f3(win_pct, avg_scored, avg_conceded):
 
 
 def calc_f4(top_scorer, top_assister, injuries, xi):
-    """v4.3: same as v4.2.1 — availability."""
     f4 = 15
     xi = xi or []
     injured = [i.get("player", "") for i in (injuries or []) if i.get("status") == "injury"]
@@ -824,9 +877,6 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
 
 
 def calc_f5(h2h_home_wins, h2h_away_wins, h2h_total):
-    """v4.3: prior H2H = 1/3. +1 in denominator because 3 outcomes * 1/3 = 1.
-    Scale down if total < 4.
-    """
     f5_h = (h2h_home_wins + PRIOR_H2H) / (h2h_total + 1) * 10
     f5_a = (h2h_away_wins + PRIOR_H2H) / (h2h_total + 1) * 10
     if h2h_total < 4:
@@ -836,7 +886,6 @@ def calc_f5(h2h_home_wins, h2h_away_wins, h2h_total):
 
 
 def calc_f6(h_avg, a_avg):
-    """v4.3: same as v4.2.1 — attack profile."""
     if (h_avg or 0) > (a_avg or 0):
         return 11, 7
     elif (h_avg or 0) < (a_avg or 0):
@@ -845,7 +894,6 @@ def calc_f6(h_avg, a_avg):
 
 
 def apply_override(f1_home, f1_away, f5_home, f5_away):
-    """v4.3: F1 vs F5 conflict. F1 wins, F5 reset to 10/0. Unchanged from v4.2.1."""
     f1_gap = abs(f1_home - f1_away)
     f5_gap = abs(f5_home - f5_away)
 
@@ -872,21 +920,12 @@ def calc_expected_total(row):
 
 
 def predict_v4_3(row):
-    """v4.3 universal model.
-
-    Changes vs v4.2.1:
-      - F2 smoothed (see smooth_rate)
-      - F5 prior-corrected
-      - Conflict penalty shrinks gap instead of flat subtraction
-      - Decision rule: gap<12 NO BET, <20 DC, else Straight
-    """
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
     home_played = row.get("home_played") or 0
     away_played = row.get("away_played") or 0
 
-    # Hard filter
     if not (has_home_last5 and has_away_last5 and has_standings
             and home_played >= 3 and away_played >= 3):
         return _empty_prediction("NO BET (insufficient data)")
@@ -922,11 +961,9 @@ def predict_v4_3(row):
     home_total_raw = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
     away_total_raw = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
 
-    # v4.3: conflict penalty SHRINKS GAP — no leader flip
     leader = "home" if home_total_raw > away_total_raw else "away"
     raw_gap = abs(home_total_raw - away_total_raw)
 
-    # Count disagreements between leaders of {F1, F2, F3, F5}
     leaders = {
         "F1": "home" if f1_home > f1_away else "away",
         "F2": "home" if f2_home > f2_away else "away",
@@ -934,10 +971,9 @@ def predict_v4_3(row):
         "F5": "home" if f5_home > f5_away else "away",
     }
     disagreements = sum(1 for l in leaders.values() if l != leader)
-    shrink = max(0.0, 1.0 - disagreements * 0.15)  # 0% to 60% shrink
+    shrink = max(0.0, 1.0 - disagreements * 0.15)
     gap = raw_gap * shrink
 
-    # Keep totals consistent: apply shrink symmetrically around the leader
     if leader == "home":
         home_total = home_total_raw
         away_total = home_total_raw - gap
@@ -945,7 +981,6 @@ def predict_v4_3(row):
         away_total = away_total_raw
         home_total = away_total_raw - gap
 
-    # v4.3 decision rule
     if gap < 12:
         call_1x2 = "NO BET"
     elif gap < 20:
@@ -953,7 +988,6 @@ def predict_v4_3(row):
     else:
         call_1x2 = "Straight Win Home" if leader == "home" else "Straight Win Away"
 
-    # F1 vs F2/F3 conflict tracking
     f1_leader_final = "home" if f1_home > f1_away else "away"
     f2f3_home = f2_home + f3_home
     f2f3_away = f2_away + f3_away
@@ -965,7 +999,6 @@ def predict_v4_3(row):
     )
 
     expected = calc_expected_total(row)
-    # v4.3: <2.4 Under, >3.2 Over (was 2.5/3.3)
     if expected < 2.4:
         call_ou = "Under 2.5"
     elif expected > 3.2:
@@ -1006,9 +1039,7 @@ def predict_v4_3(row):
     }
 
 
-# Legacy v4.2.1 model kept for A/B comparison
 def predict_v4_2_1(row):
-    """Original v4.2.1 for train/holdout comparison. Same as predict_v4 but with old thresholds."""
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
@@ -1018,7 +1049,6 @@ def predict_v4_2_1(row):
 
     f1_home, f1_away, away_collapse = calc_f1(row)
 
-    # Old F2: raw 5/2/0
     def _f2_old(last5):
         if not last5:
             return 0
@@ -1045,7 +1075,6 @@ def predict_v4_2_1(row):
                                 row.get("away_injuries"), row.get("away_xi"))
     doubted_starter = doubt_h or doubt_a
 
-    # Old F5: raw ratio
     def _f5_old(hw, aw, total):
         if not total:
             return 5.0, 5.0
@@ -1065,7 +1094,6 @@ def predict_v4_2_1(row):
     away_total = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
     gap = abs(home_total - away_total)
 
-    # Old decision rule: 15/25
     if gap > 25:
         call_1x2 = "Straight Win Home" if home_total > away_total else "Straight Win Away"
     elif gap >= 15:
@@ -1158,6 +1186,16 @@ def upsert_match(sb, record):
         else:
             clean = record
 
+        # #FIX-4: guard NOT NULL league_name (and other likely NOT NULLs)
+        if not clean.get("league_name"):
+            clean["league_name"] = "Unknown"
+        if not clean.get("match_date"):
+            clean["match_date"] = None  # let DB decide; likely to fail loudly
+        if not clean.get("home_team"):
+            return False, "missing home_team"
+        if not clean.get("away_team"):
+            return False, "missing away_team"
+
         for jsonb_field in ["home_last5", "away_last5", "home_injuries",
                             "away_injuries", "h2h", "odds"]:
             if jsonb_field in clean and clean[jsonb_field] is None:
@@ -1179,7 +1217,12 @@ def save_prediction(sb, match_id, result):
     if sb is None:
         return False, "no client"
     try:
-        sb.table("matches_raw").update(result).eq("id", match_id).execute()
+        real_columns = _get_table_columns(sb)
+        if real_columns:
+            clean = {k: v for k, v in result.items() if k in real_columns}
+        else:
+            clean = result
+        sb.table("matches_raw").update(clean).eq("id", match_id).execute()
         return True, "saved"
     except Exception as e:
         return False, str(e)
@@ -1302,7 +1345,6 @@ HOLDOUT_DATE = "2026-09-19"
 
 
 def _evaluate(rows, model_fn):
-    """Return dict of metrics for a list of settled rows."""
     placed = []
     correct = []
     no_bet = 0
@@ -1383,37 +1425,29 @@ def render_train_holdout(rows):
     st.markdown('<div class="section-title">Summary</div>', unsafe_allow_html=True)
     summary = pd.DataFrame([
         {
-            "Model": "v4.2.1",
-            "Split": "Train",
-            "Settled": v421_train["n_total"],
-            "Placed": v421_train["n_placed"],
+            "Model": "v4.2.1", "Split": "Train",
+            "Settled": v421_train["n_total"], "Placed": v421_train["n_placed"],
             "NO BET %": f"{v421_train['no_bet_pct']:.0f}%",
             "Accuracy": f"{v421_train['accuracy']:.0f}%",
             "Avg gap": f"{v421_train['avg_gap']:.1f}",
         },
         {
-            "Model": "v4.2.1",
-            "Split": "Holdout",
-            "Settled": v421_hold["n_total"],
-            "Placed": v421_hold["n_placed"],
+            "Model": "v4.2.1", "Split": "Holdout",
+            "Settled": v421_hold["n_total"], "Placed": v421_hold["n_placed"],
             "NO BET %": f"{v421_hold['no_bet_pct']:.0f}%",
             "Accuracy": f"{v421_hold['accuracy']:.0f}%",
             "Avg gap": f"{v421_hold['avg_gap']:.1f}",
         },
         {
-            "Model": "v4.3",
-            "Split": "Train",
-            "Settled": v43_train["n_total"],
-            "Placed": v43_train["n_placed"],
+            "Model": "v4.3", "Split": "Train",
+            "Settled": v43_train["n_total"], "Placed": v43_train["n_placed"],
             "NO BET %": f"{v43_train['no_bet_pct']:.0f}%",
             "Accuracy": f"{v43_train['accuracy']:.0f}%",
             "Avg gap": f"{v43_train['avg_gap']:.1f}",
         },
         {
-            "Model": "v4.3",
-            "Split": "Holdout",
-            "Settled": v43_hold["n_total"],
-            "Placed": v43_hold["n_placed"],
+            "Model": "v4.3", "Split": "Holdout",
+            "Settled": v43_hold["n_total"], "Placed": v43_hold["n_placed"],
             "NO BET %": f"{v43_hold['no_bet_pct']:.0f}%",
             "Accuracy": f"{v43_hold['accuracy']:.0f}%",
             "Avg gap": f"{v43_hold['avg_gap']:.1f}",
@@ -1531,6 +1565,24 @@ def main():
                     render_verdict(result)
                 with c2:
                     render_ou_verdict(result)
+
+                # Debug expander
+                with st.expander("🔍 Debug: parse health"):
+                    p = SportsgamblerParser(text)
+                    lg, _, _ = p._parse_league()
+                    st.write({
+                        "league_raw": lg,
+                        "league_short": lg.split(" - ")[-1] if lg else None,
+                        "league_norm": p._norm_comp(lg.split(" - ")[-1]) if lg else None,
+                        "home_last5_len": len(parsed.get("home_last5") or []),
+                        "away_last5_len": len(parsed.get("away_last5") or []),
+                        "home_last5_first": (parsed.get("home_last5") or [{}])[0].get("date"),
+                        "away_last5_first": (parsed.get("away_last5") or [{}])[0].get("date"),
+                        "home_points": parsed.get("home_points"),
+                        "away_points": parsed.get("away_points"),
+                        "home_played": parsed.get("home_played"),
+                        "away_played": parsed.get("away_played"),
+                    })
 
                 with st.expander("🔍 Parsed raw values"):
                     c1, c2 = st.columns(2)
@@ -1691,16 +1743,19 @@ def main():
         - `gap = raw_gap * shrink` — **leader never flips**
 
         **O/U (v4.3):**
-        - `< 2.4 Under` · `> 3.2 Over` (bookmaker margin, not overfit)
+        - `< 2.4 Under` · `> 3.2 Over`
         - Collapse/doubt forces Over only if expected ≥ 2.4
 
         **Validation:**
         - **Time split only**, never random
         - Train: matches before `{HOLDOUT_DATE}`
         - Holdout: matches on/after `{HOLDOUT_DATE}`
-        - **Do NOT tune thresholds after seeing holdout**
 
-        **Retained from v4.2.1:** all parser fixes #1–#17, hard filter on empty last5 or `played < 3`, F1/F5 override threshold ≥ 4, `f5_leader_raw` and `f1_vs_f2f3_conflict` logged.
+        **Parser fixes in this revision:**
+        - `_norm_comp` strips accents (Série B == Serie B)
+        - `_parse_league` reads JSON-LD `superEvent.name` first (canonical short form)
+        - `_parse_last5` falls back to no-filter if strict filter yields 0
+        - `upsert_match` guards `league_name NOT NULL` with "Unknown"
         """)
 
 
