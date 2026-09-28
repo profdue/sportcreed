@@ -11,17 +11,20 @@ Tables:
   reliability   — 10 rows, one per market type
 
 DB column naming (matches the actual table):
-  regime                    — WITHSTAND / DEMOLISH / DEMOLISH_LEAN / NO_BET
+  regime                    — 'withstand' | 'demolish' | 'neutral'
   favourite_side            — 'home' | 'away'
   underdog_side             — 'home' | 'away'
   favourite_win_prob        — model P(favourite wins)
-  favourite_gf_per_game     — generated (favourite's last-10 GF)
-  underdog_gf_per_game      — generated (underdog's last-10 GF)
-  underdog_ga_per_game      — generated (underdog's last-10 GA)
+  favourite_gf_per_game     — derived by trigger from favourite side's last-10 GF
+  underdog_gf_per_game      — derived by trigger from underdog side's last-10 GF
+  underdog_ga_per_game      — derived by trigger from underdog side's last-10 GA
+  favourite_team            — GENERATED column (from favourite_side + home/away team)
+  underdog_team             — GENERATED column (from underdog_side + home/away team)
 
-Python-side identifiers keep the short names (fav_side, dog_gf, etc.) so the
-rest of the predictor does not have to change. Only the DB boundary uses the
-long names.
+The app uses a four-valued `MatchMode` internally (WITHSTAND / DEMOLISH /
+DEMOLISH_LEAN / NO_BET) but the DB constraint on `regime` only accepts three
+lowercase values, so `REGIME_TO_DB` maps the app vocabulary to the DB's at the
+write boundary.
 """
 
 import math
@@ -144,6 +147,18 @@ class MatchMode:
     DEMOLISH = "DEMOLISH"
     DEMOLISH_LEAN = "DEMOLISH_LEAN"
     NO_BET = "NO_BET"
+
+
+# Map the app's four-valued MatchMode onto the DB's three-valued `regime`
+# check constraint: regime in ('withstand','demolish','neutral').
+# DEMOLISH_LEAN -> neutral (weaker signal, closer to no-bet than to a full
+# demolish for reliability-weighting purposes).
+REGIME_TO_DB = {
+    MatchMode.WITHSTAND:     "withstand",
+    MatchMode.DEMOLISH:      "demolish",
+    MatchMode.DEMOLISH_LEAN: "neutral",
+    MatchMode.NO_BET:        "neutral",
+}
 
 
 def classify_mode(model_total_shrunk, fav_win_prob, dog_gf, dog_ga):
@@ -662,7 +677,8 @@ class RefinedPredictor:
         self.effective_shrink = SHRINK_WEIGHT
         self.home_trust = 1.0
         self.away_trust = 1.0
-        # mode state (Python-side names; DB names differ)
+        # mode state (Python-side short names; DB names differ and are mapped
+        # only at the write boundary in write_match)
         self.fav_side = None
         self.dog_side = None
         self.fav_team = None
@@ -1556,10 +1572,11 @@ def write_match(sb, match, analysis):
             "model_prob_over_25": analysis["probabilities"].get("over_25"),
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
             # mode fields — DB columns use the favourite_*/underdog_* convention,
-            # and the classification column is `regime`. The three GF/GA columns
-            # are GENERATED ALWAYS AS ... STORED on the DB side, so we do NOT
-            # write them here.
-            "regime": analysis.get("mode"),
+            # the classification column is `regime`, and the DB check constraint
+            # allows only 'withstand' | 'demolish' | 'neutral'.
+            # favourite_gf_per_game / underdog_gf_per_game / underdog_ga_per_game
+            # are derived by the DB trigger — do not write them here.
+            "regime": REGIME_TO_DB.get(analysis.get("mode")),
             "favourite_side": analysis.get("fav_side"),
             "underdog_side": analysis.get("dog_side"),
             "favourite_win_prob": analysis.get("fav_win_prob"),
@@ -1642,7 +1659,7 @@ def write_match(sb, match, analysis):
                 rec["secondary_outcome"] = None
 
         sb.table("matches").upsert(rec, on_conflict="match_id").execute()
-        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates, regime={analysis.get('mode')})"
+        return True, f"match_id={rec['match_id']} ({len(analysis['candidates'])} candidates, regime={rec.get('regime')})"
     except Exception as e:
         return False, str(e)
 
