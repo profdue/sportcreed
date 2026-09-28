@@ -2018,7 +2018,7 @@ Error:      {diag.get('error')}
                         "picked_outcome,secondary_market,secondary_selection,secondary_outcome,"
                         "actual_home_goals,actual_away_goals,"
                         "sg_pick,sg_outcome"
-                    ).not_.is_("picked_outcome", "null").execute()
+                    ).not_.is_("actual_home_goals", "null").execute()
                 except Exception:
                     resp = sb.table("matches").select(
                         "match_id,match_date,home_team,away_team,"
@@ -2026,7 +2026,7 @@ Error:      {diag.get('error')}
                         "picked_outcome,"
                         "actual_home_goals,actual_away_goals,"
                         "sg_pick,sg_outcome"
-                    ).not_.is_("picked_outcome", "null").execute()
+                    ).not_.is_("actual_home_goals", "null").execute()
                 rows = resp.data or []
             except Exception as e:
                 st.error(f"Query failed: {e}")
