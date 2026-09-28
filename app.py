@@ -10,9 +10,21 @@ Tables:
   matches       — 1 row per match, ~235 columns (incl. sg_pick, sg_outcome)
   reliability   — 10 rows, one per market type
 
-NOTE: the Postgres column is named `match_mode` (not `mode`) because `mode`
-is a reserved word in Postgres (ordered-set aggregate) and PostgREST will
-raise 42809 if it appears unquoted in an INSERT/SELECT column list.
+NOTE: the Postgres column for the classification is named `match_mode` (not
+`mode`) because `mode` is a reserved word in Postgres (ordered-set aggregate)
+and PostgREST raises 42809 if it appears unquoted in an INSERT/SELECT column
+list.
+
+Fixes applied in this version:
+  1. compute_mode_inputs now derives fav_gf / dog_gf / dog_ga from the teams'
+     actual last-10 goals scored / conceded, not from the model's shrunk xG.
+  2. compute_mode_inputs also records fav_team / dog_team so the card can
+     display real team names instead of role words.
+  3. render_prediction_card shows team names and labels the GF/GA rows
+     correctly.
+  4. write_match persists the corrected role-based values (and optionally
+     fav_team / dog_team if those columns exist).
+  5. get_full_analysis exposes fav_team / dog_team.
 """
 
 import math
@@ -656,6 +668,8 @@ class RefinedPredictor:
         # mode state
         self.fav_side = None
         self.dog_side = None
+        self.fav_team = None
+        self.dog_team = None
         self.fav_win_prob = 0.0
         self.fav_gf = 0.0
         self.dog_gf = 0.0
@@ -802,27 +816,42 @@ class RefinedPredictor:
     # ------------------------------------------------------------------
     def compute_mode_inputs(self, match):
         """
-        Derive fav_win_prob, fav_gf, dog_gf, dog_ga from the shrunk xG and
-        model probabilities, then classify the match into a mode.
+        Derive fav_side / dog_side / fav_win_prob / fav_gf / dog_gf / dog_ga
+        from the teams' actual last-10 GF / GA, then classify the match.
+
+        The role-based GF/GA values are the TEAMS' actual last-10 form, not
+        the model's shrunk xG:
+          - fav_gf  = favourite's goals-scored-per-game (last 10)
+          - dog_gf  = underdog's goals-scored-per-game (last 10)
+          - dog_ga  = underdog's goals-conceded-per-game (last 10)
+
+        Favourite = the side with the higher model win probability.
         """
         P = self.probabilities
         p_home = P.get("home_win", 0.0)
         p_away = P.get("away_win", 0.0)
 
+        h = match["home_data"]
+        a = match["away_data"]
+
         if p_home >= p_away:
             self.fav_side = "home"
             self.dog_side = "away"
+            self.fav_team = match.get("home_team")
+            self.dog_team = match.get("away_team")
             self.fav_win_prob = p_home
-            self.fav_gf = self.shrunk_xg_home
-            self.dog_gf = self.shrunk_xg_away
-            self.dog_ga = self.shrunk_xg_home
+            self.fav_gf = float(h.get("home_goals_scored_last10") or 0.0)
+            self.dog_gf = float(a.get("away_goals_scored_last10") or 0.0)
+            self.dog_ga = float(a.get("away_goals_conceded_last10") or 0.0)
         else:
             self.fav_side = "away"
             self.dog_side = "home"
+            self.fav_team = match.get("away_team")
+            self.dog_team = match.get("home_team")
             self.fav_win_prob = p_away
-            self.fav_gf = self.shrunk_xg_away
-            self.dog_gf = self.shrunk_xg_home
-            self.dog_ga = self.shrunk_xg_away
+            self.fav_gf = float(a.get("away_goals_scored_last10") or 0.0)
+            self.dog_gf = float(h.get("home_goals_scored_last10") or 0.0)
+            self.dog_ga = float(h.get("home_goals_conceded_last10") or 0.0)
 
         self.mode = classify_mode(
             self.shrunk_total,
@@ -990,7 +1019,6 @@ class RefinedPredictor:
     def select_top(self):
         self.bets = []; self.skips = []
 
-        # ---- NO-BET ZONE ----
         if self.mode == MatchMode.NO_BET:
             if self.dog_gf >= 1.5 and self.fav_gf >= 1.5:
                 btts_yes = next(
@@ -1023,7 +1051,6 @@ class RefinedPredictor:
             })
             return
 
-        # ---- WITHSTAND / DEMOLISH / DEMOLISH-LEAN ----
         eligible = []
         for c in self.candidates:
             if self._is_suppressed(c):
@@ -1101,10 +1128,11 @@ class RefinedPredictor:
             "candidates": list(self.candidates),
             "effective_shrink": self.effective_shrink,
             "home_trust": self.home_trust, "away_trust": self.away_trust,
-            # Python dict key stays `mode` (never touches Postgres)
             "mode": self.mode,
             "fav_side": self.fav_side,
             "dog_side": self.dog_side,
+            "fav_team": self.fav_team,
+            "dog_team": self.dog_team,
             "fav_win_prob": self.fav_win_prob,
             "fav_gf": self.fav_gf,
             "dog_gf": self.dog_gf,
@@ -1534,7 +1562,7 @@ def write_match(sb, match, analysis):
             "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
             "model_prob_over_25": analysis["probabilities"].get("over_25"),
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
-            # mode fields — column is `match_mode` (safe name; `mode` is reserved)
+            # mode fields — DB column is `match_mode` (safe name; `mode` is reserved)
             "match_mode": analysis.get("mode"),
             "fav_side": analysis.get("fav_side"),
             "dog_side": analysis.get("dog_side"),
@@ -1573,7 +1601,6 @@ def write_match(sb, match, analysis):
             rec[f"score_{ck}"] = c["score"]
             rec[f"rank_{ck}"] = c["rank_in_match"]
 
-        # Mark every bet (primary + secondary) in the wide schema
         for bet in analysis["bets"]:
             top_c = next((c for c in analysis["candidates"]
                           if c["market"] == bet["market"]
@@ -1586,7 +1613,6 @@ def write_match(sb, match, analysis):
             stake_val = float(m.group(1)) if m else None
             rec[f"stake_{ck}"] = stake_val
 
-        # Primary pick summary columns
         if analysis["bets"]:
             primary = analysis["bets"][0]
             top_c = next((c for c in analysis["candidates"]
@@ -1608,7 +1634,6 @@ def write_match(sb, match, analysis):
                 rec["picked_stake"] = stake_val
                 rec["picked_outcome"] = None
 
-        # Secondary pick summary columns (only written if the column exists)
         if len(analysis["bets"]) > 1:
             secondary = analysis["bets"][1]
             sec_c = next((c for c in analysis["candidates"]
@@ -1633,8 +1658,6 @@ def record_outcome(sb, match_id, hg, ag):
     if sb is None:
         return False, "no client"
     try:
-        # Try to select secondary_* and match_mode; if the columns don't exist
-        # yet, PostgREST returns 42703 and we fall back to a smaller select.
         try:
             resp = sb.table("matches").select(
                 "ah_home_line,ah_away_line,picked_market,picked_selection,"
@@ -1708,7 +1731,6 @@ def record_outcome(sb, match_id, hg, ag):
         try:
             sb.table("matches").update(updates).eq("match_id", match_id).execute()
         except Exception:
-            # If secondary_outcome column is missing, drop it and retry
             updates.pop("secondary_outcome", None)
             sb.table("matches").update(updates).eq("match_id", match_id).execute()
 
@@ -1757,14 +1779,18 @@ def render_prediction_card(match, parsed, analysis):
         unsafe_allow_html=True,
     )
 
+    # --- Mode inputs: use TEAM NAMES, and the teams' actual last-10 GF/GA ---
+    fav_team = analysis.get("fav_team") or "—"
+    dog_team = analysis.get("dog_team") or "—"
+    fav_side = analysis.get("fav_side") or "—"
+
     st.markdown('<div class="section-title">Mode Inputs</div>', unsafe_allow_html=True)
     st.markdown(f"""
     <div class="trust-row"><span>shrunk_total</span><span class="trust-value">{analysis['shrunk_total']:.2f}</span></div>
-    <div class="trust-row"><span>favourite</span><span class="trust-value">{analysis.get('fav_side') or '—'}</span></div>
-    <div class="trust-row"><span>fav_win_prob</span><span class="trust-value">{analysis['fav_win_prob']:.1%}</span></div>
-    <div class="trust-row"><span>fav_GF</span><span class="trust-value">{analysis['fav_gf']:.2f}</span></div>
-    <div class="trust-row"><span>dog_GF</span><span class="trust-value">{analysis['dog_gf']:.2f}</span></div>
-    <div class="trust-row"><span>dog_GA</span><span class="trust-value">{analysis['dog_ga']:.2f}</span></div>
+    <div class="trust-row"><span>Favourite: <strong>{fav_team}</strong> ({fav_side})</span><span class="trust-value">{analysis['fav_win_prob']:.1%} win</span></div>
+    <div class="trust-row"><span>{fav_team} GF (last 10)</span><span class="trust-value">{analysis['fav_gf']:.2f}</span></div>
+    <div class="trust-row"><span>{dog_team} GF (last 10)</span><span class="trust-value">{analysis['dog_gf']:.2f}</span></div>
+    <div class="trust-row"><span>{dog_team} GA (last 10)</span><span class="trust-value">{analysis['dog_ga']:.2f}</span></div>
     """, unsafe_allow_html=True)
 
     if analysis["bets"]:
@@ -1919,7 +1945,6 @@ Error:      {diag.get('error')}
             st.info("Supabase not configured.")
         else:
             try:
-                # Prefer the richer select; fall back if secondary/match_mode missing
                 try:
                     resp = sb.table("matches").select(
                         "match_id,match_date,home_team,away_team,"
