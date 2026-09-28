@@ -9,6 +9,10 @@ Requires:
 Tables:
   matches       — 1 row per match, ~235 columns (incl. sg_pick, sg_outcome)
   reliability   — 10 rows, one per market type
+
+NOTE: the Postgres column is named `match_mode` (not `mode`) because `mode`
+is a reserved word in Postgres (ordered-set aggregate) and PostgREST will
+raise 42809 if it appears unquoted in an INSERT/SELECT column list.
 """
 
 import math
@@ -159,7 +163,7 @@ def classify_mode(model_total_shrunk, fav_win_prob, dog_gf, dog_ga):
 
 
 # ============================================================================
-# PARSER  (unchanged)
+# PARSER
 # ============================================================================
 def _has_bs4():
     try:
@@ -631,7 +635,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# PREDICTOR  (modified with mode logic)
+# PREDICTOR
 # ============================================================================
 class RefinedPredictor:
     def __init__(self):
@@ -800,13 +804,6 @@ class RefinedPredictor:
         """
         Derive fav_win_prob, fav_gf, dog_gf, dog_ga from the shrunk xG and
         model probabilities, then classify the match into a mode.
-
-        Definitions used (per the brief):
-          - favourite   = side with the higher model win probability
-          - dog_GF      = underdog's shrunk expected goals (attacking output)
-          - dog_GA      = underdog's shrunk expected goals conceded,
-                          proxied by the favourite's shrunk expected goals
-          - fav_win_prob = model probability the favourite wins
         """
         P = self.probabilities
         p_home = P.get("home_win", 0.0)
@@ -836,12 +833,6 @@ class RefinedPredictor:
         self._set_mode_markets()
 
     def _set_mode_markets(self):
-        """
-        Primary / secondary / suppressed (market, selection) specs per mode.
-        Handicap lines are formatted with :+g in generate_candidates, so
-        "-1.5" appears as "-1.5", "+0.75" as "+0.75", and "-1.0" as "-1".
-        The _selection_matches helper normalises integer vs decimal forms.
-        """
         m = self.mode
         if m == MatchMode.WITHSTAND:
             dog = "Home" if self.dog_side == "home" else "Away"
@@ -951,7 +942,6 @@ class RefinedPredictor:
 
     @staticmethod
     def _norm_handicap(s):
-        """Normalise '+1' / '-1' to '+1.0' / '-1.0' for comparison."""
         return re.sub(r"([+-])(\d+)(?![\d.])", r"\1\2.0", s)
 
     def _selection_matches(self, cand, market, selection):
@@ -1111,6 +1101,7 @@ class RefinedPredictor:
             "candidates": list(self.candidates),
             "effective_shrink": self.effective_shrink,
             "home_trust": self.home_trust, "away_trust": self.away_trust,
+            # Python dict key stays `mode` (never touches Postgres)
             "mode": self.mode,
             "fav_side": self.fav_side,
             "dog_side": self.dog_side,
@@ -1543,8 +1534,8 @@ def write_match(sb, match, analysis):
             "model_prob_btts_yes": analysis["probabilities"].get("btts_yes"),
             "model_prob_over_25": analysis["probabilities"].get("over_25"),
             "model_prob_under_25": analysis["probabilities"].get("under_25"),
-            # mode fields
-            "mode": analysis.get("mode"),
+            # mode fields — column is `match_mode` (safe name; `mode` is reserved)
+            "match_mode": analysis.get("mode"),
             "fav_side": analysis.get("fav_side"),
             "dog_side": analysis.get("dog_side"),
             "fav_win_prob": analysis.get("fav_win_prob"),
@@ -1595,7 +1586,7 @@ def write_match(sb, match, analysis):
             stake_val = float(m.group(1)) if m else None
             rec[f"stake_{ck}"] = stake_val
 
-        # Primary pick summary columns (kept for compatibility with Records/Pending)
+        # Primary pick summary columns
         if analysis["bets"]:
             primary = analysis["bets"][0]
             top_c = next((c for c in analysis["candidates"]
@@ -1617,7 +1608,7 @@ def write_match(sb, match, analysis):
                 rec["picked_stake"] = stake_val
                 rec["picked_outcome"] = None
 
-        # Secondary pick summary columns (optional — safe to add; ignored if absent)
+        # Secondary pick summary columns (only written if the column exists)
         if len(analysis["bets"]) > 1:
             secondary = analysis["bets"][1]
             sec_c = next((c for c in analysis["candidates"]
@@ -1642,11 +1633,20 @@ def record_outcome(sb, match_id, hg, ag):
     if sb is None:
         return False, "no client"
     try:
-        resp = sb.table("matches").select(
-            "ah_home_line,ah_away_line,picked_market,picked_selection,"
-            "secondary_market,secondary_selection,"
-            "sg_pick,home_team,away_team"
-        ).eq("match_id", match_id).execute()
+        # Try to select secondary_* and match_mode; if the columns don't exist
+        # yet, PostgREST returns 42703 and we fall back to a smaller select.
+        try:
+            resp = sb.table("matches").select(
+                "ah_home_line,ah_away_line,picked_market,picked_selection,"
+                "secondary_market,secondary_selection,"
+                "match_mode,sg_pick,home_team,away_team"
+            ).eq("match_id", match_id).execute()
+        except Exception:
+            resp = sb.table("matches").select(
+                "ah_home_line,ah_away_line,picked_market,picked_selection,"
+                "sg_pick,home_team,away_team"
+            ).eq("match_id", match_id).execute()
+
         if not resp.data:
             return False, f"match_id {match_id} not found"
         m = resp.data[0]
@@ -1705,7 +1705,13 @@ def record_outcome(sb, match_id, hg, ag):
         if sg_outcome:
             updates["sg_outcome"] = sg_outcome
 
-        sb.table("matches").update(updates).eq("match_id", match_id).execute()
+        try:
+            sb.table("matches").update(updates).eq("match_id", match_id).execute()
+        except Exception:
+            # If secondary_outcome column is missing, drop it and retry
+            updates.pop("secondary_outcome", None)
+            sb.table("matches").update(updates).eq("match_id", match_id).execute()
+
         ok, msg = update_reliability(sb)
         return True, f"settled; reliability: {msg}"
     except Exception as e:
@@ -1746,13 +1752,11 @@ def render_prediction_card(match, parsed, analysis):
     </div>
     """, unsafe_allow_html=True)
 
-    # Mode pill
     st.markdown(
         f'<div style="margin-bottom:0.5rem;">{_mode_pill(analysis.get("mode"))}</div>',
         unsafe_allow_html=True,
     )
 
-    # Mode inputs summary
     st.markdown('<div class="section-title">Mode Inputs</div>', unsafe_allow_html=True)
     st.markdown(f"""
     <div class="trust-row"><span>shrunk_total</span><span class="trust-value">{analysis['shrunk_total']:.2f}</span></div>
@@ -1763,7 +1767,6 @@ def render_prediction_card(match, parsed, analysis):
     <div class="trust-row"><span>dog_GA</span><span class="trust-value">{analysis['dog_ga']:.2f}</span></div>
     """, unsafe_allow_html=True)
 
-    # Verdict
     if analysis["bets"]:
         primary = analysis["bets"][0]
         secondary_html = ""
@@ -1885,7 +1888,7 @@ Error:      {diag.get('error')}
                             away_current_games=match.get("away_current_games", 999),
                         )
                         p.run_poisson()
-                        p.compute_mode_inputs(match)          # <-- NEW
+                        p.compute_mode_inputs(match)
                         p.generate_candidates(match["odds"])
                         reliability = get_reliability(sb)
                         p.score_and_rank(reliability)
@@ -1916,12 +1919,20 @@ Error:      {diag.get('error')}
             st.info("Supabase not configured.")
         else:
             try:
-                resp = sb.table("matches").select(
-                    "match_id,match_date,home_team,away_team,"
-                    "picked_market,picked_selection,picked_odds,"
-                    "secondary_market,secondary_selection,secondary_odds,"
-                    "mode,sg_pick"
-                ).is_("actual_home_goals", "null").execute()
+                # Prefer the richer select; fall back if secondary/match_mode missing
+                try:
+                    resp = sb.table("matches").select(
+                        "match_id,match_date,home_team,away_team,"
+                        "picked_market,picked_selection,picked_odds,"
+                        "secondary_market,secondary_selection,secondary_odds,"
+                        "match_mode,sg_pick"
+                    ).is_("actual_home_goals", "null").execute()
+                except Exception:
+                    resp = sb.table("matches").select(
+                        "match_id,match_date,home_team,away_team,"
+                        "picked_market,picked_selection,picked_odds,"
+                        "sg_pick"
+                    ).is_("actual_home_goals", "null").execute()
                 pending = resp.data or []
             except Exception as e:
                 st.error(f"Query failed: {e}")
@@ -1941,7 +1952,7 @@ Error:      {diag.get('error')}
                     so = m.get("secondary_odds")
                     if so is not None:
                         pick_str += f"  |  secondary: {m['secondary_market']} — {m['secondary_selection']} @ {so:.2f}"
-                mode = m.get("mode") or ""
+                mode = m.get("match_mode") or ""
                 header = f"{m.get('match_date','')} · {m.get('home_team','')} vs {m.get('away_team','')}"
                 if mode:
                     header += f" · {mode}"
@@ -1966,13 +1977,22 @@ Error:      {diag.get('error')}
             st.info("Supabase not configured.")
         else:
             try:
-                resp = sb.table("matches").select(
-                    "match_id,match_date,home_team,away_team,mode,"
-                    "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
-                    "picked_outcome,secondary_market,secondary_selection,secondary_outcome,"
-                    "actual_home_goals,actual_away_goals,"
-                    "sg_pick,sg_outcome"
-                ).not_.is_("picked_outcome", "null").execute()
+                try:
+                    resp = sb.table("matches").select(
+                        "match_id,match_date,home_team,away_team,match_mode,"
+                        "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
+                        "picked_outcome,secondary_market,secondary_selection,secondary_outcome,"
+                        "actual_home_goals,actual_away_goals,"
+                        "sg_pick,sg_outcome"
+                    ).not_.is_("picked_outcome", "null").execute()
+                except Exception:
+                    resp = sb.table("matches").select(
+                        "match_id,match_date,home_team,away_team,"
+                        "picked_market,picked_selection,picked_odds,picked_edge,picked_score,"
+                        "picked_outcome,"
+                        "actual_home_goals,actual_away_goals,"
+                        "sg_pick,sg_outcome"
+                    ).not_.is_("picked_outcome", "null").execute()
                 rows = resp.data or []
             except Exception as e:
                 st.error(f"Query failed: {e}")
@@ -1995,7 +2015,7 @@ Error:      {diag.get('error')}
                 df = pd.DataFrame([{
                     "Date": r.get("match_date", ""),
                     "Match": f"{r.get('home_team','')} vs {r.get('away_team','')}",
-                    "Mode": r.get("mode") or "",
+                    "Mode": r.get("match_mode") or "",
                     "My pick": f"{r.get('picked_market','')} — {r.get('picked_selection','')}",
                     "My result": r.get("picked_outcome", ""),
                     "Secondary": (f"{r.get('secondary_market','')} — {r.get('secondary_selection','')}"
