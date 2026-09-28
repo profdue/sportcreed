@@ -1,16 +1,18 @@
 """
 v4 RAW-ONLY Predictor — Streamlit app with HTML parser.
 
-All fixes applied:
-  FIX 1: XI parser scoped to match's own .lineups block (no cross-match leaks)
-  FIX 2: F1/F5 override threshold lowered from 6 to 4
-  FIX 3: calc_f4 treats injury-listed-but-starting same as doubt-starter
-  FIX 4: _parse_last5 filters to league matches only (consistent with F1/F3/F6)
-  FIX 5: _parse_standings sets home_played, away_played from main table
-  FIX 6: 4-way split parsing (home_home, home_away, away_home, away_away)
-  FIX 7: kickoff_utc set from kickoff_local
-
-Single-button workflow: paste HTML → click → parsed, predicted, saved as PENDING.
+All fixes applied (v5 final):
+  #1  kickoff_utc built as full ISO timestamp (was sending "14:00")
+  #2  XI parser scoped to match's own .lineups block (no cross-match leaks)
+  #3  F5 threshold lowered from 6 to 4 (Rennes-Marseille override now triggers)
+  #4  calc_f4 — injury-listed player who starts sets doubted_starter
+  #5  _parse_last5 — filtered to league-only for consistency with F1/F3/F6
+  #6  _parse_standings — home_played / away_played populated from main table
+  #7  4-way split parsing — home_home, home_away, away_home, away_away
+  #8  Corners from corner blocks (not .st-table cols 5/6)
+  #9  expected_return parsed from injury row
+  #10 AH / DNB / DC / HT odds parsed
+  #11 "Assistors" typo handled
 """
 
 import os
@@ -78,22 +80,6 @@ def get_supabase():
         return None, {"ok": False, "error": str(e)}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_table_columns(_sb_url: str, _sb_key: str, table_name: str = "matches_raw"):
-    """Fetch actual column names from Supabase. Cached for 5 min.
-    Falls back to None if we can't determine columns (empty table).
-    """
-    try:
-        from supabase import create_client
-        sb = create_client(_sb_url, _sb_key)
-        resp = sb.table(table_name).select("*").limit(1).execute()
-        if resp.data:
-            return set(resp.data[0].keys())
-        return None
-    except Exception:
-        return None
-
-
 # ============================================================================
 # PARSER
 # ============================================================================
@@ -113,7 +99,6 @@ class SportsgamblerParser:
         self.soup = BeautifulSoup(html, "html.parser")
         self.home_team = None
         self.away_team = None
-        self.league_name = None
 
     @staticmethod
     def _to_float(s):
@@ -162,16 +147,25 @@ class SportsgamblerParser:
                     return True
         return False
 
+    # ---------------------------------------------------------------- main
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
         league, tier, group = self._parse_league()
-        self.league_name = league
         venue = self._parse_venue()
+
+        # FIX #1: build full ISO timestamp for kickoff_utc
+        kickoff_utc_iso = None
+        if match_date and kickoff:
+            try:
+                dt = datetime.strptime(f"{match_date} {kickoff}", "%Y-%m-%d %H:%M")
+                kickoff_utc_iso = dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            except ValueError:
+                kickoff_utc_iso = None
 
         record = {
             "match_date": match_date,
-            "kickoff_utc": kickoff,      # FIX 7: set kickoff_utc
+            "kickoff_utc": kickoff_utc_iso,
             "kickoff_local": kickoff,
             "league_name": league,
             "tier": tier,
@@ -202,6 +196,7 @@ class SportsgamblerParser:
         record["odds"] = self._parse_odds()
         return record
 
+    # --------------------------------------------------------------- teams
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
         if len(teams) >= 2:
@@ -255,7 +250,6 @@ class SportsgamblerParser:
 
     # ----------------------------------------------------------- standings
     def _parse_standings(self):
-        """FIX 5+6: sets home_played/away_played; parses 4-way splits."""
         out = {}
         main_table = None
         for table in self.soup.select("table"):
@@ -304,13 +298,13 @@ class SportsgamblerParser:
                             if gd_plain is not None:
                                 gd = gd_plain
 
+                # FIX #6: games played = column index 2
                 played = self._to_int(cells[2].get_text(strip=True)) if len(cells) > 2 else None
 
                 if self._team_matches(self.home_team, team_clean):
                     out["home_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
                     out["home_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
-                    if played is not None:
-                        out["home_played"] = played
+                    out["home_played"] = played
                     if gf is not None:
                         out["home_gf"] = gf
                         out["home_ga"] = ga
@@ -319,25 +313,22 @@ class SportsgamblerParser:
                 elif self._team_matches(self.away_team, team_clean):
                     out["away_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
                     out["away_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
-                    if played is not None:
-                        out["away_played"] = played
+                    out["away_played"] = played
                     if gf is not None:
                         out["away_gf"] = gf
                         out["away_ga"] = ga
                     if gd is not None:
                         out["away_gd"] = gd
 
-        # FIX 6: 4-way split parsing
+        # FIX #7: 4-way split parsing
         self._parse_split_table("#Homeleague", self.home_team, "home_home", out)
         self._parse_split_table("#Awayleague", self.home_team, "home_away", out)
         self._parse_split_table("#Homeleague", self.away_team, "away_home", out)
         self._parse_split_table("#Awayleague", self.away_team, "away_away", out)
+
         return out
 
     def _parse_split_table(self, container_selector, team_name, prefix, out):
-        """Parse Home or Away split table for a team.
-        prefix ∈ {home_home, home_away, away_home, away_away}.
-        """
         container = self.soup.select_one(container_selector)
         if not container:
             return
@@ -394,7 +385,7 @@ class SportsgamblerParser:
 
     # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
-        """FIX 4: filters to league matches only (consistent with F1/F3/F6)."""
+        """FIX #5: filtered to league matches only."""
         out = []
         container = self.soup.select_one("#last-matches #All")
         if not container:
@@ -405,15 +396,8 @@ class SportsgamblerParser:
         if not block:
             return out
         tracked = (self.home_team if side == "home" else self.away_team) or ""
-
-        # Determine league short name for filtering
-        league_name = (self.league_name or "").lower()
-        league_short = ""
-        if league_name:
-            if " - " in league_name:
-                league_short = league_name.split(" - ", 1)[1].strip()
-            else:
-                league_short = league_name.strip()
+        league_name = (self._parse_league()[0] or "").lower()
+        league_short = league_name.split(" - ")[-1].strip() if " - " in league_name else league_name
 
         for item in block.select("li.team-stat-list-item"):
             if len(out) >= 5:
@@ -421,14 +405,10 @@ class SportsgamblerParser:
             date_el = item.select_one(".team-stats-date")
             date_text = date_el.get_text(strip=True) if date_el else ""
 
-            # FIX 4: filter to league only
-            if ":" in date_text and league_short:
+            # League-only filter
+            if ":" in date_text:
                 comp = date_text.split(":", 1)[0].strip().lower()
-                # Only accept if league_short is a substring of comp or vice versa
-                # Normalise common abbreviations
-                comp_norm = comp.replace(".", "").replace("  ", " ").strip()
-                league_norm = league_short.replace(".", "").replace("  ", " ").strip()
-                if league_norm not in comp_norm and comp_norm not in league_norm:
+                if league_short and league_short not in comp and comp not in league_short:
                     continue
 
             teams = item.select(".team-stats-team")
@@ -467,6 +447,7 @@ class SportsgamblerParser:
             })
         return out
 
+    # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -508,6 +489,7 @@ class SportsgamblerParser:
             out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
+    # ---------------------------------------------------------- players
     def _parse_players(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -523,6 +505,7 @@ class SportsgamblerParser:
             if mm:
                 out[f"{prefix}_top_scorer"] = mm.group(1).strip()
                 out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
+        # FIX #11: "Assistors" typo handled
         m = re.search(r"Top Assis\w+ for .+? this season are (.+?)(?:\.|$)", text)
         if m:
             first = m.group(1).split(",")[0].strip()
@@ -563,6 +546,7 @@ class SportsgamblerParser:
                 else:
                     status = "injury"
 
+                # FIX #9: expected_return parsed
                 expected_return = None
                 detail_el = row.select_one(".inj-two-hidden")
                 if detail_el:
@@ -580,11 +564,10 @@ class SportsgamblerParser:
         return out
 
     def _parse_xi(self, side):
-        """FIX 1: strictly scoped to the match's own .lineups container."""
+        """FIX #2: scoped to match's own lineups block — no cross-match leaks."""
         out = []
         side_class = "lineups-home" if side == "home" else "lineups-away"
 
-        # Find the .lineups container that has BOTH sides (exactly one per match)
         containers = self.soup.select(".lineups")
         best_container = None
         for c in containers:
@@ -614,6 +597,7 @@ class SportsgamblerParser:
                     return m.group(1)
         return None
 
+    # --------------------------------------------------------------- h2h
     def _parse_h2h(self):
         out = {"h2h": [], "h2h_home_wins": 0, "h2h_draws": 0, "h2h_away_wins": 0}
         container = self.soup.select_one("#head-to-head")
@@ -659,6 +643,7 @@ class SportsgamblerParser:
             })
         return out
 
+    # ------------------------------------------------------------- corners
     def _parse_corners(self):
         out = {}
         for side, cid in [("home", "#ht-corners"), ("away", "#at-corners")]:
@@ -677,7 +662,9 @@ class SportsgamblerParser:
                 out[f"{side}_{venue}_last10_corners_against"] = float(m.group(2))
         return out
 
+    # ------------------------------------------------------------- odds
     def _parse_odds(self):
+        """FIX #10: extracts AH, DNB, DC, HT too."""
         odds = {}
         for row in self.soup.select(".nlf_odds_row"):
             title_el = row.select_one(".nfl_odd_title")
@@ -775,7 +762,7 @@ def calc_f3(win_pct, avg_scored, avg_conceded):
 
 
 def calc_f4(top_scorer, top_assister, injuries, xi):
-    """FIX 3: injury-listed-but-starting also sets doubted_starter."""
+    """FIX #4: injury-listed player who starts also sets doubted_starter."""
     f4 = 15
     xi = xi or []
     injured = [i.get("player", "") for i in (injuries or []) if i.get("status") == "injury"]
@@ -790,7 +777,7 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
         if name in xi and (name == top_scorer or name == top_assister):
             f4 += 5
             doubted_starter = True
-    # FIX 3: injury-listed player who starts is a data conflict → trust XI
+    # FIX #4: injury-listed player who starts = same as doubt starter
     for name in injured:
         if name in xi and (name == top_scorer or name == top_assister):
             f4 += 5
@@ -814,7 +801,7 @@ def calc_f6(h_avg, a_avg):
 
 
 def apply_override(f1_home, f1_away, f5_home, f5_away):
-    """FIX 2: threshold lowered from 6 to 4."""
+    """FIX #3: threshold lowered from 6 to 4."""
     f1_gap = abs(f1_home - f1_away)
     f5_gap = abs(f5_home - f5_away)
     f1_leader = "home" if f1_home > f1_away else "away"
@@ -907,16 +894,27 @@ def predict_v4(row):
 # ============================================================================
 # DB HELPERS
 # ============================================================================
-def upsert_match(sb, record, sb_url, sb_key):
-    """Upsert filtered by actual table columns (schema-aware)."""
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_table_columns(_sb, table_name="matches_raw"):
+    """Fetches actual column names from Supabase once, cached for 5 min."""
+    try:
+        resp = _sb.table(table_name).select("*").limit(1).execute()
+        if resp.data:
+            return set(resp.data[0].keys())
+        return None
+    except Exception:
+        return None
+
+
+def upsert_match(sb, record):
     if sb is None:
         return False, "no client"
     try:
-        real_columns = get_table_columns(sb_url, sb_key)
+        real_columns = _get_table_columns(sb)
+
         if real_columns:
             clean = {k: v for k, v in record.items() if k in real_columns}
         else:
-            # Fallback allow-list
             allowed = {
                 "match_date", "kickoff_utc", "kickoff_local", "league_name", "tier", "group_name",
                 "season", "home_team", "away_team", "venue", "stage", "round",
@@ -928,16 +926,14 @@ def upsert_match(sb, record, sb_url, sb_key):
                 "home_last5", "away_last5",
                 "home_last10_w", "home_last10_d", "home_last10_l",
                 "home_last10_avg_scored", "home_last10_avg_conceded",
-                "home_last10_possession", "home_last10_corners_for",
-                "home_last10_corners_against", "home_last10_win_pct",
+                "home_last10_corners_for", "home_last10_corners_against",
+                "home_last10_win_pct",
                 "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
-                "home_home_last10_corners_for", "home_home_last10_corners_against",
                 "away_last10_w", "away_last10_d", "away_last10_l",
                 "away_last10_avg_scored", "away_last10_avg_conceded",
-                "away_last10_possession", "away_last10_corners_for",
-                "away_last10_corners_against", "away_last10_win_pct",
+                "away_last10_corners_for", "away_last10_corners_against",
+                "away_last10_win_pct",
                 "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
-                "away_away_last10_corners_for", "away_away_last10_corners_against",
                 "home_top_scorer", "home_top_scorer_goals",
                 "home_top_assister", "home_top_assister_assists",
                 "away_top_scorer", "away_top_scorer_goals",
@@ -1094,15 +1090,11 @@ def main():
         st.error(f"Supabase connection failed: {diag.get('error')}")
         return
 
-    sb_url = diag.get("url")
-    sb_key = st.secrets["SUPABASE_KEY"]
-
     tabs = st.tabs(["📥 Parse & Save", "⏳ Pending", "📊 Performance", "ℹ️ v4 Spec"])
 
-    # ---------------------------------------------------- parse & save
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Click the button — the app parses, predicts, and saves in one action.")
+        st.caption("Click the button — the app parses, predicts, and saves to Supabase in one action.")
 
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
@@ -1125,7 +1117,7 @@ def main():
                     result = predict_v4(parsed)
 
                 with st.spinner("Saving to Supabase..."):
-                    ok, row = upsert_match(sb, parsed, sb_url, sb_key)
+                    ok, row = upsert_match(sb, parsed)
                     save_ok = False
                     save_msg = ""
                     if ok and row:
@@ -1169,8 +1161,7 @@ def main():
                         st.write(f"Last5: {parsed.get('home_last5')}")
                         st.write(f"Last10: W{parsed.get('home_last10_w')} D{parsed.get('home_last10_d')} L{parsed.get('home_last10_l')}")
                         st.write(f"Home venue avg: {parsed.get('home_home_last10_avg_scored')} / {parsed.get('home_home_last10_avg_conceded')}")
-                        st.write(f"Home home win%: {parsed.get('home_home_win_pct')}")
-                        st.write(f"Home away pts/played: {parsed.get('home_away_points')}/{parsed.get('home_away_played')}")
+                        st.write(f"Home win%: {parsed.get('home_home_win_pct')}")
                         st.write(f"XI: {parsed.get('home_xi')}")
                         st.write(f"Injuries: {parsed.get('home_injuries')}")
                     with c2:
@@ -1179,12 +1170,12 @@ def main():
                         st.write(f"Last5: {parsed.get('away_last5')}")
                         st.write(f"Last10: W{parsed.get('away_last10_w')} D{parsed.get('away_last10_d')} L{parsed.get('away_last10_l')}")
                         st.write(f"Away venue avg: {parsed.get('away_away_last10_avg_scored')} / {parsed.get('away_away_last10_avg_conceded')}")
-                        st.write(f"Away away win%: {parsed.get('away_away_win_pct')}")
-                        st.write(f"Away home pts/played: {parsed.get('away_home_points')}/{parsed.get('away_home_played')}")
+                        st.write(f"Away win%: {parsed.get('away_away_win_pct')}")
                         st.write(f"XI: {parsed.get('away_xi')}")
                         st.write(f"Injuries: {parsed.get('away_injuries')}")
-                    st.write(f"Away away split: pts {parsed.get('away_away_points')}, played {parsed.get('away_away_played')}")
+                    st.write(f"Splits: home_home {parsed.get('home_home_points')}/{parsed.get('home_home_played')}, home_away {parsed.get('home_away_points')}/{parsed.get('home_away_played')}, away_home {parsed.get('away_home_points')}/{parsed.get('away_home_played')}, away_away {parsed.get('away_away_points')}/{parsed.get('away_away_played')}")
                     st.write(f"H2H: {parsed.get('h2h')}")
+                    st.write(f"Kickoff UTC: {parsed.get('kickoff_utc')}")
 
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
                 render_factor_row("F1 League Momentum", result["f1_home"], result["f1_away"], "(20 pts)")
@@ -1214,7 +1205,6 @@ def main():
 
                 st.info("👉 Go to **⏳ Pending** tab after the match to enter the actual score.")
 
-    # ------------------------------------------------------------- pending
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
         rows = load_all(sb)
@@ -1251,7 +1241,6 @@ def main():
                         else:
                             st.error(msg)
 
-    # --------------------------------------------------------- performance
     with tabs[2]:
         st.subheader("📊 Performance")
         rows = load_all(sb)
@@ -1291,7 +1280,6 @@ def main():
             } for r in settled])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # --------------------------------------------------------------- spec
     with tabs[3]:
         st.subheader("v4 Specification")
         st.markdown("""
@@ -1300,7 +1288,7 @@ def main():
         | Factor | Weight | Source |
         |--------|--------|--------|
         | F1 League Momentum | 20 | Position, Points, GD |
-        | F2 Current Form Last 5 | 25 | W=5, D=2, L=0, max 25 (league only) |
+        | F2 Current Form Last 5 | 25 | W=5, D=2, L=0, max 25 |
         | F3 Venue Split | 15 | Win% + goal edge at venue |
         | F4 Availability | 15 | Injuries (not suspensions) vs Confirmed XI |
         | F5 H2H Psychology | 10 | H2H W/D/L |
@@ -1314,7 +1302,7 @@ def main():
         **Overrides:**
         - F1 vs F5 conflict: F1 gap ≥ 12 AND F5 gap ≥ 4 AND opposite → F1 wins
         - Away collapse: away team 0 pts from 3+ away games → home +8 F1, force Over 2.5
-        - Doubt/injury-listed starter in XI: F4 +5, force Over 2.5
+        - Doubt starter: key player in XI listed as doubt OR injury → F4 +5, force Over 2.5
 
         **O/U:** Expected = (HomeH avg scored + AwayA avg conceded + AwayA avg scored + HomeH avg conceded) / 2
         - < 2.5 → Under
