@@ -9,6 +9,7 @@ Parser fixes:
   #FIX-5  _parse_last10 falls back to keystats block when .st-table absent
   #FIX-6  _parse_players falls back to keystats block when goalassist absent
   #FIX-7  warning layer distinguishes missing (None) from zero
+  #FIX-8  _parse_last10 SKIPS venue-split .st-table (Lazio-Milan bug fix)
 
 Audit layer:
   #N1 no_bet_reason_1x2 / no_bet_reason_ou
@@ -205,20 +206,16 @@ class SportsgamblerParser:
         record["home_last5"] = self._parse_last5("home")
         record["away_last5"] = self._parse_last5("away")
 
-        # #FIX-5: last10 with keystats fallback
         home_last10 = self._parse_last10("home")
         away_last10 = self._parse_last10("away")
         record.update(home_last10)
         record.update(away_last10)
 
-        # #FIX-5 (cont.): keystats-only fields the .st-table path doesn't populate
         keystats = self._parse_keystats_block()
         for key, val in keystats.items():
-            # Do not overwrite an already-populated value from .st-table path
             if key not in record or record.get(key) is None:
                 record[key] = val
 
-        # #FIX-6: players with keystats fallback
         home_players = self._parse_players("home")
         away_players = self._parse_players("away")
         for k, v in home_players.items():
@@ -528,12 +525,29 @@ class SportsgamblerParser:
     # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
         """
-        #FIX-5: primary path reads .st-table. If absent, the caller will
-        merge results from _parse_keystats_block().
+        #FIX-5: primary path reads .st-table; falls back to keystats elsewhere.
+        #FIX-8: SKIP venue-split .st-table. Pages like Lazio-Milan expose a
+        .st-table with headers "Lazio Home Stats" / "AC Milan Away Stats" —
+        those hold venue-specific numbers, not overall last-10. The keystats
+        fallback has the correct overall numbers.
         """
         out = {}
         prefix = "home" if side == "home" else "away"
         table = self.soup.select_one(".st-table")
+
+        # #FIX-8: detect venue-split table via its headers
+        if table:
+            header_text = " ".join(
+                th.get_text(" ", strip=True) for th in table.select("th")
+            ).lower()
+            venue_markers = (
+                "home stats", "away stats",
+                "home form", "away form",
+                "home matches", "away matches",
+            )
+            if any(m in header_text for m in venue_markers):
+                table = None
+
         if table:
             rows = table.select("tbody tr")
             idx = 0 if side == "home" else 1
@@ -573,27 +587,6 @@ class SportsgamblerParser:
 
     # ------------------------------------------------------- keystats block
     def _parse_keystats_block(self):
-        """
-        #FIX-5 / #FIX-6: parse the .keystats layout used on some preview pages.
-
-        The .keystats block contains per-team lists:
-          - "Full-Time Result": "X wins, Y defeats and Z draws in the previous 10 matches"
-                                "X wins, Y defeats and Z draws in the previous 10 home/away matches"
-          - "Goals":            "An average of A goals scored and B conceded in the previous 10 matches"
-                                "An average of A goals scored and B conceded in the previous 10 home/away matches"
-                                "An average of T goals per game in the previous 10 matches"
-                                "BTTS Yes in N of the previous 10 matches"
-                                "BTTS Yes in N of the previous 10 home/away matches"
-                                "Over 2.5 Goals in N of the previous 10 matches"
-                                "Over 2.5 Goals in N of the previous 10 home/away matches"
-          - "Corners":          "average of A corners awarded and B corners conceded in the last 10 ..."
-          - "Possession":       "An average of P% possession in the last 10 ..."
-          - "Top Scorers & Assists": "Top Scorers for X this season are Name (N), Name (N) ..."
-                                     "Top Assistors for X this season are Name (N) ..."
-
-        Returns a flat dict of parsed fields, keyed by the same names used
-        elsewhere in the pipeline (home_last10_w, home_home_last10_avg_scored, etc.).
-        """
         out = {}
 
         home_team = self.home_team
@@ -601,16 +594,11 @@ class SportsgamblerParser:
         if not home_team or not away_team:
             return out
 
-        # Find the keystats container
         keystats = self.soup.select_one(".keystats")
         if not keystats:
             return out
 
-        # Iterate over keystat-item blocks and identify which side each belongs to.
-        # Layout: side A items and side B items alternate in the HTML.
-        # The .awaystats class marks the away side on each row.
         for item in keystats.select(".keystat-item"):
-            # Skip team header rows (no .stats-title-sub)
             title_sub = item.select_one(".stats-title-sub")
             if not title_sub:
                 continue
@@ -632,8 +620,10 @@ class SportsgamblerParser:
                     out[f"{prefix}_last10_w"] = int(m.group(1))
                     out[f"{prefix}_last10_l"] = int(m.group(2))
                     out[f"{prefix}_last10_d"] = int(m.group(3))
+
+                venue = "home" if not is_away else "away"
                 m = re.search(
-                    rf"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+{('home' if not is_away else 'away')}\s+matches",
+                    rf"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+{venue}\s+matches",
                     text, re.I,
                 )
                 if m:
@@ -675,26 +665,10 @@ class SportsgamblerParser:
                     out[f"{prefix}_last10_btts_yes"] = int(m.group(1))
                     out[f"{prefix}_last10_btts_no"] = 10 - int(m.group(1))
 
-                m = re.search(r"BTTS Yes in (\d+) of the previous 10 home matches", text, re.I)
-                if m:
-                    out[f"{prefix}_home_last10_btts_yes"] = int(m.group(1))
-
-                m = re.search(r"BTTS Yes in (\d+) of the previous 10 away matches", text, re.I)
-                if m:
-                    out[f"{prefix}_away_last10_btts_yes"] = int(m.group(1))
-
                 m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_over25"] = int(m.group(1))
                     out[f"{prefix}_last10_under25"] = 10 - int(m.group(1))
-
-                m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 home matches", text, re.I)
-                if m:
-                    out[f"{prefix}_home_last10_over25"] = int(m.group(1))
-
-                m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 away matches", text, re.I)
-                if m:
-                    out[f"{prefix}_away_last10_over25"] = int(m.group(1))
 
             # --- Corners
             elif "Corners" in title_text:
@@ -752,7 +726,6 @@ class SportsgamblerParser:
                         out[f"{prefix}_top_assister"] = mm.group(1).strip()
                         out[f"{prefix}_top_assister_assists"] = int(mm.group(2))
 
-        # Derive win_pct if we now have last10_w
         for prefix in ("home", "away"):
             w_key = f"{prefix}_last10_w"
             if out.get(w_key) is not None and f"{prefix}_last10_win_pct" not in out:
@@ -1093,7 +1066,6 @@ def calc_expected_total(row):
     a1 = row.get("away_away_last10_avg_conceded")
     a2 = row.get("away_away_last10_avg_scored")
     h2 = row.get("home_home_last10_avg_conceded")
-    # Fall back to overall last10 averages if venue-specific missing
     if h1 is None:
         h1 = row.get("home_last10_avg_scored")
     if a1 is None:
@@ -1102,7 +1074,6 @@ def calc_expected_total(row):
         a2 = row.get("away_last10_avg_scored")
     if h2 is None:
         h2 = row.get("home_last10_avg_conceded")
-    # Final fallback to neutral
     h1 = h1 if h1 is not None else 1.0
     a1 = a1 if a1 is not None else 1.0
     a2 = a2 if a2 is not None else 1.0
@@ -1415,10 +1386,6 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
 # RISK WARNINGS
 # ============================================================================
 def compute_warnings(row, prediction):
-    """
-    #FIX-7: warning layer distinguishes missing (None) from zero.
-    Every threshold check requires the input to be present.
-    """
     warnings = []
 
     home_home_pct = row.get("home_home_win_pct")
@@ -1437,7 +1404,6 @@ def compute_warnings(row, prediction):
     total_gap = prediction.get("total_gap", 0)
     h2h_draws = row.get("h2h_draws")
 
-    # FLAG 1 — Both venue win rates are zero
     if (home_home_pct is not None and away_away_pct is not None
             and home_home_pct == 0 and away_away_pct == 0):
         warnings.append({
@@ -1451,7 +1417,6 @@ def compute_warnings(row, prediction):
             "severity": "high",
         })
 
-    # FLAG 2 — Extreme venue gap built on tiny samples
     if home_home_pct is not None and away_away_pct is not None:
         if abs(home_home_pct - away_away_pct) >= 40:
             small_home = home_home_played is not None and home_home_played < 4
@@ -1471,7 +1436,6 @@ def compute_warnings(row, prediction):
                     "severity": "high",
                 })
 
-    # FLAG 3 — Model pick contradicts recent form (#FIX-7: require present)
     if call.endswith("Home") and home_last10_w is not None and home_last10_w <= 2:
         warnings.append({
             "code": "home_pick_weak_form",
@@ -1493,7 +1457,6 @@ def compute_warnings(row, prediction):
             "severity": "medium",
         })
 
-    # FLAG 4 — Squad crisis
     home_top_scorer = row.get("home_top_scorer")
     away_top_scorer = row.get("away_top_scorer")
     home_injured_names = {i.get("player") for i in home_injuries
@@ -1528,7 +1491,6 @@ def compute_warnings(row, prediction):
                 "severity": "medium",
             })
 
-    # FLAG 5 — Draw-prone profile
     if (home_pts is not None and away_pts is not None
             and home_gd is not None and away_gd is not None
             and h2h_draws is not None):
@@ -1548,7 +1510,6 @@ def compute_warnings(row, prediction):
                 "severity": "high",
             })
 
-    # FLAG 6 — Thin gap
     if call in ("Straight Win Home", "Straight Win Away") and total_gap < 22:
         warnings.append({
             "code": "thin_gap_straight",
@@ -2001,6 +1962,8 @@ def main():
                         "away_last10_w": parsed.get("away_last10_w"),
                         "away_last10_d": parsed.get("away_last10_d"),
                         "away_last10_l": parsed.get("away_last10_l"),
+                        "home_last10_avg_scored": parsed.get("home_last10_avg_scored"),
+                        "away_last10_avg_scored": parsed.get("away_last10_avg_scored"),
                         "home_points": parsed.get("home_points"),
                         "away_points": parsed.get("away_points"),
                         "home_played": parsed.get("home_played"),
@@ -2246,8 +2209,9 @@ def main():
         - Holdout: matches on/after `{HOLDOUT_DATE}`
 
         **Parser coverage:**
-        - Reads `.st-table` layout when present
-        - Falls back to `.keystats` layout when absent
+        - Reads `.st-table` when it holds overall last-10
+        - SKIPS venue-split `.st-table` and uses keystats for the correct overall numbers
+        - Falls back to `.keystats` when `.st-table` absent or venue-split
         - Distinguishes missing (None) from zero throughout
         """)
 
