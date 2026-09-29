@@ -1,50 +1,31 @@
 """
 v4.3 RAW-ONLY Predictor — universal version.
 
-Parser fixes in this revision:
-  #FIX-1  _norm_comp now strips accents (Série B == Serie B)
-  #FIX-2  _parse_league reads JSON-LD superEvent.name first (canonical short form)
-  #FIX-3  _parse_last5 has a fallback: if strict league filter yields 0, retry without filter
-  #FIX-4  upsert_match guards league_name NOT NULL with "Unknown" fallback
+Parser fixes:
+  #FIX-1  _norm_comp strips accents (Série B == Serie B)
+  #FIX-2  _parse_league reads JSON-LD superEvent.name first
+  #FIX-3  _parse_last5 falls back to no-filter if strict filter yields 0
+  #FIX-4  upsert_match guards league_name NOT NULL
 
-Retained from v4.2.1 / earlier v4.3:
-  #1  kickoff_utc built as full ISO timestamp
-  #2  XI scoped to #lineups content-block only
-  #3  F1/F5 override threshold >= 4
-  #4  calc_f4 — injury-listed player who starts sets doubted_starter
-  #5  _parse_last5 — NORMALIZED league filter
-  #6  _parse_standings — home_played / away_played populated
-  #7  4-way split parsing
-  #8  Corners from corner blocks
-  #9  expected_return parsed
-  #10 AH / DNB / DC / HT odds parsed
-  #11 "Assistors" typo handled
-  #12 _team_matches_strict for injuries
-  #13 Insufficient-data guard
-  #14 Doubt-starter forces Over only if expected >= 2.4
-  #15 f5_leader_raw stored
-  #16 f1_vs_f2f3_conflict flag logged
-  #17 Schema-aware upsert
-  #18 Single button: Parse → Predict → Save
-  #A  F2 smoothing: single ALPHA + PRIOR_RATE
+Model:
+  #A  F2 smoothing: ALPHA + PRIOR_RATE
   #B  Conflict penalty: shrink gap, no leader flip
-  #C  Time-split validation (walk-forward)
+  #C  Time-split validation
   #D  Decision rule: gap<12 NO BET, <20 DC, else Straight
   #E  Train/Holdout tab comparing v4.2.1 vs v4.3
 
-New in this revision (per analyst feedback):
-  #N1 snapshot_utc captured at parse time (pre-match provenance)
-  #N2 no_bet_reason_1x2 and no_bet_reason_ou — market-specific abstention reasons
-  #N3 venue_ppg_gap feature stored but NOT used in prediction (for out-of-sample eval)
-  #N4 Risk-warning display layer (non-blocking)
-  #N5 Data Audit expander in Parse & Save tab
+Audit layer (new):
+  #N1 no_bet_reason_1x2 and no_bet_reason_ou — market-specific abstentions
+  #N2 venue_ppg_gap fields — candidate feature stored, not used in prediction
+  #N3 Risk-warning display layer (non-blocking)
+  #N4 Data Audit tab
 """
 
 import json
 import os
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -112,9 +93,9 @@ def _has_bs4():
 # ============================================================================
 # v4.3 UNIVERSAL CONSTANTS
 # ============================================================================
-ALPHA = 2                 # prior games (single constant for all Fs)
-PRIOR_FORM = 0.4          # prior rate for F2 (W=1, D=0.4)
-PRIOR_H2H = 1.0 / 3.0     # prior for F5 (3 outcomes, neutral = 1/3 each)
+ALPHA = 2
+PRIOR_FORM = 0.4
+PRIOR_H2H = 1.0 / 3.0
 
 
 # ============================================================================
@@ -153,11 +134,6 @@ class SportsgamblerParser:
 
     @staticmethod
     def _norm_comp(s):
-        """#FIX-1: strip accents so 'Série B' == 'Serie B' == 'serieb'.
-
-        Normalize competition name: remove accents, spaces, punctuation, lowercase.
-        'Série B' -> 'serieb' | 'Serie B' -> 'serieb' | 'La Liga' -> 'laliga'
-        """
         if not s:
             return ""
         s = unicodedata.normalize("NFKD", s)
@@ -199,13 +175,7 @@ class SportsgamblerParser:
         primary = a_words[0]
         return primary in b
 
-    # ---------------------------------------------------------------- main
     def parse(self):
-        # #N1: capture snapshot timestamp at the moment of parsing.
-        # This is the ONLY field that can prove the HTML was seen before the
-        # match. created_at is set by the DB and may lag or postdate kickoff.
-        snapshot_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
         league, tier, group = self._parse_league()
@@ -232,8 +202,6 @@ class SportsgamblerParser:
             "venue": venue,
             "stage": None,
             "round": None,
-            # #N1: pre-match provenance
-            "snapshot_utc": snapshot_utc,
         }
 
         record.update(self._parse_standings())
@@ -282,9 +250,6 @@ class SportsgamblerParser:
         return iso, kickoff
 
     def _parse_league(self):
-        """#FIX-2: read league from JSON-LD superEvent.name (canonical short form),
-        fall back to .t_info_link if JSON-LD is missing.
-        """
         league = None
 
         for script in self.soup.find_all("script", type="application/ld+json"):
@@ -332,7 +297,6 @@ class SportsgamblerParser:
         venue_el = self.soup.select_one(".t_top .t_venue")
         return venue_el.get_text(strip=True) if venue_el else None
 
-    # ----------------------------------------------------------- standings
     def _parse_standings(self):
         out = {}
         main_table = None
@@ -465,12 +429,7 @@ class SportsgamblerParser:
             return int(m.group(1)), int(m.group(2))
         return None
 
-    # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
-        """#FIX-3: strict league filter first; if it yields 0 matches, retry
-        without the league filter so we never return an empty list when the
-        page clearly has matches.
-        """
         container = self.soup.select_one("#last-matches #All")
         if not container:
             container = self.soup.select_one("#last-matches")
@@ -548,7 +507,6 @@ class SportsgamblerParser:
             "is_home": is_home,
         }
 
-    # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -590,7 +548,6 @@ class SportsgamblerParser:
             out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
-    # ---------------------------------------------------------- players
     def _parse_players(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -928,13 +885,11 @@ def calc_expected_total(row):
 
 def calc_venue_ppg_gap(row):
     """
-    #N3: compute venue-specific points-per-game gap.
-
+    #N2: venue-specific points-per-game gap.
     home_ppg = home team's points per game AT HOME
     away_ppg = away team's points per game AWAY
     gap = home_ppg - away_ppg
-
-    Stored for out-of-sample evaluation ONLY. Not used in the prediction.
+    Stored for evaluation only. Not used in the prediction.
     """
     hp = row.get("home_home_points")
     hg = row.get("home_home_played")
@@ -951,13 +906,6 @@ def calc_venue_ppg_gap(row):
 
 
 def predict_v4_3(row):
-    """
-    v4.3 prediction. Returns the same fields as before, PLUS:
-      - no_bet_reason_1x2
-      - no_bet_reason_ou
-      - venue_ppg_gap, venue_ppg_gap_home, venue_ppg_gap_away  (#N3, unused)
-    """
-    # #N3: compute venue PPG gap regardless of whether we end up betting.
     venue_ppg_gap, home_ppg, away_ppg = calc_venue_ppg_gap(row)
 
     has_home_last5 = bool(row.get("home_last5"))
@@ -1035,7 +983,6 @@ def predict_v4_3(row):
         away_total = away_total_raw
         home_total = away_total_raw - gap
 
-    # #N2: market-specific abstention reason for 1X2
     if gap < 12:
         call_1x2 = "NO BET"
         no_bet_reason_1x2 = "low_gap"
@@ -1057,7 +1004,6 @@ def predict_v4_3(row):
     )
 
     expected = calc_expected_total(row)
-    # #N2: market-specific abstention reason for O/U
     if expected < 2.4:
         call_ou = "Under 2.5"
         no_bet_reason_ou = None
@@ -1070,7 +1016,7 @@ def predict_v4_3(row):
 
     if (away_collapse or doubted_starter) and expected >= 2.4:
         call_ou = "Over 2.5"
-        no_bet_reason_ou = None  # forced overrides the middle band
+        no_bet_reason_ou = None
 
     return {
         "f1_home": round(f1_home, 2), "f1_away": round(f1_away, 2),
@@ -1099,10 +1045,8 @@ def predict_v4_3(row):
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "model_version": "v4.3",
-        # #N2
         "no_bet_reason_1x2": no_bet_reason_1x2,
         "no_bet_reason_ou": no_bet_reason_ou,
-        # #N3
         "venue_ppg_gap": venue_ppg_gap,
         "venue_ppg_gap_home": home_ppg,
         "venue_ppg_gap_away": away_ppg,
@@ -1110,7 +1054,6 @@ def predict_v4_3(row):
 
 
 def predict_v4_2_1(row):
-    """v4.2.1 comparison model — unchanged from prior revision."""
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
@@ -1213,7 +1156,7 @@ def predict_v4_2_1(row):
         "model_version": "v4.2.1",
         "no_bet_reason_1x2": "low_gap" if call_1x2 == "NO BET" else None,
         "no_bet_reason_ou": "expected_in_middle_band" if call_ou == "No Bet" else None,
-        "venue_ppg_gap": None,  # v4.2.1 doesn't compute this
+        "venue_ppg_gap": None,
         "venue_ppg_gap_home": None,
         "venue_ppg_gap_away": None,
     }
@@ -1250,10 +1193,6 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
 # RISK WARNINGS
 # ============================================================================
 def compute_warnings(row, prediction):
-    """
-    Compute warning flags for a v4.3 prediction.
-    Does not change the call. Only surfaces risk.
-    """
     warnings = []
 
     home_home_pct = row.get("home_home_win_pct")
@@ -1272,7 +1211,6 @@ def compute_warnings(row, prediction):
     total_gap = prediction.get("total_gap", 0)
     h2h_draws = row.get("h2h_draws") or 0
 
-    # FLAG 1 — Both venue win rates are zero
     if home_home_pct == 0 and away_away_pct == 0:
         warnings.append({
             "code": "both_venue_winless",
@@ -1285,7 +1223,6 @@ def compute_warnings(row, prediction):
             "severity": "high",
         })
 
-    # FLAG 2 — Extreme venue gap built on tiny samples
     if abs((home_home_pct or 0) - (away_away_pct or 0)) >= 40:
         small_home = home_home_played < 4
         small_away = away_away_played < 4
@@ -1304,7 +1241,6 @@ def compute_warnings(row, prediction):
                 "severity": "high",
             })
 
-    # FLAG 3 — Model pick contradicts recent form
     if call.endswith("Home") and home_last10_w <= 2:
         warnings.append({
             "code": "home_pick_weak_form",
@@ -1326,7 +1262,6 @@ def compute_warnings(row, prediction):
             "severity": "medium",
         })
 
-    # FLAG 4 — Squad crisis
     home_top_scorer = row.get("home_top_scorer")
     away_top_scorer = row.get("away_top_scorer")
     home_injured_names = {i.get("player") for i in home_injuries
@@ -1361,7 +1296,6 @@ def compute_warnings(row, prediction):
                 "severity": "medium",
             })
 
-    # FLAG 5 — Draw-prone profile
     pts_gap = abs(home_pts - away_pts)
     gd_gap = abs(home_gd - away_gd)
     if (call in ("Straight Win Home", "Straight Win Away")
@@ -1378,7 +1312,6 @@ def compute_warnings(row, prediction):
             "severity": "high",
         })
 
-    # FLAG 6 — Thin gap
     if call in ("Straight Win Home", "Straight Win Away") and total_gap < 22:
         warnings.append({
             "code": "thin_gap_straight",
@@ -1414,10 +1347,8 @@ def upsert_match(sb, record):
         real_columns = _get_table_columns(sb)
         if real_columns:
             clean = {k: v for k, v in record.items() if k in real_columns}
-            dropped = [k for k in record if k not in real_columns]
         else:
             clean = record
-            dropped = []
 
         if not clean.get("league_name"):
             clean["league_name"] = "Unknown"
@@ -1784,7 +1715,6 @@ def main():
                         &nbsp;·&nbsp; {parsed.get('match_date') or '—'}
                         &nbsp;·&nbsp; {parsed.get('kickoff_local') or ''}
                         &nbsp;·&nbsp; {parsed.get('venue') or '—'}
-                        &nbsp;·&nbsp; snapshot {parsed.get('snapshot_utc', '—')}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1802,7 +1732,6 @@ def main():
                 with c2:
                     render_ou_verdict(result)
 
-                # #N4: Risk warning layer
                 warnings = compute_warnings(parsed, result)
                 if warnings:
                     st.markdown("### 🚩 Risk Warnings")
@@ -1817,27 +1746,13 @@ def main():
                 else:
                     st.success("No risk warnings — clean profile.")
 
-                # #N5: Data Audit expander
-                with st.expander("🔍 Data Audit (provenance & abstention reasons)"):
-                    snap = parsed.get("snapshot_utc")
-                    kick = parsed.get("kickoff_utc")
+                with st.expander("🔍 Data Audit (abstention reasons)"):
                     st.write({
-                        "snapshot_utc": snap,
-                        "kickoff_utc": kick,
-                        "snapshot_is_pre_kickoff": (
-                            (snap is not None and kick is not None and snap < kick)
-                            if (snap and kick) else None
-                        ),
                         "no_bet_reason_1x2": result.get("no_bet_reason_1x2"),
                         "no_bet_reason_ou": result.get("no_bet_reason_ou"),
                         "call_1x2": result.get("call_1x2"),
                         "call_ou": result.get("call_ou"),
                     })
-                    st.caption(
-                        "snapshot_utc is captured at parse time. If it is after "
-                        "kickoff_utc, the HTML may have been from a post-match page "
-                        "and the inputs may include the result."
-                    )
 
                 with st.expander("🔍 Debug: parse health"):
                     p = SportsgamblerParser(text)
@@ -1993,7 +1908,7 @@ def main():
 
     with tabs[4]:
         st.subheader("🔍 Data Audit")
-        st.caption("Provenance checks and per-market abstention reasons.")
+        st.caption("Per-market abstention reasons and candidate feature coverage.")
 
         rows = load_all(sb)
         if not rows:
@@ -2004,34 +1919,6 @@ def main():
             n_incomplete = n_total - n_ok
             st.write(f"**Total rows:** {n_total} · **parse_ok:** {n_ok} · **incomplete:** {n_incomplete}")
 
-            # Snapshot vs kickoff
-            st.markdown('<div class="section-title">Snapshot timing</div>', unsafe_allow_html=True)
-            has_snap = [r for r in rows if r.get("snapshot_utc")]
-            if not has_snap:
-                st.warning(
-                    "No rows have `snapshot_utc`. This column was added in the "
-                    "current revision — historical rows will not have it. "
-                    "New parses will populate it."
-                )
-            else:
-                pre = 0
-                post = 0
-                unknown = 0
-                for r in has_snap:
-                    s = r.get("snapshot_utc")
-                    k = r.get("kickoff_utc")
-                    if not s or not k:
-                        unknown += 1
-                    elif s < k:
-                        pre += 1
-                    else:
-                        post += 1
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Snapshot before kickoff", pre)
-                c2.metric("Snapshot at/after kickoff", post)
-                c3.metric("Unknown", unknown)
-
-            # Per-market no-bet reasons
             st.markdown('<div class="section-title">1X2 abstention reasons</div>', unsafe_allow_html=True)
             r1x2 = {}
             for r in rows:
@@ -2062,14 +1949,13 @@ def main():
             else:
                 st.write("No NO BET O/U calls in the dataset.")
 
-            # Venue PPG gap — quick look at whether the field is populated
             st.markdown('<div class="section-title">Venue PPG gap (candidate feature)</div>', unsafe_allow_html=True)
             vppg = [r for r in rows if r.get("venue_ppg_gap") is not None
                     and r.get("actual_home_goals") is not None]
             if not vppg:
                 st.info(
-                    "No rows have `venue_ppg_gap` yet. It is populated on new parses. "
-                    "Once populated, this panel will show the correlation with home wins."
+                    "No rows have `venue_ppg_gap` populated yet. "
+                    "It will populate on new parses once the column exists in the DB."
                 )
             else:
                 import numpy as np
@@ -2079,9 +1965,7 @@ def main():
                 if gaps.std() > 0 and wins.std() > 0:
                     r_pb = float(np.corrcoef(gaps, wins)[0, 1])
                     st.write(f"**Point-biserial correlation (venue PPG gap vs home win):** {r_pb:+.3f}")
-                    st.caption(f"n = {len(vppg)}. This is the candidate signal flagged by the analyst. "
-                               "Do not act on it until the sample is larger and the snapshot "
-                               "timing audit above confirms pre-match capture.")
+                    st.caption(f"n = {len(vppg)}. Validate before acting.")
                 else:
                     st.write("Not enough variance to compute correlation.")
 
@@ -2121,17 +2005,11 @@ def main():
 
         **Candidate feature (stored, not used):**
         - `venue_ppg_gap` = home PPG at home − away PPG away
-        - Available for out-of-sample evaluation
-        - Not consumed by `predict_v4_3`
+        - Populated on parse, available for out-of-sample evaluation
 
-        **Abstention reasons (new):**
+        **Abstention reasons:**
         - `no_bet_reason_1x2`: `low_gap` | `insufficient_data` | `insufficient_form`
         - `no_bet_reason_ou`: `expected_in_middle_band` | `insufficient_data` | `insufficient_form`
-
-        **Provenance (new):**
-        - `snapshot_utc` captured at parse time
-        - If `snapshot_utc < kickoff_utc`, the HTML was pre-match by construction
-        - Historical rows will not have this field
         """)
 
 
