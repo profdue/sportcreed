@@ -9,7 +9,8 @@ Parser fixes:
   #FIX-5  _parse_last10 falls back to keystats block when .st-table absent
   #FIX-6  _parse_players falls back to keystats block when goalassist absent
   #FIX-7  warning layer distinguishes missing (None) from zero
-  #FIX-8  _parse_last10 SKIPS venue-split .st-table (Lazio-Milan bug fix)
+  #FIX-8  _parse_last10 SKIPS venue-split .st-table (scans headers AND body cells)
+  #FIX-9  keystats values OVERRIDE .st-table for keystats-owned fields
 
 Audit layer:
   #N1 no_bet_reason_1x2 / no_bet_reason_ou
@@ -93,6 +94,37 @@ def _has_bs4():
 ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
+
+# #FIX-9: fields that keystats owns. When keystats has a value for these,
+# it overrides whatever the .st-table path returned.
+KEYSTATS_PRIORITY_FIELDS = {
+    # overall last-10 form
+    "home_last10_w", "home_last10_d", "home_last10_l",
+    "away_last10_w", "away_last10_d", "away_last10_l",
+    "home_last10_avg_scored", "home_last10_avg_conceded",
+    "away_last10_avg_scored", "away_last10_avg_conceded",
+    "home_last10_over25", "home_last10_under25",
+    "away_last10_over25", "away_last10_under25",
+    "home_last10_btts_yes", "home_last10_btts_no",
+    "away_last10_btts_yes", "away_last10_btts_no",
+    # venue-split goals
+    "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
+    "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
+    "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
+    "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
+    # possession
+    "home_last10_possession", "away_last10_possession",
+    # corners
+    "home_last10_corners_for", "home_last10_corners_against",
+    "away_last10_corners_for", "away_last10_corners_against",
+    "home_home_last10_corners_for", "home_home_last10_corners_against",
+    "away_away_last10_corners_for", "away_away_last10_corners_against",
+    # top scorers/assisters
+    "home_top_scorer", "home_top_scorer_goals",
+    "away_top_scorer", "away_top_scorer_goals",
+    "home_top_assister", "home_top_assister_assists",
+    "away_top_assister", "away_top_assister_assists",
+}
 
 
 # ============================================================================
@@ -206,16 +238,24 @@ class SportsgamblerParser:
         record["home_last5"] = self._parse_last5("home")
         record["away_last5"] = self._parse_last5("away")
 
+        # last10 primary path (.st-table) — may return partial or nothing
         home_last10 = self._parse_last10("home")
         away_last10 = self._parse_last10("away")
         record.update(home_last10)
         record.update(away_last10)
 
+        # keystats fallback/override
         keystats = self._parse_keystats_block()
         for key, val in keystats.items():
-            if key not in record or record.get(key) is None:
+            if val is None:
+                continue
+            # #FIX-9: keystats wins for fields it owns
+            if key in KEYSTATS_PRIORITY_FIELDS:
+                record[key] = val
+            elif key not in record or record.get(key) is None:
                 record[key] = val
 
+        # players — separate fallback since goalassist block is on some pages only
         home_players = self._parse_players("home")
         away_players = self._parse_players("away")
         for k, v in home_players.items():
@@ -525,27 +565,39 @@ class SportsgamblerParser:
     # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
         """
-        #FIX-5: primary path reads .st-table; falls back to keystats elsewhere.
-        #FIX-8: SKIP venue-split .st-table. Pages like Lazio-Milan expose a
-        .st-table with headers "Lazio Home Stats" / "AC Milan Away Stats" —
-        those hold venue-specific numbers, not overall last-10. The keystats
-        fallback has the correct overall numbers.
+        Primary path: read .st-table if it holds OVERALL last-10.
+        #FIX-8: skip the .st-table if it is a venue-split table.
+                Detection scans BOTH headers AND the first cell of each body row,
+                because Sportsgambler places "Lazio Home Stats" / "AC Milan Away Stats"
+                in <td colspan="2"> cells, not in <th> headers.
+        Keystats block is the canonical source and will override via #FIX-9.
         """
         out = {}
         prefix = "home" if side == "home" else "away"
         table = self.soup.select_one(".st-table")
 
-        # #FIX-8: detect venue-split table via its headers
+        # #FIX-8: detect venue-split table
         if table:
             header_text = " ".join(
                 th.get_text(" ", strip=True) for th in table.select("th")
             ).lower()
+
+            body_first_cells = []
+            for tr in table.select("tbody tr"):
+                tds = tr.select("td")
+                if tds:
+                    body_first_cells.append(tds[0].get_text(" ", strip=True))
+            body_text = " ".join(body_first_cells).lower()
+
+            combined = header_text + " || " + body_text
             venue_markers = (
                 "home stats", "away stats",
                 "home form", "away form",
                 "home matches", "away matches",
+                "home league games", "away league games",
+                "home league", "away league",
             )
-            if any(m in header_text for m in venue_markers):
+            if any(m in combined for m in venue_markers):
                 table = None
 
         if table:
@@ -606,7 +658,6 @@ class SportsgamblerParser:
 
             is_away = "awaystats" in item.get("class", [])
             prefix = "away" if is_away else "home"
-            opponent_prefix = "home" if is_away else "away"
 
             text = item.get_text(" ", strip=True)
 
@@ -2210,8 +2261,8 @@ def main():
 
         **Parser coverage:**
         - Reads `.st-table` when it holds overall last-10
-        - SKIPS venue-split `.st-table` and uses keystats for the correct overall numbers
-        - Falls back to `.keystats` when `.st-table` absent or venue-split
+        - SKIPS venue-split `.st-table` (headers AND body cells scanned)
+        - Keystats block wins for the fields it owns
         - Distinguishes missing (None) from zero throughout
         """)
 
