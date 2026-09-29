@@ -2,22 +2,18 @@
 v4.3 RAW-ONLY Predictor — universal version.
 
 Parser fixes:
-  #FIX-1  _norm_comp strips accents (Série B == Serie B)
+  #FIX-1  _norm_comp strips accents
   #FIX-2  _parse_league reads JSON-LD superEvent.name first
   #FIX-3  _parse_last5 falls back to no-filter if strict filter yields 0
   #FIX-4  upsert_match guards league_name NOT NULL
+  #FIX-5  _parse_last10 falls back to keystats block when .st-table absent
+  #FIX-6  _parse_players falls back to keystats block when goalassist absent
+  #FIX-7  warning layer distinguishes missing (None) from zero
 
-Model:
-  #A  F2 smoothing: ALPHA + PRIOR_RATE
-  #B  Conflict penalty: shrink gap, no leader flip
-  #C  Time-split validation
-  #D  Decision rule: gap<12 NO BET, <20 DC, else Straight
-  #E  Train/Holdout tab comparing v4.2.1 vs v4.3
-
-Audit layer (new):
-  #N1 no_bet_reason_1x2 and no_bet_reason_ou — market-specific abstentions
-  #N2 venue_ppg_gap fields — candidate feature stored, not used in prediction
-  #N3 Risk-warning display layer (non-blocking)
+Audit layer:
+  #N1 no_bet_reason_1x2 / no_bet_reason_ou
+  #N2 venue_ppg_gap fields (candidate feature)
+  #N3 risk-warning display layer
   #N4 Data Audit tab
 """
 
@@ -175,6 +171,7 @@ class SportsgamblerParser:
         primary = a_words[0]
         return primary in b
 
+    # ---------------------------------------------------------------- main
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
@@ -207,10 +204,30 @@ class SportsgamblerParser:
         record.update(self._parse_standings())
         record["home_last5"] = self._parse_last5("home")
         record["away_last5"] = self._parse_last5("away")
-        record.update(self._parse_last10("home"))
-        record.update(self._parse_last10("away"))
-        record.update(self._parse_players("home"))
-        record.update(self._parse_players("away"))
+
+        # #FIX-5: last10 with keystats fallback
+        home_last10 = self._parse_last10("home")
+        away_last10 = self._parse_last10("away")
+        record.update(home_last10)
+        record.update(away_last10)
+
+        # #FIX-5 (cont.): keystats-only fields the .st-table path doesn't populate
+        keystats = self._parse_keystats_block()
+        for key, val in keystats.items():
+            # Do not overwrite an already-populated value from .st-table path
+            if key not in record or record.get(key) is None:
+                record[key] = val
+
+        # #FIX-6: players with keystats fallback
+        home_players = self._parse_players("home")
+        away_players = self._parse_players("away")
+        for k, v in home_players.items():
+            if v is not None and (k not in record or record.get(k) is None):
+                record[k] = v
+        for k, v in away_players.items():
+            if v is not None and (k not in record or record.get(k) is None):
+                record[k] = v
+
         record["home_injuries"] = self._parse_injuries("home")
         record["away_injuries"] = self._parse_injuries("away")
         record["home_xi"] = self._parse_xi("home")
@@ -251,7 +268,6 @@ class SportsgamblerParser:
 
     def _parse_league(self):
         league = None
-
         for script in self.soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
@@ -297,6 +313,7 @@ class SportsgamblerParser:
         venue_el = self.soup.select_one(".t_top .t_venue")
         return venue_el.get_text(strip=True) if venue_el else None
 
+    # ----------------------------------------------------------- standings
     def _parse_standings(self):
         out = {}
         main_table = None
@@ -429,6 +446,7 @@ class SportsgamblerParser:
             return int(m.group(1)), int(m.group(2))
         return None
 
+    # ---------------------------------------------------------- form last5
     def _parse_last5(self, side):
         container = self.soup.select_one("#last-matches #All")
         if not container:
@@ -507,7 +525,12 @@ class SportsgamblerParser:
             "is_home": is_home,
         }
 
+    # --------------------------------------------------------- form last10
     def _parse_last10(self, side):
+        """
+        #FIX-5: primary path reads .st-table. If absent, the caller will
+        merge results from _parse_keystats_block().
+        """
         out = {}
         prefix = "home" if side == "home" else "away"
         table = self.soup.select_one(".st-table")
@@ -544,10 +567,200 @@ class SportsgamblerParser:
                 out[f"{prefix}_away_last10_avg_conceded"] = float(m.group(2))
 
         w_key = f"{prefix}_last10_w"
-        if w_key in out:
+        if w_key in out and out[w_key] is not None:
             out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
+    # ------------------------------------------------------- keystats block
+    def _parse_keystats_block(self):
+        """
+        #FIX-5 / #FIX-6: parse the .keystats layout used on some preview pages.
+
+        The .keystats block contains per-team lists:
+          - "Full-Time Result": "X wins, Y defeats and Z draws in the previous 10 matches"
+                                "X wins, Y defeats and Z draws in the previous 10 home/away matches"
+          - "Goals":            "An average of A goals scored and B conceded in the previous 10 matches"
+                                "An average of A goals scored and B conceded in the previous 10 home/away matches"
+                                "An average of T goals per game in the previous 10 matches"
+                                "BTTS Yes in N of the previous 10 matches"
+                                "BTTS Yes in N of the previous 10 home/away matches"
+                                "Over 2.5 Goals in N of the previous 10 matches"
+                                "Over 2.5 Goals in N of the previous 10 home/away matches"
+          - "Corners":          "average of A corners awarded and B corners conceded in the last 10 ..."
+          - "Possession":       "An average of P% possession in the last 10 ..."
+          - "Top Scorers & Assists": "Top Scorers for X this season are Name (N), Name (N) ..."
+                                     "Top Assistors for X this season are Name (N) ..."
+
+        Returns a flat dict of parsed fields, keyed by the same names used
+        elsewhere in the pipeline (home_last10_w, home_home_last10_avg_scored, etc.).
+        """
+        out = {}
+
+        home_team = self.home_team
+        away_team = self.away_team
+        if not home_team or not away_team:
+            return out
+
+        # Find the keystats container
+        keystats = self.soup.select_one(".keystats")
+        if not keystats:
+            return out
+
+        # Iterate over keystat-item blocks and identify which side each belongs to.
+        # Layout: side A items and side B items alternate in the HTML.
+        # The .awaystats class marks the away side on each row.
+        for item in keystats.select(".keystat-item"):
+            # Skip team header rows (no .stats-title-sub)
+            title_sub = item.select_one(".stats-title-sub")
+            if not title_sub:
+                continue
+            title_text = title_sub.get_text(" ", strip=True)
+
+            is_away = "awaystats" in item.get("class", [])
+            prefix = "away" if is_away else "home"
+            opponent_prefix = "home" if is_away else "away"
+
+            text = item.get_text(" ", strip=True)
+
+            # --- Full-Time Result
+            if "Full-Time Result" in title_text:
+                m = re.search(
+                    r"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_last10_w"] = int(m.group(1))
+                    out[f"{prefix}_last10_l"] = int(m.group(2))
+                    out[f"{prefix}_last10_d"] = int(m.group(3))
+                m = re.search(
+                    rf"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+{('home' if not is_away else 'away')}\s+matches",
+                    text, re.I,
+                )
+                if m:
+                    w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    played = w + l + d
+                    if not is_away:
+                        out["home_home_played"] = out.get("home_home_played") or played
+                    else:
+                        out["away_away_played"] = out.get("away_away_played") or played
+
+            # --- Goals
+            elif "Goals" in title_text:
+                m = re.search(
+                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_last10_avg_scored"] = float(m.group(1))
+                    out[f"{prefix}_last10_avg_conceded"] = float(m.group(2))
+
+                m = re.search(
+                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 home matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_home_last10_avg_scored"] = float(m.group(1))
+                    out[f"{prefix}_home_last10_avg_conceded"] = float(m.group(2))
+
+                m = re.search(
+                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 away matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_away_last10_avg_scored"] = float(m.group(1))
+                    out[f"{prefix}_away_last10_avg_conceded"] = float(m.group(2))
+
+                m = re.search(r"BTTS Yes in (\d+) of the previous 10 matches", text, re.I)
+                if m:
+                    out[f"{prefix}_last10_btts_yes"] = int(m.group(1))
+                    out[f"{prefix}_last10_btts_no"] = 10 - int(m.group(1))
+
+                m = re.search(r"BTTS Yes in (\d+) of the previous 10 home matches", text, re.I)
+                if m:
+                    out[f"{prefix}_home_last10_btts_yes"] = int(m.group(1))
+
+                m = re.search(r"BTTS Yes in (\d+) of the previous 10 away matches", text, re.I)
+                if m:
+                    out[f"{prefix}_away_last10_btts_yes"] = int(m.group(1))
+
+                m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 matches", text, re.I)
+                if m:
+                    out[f"{prefix}_last10_over25"] = int(m.group(1))
+                    out[f"{prefix}_last10_under25"] = 10 - int(m.group(1))
+
+                m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 home matches", text, re.I)
+                if m:
+                    out[f"{prefix}_home_last10_over25"] = int(m.group(1))
+
+                m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 away matches", text, re.I)
+                if m:
+                    out[f"{prefix}_away_last10_over25"] = int(m.group(1))
+
+            # --- Corners
+            elif "Corners" in title_text:
+                m = re.search(
+                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_last10_corners_for"] = float(m.group(1))
+                    out[f"{prefix}_last10_corners_against"] = float(m.group(2))
+
+                m = re.search(
+                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 home matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_home_last10_corners_for"] = float(m.group(1))
+                    out[f"{prefix}_home_last10_corners_against"] = float(m.group(2))
+
+                m = re.search(
+                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 away matches",
+                    text, re.I,
+                )
+                if m:
+                    out[f"{prefix}_away_last10_corners_for"] = float(m.group(1))
+                    out[f"{prefix}_away_last10_corners_against"] = float(m.group(2))
+
+            # --- Possession
+            elif "Possession" in title_text:
+                m = re.search(r"average of ([\d.]+)% possession in the last 10 matches", text, re.I)
+                if m:
+                    out[f"{prefix}_last10_possession"] = float(m.group(1))
+
+            # --- Top Scorers & Assists
+            elif "Top Scorers" in title_text:
+                m = re.search(
+                    r"Top Scorers for .+? this season are\s+(.+?)(?:Top Assistors|$)",
+                    text,
+                )
+                if m:
+                    first = m.group(1).split(",")[0].strip()
+                    mm = re.match(r"(.+?)\s*\((\d+)\)", first)
+                    if mm:
+                        out[f"{prefix}_top_scorer"] = mm.group(1).strip()
+                        out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
+
+                m = re.search(
+                    r"Top Assistors for .+? this season are\s+(.+?)$",
+                    text,
+                )
+                if m:
+                    first = m.group(1).split(",")[0].strip()
+                    mm = re.match(r"(.+?)\s*\((\d+)\)", first)
+                    if mm:
+                        out[f"{prefix}_top_assister"] = mm.group(1).strip()
+                        out[f"{prefix}_top_assister_assists"] = int(mm.group(2))
+
+        # Derive win_pct if we now have last10_w
+        for prefix in ("home", "away"):
+            w_key = f"{prefix}_last10_w"
+            if out.get(w_key) is not None and f"{prefix}_last10_win_pct" not in out:
+                out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
+
+        return out
+
+    # ---------------------------------------------------------- players
     def _parse_players(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -876,21 +1089,28 @@ def apply_override(f1_home, f1_away, f5_home, f5_away):
 
 
 def calc_expected_total(row):
-    h1 = row.get("home_home_last10_avg_scored") or 1.0
-    a1 = row.get("away_away_last10_avg_conceded") or 1.0
-    a2 = row.get("away_away_last10_avg_scored") or 1.0
-    h2 = row.get("home_home_last10_avg_conceded") or 1.0
+    h1 = row.get("home_home_last10_avg_scored")
+    a1 = row.get("away_away_last10_avg_conceded")
+    a2 = row.get("away_away_last10_avg_scored")
+    h2 = row.get("home_home_last10_avg_conceded")
+    # Fall back to overall last10 averages if venue-specific missing
+    if h1 is None:
+        h1 = row.get("home_last10_avg_scored")
+    if a1 is None:
+        a1 = row.get("away_last10_avg_conceded")
+    if a2 is None:
+        a2 = row.get("away_last10_avg_scored")
+    if h2 is None:
+        h2 = row.get("home_last10_avg_conceded")
+    # Final fallback to neutral
+    h1 = h1 if h1 is not None else 1.0
+    a1 = a1 if a1 is not None else 1.0
+    a2 = a2 if a2 is not None else 1.0
+    h2 = h2 if h2 is not None else 1.0
     return (h1 + a1 + a2 + h2) / 2
 
 
 def calc_venue_ppg_gap(row):
-    """
-    #N2: venue-specific points-per-game gap.
-    home_ppg = home team's points per game AT HOME
-    away_ppg = away team's points per game AWAY
-    gap = home_ppg - away_ppg
-    Stored for evaluation only. Not used in the prediction.
-    """
     hp = row.get("home_home_points")
     hg = row.get("home_home_played")
     ap = row.get("away_away_points")
@@ -911,8 +1131,10 @@ def predict_v4_3(row):
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
-    home_played = row.get("home_played") or 0
-    away_played = row.get("away_played") or 0
+    home_played = row.get("home_played")
+    away_played = row.get("away_played")
+    home_played = home_played if home_played is not None else 0
+    away_played = away_played if away_played is not None else 0
 
     if not (has_home_last5 and has_away_last5 and has_standings
             and home_played >= 3 and away_played >= 3):
@@ -1193,55 +1415,64 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
 # RISK WARNINGS
 # ============================================================================
 def compute_warnings(row, prediction):
+    """
+    #FIX-7: warning layer distinguishes missing (None) from zero.
+    Every threshold check requires the input to be present.
+    """
     warnings = []
 
     home_home_pct = row.get("home_home_win_pct")
     away_away_pct = row.get("away_away_win_pct")
-    home_home_played = row.get("home_home_played") or 0
-    away_away_played = row.get("away_away_played") or 0
-    home_last10_w = row.get("home_last10_w") or 0
-    away_last10_w = row.get("away_last10_w") or 0
-    home_pts = row.get("home_points") or 0
-    away_pts = row.get("away_points") or 0
-    home_gd = row.get("home_gd") or 0
-    away_gd = row.get("away_gd") or 0
+    home_home_played = row.get("home_home_played")
+    away_away_played = row.get("away_away_played")
+    home_last10_w = row.get("home_last10_w")
+    away_last10_w = row.get("away_last10_w")
+    home_pts = row.get("home_points")
+    away_pts = row.get("away_points")
+    home_gd = row.get("home_gd")
+    away_gd = row.get("away_gd")
     home_injuries = row.get("home_injuries") or []
     away_injuries = row.get("away_injuries") or []
     call = prediction.get("call_1x2", "")
     total_gap = prediction.get("total_gap", 0)
-    h2h_draws = row.get("h2h_draws") or 0
+    h2h_draws = row.get("h2h_draws")
 
-    if home_home_pct == 0 and away_away_pct == 0:
+    # FLAG 1 — Both venue win rates are zero
+    if (home_home_pct is not None and away_away_pct is not None
+            and home_home_pct == 0 and away_away_pct == 0):
         warnings.append({
             "code": "both_venue_winless",
             "label": "⚠️ Both teams winless at their venue",
             "detail": (
-                f"Home has not won at home ({home_home_played} games), "
-                f"away has not won away ({away_away_played} games). "
+                f"Home has not won at home ({home_home_played if home_home_played is not None else '?'} games), "
+                f"away has not won away ({away_away_played if away_away_played is not None else '?'} games). "
                 f"In-sample this profile drew 5 of 5 times."
             ),
             "severity": "high",
         })
 
-    if abs((home_home_pct or 0) - (away_away_pct or 0)) >= 40:
-        small_home = home_home_played < 4
-        small_away = away_away_played < 4
-        if small_home or small_away:
-            warnings.append({
-                "code": "extreme_gap_small_sample",
-                "label": "⚠️ Extreme venue gap on small sample",
-                "detail": (
-                    f"Venue gap ≥ 40 but "
-                    f"{'home ' if small_home else ''}"
-                    f"{'away ' if small_away else ''}"
-                    f"sample is under 4 games. "
-                    f"Promoted teams and early-season anomalies "
-                    f"produce false positives here."
-                ),
-                "severity": "high",
-            })
+    # FLAG 2 — Extreme venue gap built on tiny samples
+    if home_home_pct is not None and away_away_pct is not None:
+        if abs(home_home_pct - away_away_pct) >= 40:
+            small_home = home_home_played is not None and home_home_played < 4
+            small_away = away_away_played is not None and away_away_played < 4
+            if small_home or small_away:
+                warnings.append({
+                    "code": "extreme_gap_small_sample",
+                    "label": "⚠️ Extreme venue gap on small sample",
+                    "detail": (
+                        f"Venue gap ≥ 40 but "
+                        f"{'home ' if small_home else ''}"
+                        f"{'away ' if small_away else ''}"
+                        f"sample is under 4 games. "
+                        f"Promoted teams and early-season anomalies "
+                        f"produce false positives here."
+                    ),
+                    "severity": "high",
+                })
 
-    if call.endswith("Home") and home_last10_w <= 2:
+    # FLAG 3 — Model pick contradicts recent form (#FIX-7: require present)
+    if call.endswith("Home") and home_last10_w is not None and home_last10_w <= 2:
         warnings.append({
             "code": "home_pick_weak_form",
             "label": "⚠️ Betting on home team with poor recent form",
@@ -1251,7 +1482,7 @@ def compute_warnings(row, prediction):
             ),
             "severity": "medium",
         })
-    if call.endswith("Away") and away_last10_w <= 2:
+    if call.endswith("Away") and away_last10_w is not None and away_last10_w <= 2:
         warnings.append({
             "code": "away_pick_weak_form",
             "label": "⚠️ Betting on away team with poor recent form",
@@ -1262,6 +1493,7 @@ def compute_warnings(row, prediction):
             "severity": "medium",
         })
 
+    # FLAG 4 — Squad crisis
     home_top_scorer = row.get("home_top_scorer")
     away_top_scorer = row.get("away_top_scorer")
     home_injured_names = {i.get("player") for i in home_injuries
@@ -1296,22 +1528,27 @@ def compute_warnings(row, prediction):
                 "severity": "medium",
             })
 
-    pts_gap = abs(home_pts - away_pts)
-    gd_gap = abs(home_gd - away_gd)
-    if (call in ("Straight Win Home", "Straight Win Away")
-            and pts_gap <= 4 and gd_gap <= 3
-            and h2h_draws >= 2):
-        warnings.append({
-            "code": "draw_prone_profile",
-            "label": "⚠️ Draw-prone profile but straight win picked",
-            "detail": (
-                f"Points gap {pts_gap}, GD gap {gd_gap}, "
-                f"H2H draws {h2h_draws}. "
-                f"These features historically favour a draw."
-            ),
-            "severity": "high",
-        })
+    # FLAG 5 — Draw-prone profile
+    if (home_pts is not None and away_pts is not None
+            and home_gd is not None and away_gd is not None
+            and h2h_draws is not None):
+        pts_gap = abs(home_pts - away_pts)
+        gd_gap = abs(home_gd - away_gd)
+        if (call in ("Straight Win Home", "Straight Win Away")
+                and pts_gap <= 4 and gd_gap <= 3
+                and h2h_draws >= 2):
+            warnings.append({
+                "code": "draw_prone_profile",
+                "label": "⚠️ Draw-prone profile but straight win picked",
+                "detail": (
+                    f"Points gap {pts_gap}, GD gap {gd_gap}, "
+                    f"H2H draws {h2h_draws}. "
+                    f"These features historically favour a draw."
+                ),
+                "severity": "high",
+            })
 
+    # FLAG 6 — Thin gap
     if call in ("Straight Win Home", "Straight Win Away") and total_gap < 22:
         warnings.append({
             "code": "thin_gap_straight",
@@ -1755,18 +1992,23 @@ def main():
                     })
 
                 with st.expander("🔍 Debug: parse health"):
-                    p = SportsgamblerParser(text)
-                    lg, _, _ = p._parse_league()
                     st.write({
-                        "league_raw": lg,
-                        "league_short": lg.split(" - ")[-1] if lg else None,
-                        "league_norm": p._norm_comp(lg.split(" - ")[-1]) if lg else None,
                         "home_last5_len": len(parsed.get("home_last5") or []),
                         "away_last5_len": len(parsed.get("away_last5") or []),
+                        "home_last10_w": parsed.get("home_last10_w"),
+                        "home_last10_d": parsed.get("home_last10_d"),
+                        "home_last10_l": parsed.get("home_last10_l"),
+                        "away_last10_w": parsed.get("away_last10_w"),
+                        "away_last10_d": parsed.get("away_last10_d"),
+                        "away_last10_l": parsed.get("away_last10_l"),
                         "home_points": parsed.get("home_points"),
                         "away_points": parsed.get("away_points"),
                         "home_played": parsed.get("home_played"),
                         "away_played": parsed.get("away_played"),
+                        "home_home_last10_avg_scored": parsed.get("home_home_last10_avg_scored"),
+                        "home_home_last10_avg_conceded": parsed.get("home_home_last10_avg_conceded"),
+                        "away_away_last10_avg_scored": parsed.get("away_away_last10_avg_scored"),
+                        "away_away_last10_avg_conceded": parsed.get("away_away_last10_avg_conceded"),
                     })
 
                 with st.expander("🔍 Parsed raw values"):
@@ -2003,13 +2245,10 @@ def main():
         - Train: matches before `{HOLDOUT_DATE}`
         - Holdout: matches on/after `{HOLDOUT_DATE}`
 
-        **Candidate feature (stored, not used):**
-        - `venue_ppg_gap` = home PPG at home − away PPG away
-        - Populated on parse, available for out-of-sample evaluation
-
-        **Abstention reasons:**
-        - `no_bet_reason_1x2`: `low_gap` | `insufficient_data` | `insufficient_form`
-        - `no_bet_reason_ou`: `expected_in_middle_band` | `insufficient_data` | `insufficient_form`
+        **Parser coverage:**
+        - Reads `.st-table` layout when present
+        - Falls back to `.keystats` layout when absent
+        - Distinguishes missing (None) from zero throughout
         """)
 
 
