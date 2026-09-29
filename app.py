@@ -31,6 +31,7 @@ Retained from v4.2.1 / earlier v4.3:
   #C  Time-split validation (walk-forward)
   #D  Decision rule: gap<12 NO BET, <20 DC, else Straight
   #E  Train/Holdout tab comparing v4.2.1 vs v4.3
+  #F  Risk-warning display layer (non-blocking)
 """
 
 import json
@@ -919,6 +920,166 @@ def calc_expected_total(row):
     return (h1 + a1 + a2 + h2) / 2
 
 
+def compute_warnings(row, prediction):
+    """
+    Compute warning flags for a v4.3 prediction.
+    Does not change the call. Only surfaces risk.
+    Returns a list of dicts: {"code": ..., "label": ..., "detail": ...}
+    """
+    warnings = []
+
+    # Values we need
+    home_home_pct = row.get("home_home_win_pct")
+    away_away_pct = row.get("away_away_win_pct")
+    home_home_played = row.get("home_home_played") or 0
+    away_away_played = row.get("away_away_played") or 0
+    home_last10_w = row.get("home_last10_w") or 0
+    away_last10_w = row.get("away_last10_w") or 0
+    home_pts = row.get("home_points") or 0
+    away_pts = row.get("away_points") or 0
+    home_gd = row.get("home_gd") or 0
+    away_gd = row.get("away_gd") or 0
+    home_injuries = row.get("home_injuries") or []
+    away_injuries = row.get("away_injuries") or []
+    call = prediction.get("call_1x2", "")
+    total_gap = prediction.get("total_gap", 0)
+    h2h_draws = row.get("h2h_draws") or 0
+
+    # --------------------------------------------------------------
+    # FLAG 1 — Both venue win rates are zero
+    # --------------------------------------------------------------
+    if home_home_pct == 0 and away_away_pct == 0:
+        warnings.append({
+            "code": "both_venue_winless",
+            "label": "⚠️ Both teams winless at their venue",
+            "detail": (
+                f"Home has not won at home ({home_home_played} games), "
+                f"away has not won away ({away_away_played} games). "
+                f"In-sample this profile drew 5 of 5 times."
+            ),
+            "severity": "high",
+        })
+
+    # --------------------------------------------------------------
+    # FLAG 2 — Extreme venue gap built on tiny samples
+    # --------------------------------------------------------------
+    if abs((home_home_pct or 0) - (away_away_pct or 0)) >= 40:
+        small_home = home_home_played < 4
+        small_away = away_away_played < 4
+        if small_home or small_away:
+            warnings.append({
+                "code": "extreme_gap_small_sample",
+                "label": "⚠️ Extreme venue gap on small sample",
+                "detail": (
+                    f"Venue gap ≥ 40 but "
+                    f"{'home ' if small_home else ''}"
+                    f"{'away ' if small_away else ''}"
+                    f"sample is under 4 games. "
+                    f"Promoted teams and early-season anomalies "
+                    f"produce false positives here."
+                ),
+                "severity": "high",
+            })
+
+    # --------------------------------------------------------------
+    # FLAG 3 — Model pick contradicts recent form
+    # --------------------------------------------------------------
+    if call.endswith("Home") and home_last10_w <= 2:
+        warnings.append({
+            "code": "home_pick_weak_form",
+            "label": "⚠️ Betting on home team with poor recent form",
+            "detail": (
+                f"Model picks home, but home team won only "
+                f"{home_last10_w}/10 recent games."
+            ),
+            "severity": "medium",
+        })
+    if call.endswith("Away") and away_last10_w <= 2:
+        warnings.append({
+            "code": "away_pick_weak_form",
+            "label": "⚠️ Betting on away team with poor recent form",
+            "detail": (
+                f"Model picks away, but away team won only "
+                f"{away_last10_w}/10 recent games."
+            ),
+            "severity": "medium",
+        })
+
+    # --------------------------------------------------------------
+    # FLAG 4 — Squad crisis (6+ injuries, or key player out)
+    # --------------------------------------------------------------
+    home_top_scorer = row.get("home_top_scorer")
+    away_top_scorer = row.get("away_top_scorer")
+    home_top_assister = row.get("home_top_assister")
+    away_top_assister = row.get("away_top_assister")
+    home_injured_names = {i.get("player") for i in home_injuries
+                          if i.get("status") == "injury"}
+    away_injured_names = {i.get("player") for i in away_injuries
+                          if i.get("status") == "injury"}
+
+    if len(home_injuries) >= 6 or home_top_scorer in home_injured_names:
+        if call.endswith("Home"):
+            warnings.append({
+                "code": "home_squad_crisis",
+                "label": "⚠️ Home team has injury concerns but is picked",
+                "detail": (
+                    f"{len(home_injuries)} injuries listed"
+                    + (f", including top scorer {home_top_scorer}"
+                       if home_top_scorer in home_injured_names else "")
+                    + "."
+                ),
+                "severity": "medium",
+            })
+    if len(away_injuries) >= 6 or away_top_scorer in away_injured_names:
+        if call.endswith("Away"):
+            warnings.append({
+                "code": "away_squad_crisis",
+                "label": "⚠️ Away team has injury concerns but is picked",
+                "detail": (
+                    f"{len(away_injuries)} injuries listed"
+                    + (f", including top scorer {away_top_scorer}"
+                       if away_top_scorer in away_injured_names else "")
+                    + "."
+                ),
+                "severity": "medium",
+            })
+
+    # --------------------------------------------------------------
+    # FLAG 5 — Draw-prone profile
+    # --------------------------------------------------------------
+    pts_gap = abs(home_pts - away_pts)
+    gd_gap = abs(home_gd - away_gd)
+    if (call in ("Straight Win Home", "Straight Win Away")
+            and pts_gap <= 4 and gd_gap <= 3
+            and h2h_draws >= 2):
+        warnings.append({
+            "code": "draw_prone_profile",
+            "label": "⚠️ Draw-prone profile but straight win picked",
+            "detail": (
+                f"Points gap {pts_gap}, GD gap {gd_gap}, "
+                f"H2H draws {h2h_draws}. "
+                f"These features historically favour a draw."
+            ),
+            "severity": "high",
+        })
+
+    # --------------------------------------------------------------
+    # FLAG 6 — Straight win picked but gap is thin after shrink
+    # --------------------------------------------------------------
+    if call in ("Straight Win Home", "Straight Win Away") and total_gap < 22:
+        warnings.append({
+            "code": "thin_gap_straight",
+            "label": "⚠️ Straight win called on thin margin",
+            "detail": (
+                f"Straight win requires confidence. Total gap is only "
+                f"{total_gap}. Near the DC threshold."
+            ),
+            "severity": "low",
+        })
+
+    return warnings
+
+
 def predict_v4_3(row):
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
@@ -1566,6 +1727,20 @@ def main():
                 with c2:
                     render_ou_verdict(result)
 
+                warnings = compute_warnings(parsed, result)
+                if warnings:
+                    st.markdown("### 🚩 Risk Warnings")
+                    for w in warnings:
+                        severity = w["severity"]
+                        if severity == "high":
+                            st.error(f"**{w['label']}**\n\n{w['detail']}")
+                        elif severity == "medium":
+                            st.warning(f"**{w['label']}**\n\n{w['detail']}")
+                        else:
+                            st.info(f"**{w['label']}**\n\n{w['detail']}")
+                else:
+                    st.success("No risk warnings — clean profile.")
+
                 # Debug expander
                 with st.expander("🔍 Debug: parse health"):
                     p = SportsgamblerParser(text)
@@ -1756,6 +1931,9 @@ def main():
         - `_parse_league` reads JSON-LD `superEvent.name` first (canonical short form)
         - `_parse_last5` falls back to no-filter if strict filter yields 0
         - `upsert_match` guards `league_name NOT NULL` with "Unknown"
+
+        **Risk-warning layer (new):**
+        - 6 non-blocking flags computed at display time — see the “Risk Warnings” section after each prediction.
         """)
 
 
