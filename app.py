@@ -31,14 +31,20 @@ Retained from v4.2.1 / earlier v4.3:
   #C  Time-split validation (walk-forward)
   #D  Decision rule: gap<12 NO BET, <20 DC, else Straight
   #E  Train/Holdout tab comparing v4.2.1 vs v4.3
-  #F  Risk-warning display layer (non-blocking)
+
+New in this revision (per analyst feedback):
+  #N1 snapshot_utc captured at parse time (pre-match provenance)
+  #N2 no_bet_reason_1x2 and no_bet_reason_ou — market-specific abstention reasons
+  #N3 venue_ppg_gap feature stored but NOT used in prediction (for out-of-sample eval)
+  #N4 Risk-warning display layer (non-blocking)
+  #N5 Data Audit expander in Parse & Save tab
 """
 
 import json
 import os
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -195,6 +201,11 @@ class SportsgamblerParser:
 
     # ---------------------------------------------------------------- main
     def parse(self):
+        # #N1: capture snapshot timestamp at the moment of parsing.
+        # This is the ONLY field that can prove the HTML was seen before the
+        # match. created_at is set by the DB and may lag or postdate kickoff.
+        snapshot_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
         league, tier, group = self._parse_league()
@@ -221,6 +232,8 @@ class SportsgamblerParser:
             "venue": venue,
             "stage": None,
             "round": None,
+            # #N1: pre-match provenance
+            "snapshot_utc": snapshot_utc,
         }
 
         record.update(self._parse_standings())
@@ -271,13 +284,9 @@ class SportsgamblerParser:
     def _parse_league(self):
         """#FIX-2: read league from JSON-LD superEvent.name (canonical short form),
         fall back to .t_info_link if JSON-LD is missing.
-
-        The short form (e.g. 'Série B') is exactly what appears in the per-match
-        date labels ('Serie B: 19/09'), so downstream matching is reliable.
         """
         league = None
 
-        # Source 1: JSON-LD superEvent.name
         for script in self.soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
@@ -295,7 +304,6 @@ class SportsgamblerParser:
             if league:
                 break
 
-        # Source 2 (fallback): .t_info_link
         if not league:
             for link in self.soup.select(".t_top .t_info_link"):
                 text = link.get_text(strip=True)
@@ -489,11 +497,9 @@ class SportsgamblerParser:
         strict = collect(apply_league_filter=True)
         if strict:
             return strict
-        # Fallback: ignore league filter if strict found nothing
         return collect(apply_league_filter=False)
 
     def _parse_last5_item(self, item, side, apply_league_filter, league_norm):
-        """Parse one last-5 list item. Returns dict or None."""
         tracked = (self.home_team if side == "home" else self.away_team) or ""
 
         date_el = item.select_one(".team-stats-date")
@@ -920,167 +926,40 @@ def calc_expected_total(row):
     return (h1 + a1 + a2 + h2) / 2
 
 
-def compute_warnings(row, prediction):
+def calc_venue_ppg_gap(row):
     """
-    Compute warning flags for a v4.3 prediction.
-    Does not change the call. Only surfaces risk.
-    Returns a list of dicts: {"code": ..., "label": ..., "detail": ...}
+    #N3: compute venue-specific points-per-game gap.
+
+    home_ppg = home team's points per game AT HOME
+    away_ppg = away team's points per game AWAY
+    gap = home_ppg - away_ppg
+
+    Stored for out-of-sample evaluation ONLY. Not used in the prediction.
     """
-    warnings = []
+    hp = row.get("home_home_points")
+    hg = row.get("home_home_played")
+    ap = row.get("away_away_points")
+    ag = row.get("away_away_played")
 
-    # Values we need
-    home_home_pct = row.get("home_home_win_pct")
-    away_away_pct = row.get("away_away_win_pct")
-    home_home_played = row.get("home_home_played") or 0
-    away_away_played = row.get("away_away_played") or 0
-    home_last10_w = row.get("home_last10_w") or 0
-    away_last10_w = row.get("away_last10_w") or 0
-    home_pts = row.get("home_points") or 0
-    away_pts = row.get("away_points") or 0
-    home_gd = row.get("home_gd") or 0
-    away_gd = row.get("away_gd") or 0
-    home_injuries = row.get("home_injuries") or []
-    away_injuries = row.get("away_injuries") or []
-    call = prediction.get("call_1x2", "")
-    total_gap = prediction.get("total_gap", 0)
-    h2h_draws = row.get("h2h_draws") or 0
+    home_ppg = (hp / hg) if (hp is not None and hg) else None
+    away_ppg = (ap / ag) if (ap is not None and ag) else None
 
-    # --------------------------------------------------------------
-    # FLAG 1 — Both venue win rates are zero
-    # --------------------------------------------------------------
-    if home_home_pct == 0 and away_away_pct == 0:
-        warnings.append({
-            "code": "both_venue_winless",
-            "label": "⚠️ Both teams winless at their venue",
-            "detail": (
-                f"Home has not won at home ({home_home_played} games), "
-                f"away has not won away ({away_away_played} games). "
-                f"In-sample this profile drew 5 of 5 times."
-            ),
-            "severity": "high",
-        })
+    if home_ppg is None or away_ppg is None:
+        return None, home_ppg, away_ppg
 
-    # --------------------------------------------------------------
-    # FLAG 2 — Extreme venue gap built on tiny samples
-    # --------------------------------------------------------------
-    if abs((home_home_pct or 0) - (away_away_pct or 0)) >= 40:
-        small_home = home_home_played < 4
-        small_away = away_away_played < 4
-        if small_home or small_away:
-            warnings.append({
-                "code": "extreme_gap_small_sample",
-                "label": "⚠️ Extreme venue gap on small sample",
-                "detail": (
-                    f"Venue gap ≥ 40 but "
-                    f"{'home ' if small_home else ''}"
-                    f"{'away ' if small_away else ''}"
-                    f"sample is under 4 games. "
-                    f"Promoted teams and early-season anomalies "
-                    f"produce false positives here."
-                ),
-                "severity": "high",
-            })
-
-    # --------------------------------------------------------------
-    # FLAG 3 — Model pick contradicts recent form
-    # --------------------------------------------------------------
-    if call.endswith("Home") and home_last10_w <= 2:
-        warnings.append({
-            "code": "home_pick_weak_form",
-            "label": "⚠️ Betting on home team with poor recent form",
-            "detail": (
-                f"Model picks home, but home team won only "
-                f"{home_last10_w}/10 recent games."
-            ),
-            "severity": "medium",
-        })
-    if call.endswith("Away") and away_last10_w <= 2:
-        warnings.append({
-            "code": "away_pick_weak_form",
-            "label": "⚠️ Betting on away team with poor recent form",
-            "detail": (
-                f"Model picks away, but away team won only "
-                f"{away_last10_w}/10 recent games."
-            ),
-            "severity": "medium",
-        })
-
-    # --------------------------------------------------------------
-    # FLAG 4 — Squad crisis (6+ injuries, or key player out)
-    # --------------------------------------------------------------
-    home_top_scorer = row.get("home_top_scorer")
-    away_top_scorer = row.get("away_top_scorer")
-    home_top_assister = row.get("home_top_assister")
-    away_top_assister = row.get("away_top_assister")
-    home_injured_names = {i.get("player") for i in home_injuries
-                          if i.get("status") == "injury"}
-    away_injured_names = {i.get("player") for i in away_injuries
-                          if i.get("status") == "injury"}
-
-    if len(home_injuries) >= 6 or home_top_scorer in home_injured_names:
-        if call.endswith("Home"):
-            warnings.append({
-                "code": "home_squad_crisis",
-                "label": "⚠️ Home team has injury concerns but is picked",
-                "detail": (
-                    f"{len(home_injuries)} injuries listed"
-                    + (f", including top scorer {home_top_scorer}"
-                       if home_top_scorer in home_injured_names else "")
-                    + "."
-                ),
-                "severity": "medium",
-            })
-    if len(away_injuries) >= 6 or away_top_scorer in away_injured_names:
-        if call.endswith("Away"):
-            warnings.append({
-                "code": "away_squad_crisis",
-                "label": "⚠️ Away team has injury concerns but is picked",
-                "detail": (
-                    f"{len(away_injuries)} injuries listed"
-                    + (f", including top scorer {away_top_scorer}"
-                       if away_top_scorer in away_injured_names else "")
-                    + "."
-                ),
-                "severity": "medium",
-            })
-
-    # --------------------------------------------------------------
-    # FLAG 5 — Draw-prone profile
-    # --------------------------------------------------------------
-    pts_gap = abs(home_pts - away_pts)
-    gd_gap = abs(home_gd - away_gd)
-    if (call in ("Straight Win Home", "Straight Win Away")
-            and pts_gap <= 4 and gd_gap <= 3
-            and h2h_draws >= 2):
-        warnings.append({
-            "code": "draw_prone_profile",
-            "label": "⚠️ Draw-prone profile but straight win picked",
-            "detail": (
-                f"Points gap {pts_gap}, GD gap {gd_gap}, "
-                f"H2H draws {h2h_draws}. "
-                f"These features historically favour a draw."
-            ),
-            "severity": "high",
-        })
-
-    # --------------------------------------------------------------
-    # FLAG 6 — Straight win picked but gap is thin after shrink
-    # --------------------------------------------------------------
-    if call in ("Straight Win Home", "Straight Win Away") and total_gap < 22:
-        warnings.append({
-            "code": "thin_gap_straight",
-            "label": "⚠️ Straight win called on thin margin",
-            "detail": (
-                f"Straight win requires confidence. Total gap is only "
-                f"{total_gap}. Near the DC threshold."
-            ),
-            "severity": "low",
-        })
-
-    return warnings
+    return round(home_ppg - away_ppg, 4), round(home_ppg, 4), round(away_ppg, 4)
 
 
 def predict_v4_3(row):
+    """
+    v4.3 prediction. Returns the same fields as before, PLUS:
+      - no_bet_reason_1x2
+      - no_bet_reason_ou
+      - venue_ppg_gap, venue_ppg_gap_home, venue_ppg_gap_away  (#N3, unused)
+    """
+    # #N3: compute venue PPG gap regardless of whether we end up betting.
+    venue_ppg_gap, home_ppg, away_ppg = calc_venue_ppg_gap(row)
+
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
@@ -1089,13 +968,27 @@ def predict_v4_3(row):
 
     if not (has_home_last5 and has_away_last5 and has_standings
             and home_played >= 3 and away_played >= 3):
-        return _empty_prediction("NO BET (insufficient data)")
+        return _empty_prediction(
+            "NO BET (insufficient data)",
+            reason_1x2="insufficient_data",
+            reason_ou="insufficient_data",
+            venue_ppg_gap=venue_ppg_gap,
+            home_ppg=home_ppg,
+            away_ppg=away_ppg,
+        )
 
     f1_home, f1_away, away_collapse = calc_f1(row)
     f2_home = calc_f2(row.get("home_last5"))
     f2_away = calc_f2(row.get("away_last5"))
     if f2_home is None or f2_away is None:
-        return _empty_prediction("NO BET (insufficient form)")
+        return _empty_prediction(
+            "NO BET (insufficient form)",
+            reason_1x2="insufficient_form",
+            reason_ou="insufficient_form",
+            venue_ppg_gap=venue_ppg_gap,
+            home_ppg=home_ppg,
+            away_ppg=away_ppg,
+        )
 
     f3_home = calc_f3(row.get("home_home_win_pct"),
                       row.get("home_home_last10_avg_scored"),
@@ -1142,12 +1035,16 @@ def predict_v4_3(row):
         away_total = away_total_raw
         home_total = away_total_raw - gap
 
+    # #N2: market-specific abstention reason for 1X2
     if gap < 12:
         call_1x2 = "NO BET"
+        no_bet_reason_1x2 = "low_gap"
     elif gap < 20:
         call_1x2 = "Double Chance 1X" if leader == "home" else "Double Chance X2"
+        no_bet_reason_1x2 = None
     else:
         call_1x2 = "Straight Win Home" if leader == "home" else "Straight Win Away"
+        no_bet_reason_1x2 = None
 
     f1_leader_final = "home" if f1_home > f1_away else "away"
     f2f3_home = f2_home + f3_home
@@ -1160,15 +1057,20 @@ def predict_v4_3(row):
     )
 
     expected = calc_expected_total(row)
+    # #N2: market-specific abstention reason for O/U
     if expected < 2.4:
         call_ou = "Under 2.5"
+        no_bet_reason_ou = None
     elif expected > 3.2:
         call_ou = "Over 2.5"
+        no_bet_reason_ou = None
     else:
         call_ou = "No Bet"
+        no_bet_reason_ou = "expected_in_middle_band"
 
     if (away_collapse or doubted_starter) and expected >= 2.4:
         call_ou = "Over 2.5"
+        no_bet_reason_ou = None  # forced overrides the middle band
 
     return {
         "f1_home": round(f1_home, 2), "f1_away": round(f1_away, 2),
@@ -1197,16 +1099,26 @@ def predict_v4_3(row):
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "model_version": "v4.3",
+        # #N2
+        "no_bet_reason_1x2": no_bet_reason_1x2,
+        "no_bet_reason_ou": no_bet_reason_ou,
+        # #N3
+        "venue_ppg_gap": venue_ppg_gap,
+        "venue_ppg_gap_home": home_ppg,
+        "venue_ppg_gap_away": away_ppg,
     }
 
 
 def predict_v4_2_1(row):
+    """v4.2.1 comparison model — unchanged from prior revision."""
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
 
     if not (has_home_last5 and has_away_last5 and has_standings):
-        return _empty_prediction("NO BET (insufficient data)")
+        return _empty_prediction("NO BET (insufficient data)",
+                                 reason_1x2="insufficient_data",
+                                 reason_ou="insufficient_data")
 
     f1_home, f1_away, away_collapse = calc_f1(row)
 
@@ -1299,10 +1211,16 @@ def predict_v4_2_1(row):
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "model_version": "v4.2.1",
+        "no_bet_reason_1x2": "low_gap" if call_1x2 == "NO BET" else None,
+        "no_bet_reason_ou": "expected_in_middle_band" if call_ou == "No Bet" else None,
+        "venue_ppg_gap": None,  # v4.2.1 doesn't compute this
+        "venue_ppg_gap_home": None,
+        "venue_ppg_gap_away": None,
     }
 
 
-def _empty_prediction(reason):
+def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
+                      venue_ppg_gap=None, home_ppg=None, away_ppg=None):
     return {
         "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
         "f2_home": 0, "f2_away": 0,
@@ -1320,7 +1238,159 @@ def _empty_prediction(reason):
         "call_ou": "No Bet",
         "expected_total": 0,
         "model_version": "v4.3",
+        "no_bet_reason_1x2": reason_1x2,
+        "no_bet_reason_ou": reason_ou,
+        "venue_ppg_gap": venue_ppg_gap,
+        "venue_ppg_gap_home": home_ppg,
+        "venue_ppg_gap_away": away_ppg,
     }
+
+
+# ============================================================================
+# RISK WARNINGS
+# ============================================================================
+def compute_warnings(row, prediction):
+    """
+    Compute warning flags for a v4.3 prediction.
+    Does not change the call. Only surfaces risk.
+    """
+    warnings = []
+
+    home_home_pct = row.get("home_home_win_pct")
+    away_away_pct = row.get("away_away_win_pct")
+    home_home_played = row.get("home_home_played") or 0
+    away_away_played = row.get("away_away_played") or 0
+    home_last10_w = row.get("home_last10_w") or 0
+    away_last10_w = row.get("away_last10_w") or 0
+    home_pts = row.get("home_points") or 0
+    away_pts = row.get("away_points") or 0
+    home_gd = row.get("home_gd") or 0
+    away_gd = row.get("away_gd") or 0
+    home_injuries = row.get("home_injuries") or []
+    away_injuries = row.get("away_injuries") or []
+    call = prediction.get("call_1x2", "")
+    total_gap = prediction.get("total_gap", 0)
+    h2h_draws = row.get("h2h_draws") or 0
+
+    # FLAG 1 — Both venue win rates are zero
+    if home_home_pct == 0 and away_away_pct == 0:
+        warnings.append({
+            "code": "both_venue_winless",
+            "label": "⚠️ Both teams winless at their venue",
+            "detail": (
+                f"Home has not won at home ({home_home_played} games), "
+                f"away has not won away ({away_away_played} games). "
+                f"In-sample this profile drew 5 of 5 times."
+            ),
+            "severity": "high",
+        })
+
+    # FLAG 2 — Extreme venue gap built on tiny samples
+    if abs((home_home_pct or 0) - (away_away_pct or 0)) >= 40:
+        small_home = home_home_played < 4
+        small_away = away_away_played < 4
+        if small_home or small_away:
+            warnings.append({
+                "code": "extreme_gap_small_sample",
+                "label": "⚠️ Extreme venue gap on small sample",
+                "detail": (
+                    f"Venue gap ≥ 40 but "
+                    f"{'home ' if small_home else ''}"
+                    f"{'away ' if small_away else ''}"
+                    f"sample is under 4 games. "
+                    f"Promoted teams and early-season anomalies "
+                    f"produce false positives here."
+                ),
+                "severity": "high",
+            })
+
+    # FLAG 3 — Model pick contradicts recent form
+    if call.endswith("Home") and home_last10_w <= 2:
+        warnings.append({
+            "code": "home_pick_weak_form",
+            "label": "⚠️ Betting on home team with poor recent form",
+            "detail": (
+                f"Model picks home, but home team won only "
+                f"{home_last10_w}/10 recent games."
+            ),
+            "severity": "medium",
+        })
+    if call.endswith("Away") and away_last10_w <= 2:
+        warnings.append({
+            "code": "away_pick_weak_form",
+            "label": "⚠️ Betting on away team with poor recent form",
+            "detail": (
+                f"Model picks away, but away team won only "
+                f"{away_last10_w}/10 recent games."
+            ),
+            "severity": "medium",
+        })
+
+    # FLAG 4 — Squad crisis
+    home_top_scorer = row.get("home_top_scorer")
+    away_top_scorer = row.get("away_top_scorer")
+    home_injured_names = {i.get("player") for i in home_injuries
+                          if i.get("status") == "injury"}
+    away_injured_names = {i.get("player") for i in away_injuries
+                          if i.get("status") == "injury"}
+
+    if len(home_injuries) >= 6 or home_top_scorer in home_injured_names:
+        if call.endswith("Home"):
+            warnings.append({
+                "code": "home_squad_crisis",
+                "label": "⚠️ Home team has injury concerns but is picked",
+                "detail": (
+                    f"{len(home_injuries)} injuries listed"
+                    + (f", including top scorer {home_top_scorer}"
+                       if home_top_scorer in home_injured_names else "")
+                    + "."
+                ),
+                "severity": "medium",
+            })
+    if len(away_injuries) >= 6 or away_top_scorer in away_injured_names:
+        if call.endswith("Away"):
+            warnings.append({
+                "code": "away_squad_crisis",
+                "label": "⚠️ Away team has injury concerns but is picked",
+                "detail": (
+                    f"{len(away_injuries)} injuries listed"
+                    + (f", including top scorer {away_top_scorer}"
+                       if away_top_scorer in away_injured_names else "")
+                    + "."
+                ),
+                "severity": "medium",
+            })
+
+    # FLAG 5 — Draw-prone profile
+    pts_gap = abs(home_pts - away_pts)
+    gd_gap = abs(home_gd - away_gd)
+    if (call in ("Straight Win Home", "Straight Win Away")
+            and pts_gap <= 4 and gd_gap <= 3
+            and h2h_draws >= 2):
+        warnings.append({
+            "code": "draw_prone_profile",
+            "label": "⚠️ Draw-prone profile but straight win picked",
+            "detail": (
+                f"Points gap {pts_gap}, GD gap {gd_gap}, "
+                f"H2H draws {h2h_draws}. "
+                f"These features historically favour a draw."
+            ),
+            "severity": "high",
+        })
+
+    # FLAG 6 — Thin gap
+    if call in ("Straight Win Home", "Straight Win Away") and total_gap < 22:
+        warnings.append({
+            "code": "thin_gap_straight",
+            "label": "⚠️ Straight win called on thin margin",
+            "detail": (
+                f"Straight win requires confidence. Total gap is only "
+                f"{total_gap}. Near the DC threshold."
+            ),
+            "severity": "low",
+        })
+
+    return warnings
 
 
 # ============================================================================
@@ -1344,14 +1414,15 @@ def upsert_match(sb, record):
         real_columns = _get_table_columns(sb)
         if real_columns:
             clean = {k: v for k, v in record.items() if k in real_columns}
+            dropped = [k for k in record if k not in real_columns]
         else:
             clean = record
+            dropped = []
 
-        # #FIX-4: guard NOT NULL league_name (and other likely NOT NULLs)
         if not clean.get("league_name"):
             clean["league_name"] = "Unknown"
         if not clean.get("match_date"):
-            clean["match_date"] = None  # let DB decide; likely to fail loudly
+            clean["match_date"] = None
         if not clean.get("home_team"):
             return False, "missing home_team"
         if not clean.get("away_team"):
@@ -1493,8 +1564,10 @@ def render_verdict(result):
 def render_ou_verdict(result):
     call = result.get("call_ou", "")
     expected = result.get("expected_total", 0)
+    reason = result.get("no_bet_reason_ou")
+    reason_str = f" ({reason})" if reason else ""
     if call == "No Bet":
-        st.info(f"🟡 O/U 2.5: **NO BET** — expected {expected:.2f}")
+        st.info(f"🟡 O/U 2.5: **NO BET** — expected {expected:.2f}{reason_str}")
     else:
         st.success(f"🟢 O/U 2.5: **{call}** — expected {expected:.2f}")
 
@@ -1663,6 +1736,7 @@ def main():
         "⏳ Pending",
         "📊 Performance",
         "🧪 Train/Holdout",
+        "🔍 Data Audit",
         "ℹ️ v4.3 Spec",
     ])
 
@@ -1710,6 +1784,7 @@ def main():
                         &nbsp;·&nbsp; {parsed.get('match_date') or '—'}
                         &nbsp;·&nbsp; {parsed.get('kickoff_local') or ''}
                         &nbsp;·&nbsp; {parsed.get('venue') or '—'}
+                        &nbsp;·&nbsp; snapshot {parsed.get('snapshot_utc', '—')}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1727,6 +1802,7 @@ def main():
                 with c2:
                     render_ou_verdict(result)
 
+                # #N4: Risk warning layer
                 warnings = compute_warnings(parsed, result)
                 if warnings:
                     st.markdown("### 🚩 Risk Warnings")
@@ -1741,7 +1817,28 @@ def main():
                 else:
                     st.success("No risk warnings — clean profile.")
 
-                # Debug expander
+                # #N5: Data Audit expander
+                with st.expander("🔍 Data Audit (provenance & abstention reasons)"):
+                    snap = parsed.get("snapshot_utc")
+                    kick = parsed.get("kickoff_utc")
+                    st.write({
+                        "snapshot_utc": snap,
+                        "kickoff_utc": kick,
+                        "snapshot_is_pre_kickoff": (
+                            (snap is not None and kick is not None and snap < kick)
+                            if (snap and kick) else None
+                        ),
+                        "no_bet_reason_1x2": result.get("no_bet_reason_1x2"),
+                        "no_bet_reason_ou": result.get("no_bet_reason_ou"),
+                        "call_1x2": result.get("call_1x2"),
+                        "call_ou": result.get("call_ou"),
+                    })
+                    st.caption(
+                        "snapshot_utc is captured at parse time. If it is after "
+                        "kickoff_utc, the HTML may have been from a post-match page "
+                        "and the inputs may include the result."
+                    )
+
                 with st.expander("🔍 Debug: parse health"):
                     p = SportsgamblerParser(text)
                     lg, _, _ = p._parse_league()
@@ -1751,8 +1848,6 @@ def main():
                         "league_norm": p._norm_comp(lg.split(" - ")[-1]) if lg else None,
                         "home_last5_len": len(parsed.get("home_last5") or []),
                         "away_last5_len": len(parsed.get("away_last5") or []),
-                        "home_last5_first": (parsed.get("home_last5") or [{}])[0].get("date"),
-                        "away_last5_first": (parsed.get("away_last5") or [{}])[0].get("date"),
                         "home_points": parsed.get("home_points"),
                         "away_points": parsed.get("away_points"),
                         "home_played": parsed.get("home_played"),
@@ -1783,6 +1878,14 @@ def main():
                 render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(15 pts)")
                 render_factor_row("F5 H2H Psychology (prior-corrected)", result["f5_home"], result["f5_away"], "(10 pts)")
                 render_factor_row("F6 Attack Profile", result["f6_home"], result["f6_away"], "(15 pts)")
+
+                if result.get("venue_ppg_gap") is not None:
+                    st.markdown(
+                        f"**Venue PPG gap** (unused, candidate feature): "
+                        f"home {result['venue_ppg_gap_home']} vs "
+                        f"away {result['venue_ppg_gap_away']} → gap "
+                        f"**{result['venue_ppg_gap']:+.2f}**"
+                    )
 
                 st.markdown(f"""
                 <div class="factor-row" style="background:#1e3a8a;">
@@ -1889,6 +1992,100 @@ def main():
         render_train_holdout(rows)
 
     with tabs[4]:
+        st.subheader("🔍 Data Audit")
+        st.caption("Provenance checks and per-market abstention reasons.")
+
+        rows = load_all(sb)
+        if not rows:
+            st.info("No rows loaded.")
+        else:
+            n_total = len(rows)
+            n_ok = sum(1 for r in rows if r.get("parse_status") == "ok")
+            n_incomplete = n_total - n_ok
+            st.write(f"**Total rows:** {n_total} · **parse_ok:** {n_ok} · **incomplete:** {n_incomplete}")
+
+            # Snapshot vs kickoff
+            st.markdown('<div class="section-title">Snapshot timing</div>', unsafe_allow_html=True)
+            has_snap = [r for r in rows if r.get("snapshot_utc")]
+            if not has_snap:
+                st.warning(
+                    "No rows have `snapshot_utc`. This column was added in the "
+                    "current revision — historical rows will not have it. "
+                    "New parses will populate it."
+                )
+            else:
+                pre = 0
+                post = 0
+                unknown = 0
+                for r in has_snap:
+                    s = r.get("snapshot_utc")
+                    k = r.get("kickoff_utc")
+                    if not s or not k:
+                        unknown += 1
+                    elif s < k:
+                        pre += 1
+                    else:
+                        post += 1
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Snapshot before kickoff", pre)
+                c2.metric("Snapshot at/after kickoff", post)
+                c3.metric("Unknown", unknown)
+
+            # Per-market no-bet reasons
+            st.markdown('<div class="section-title">1X2 abstention reasons</div>', unsafe_allow_html=True)
+            r1x2 = {}
+            for r in rows:
+                call = r.get("call_1x2") or ""
+                if call.startswith("NO BET"):
+                    reason = r.get("no_bet_reason_1x2") or r.get("no_bet_reason") or "(unrecorded)"
+                    r1x2[reason] = r1x2.get(reason, 0) + 1
+            if r1x2:
+                st.dataframe(
+                    pd.DataFrame([{"reason": k, "count": v} for k, v in sorted(r1x2.items(), key=lambda x: -x[1])]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.write("No NO BET 1X2 calls in the dataset.")
+
+            st.markdown('<div class="section-title">O/U abstention reasons</div>', unsafe_allow_html=True)
+            rou = {}
+            for r in rows:
+                call = r.get("call_ou") or ""
+                if call.lower().startswith("no bet") or call == "No Bet":
+                    reason = r.get("no_bet_reason_ou") or r.get("no_bet_reason") or "(unrecorded)"
+                    rou[reason] = rou.get(reason, 0) + 1
+            if rou:
+                st.dataframe(
+                    pd.DataFrame([{"reason": k, "count": v} for k, v in sorted(rou.items(), key=lambda x: -x[1])]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.write("No NO BET O/U calls in the dataset.")
+
+            # Venue PPG gap — quick look at whether the field is populated
+            st.markdown('<div class="section-title">Venue PPG gap (candidate feature)</div>', unsafe_allow_html=True)
+            vppg = [r for r in rows if r.get("venue_ppg_gap") is not None
+                    and r.get("actual_home_goals") is not None]
+            if not vppg:
+                st.info(
+                    "No rows have `venue_ppg_gap` yet. It is populated on new parses. "
+                    "Once populated, this panel will show the correlation with home wins."
+                )
+            else:
+                import numpy as np
+                gaps = np.array([r["venue_ppg_gap"] for r in vppg])
+                wins = np.array([1 if (r["actual_home_goals"] > r["actual_away_goals"]) else 0
+                                 for r in vppg])
+                if gaps.std() > 0 and wins.std() > 0:
+                    r_pb = float(np.corrcoef(gaps, wins)[0, 1])
+                    st.write(f"**Point-biserial correlation (venue PPG gap vs home win):** {r_pb:+.3f}")
+                    st.caption(f"n = {len(vppg)}. This is the candidate signal flagged by the analyst. "
+                               "Do not act on it until the sample is larger and the snapshot "
+                               "timing audit above confirms pre-match capture.")
+                else:
+                    st.write("Not enough variance to compute correlation.")
+
+    with tabs[5]:
         st.subheader("v4.3 Specification")
         st.markdown(f"""
         **100-point model. Only prematch fields. No xG, no possession.**
@@ -1903,37 +2100,38 @@ def main():
         | F6 Attack Profile | 15 | unchanged |
 
         **Constants:**
-        - `ALPHA = {ALPHA}` (prior games, single constant for all Fs)
+        - `ALPHA = {ALPHA}`
         - `PRIOR_FORM = {PRIOR_FORM}`
         - `PRIOR_H2H = 1/3`
 
         **Decision rule (v4.3):**
-        - Gap < 12 → NO BET
+        - Gap < 12 → NO BET (`no_bet_reason_1x2 = "low_gap"`)
         - Gap 12–20 → Double Chance
         - Gap ≥ 20 → Straight Win
 
-        **Conflict penalty (v4.3):**
-        - Count leaders of F1, F2, F3, F5 that disagree with overall leader
-        - `shrink = 1 - disagreements * 0.15` (0% to 60%)
-        - `gap = raw_gap * shrink` — **leader never flips**
-
         **O/U (v4.3):**
         - `< 2.4 Under` · `> 3.2 Over`
-        - Collapse/doubt forces Over only if expected ≥ 2.4
+        - Middle band → NO BET (`no_bet_reason_ou = "expected_in_middle_band"`)
+        - Collapse/doubt forces Over if expected ≥ 2.4
 
         **Validation:**
-        - **Time split only**, never random
+        - Time split only, never random
         - Train: matches before `{HOLDOUT_DATE}`
         - Holdout: matches on/after `{HOLDOUT_DATE}`
 
-        **Parser fixes in this revision:**
-        - `_norm_comp` strips accents (Série B == Serie B)
-        - `_parse_league` reads JSON-LD `superEvent.name` first (canonical short form)
-        - `_parse_last5` falls back to no-filter if strict filter yields 0
-        - `upsert_match` guards `league_name NOT NULL` with "Unknown"
+        **Candidate feature (stored, not used):**
+        - `venue_ppg_gap` = home PPG at home − away PPG away
+        - Available for out-of-sample evaluation
+        - Not consumed by `predict_v4_3`
 
-        **Risk-warning layer (new):**
-        - 6 non-blocking flags computed at display time — see the “Risk Warnings” section after each prediction.
+        **Abstention reasons (new):**
+        - `no_bet_reason_1x2`: `low_gap` | `insufficient_data` | `insufficient_form`
+        - `no_bet_reason_ou`: `expected_in_middle_band` | `insufficient_data` | `insufficient_form`
+
+        **Provenance (new):**
+        - `snapshot_utc` captured at parse time
+        - If `snapshot_utc < kickoff_utc`, the HTML was pre-match by construction
+        - Historical rows will not have this field
         """)
 
 
