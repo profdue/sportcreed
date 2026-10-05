@@ -1,19 +1,17 @@
 """
-v4.4 TAGGED PREDICTOR — full code, Streamlit-safe.
+v4.4 TAGGED PREDICTOR — full code.
 
-Fixes over the previous version:
-  - _sb argument name in _get_table_columns so st.cache_data does not hash
-    the Supabase client (this was the hang).
-  - Single load_all() call at the top of main(), reused by all tabs.
-  - Supabase client created with a postgrest timeout.
-  - Schema-migration guide included below the app (tags, dc_hit, v4_4_bet).
+Restores v4.3's per-tab loading behavior:
+  - No DB load at boot.
+  - Each tab loads only the data it needs.
+  - Parse tab renders instantly.
+  - Every DB call wrapped in a timeout so nothing hangs the app.
 
 Model: v4.3 factor pipeline unchanged.
-Decision layer: v4.4 shipped rule.
-Rule: bet DC on the composite leader when total_gap >= 20, standard gates.
-Tags logged on every pick.
+Decision layer: v4.4 shipped rule + tags.
 """
 
+import concurrent.futures
 import json
 import os
 import re
@@ -73,7 +71,7 @@ st.markdown("""
 
 
 # ============================================================================
-# SUPABASE CLIENT — no cache_resource to avoid stale failure tuples
+# SUPABASE — no cache, no boot-time call
 # ============================================================================
 
 def get_supabase():
@@ -81,8 +79,6 @@ def get_supabase():
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        # Try to pass a postgrest timeout; fall back silently if the API
-        # does not accept the options object.
         try:
             from supabase.client import ClientOptions
             options = ClientOptions(postgrest_client_timeout=15)
@@ -109,8 +105,7 @@ ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
 
-GAP_THRESHOLD = 20          # v4.4 shipped gate
-SHIPPED_MARKET = "DC"       # always DC on the composite leader
+GAP_THRESHOLD = 20
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -139,7 +134,7 @@ KEYSTATS_PRIORITY_FIELDS = {
 
 
 # ============================================================================
-# PARSER — identical to v4.3
+# PARSER — unchanged from v4.3
 # ============================================================================
 class SportsgamblerParser:
     def __init__(self, html: str):
@@ -995,7 +990,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER — identical to v4.3
+# FACTOR LAYER — unchanged from v4.3
 # ============================================================================
 
 def smooth_rate(wins, draws, games):
@@ -1135,7 +1130,7 @@ def calc_venue_ppg_gap(row):
 
 
 # ============================================================================
-# v4.3 predictor (kept for reference and for the shared factor pipeline)
+# v4.3 predictor — kept for the shared factor pipeline
 # ============================================================================
 
 def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
@@ -1402,14 +1397,14 @@ def predict_v4_4(row):
 
 
 # ============================================================================
-# DB HELPERS — with the _sb fix
+# DB HELPERS — with _sb fix and threaded timeout
 # ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_table_columns(_sb, table_name="matches_raw"):
     """
-    NOTE: argument is _sb (underscore prefix) so st.cache_data does not
-    attempt to hash the Supabase client. This is the fix for the hang.
+    _sb starts with underscore so st.cache_data does not attempt to hash
+    the Supabase client.
     """
     try:
         resp = _sb.table(table_name).select("*").limit(1).execute()
@@ -1461,7 +1456,6 @@ def save_prediction(sb, match_id, result):
         return False, "no client"
     try:
         real_columns = _get_table_columns(sb) or set()
-        # only send columns that exist; also drop private keys (leading _)
         clean = {}
         for k, v in result.items():
             if k.startswith("_"):
@@ -1475,15 +1469,27 @@ def save_prediction(sb, match_id, result):
         return False, str(e)
 
 
-def load_all(sb):
+def load_all(sb, timeout_seconds=15):
+    """
+    Per-tab loader. Timeout-wrapped so a slow Supabase never hangs the app.
+    """
     if sb is None:
         return []
-    try:
-        resp = sb.table("matches_raw").select("*").order("match_date", desc=True).execute()
-        return resp.data or []
-    except Exception as e:
-        st.error(f"Load failed: {e}")
-        return []
+
+    def _fetch():
+        return sb.table("matches_raw").select("*").order("match_date", desc=True).execute()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_fetch)
+        try:
+            resp = fut.result(timeout=timeout_seconds)
+            return resp.data or []
+        except concurrent.futures.TimeoutError:
+            st.warning(f"Supabase query exceeded {timeout_seconds}s. Showing empty results.")
+            return []
+        except Exception as e:
+            st.error(f"Load failed: {e}")
+            return []
 
 
 def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
@@ -1671,7 +1677,7 @@ def compute_tag_performance(rows):
 
 
 # ============================================================================
-# UI — single load, shared across tabs
+# UI — per-tab loading
 # ============================================================================
 
 def main():
@@ -1683,10 +1689,6 @@ def main():
         st.error(f"Supabase connection failed: {diag.get('error')}")
         return
 
-    # Load once. All tabs use this list.
-    with st.spinner("Loading matches..."):
-        rows = load_all(sb)
-
     tabs = st.tabs([
         "📥 Parse & Save",
         "⏳ Pending",
@@ -1695,7 +1697,7 @@ def main():
         "📋 Spec",
     ])
 
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------- Parse
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
         st.caption("Parse → v4.4 predict → save with tags.")
@@ -1777,50 +1779,59 @@ def main():
 
                 st.info("👉 Enter the final score in the Pending tab after the match.")
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------- Pending
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
-        pending = [r for r in rows if r.get("actual_home_goals") is None]
-        if not pending:
-            st.success("No pending matches.")
-        else:
-            st.write(f"**{len(pending)} pending matches**")
-            for r in pending:
-                match_id = r["id"]
-                call_v44 = r.get("v4_4_call") or "—"
-                bet_v44 = r.get("v4_4_bet")
-                gap = r.get("total_gap", 0) or 0
-                tags = r.get("tags") or []
-                header = (
-                    f"{r.get('match_date','')} · "
-                    f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                    f"v4.4: {call_v44} (gap {gap})"
-                )
-                with st.expander(header):
-                    st.markdown(render_tags(tags), unsafe_allow_html=True)
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("v4.4 call", call_v44)
-                    c2.metric("Gap", f"{gap:.1f}")
-                    c3.metric("Leader", r.get("f1_leader", "—"))
-                    st.markdown("**Enter actual score:**")
-                    col1, col2, col3 = st.columns([1, 1, 2])
-                    hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
-                    ag = col2.number_input("Away goals", 0, 15, 0, key=f"ag_{match_id}")
-                    if col3.button("📝 Save Result", key=f"save_{match_id}"):
-                        ok, msg = update_audit(
-                            sb, match_id, hg, ag,
-                            r.get("call_1x2") or "",
-                            bet_v4_4=bet_v44,
-                        )
-                        if ok:
-                            st.success("Result recorded.")
-                            st.rerun()
-                        else:
-                            st.error(msg)
+        with st.spinner("Loading pending matches..."):
+            rows = load_all(sb)
 
-    # ------------------------------------------------------------------
+        if not rows:
+            st.info("No rows loaded (or Supabase timed out).")
+        else:
+            pending = [r for r in rows if r.get("actual_home_goals") is None]
+            if not pending:
+                st.success("No pending matches.")
+            else:
+                st.write(f"**{len(pending)} pending matches**")
+                for r in pending:
+                    match_id = r["id"]
+                    call_v44 = r.get("v4_4_call") or "—"
+                    bet_v44 = r.get("v4_4_bet")
+                    gap = r.get("total_gap", 0) or 0
+                    tags = r.get("tags") or []
+                    header = (
+                        f"{r.get('match_date','')} · "
+                        f"{r.get('home_team','')} vs {r.get('away_team','')} · "
+                        f"v4.4: {call_v44} (gap {gap})"
+                    )
+                    with st.expander(header):
+                        st.markdown(render_tags(tags), unsafe_allow_html=True)
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("v4.4 call", call_v44)
+                        c2.metric("Gap", f"{gap:.1f}")
+                        c3.metric("Leader", r.get("f1_leader", "—"))
+                        st.markdown("**Enter actual score:**")
+                        col1, col2, col3 = st.columns([1, 1, 2])
+                        hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
+                        ag = col2.number_input("Away goals", 0, 15, 0, key=f"ag_{match_id}")
+                        if col3.button("📝 Save Result", key=f"save_{match_id}"):
+                            ok, msg = update_audit(
+                                sb, match_id, hg, ag,
+                                r.get("call_1x2") or "",
+                                bet_v4_4=bet_v44,
+                            )
+                            if ok:
+                                st.success("Result recorded.")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+
+    # --------------------------------------------------------- Performance
     with tabs[2]:
         st.subheader("📊 Performance")
+        with st.spinner("Loading performance data..."):
+            rows = load_all(sb)
+
         settled = [r for r in rows if r.get("actual_home_goals") is not None
                    and r.get("actual_away_goals") is not None]
         if not settled:
@@ -1851,12 +1862,15 @@ def main():
             } for r in placed])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------- Tag Performance
     with tabs[3]:
         st.subheader("🏷️ Tag Performance")
+        with st.spinner("Loading tag data..."):
+            rows = load_all(sb)
+
         settled = [r for r in rows if r.get("dc_hit") is not None]
         if not settled:
-            st.info("No settled bets with tags yet.")
+            st.info("No settled bets with dc_hit recorded yet.")
         else:
             st.caption(f"n = {len(settled)} settled bets with dc_hit recorded.")
             singles, pairs = compute_tag_performance(settled)
@@ -1867,7 +1881,7 @@ def main():
             if pairs:
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------- Spec
     with tabs[4]:
         st.subheader("v4.4 Spec")
         st.markdown(f"""
@@ -1890,7 +1904,7 @@ def main():
         - `team_disagreement` — any conflict flag fires OR disagreements ≥ 2
         - `venue_incomplete` — either side has < 4 venue games
 
-        **Do not add any filter based on tags until each tag has 50+ settled picks.**
+        **Do not add any tag-based filter until each tag has 50+ settled picks.**
         """)
 
 
