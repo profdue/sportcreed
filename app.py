@@ -1,14 +1,16 @@
 """
-v4.4 TAGGED PREDICTOR — full code.
+v4.4 TAGGED PREDICTOR — working version.
 
-Restores v4.3's per-tab loading behavior:
-  - No DB load at boot.
-  - Each tab loads only the data it needs.
-  - Parse tab renders instantly.
-  - Every DB call wrapped in a timeout so nothing hangs the app.
+Client construction reverted to v4.3's form:
+  @st.cache_resource + create_client(url, key) — no ClientOptions.
+
+Per-tab loading so nothing hangs at boot.
+Threaded timeout on load_all.
+_sb underscore on cached column introspection.
 
 Model: v4.3 factor pipeline unchanged.
 Decision layer: v4.4 shipped rule + tags.
+Rule: bet DC on the composite leader when total_gap >= 20.
 """
 
 import concurrent.futures
@@ -71,21 +73,16 @@ st.markdown("""
 
 
 # ============================================================================
-# SUPABASE — no cache, no boot-time call
+# SUPABASE — exact v4.3 client construction (this is the working form)
 # ============================================================================
 
+@st.cache_resource(show_spinner=False)
 def get_supabase():
     try:
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        try:
-            from supabase.client import ClientOptions
-            options = ClientOptions(postgrest_client_timeout=15)
-            client = create_client(url, key, options=options)
-        except Exception:
-            client = create_client(url, key)
-        return client, {"ok": True, "url": url}
+        return create_client(url, key), {"ok": True, "url": url}
     except Exception as e:
         return None, {"ok": False, "error": str(e)}
 
@@ -1130,7 +1127,7 @@ def calc_venue_ppg_gap(row):
 
 
 # ============================================================================
-# v4.3 predictor — kept for the shared factor pipeline
+# v4.3 predictor — factor pipeline
 # ============================================================================
 
 def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
@@ -1151,7 +1148,7 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
         "call_1x2": reason,
         "call_ou": "No Bet",
         "expected_total": 0,
-        "model_version": "v4.3",
+        "model_version": "v4.4",
         "no_bet_reason_1x2": reason_1x2,
         "no_bet_reason_ou": reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
@@ -1301,7 +1298,7 @@ def predict_v4_3(row):
         "call_1x2": call_1x2,
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
-        "model_version": "v4.3",
+        "model_version": "v4.4",
         "no_bet_reason_1x2": no_bet_reason_1x2,
         "no_bet_reason_ou": no_bet_reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
@@ -1397,14 +1394,13 @@ def predict_v4_4(row):
 
 
 # ============================================================================
-# DB HELPERS — with _sb fix and threaded timeout
+# DB HELPERS
 # ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_table_columns(_sb, table_name="matches_raw"):
     """
-    _sb starts with underscore so st.cache_data does not attempt to hash
-    the Supabase client.
+    _sb starts with underscore so st.cache_data does not hash the client.
     """
     try:
         resp = _sb.table(table_name).select("*").limit(1).execute()
