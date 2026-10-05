@@ -8,6 +8,18 @@ Adds:
 
 Model: v4.3 factor pipeline unchanged.
 Decision layer: v4.4 shipped rule + tags.
+
+Parser fixes vs previous version:
+  - Top scorer/assister now prefer the preview-body line
+    ("X is top scorer on N") over the season-only Key Stats block.
+  - Key Stats remains as fallback.
+  - Home/away possession splits captured.
+  - Multi-word and accented player names handled.
+  - _parse_players unified with the new helper.
+
+v4.4 decision fixes:
+  - Top-scorer-out skip now requires the scorer to have >= 3 goals.
+    A 1-goal "top scorer" no longer triggers a skip.
 """
 
 import concurrent.futures
@@ -119,7 +131,6 @@ def _describe_key(key_info):
 
 
 def _check_url(url_info):
-    """Return issues with the URL, or empty list if clean."""
     issues = []
     if not url_info.get("present"):
         return ["URL missing from st.secrets"]
@@ -128,12 +139,11 @@ def _check_url(url_info):
     if url_info.get("has_newline"):
         issues.append("URL contains a newline")
     if url_info.get("has_quotes"):
-        issues.append("URL appears to be wrapped in quotes (Streamlit secrets already strip them — remove them if you added them manually)")
+        issues.append("URL appears to be wrapped in quotes")
     return issues
 
 
 def _check_key(key_info):
-    """Return issues with the key, or empty list if clean."""
     issues = []
     if not key_info.get("present"):
         return ["Key missing from st.secrets"]
@@ -151,10 +161,6 @@ def _check_key(key_info):
 
 
 def _decode_jwt_ref(key):
-    """
-    Decode the JWT payload (middle segment) and extract the `ref` claim.
-    Returns None if not a JWT or if decoding fails.
-    """
     if not key or not key.startswith("eyJ"):
         return None
     try:
@@ -172,14 +178,12 @@ def _decode_jwt_ref(key):
 
 
 def render_diagnostic_banner():
-    """A compact banner showing URL/key shape. Never reveals values."""
     url_info = _inspect_secret("SUPABASE_URL")
     key_info = _inspect_secret("SUPABASE_KEY")
     url_issues = _check_url(url_info)
     key_issues = _check_key(key_info)
 
     st.markdown("### 🔍 Diagnostics")
-
     c1, c2 = st.columns(2)
 
     with c1:
@@ -191,9 +195,8 @@ def render_diagnostic_banner():
                 f'prefix={url_info["prefix"]!r}</span>',
                 unsafe_allow_html=True,
             )
-            if url_issues:
-                for i in url_issues:
-                    st.error(i)
+            for i in url_issues:
+                st.error(i)
         else:
             st.markdown('<span class="diag-bad">MISSING</span>', unsafe_allow_html=True)
 
@@ -207,13 +210,11 @@ def render_diagnostic_banner():
                 f'kind={key_kind}</span>',
                 unsafe_allow_html=True,
             )
-            if key_issues:
-                for i in key_issues:
-                    st.error(i)
+            for i in key_issues:
+                st.error(i)
         else:
             st.markdown('<span class="diag-bad">MISSING</span>', unsafe_allow_html=True)
 
-    # If both present, try to verify URL/key consistency
     if url_info.get("present") and key_info.get("present"):
         try:
             raw_key = str(st.secrets["SUPABASE_KEY"]).strip()
@@ -221,7 +222,6 @@ def render_diagnostic_banner():
         except Exception:
             raw_key = raw_url = ""
 
-        # Try JWT ref match
         ref = _decode_jwt_ref(raw_key)
         if ref:
             m = re.match(r"https://([^.]+)\.supabase\.co", raw_url)
@@ -232,33 +232,20 @@ def render_diagnostic_banner():
                 else:
                     st.error(
                         f"❌ URL and KEY belong to different projects. "
-                        f"URL ref = `{url_ref}`, KEY ref = `{ref}`. "
-                        f"Copy both from the same Supabase API page."
+                        f"URL ref = `{url_ref}`, KEY ref = `{ref}`."
                     )
             else:
-                st.warning(
-                    f"Could not parse project ref from URL `{raw_url}`. "
-                    f"Expected format: https://<ref>.supabase.co"
-                )
+                st.warning(f"Could not parse project ref from URL `{raw_url}`.")
         elif raw_key.startswith("sb_publishable_"):
-            st.info(
-                "Publishable key detected. Cannot verify project match "
-                "from the key alone; ensure it was copied from the same "
-                "Supabase API page as the URL."
-            )
+            st.info("Publishable key detected. Cannot verify project match from key alone.")
         else:
-            st.warning(
-                "Could not decode JWT from key. If it is not `eyJ...`, "
-                "make sure you copied the full key."
-            )
+            st.warning("Could not decode JWT from key.")
 
 
 def render_debug_tab(sb):
-    """Full debug panel: connection status, live query, sample row."""
     st.subheader("🛠 Debug")
-    st.caption("This panel is for diagnosing connection and schema issues. No values are revealed.")
+    st.caption("Connection and schema diagnostics. No values are revealed.")
 
-    # --- Secrets inspection ---
     st.markdown('<div class="section-title">1. Secrets</div>', unsafe_allow_html=True)
     url_info = _inspect_secret("SUPABASE_URL")
     key_info = _inspect_secret("SUPABASE_KEY")
@@ -278,20 +265,12 @@ def render_debug_tab(sb):
         else:
             st.error("KEY not found in st.secrets.")
 
-    # --- Client state ---
     st.markdown('<div class="section-title">2. Client state</div>', unsafe_allow_html=True)
     if sb is None:
-        st.error("Supabase client was NOT created. See the connection error above.")
+        st.error("Supabase client was NOT created.")
         return
     st.success("Supabase client created.")
-    try:
-        url_attr = getattr(sb, "supabase_url", None) or getattr(sb, "_url", None)
-        if url_attr:
-            st.write(f"Client URL attribute: `{url_attr}`")
-    except Exception:
-        pass
 
-    # --- Live ping ---
     st.markdown('<div class="section-title">3. Live ping</div>', unsafe_allow_html=True)
     if st.button("🏓 Ping Supabase", key="debug_ping"):
         with st.spinner("Pinging..."):
@@ -303,11 +282,9 @@ def render_debug_tab(sb):
             except Exception as e:
                 st.error(f"Ping failed: {e}")
 
-    # --- Column check ---
     st.markdown('<div class="section-title">4. Schema check</div>', unsafe_allow_html=True)
-    st.caption("Queries information_schema through the client. Requires the table to exist.")
     if st.button("🔎 List matches_raw columns", key="debug_cols"):
-        with st.spinner("Querying information_schema..."):
+        with st.spinner("Querying..."):
             try:
                 resp = sb.table("matches_raw").select("*").limit(1).execute()
                 if resp.data:
@@ -316,16 +293,9 @@ def render_debug_tab(sb):
                     st.write(cols)
                 else:
                     st.info("Table is empty. Cannot list columns from a live row.")
-                    st.caption(
-                        "Fallback: run this in Supabase SQL Editor:\n"
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = 'public' AND table_name = 'matches_raw' "
-                        "ORDER BY ordinal_position;"
-                    )
             except Exception as e:
                 st.error(f"Schema check failed: {e}")
 
-    # --- Full count ---
     st.markdown('<div class="section-title">5. Row count</div>', unsafe_allow_html=True)
     if st.button("🧮 Count rows", key="debug_count"):
         with st.spinner("Counting..."):
@@ -335,12 +305,7 @@ def render_debug_tab(sb):
             except Exception as e:
                 st.error(f"Count failed: {e}")
 
-    # --- Test insert ---
     st.markdown('<div class="section-title">6. Test insert</div>', unsafe_allow_html=True)
-    st.caption(
-        "Writes a throwaway row. Uses home_team='__DEBUG__' so it can be cleaned up. "
-        "Try this only after the ping succeeds."
-    )
     if st.button("🧪 Insert test row", key="debug_insert"):
         with st.spinner("Inserting..."):
             try:
@@ -354,10 +319,6 @@ def render_debug_tab(sb):
                 st.success(f"Insert succeeded. id = {resp.data[0].get('id') if resp.data else 'unknown'}")
             except Exception as e:
                 st.error(f"Insert failed: {e}")
-                st.caption(
-                    "Common causes: RLS policy missing (if RLS enabled), "
-                    "column NOT NULL without default, or connection error."
-                )
 
     if st.button("🧹 Delete test rows", key="debug_cleanup"):
         with st.spinner("Deleting..."):
@@ -404,6 +365,7 @@ ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
 GAP_THRESHOLD = 20
+TOP_SCORER_OUT_MIN_GOALS = 3   # NEW: top-scorer-out skip only fires if scorer >= 3 goals
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -420,6 +382,7 @@ KEYSTATS_PRIORITY_FIELDS = {
     "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
     "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
     "home_last10_possession", "away_last10_possession",
+    "home_home_last10_possession", "away_away_last10_possession",
     "home_last10_corners_for", "home_last10_corners_against",
     "away_last10_corners_for", "away_last10_corners_against",
     "home_home_last10_corners_for", "home_home_last10_corners_against",
@@ -428,6 +391,8 @@ KEYSTATS_PRIORITY_FIELDS = {
     "away_top_scorer", "away_top_scorer_goals",
     "home_top_assister", "home_top_assister_assists",
     "away_top_assister", "away_top_assister_assists",
+    "home_top_scorer_source", "away_top_scorer_source",
+    "home_top_assister_source", "away_top_assister_source",
 }
 
 
@@ -435,6 +400,8 @@ KEYSTATS_PRIORITY_FIELDS = {
 # FROZEN SCHEMA SNAPSHOT
 # ============================================================================
 # Keep in sync when the table is altered.
+# NOTE: includes four new *_source columns. If you don't want them, either
+# drop them here or run the ALTER TABLE statements shown in the notes.
 MATCHES_RAW_COLUMNS = {
     "id", "created_at",
     "match_date", "kickoff_utc", "kickoff_local",
@@ -459,14 +426,18 @@ MATCHES_RAW_COLUMNS = {
     "away_last10_btts_yes", "away_last10_btts_no",
     "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
     "home_home_last10_corners_for", "home_home_last10_corners_against",
+    "home_home_last10_possession",
     "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
     "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
     "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
     "away_away_last10_corners_for", "away_away_last10_corners_against",
+    "away_away_last10_possession",
     "home_top_scorer", "home_top_scorer_goals",
     "home_top_assister", "home_top_assister_assists",
     "away_top_scorer", "away_top_scorer_goals",
     "away_top_assister", "away_top_assister_assists",
+    "home_top_scorer_source", "away_top_scorer_source",
+    "home_top_assister_source", "away_top_assister_source",
     "home_injuries", "away_injuries", "home_xi", "away_xi",
     "home_formation", "away_formation",
     "h2h", "h2h_home_wins", "h2h_draws", "h2h_away_wins",
@@ -504,8 +475,39 @@ def _get_table_columns(_sb, table_name="matches_raw"):
 
 
 # ============================================================================
-# PARSER — unchanged
+# PARSER
 # ============================================================================
+
+# Preview-body patterns (last-10-games window; site's own analysis).
+_PREVIEW_TOP_SCORER_PATTERNS = [
+    # "Borja Iglesias is top scorer on 3, with Iago Aspas and Ferran Jutgla next on 2."
+    re.compile(
+        r"([A-Z][\w'\-\.\u00C0-\u024F]+(?:\s+[A-Z][\w'\-\.\u00C0-\u024F]+){0,3})"
+        r"\s+is\s+top\s+scorer\s+on\s+(\d+)",
+    ),
+    # "Top goalscorer Orri Oskarsson has found the net 5 times"
+    re.compile(
+        r"Top\s+goalscorer\s+"
+        r"([A-Z][\w'\-\.\u00C0-\u024F]+(?:\s+[A-Z][\w'\-\.\u00C0-\u024F]+){0,3})"
+        r"\s+has\s+found\s+the\s+net\s+(\d+)\s+times",
+    ),
+]
+
+# Key-stats patterns (season-to-date window; fallback).
+_KEYSTATS_TOP_SCORER = re.compile(
+    r"Top\s+Scorers?\s+for\s+.+?\s+this\s+season\s+are\s+(.+?)(?:Top\s+Assistors?|$)",
+    re.I | re.S,
+)
+_KEYSTATS_TOP_ASSISTER = re.compile(
+    r"Top\s+Assistors?\s+for\s+.+?\s+this\s+season\s+are\s+(.+?)$",
+    re.I | re.S,
+)
+# "Name (N)" — handles multi-word names and accented characters.
+_NAME_GOALS = re.compile(
+    r"([A-Z][\w'\-\.\u00C0-\u024F]+(?:\s+[A-Z][\w'\-\.\u00C0-\u024F]+){0,3})\s*\((\d+)\)"
+)
+
+
 class SportsgamblerParser:
     def __init__(self, html: str):
         if not _has_bs4():
@@ -515,6 +517,7 @@ class SportsgamblerParser:
         self.home_team = None
         self.away_team = None
 
+    # ------------------------------------------------------------------ utils
     @staticmethod
     def _to_float(s):
         try:
@@ -545,6 +548,7 @@ class SportsgamblerParser:
         s = "".join(c for c in s if not unicodedata.combining(c))
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
+    # -------------------------------------------------------------- team match
     def _team_matches(self, full_name, table_name):
         if not full_name or not table_name:
             return False
@@ -579,6 +583,7 @@ class SportsgamblerParser:
             return False
         return a_words[0] in b
 
+    # ------------------------------------------------------------------- parse
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
@@ -623,12 +628,11 @@ class SportsgamblerParser:
             elif key not in record or record.get(key) is None:
                 record[key] = val
 
-        for k, v in self._parse_players("home").items():
-            if v is not None and (k not in record or record.get(k) is None):
-                record[k] = v
-        for k, v in self._parse_players("away").items():
-            if v is not None and (k not in record or record.get(k) is None):
-                record[k] = v
+        # Top scorers/assisters: preview body wins, Key Stats is fallback.
+        for side in ("home", "away"):
+            for k, v in self._parse_top_scorers_and_assisters(side).items():
+                if v is not None:
+                    record[k] = v
 
         record["home_injuries"] = self._parse_injuries("home")
         record["away_injuries"] = self._parse_injuries("away")
@@ -641,6 +645,7 @@ class SportsgamblerParser:
         record["odds"] = self._parse_odds()
         return record
 
+    # ------------------------------------------------------------------ teams
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
         if len(teams) >= 2:
@@ -711,6 +716,7 @@ class SportsgamblerParser:
         el = self.soup.select_one(".t_top .t_venue")
         return el.get_text(strip=True) if el else None
 
+    # -------------------------------------------------------------- standings
     def _parse_standings(self):
         out = {}
         main_table = None
@@ -840,6 +846,7 @@ class SportsgamblerParser:
             return int(m.group(1)), int(m.group(2))
         return None
 
+    # ----------------------------------------------------------------- last5
     def _parse_last5(self, side):
         container = self.soup.select_one("#last-matches #All") or self.soup.select_one("#last-matches")
         if not container:
@@ -911,6 +918,7 @@ class SportsgamblerParser:
             "is_home": is_home,
         }
 
+    # ---------------------------------------------------------------- last10
     def _parse_last10(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -963,6 +971,7 @@ class SportsgamblerParser:
             out[f"{prefix}_last10_win_pct"] = (out[f"{prefix}_last10_w"] / 10) * 100
         return out
 
+    # ---------------------------------------------------------------- keystats
     def _parse_keystats_block(self):
         out = {}
         if not self.home_team or not self.away_team:
@@ -970,6 +979,7 @@ class SportsgamblerParser:
         keystats = self.soup.select_one(".keystats")
         if not keystats:
             return out
+
         for item in keystats.select(".keystat-item"):
             title_sub = item.select_one(".stats-title-sub")
             if not title_sub:
@@ -978,8 +988,12 @@ class SportsgamblerParser:
             is_away = "awaystats" in item.get("class", [])
             prefix = "away" if is_away else "home"
             text = item.get_text(" ", strip=True)
+
             if "Full-Time Result" in title_text:
-                m = re.search(r"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+matches", text, re.I)
+                m = re.search(
+                    r"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_last10_w"] = int(m.group(1))
                     out[f"{prefix}_last10_l"] = int(m.group(2))
@@ -996,16 +1010,26 @@ class SportsgamblerParser:
                         out["home_home_played"] = out.get("home_home_played") or played
                     else:
                         out["away_away_played"] = out.get("away_away_played") or played
+
             elif "Goals" in title_text:
-                m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 matches", text, re.I)
+                m = re.search(
+                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_last10_avg_scored"] = float(m.group(1))
                     out[f"{prefix}_last10_avg_conceded"] = float(m.group(2))
-                m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 home matches", text, re.I)
+                m = re.search(
+                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 home matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_home_last10_avg_scored"] = float(m.group(1))
                     out[f"{prefix}_home_last10_avg_conceded"] = float(m.group(2))
-                m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 away matches", text, re.I)
+                m = re.search(
+                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 away matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_away_last10_avg_scored"] = float(m.group(1))
                     out[f"{prefix}_away_last10_avg_conceded"] = float(m.group(2))
@@ -1017,67 +1041,147 @@ class SportsgamblerParser:
                 if m:
                     out[f"{prefix}_last10_over25"] = int(m.group(1))
                     out[f"{prefix}_last10_under25"] = 10 - int(m.group(1))
+
             elif "Corners" in title_text:
-                m = re.search(r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 matches", text, re.I)
+                m = re.search(
+                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_last10_corners_for"] = float(m.group(1))
                     out[f"{prefix}_last10_corners_against"] = float(m.group(2))
-                m = re.search(r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 home matches", text, re.I)
+                m = re.search(
+                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 home matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_home_last10_corners_for"] = float(m.group(1))
                     out[f"{prefix}_home_last10_corners_against"] = float(m.group(2))
-                m = re.search(r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 away matches", text, re.I)
+                m = re.search(
+                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 away matches",
+                    text, re.I,
+                )
                 if m:
                     out[f"{prefix}_away_last10_corners_for"] = float(m.group(1))
                     out[f"{prefix}_away_last10_corners_against"] = float(m.group(2))
+
             elif "Possession" in title_text:
                 m = re.search(r"average of ([\d.]+)% possession in the last 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_possession"] = float(m.group(1))
-            elif "Top Scorers" in title_text:
-                m = re.search(r"Top Scorers for .+? this season are\s+(.+?)(?:Top Assistors|$)", text)
+                m = re.search(r"average of ([\d.]+)% possession in the last 10 home matches", text, re.I)
                 if m:
-                    first = m.group(1).split(",")[0].strip()
-                    mm = re.match(r"(.+?)\s*\((\d+)\)", first)
-                    if mm:
-                        out[f"{prefix}_top_scorer"] = mm.group(1).strip()
-                        out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
-                m = re.search(r"Top Assistors for .+? this season are\s+(.+?)$", text)
+                    out[f"{prefix}_home_last10_possession"] = float(m.group(1))
+                m = re.search(r"average of ([\d.]+)% possession in the last 10 away matches", text, re.I)
                 if m:
-                    first = m.group(1).split(",")[0].strip()
-                    mm = re.match(r"(.+?)\s*\((\d+)\)", first)
-                    if mm:
-                        out[f"{prefix}_top_assister"] = mm.group(1).strip()
-                        out[f"{prefix}_top_assister_assists"] = int(mm.group(2))
+                    out[f"{prefix}_away_last10_possession"] = float(m.group(1))
+
+            # Top Scorers / Assistors handled by _parse_top_scorers_and_assisters.
+
         for prefix in ("home", "away"):
             w_key = f"{prefix}_last10_w"
             if out.get(w_key) is not None and f"{prefix}_last10_win_pct" not in out:
                 out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
-    def _parse_players(self, side):
-        out = {}
+    # ----------------------------------------------------- top scorer/assister
+    def _extract_top_scorer_from_preview(self, side):
+        """
+        Read the site's own 'top scorer on N' line from the preview body.
+        Returns (name, goals) or (None, None).
+        """
+        target = self.home_team if side == "home" else self.away_team
+        if not target:
+            return None, None
+
+        paragraphs = self.soup.select("h2#match-preview ~ p, h2#match-preview ~ h3 ~ p")
+        if not paragraphs:
+            paragraphs = self.soup.find_all("p")
+
+        best_name, best_goals = None, -1
+        for p in paragraphs:
+            text = p.get_text(" ", strip=True)
+            if not text or target.lower() not in text.lower():
+                continue
+            for pat in _PREVIEW_TOP_SCORER_PATTERNS:
+                m = pat.search(text)
+                if not m:
+                    continue
+                name = m.group(1).strip()
+                try:
+                    goals = int(m.group(2))
+                except (TypeError, ValueError):
+                    continue
+                if goals > best_goals:
+                    best_name, best_goals = name, goals
+        return (best_name, best_goals) if best_goals >= 0 else (None, None)
+
+    def _extract_top_from_keystats(self, side, kind):
+        """
+        Fallback: read the season-to-date Key Stats block.
+        kind is 'scorer' or 'assister'.
+        """
+        target = self.home_team if side == "home" else self.away_team
+        if not target:
+            return None, None
+        for item in self.soup.select(".keystat-item"):
+            title_sub = item.select_one(".stats-title-sub")
+            if not title_sub:
+                continue
+            title_text = title_sub.get_text(" ", strip=True)
+            if kind == "scorer" and "Top Scorers" not in title_text:
+                continue
+            if kind == "assister" and "Top Assistors" not in title_text:
+                continue
+            is_away = "awaystats" in item.get("class", [])
+            if (is_away and side == "home") or (not is_away and side == "away"):
+                continue
+            text = item.get_text(" ", strip=True)
+            pat = _KEYSTATS_TOP_SCORER if kind == "scorer" else _KEYSTATS_TOP_ASSISTER
+            m = pat.search(text)
+            if not m:
+                continue
+            for mm in _NAME_GOALS.finditer(m.group(1)):
+                name = mm.group(1).strip()
+                try:
+                    val = int(mm.group(2))
+                except ValueError:
+                    continue
+                if len(name) >= 3 and name[0].isupper():
+                    return name, val
+        return None, None
+
+    def _parse_top_scorers_and_assisters(self, side):
+        """
+        Merge preview-body and Key-Stats sources for one side.
+        Preview body wins when present (it's the site's own analysis window).
+        """
         prefix = "home" if side == "home" else "away"
-        block = self.soup.select_one(f"#{'ht' if side == 'home' else 'at'}-goalassist")
-        if not block:
-            return out
-        text = block.get_text(" ", strip=True)
-        m = re.search(r"Top Scorers for .+? this season are (.+?)(?:\.|$)", text)
-        if m:
-            first = m.group(1).split(",")[0].strip()
-            mm = re.match(r"(.+?)\s*\((\d+)\)", first)
-            if mm:
-                out[f"{prefix}_top_scorer"] = mm.group(1).strip()
-                out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
-        m = re.search(r"Top Assis\w+ for .+? this season are (.+?)(?:\.|$)", text)
-        if m:
-            first = m.group(1).split(",")[0].strip()
-            mm = re.match(r"(.+?)\s*\((\d+)\)", first)
-            if mm:
-                out[f"{prefix}_top_assister"] = mm.group(1).strip()
-                out[f"{prefix}_top_assister_assists"] = int(mm.group(2))
+        out = {}
+
+        name, goals = self._extract_top_scorer_from_preview(side)
+        source = "preview"
+        if not name:
+            name, goals = self._extract_top_from_keystats(side, "scorer")
+            source = "keystats" if name else None
+        if name:
+            out[f"{prefix}_top_scorer"] = name
+            out[f"{prefix}_top_scorer_goals"] = goals
+            out[f"{prefix}_top_scorer_source"] = source
+
+        name, assists = self._extract_top_from_keystats(side, "assister")
+        if name:
+            out[f"{prefix}_top_assister"] = name
+            out[f"{prefix}_top_assister_assists"] = assists
+            out[f"{prefix}_top_assister_source"] = "keystats"
+
         return out
 
+    def _parse_players(self, side):
+        """Backward-compatible wrapper."""
+        return self._parse_top_scorers_and_assisters(side)
+
+    # -------------------------------------------------------------- injuries
     def _parse_injuries(self, side):
         out = []
         seen = set()
@@ -1110,7 +1214,8 @@ class SportsgamblerParser:
                 expected_return = None
                 detail_el = row.select_one(".inj-two-hidden")
                 if detail_el:
-                    m = re.search(r"Expected return:\s*(\d{4}-\d{2}-\d{2})", detail_el.get_text(" ", strip=True))
+                    m = re.search(r"Expected return:\s*(\d{4}-\d{2}-\d{2})",
+                                  detail_el.get_text(" ", strip=True))
                     if m:
                         expected_return = m.group(1)
                 out.append({
@@ -1121,6 +1226,7 @@ class SportsgamblerParser:
                 })
         return out
 
+    # --------------------------------------------------------------- XI / form
     def _parse_xi(self, side):
         out = []
         side_class = "lineups-home" if side == "home" else "lineups-away"
@@ -1151,6 +1257,7 @@ class SportsgamblerParser:
                     return m.group(1)
         return None
 
+    # -------------------------------------------------------------------- h2h
     def _parse_h2h(self):
         out = {"h2h": [], "h2h_home_wins": 0, "h2h_draws": 0, "h2h_away_wins": 0}
         container = self.soup.select_one("#head-to-head")
@@ -1214,6 +1321,7 @@ class SportsgamblerParser:
                 out[f"{side}_{venue}_last10_corners_against"] = float(m.group(2))
         return out
 
+    # ------------------------------------------------------------------- odds
     def _parse_odds(self):
         odds = {}
         for row in self.soup.select(".nlf_odds_row"):
@@ -1577,10 +1685,15 @@ def decide_bet(prediction):
         return "SKIP", "f1_f5_conflict"
     if prediction.get("f1_vs_f2f3_conflict"):
         return "SKIP", "f1_f2f3_conflict"
-    if prediction.get("_home_top_scorer_out"):
+
+    # NEW: top-scorer-out skip only fires if the scorer has >= TOP_SCORER_OUT_MIN_GOALS
+    if (prediction.get("_home_top_scorer_out")
+            and (prediction.get("_home_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS):
         return "SKIP", "home_top_scorer_out"
-    if prediction.get("_away_top_scorer_out"):
+    if (prediction.get("_away_top_scorer_out")
+            and (prediction.get("_away_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS):
         return "SKIP", "away_top_scorer_out"
+
     leader = prediction.get("f1_leader")
     return ("BET", "DC 1X") if leader == "home" else ("BET", "DC X2")
 
@@ -1594,6 +1707,9 @@ def predict_v4_4(row):
     away_inj = {i.get("player") for i in (row.get("away_injuries") or []) if i.get("status") == "injury"}
     base["_home_top_scorer_out"] = bool(home_top_scorer and home_top_scorer in home_inj)
     base["_away_top_scorer_out"] = bool(away_top_scorer and away_top_scorer in away_inj)
+    base["_home_top_scorer_goals"] = row.get("home_top_scorer_goals") or 0
+    base["_away_top_scorer_goals"] = row.get("away_top_scorer_goals") or 0
+
     decision, market = decide_bet(base)
     base["v4_4_decision"] = decision
     if decision == "BET":
@@ -1645,15 +1761,13 @@ def save_prediction(sb, match_id, result):
     real_columns = MATCHES_RAW_COLUMNS
     clean = {}
     for k, v in result.items():
-        # Skip private flags (start with underscore)
         if k.startswith("_"):
             continue
-        # Strict filter: only keys that are known columns
         if k not in real_columns:
             continue
         clean[k] = v
 
-    # Hard safety nets for keys that were previously problematic
+    # Hard safety net for keys that were previously problematic
     for bad_key in ("leader", "v4_3_call", "v4_4_decision", "v4_4_skip_reason"):
         clean.pop(bad_key, None)
 
@@ -1854,7 +1968,6 @@ def main():
     st.title("⚽ v4.4 Tagged Predictor")
     st.caption("Composite rank. DC on leader. Gap ≥ 20. Tags on every pick.")
 
-    # Diagnostics banner — always visible, minimal, no values revealed
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
 
@@ -1862,7 +1975,6 @@ def main():
     if sb is None:
         st.error(f"Supabase client could not be created: {diag.get('error')}")
         st.info("Open the Debug tab below to see exactly what is wrong.")
-        # Still render the Debug tab so the user can inspect
         render_debug_tab(None)
         return
 
@@ -1879,6 +1991,7 @@ def main():
         st.subheader("Paste Sportsgambler HTML")
         st.caption("Parse → v4.4 predict → save with tags.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
+
         if st.button("⚽ Parse, Predict & Save (v4.4)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
@@ -2041,12 +2154,15 @@ def main():
         - Skip if `total_gap < {GAP_THRESHOLD}`
         - Skip if `f1_f5_conflict` fires without override
         - Skip if `f1_vs_f2f3_conflict` fires
-        - Skip if a top scorer is injured and not in the XI
+        - Skip if a top scorer (>= {TOP_SCORER_OUT_MIN_GOALS} goals) is injured and not in the XI
         - Otherwise bet DC on the leader
 
         **Market:** DC 1X if home, DC X2 if away.
 
         **Tags:** gap_20, home_leader/away_leader, team_disagreement, venue_incomplete.
+
+        **Top-scorer source:** preview body ("X is top scorer on N") preferred;
+        Key Stats ("this season") is fallback.
 
         **No tag becomes a filter until it has 50+ settled picks.**
         """)
