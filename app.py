@@ -1,23 +1,17 @@
 """
-v4.4 TAGGED PREDICTOR — ships the rule with tags.
+v4.4 TAGGED PREDICTOR — full code, Streamlit-safe.
 
-Model (v4.3 factors) unchanged:
-  F1..F6 computed from the same raw fields.
-  Composite leader and total_gap are the model's rank output.
+Fixes over the previous version:
+  - _sb argument name in _get_table_columns so st.cache_data does not hash
+    the Supabase client (this was the hang).
+  - Single load_all() call at the top of main(), reused by all tabs.
+  - Supabase client created with a postgrest timeout.
+  - Schema-migration guide included below the app (tags, dc_hit, v4_4_bet).
 
-New decision layer (v4.4):
-  Rule: bet DC on the composite leader, gate at total_gap >= 20.
-  Tags logged on every placed pick:
-    gap_20
-    home_leader / away_leader
-    team_disagreement
-    venue_incomplete
-
-Compatibility:
-  - Parser: identical to v4.3
-  - predict_v4_3(): preserved and callable
-  - predict_v4_4(): the shipped rule, tags attached
-  - Settlement logging: writes dc_hit on top of is_correct_1x2
+Model: v4.3 factor pipeline unchanged.
+Decision layer: v4.4 shipped rule.
+Rule: bet DC on the composite leader when total_gap >= 20, standard gates.
+Tags logged on every pick.
 """
 
 import json
@@ -29,6 +23,9 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# ---------------------------------------------------------------------------
+# MUST be the very first Streamlit call
+# ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="v4.4 Tagged Predictor",
     page_icon="⚽",
@@ -75,35 +72,46 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-@st.cache_resource(show_spinner=False)
+# ============================================================================
+# SUPABASE CLIENT — no cache_resource to avoid stale failure tuples
+# ============================================================================
+
 def get_supabase():
     try:
         from supabase import create_client
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key), {"ok": True, "url": url}
+        # Try to pass a postgrest timeout; fall back silently if the API
+        # does not accept the options object.
+        try:
+            from supabase.client import ClientOptions
+            options = ClientOptions(postgrest_client_timeout=15)
+            client = create_client(url, key, options=options)
+        except Exception:
+            client = create_client(url, key)
+        return client, {"ok": True, "url": url}
     except Exception as e:
         return None, {"ok": False, "error": str(e)}
 
 
 def _has_bs4():
     try:
-        import bs4
+        import bs4  # noqa
         return True
     except ImportError:
         return False
 
 
 # ============================================================================
-# UNIVERSAL CONSTANTS
+# CONSTANTS
 # ============================================================================
 ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
 
-# Decision-layer constants (v4.4)
-GAP_THRESHOLD = 20           # shipped gate
-SHIPPED_MARKET = "DC"        # always DC on the composite leader
+GAP_THRESHOLD = 20          # v4.4 shipped gate
+SHIPPED_MARKET = "DC"       # always DC on the composite leader
+
 
 KEYSTATS_PRIORITY_FIELDS = {
     "home_last10_w", "home_last10_d", "home_last10_l",
@@ -131,7 +139,7 @@ KEYSTATS_PRIORITY_FIELDS = {
 
 
 # ============================================================================
-# PARSER — unchanged from v4.3
+# PARSER — identical to v4.3
 # ============================================================================
 class SportsgamblerParser:
     def __init__(self, html: str):
@@ -987,7 +995,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER — unchanged from v4.3
+# FACTOR LAYER — identical to v4.3
 # ============================================================================
 
 def smooth_rate(wins, draws, games):
@@ -1127,116 +1135,35 @@ def calc_venue_ppg_gap(row):
 
 
 # ============================================================================
-# DECISION LAYER — v4.4 tagged rule
+# v4.3 predictor (kept for reference and for the shared factor pipeline)
 # ============================================================================
 
-def compute_tags(row, prediction):
-    """
-    Assign the four tags that ship with every pick.
-    Tags are attached to any logged row, whether or not it becomes a bet.
-    """
-    tags = []
+def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
+                      venue_ppg_gap=None, home_ppg=None, away_ppg=None):
+    return {
+        "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
+        "f2_home": 0, "f2_away": 0,
+        "f3_home": 0, "f3_away": 0,
+        "f4_home": 0, "f4_away": 0,
+        "f5_home": 0, "f5_away": 0, "f5_gap": 0, "f5_leader": None,
+        "f5_leader_raw": None,
+        "f6_home": 0, "f6_away": 0,
+        "home_total": 0, "away_total": 0, "raw_gap": 0, "total_gap": 0,
+        "disagreements": 0, "shrink_factor": 1.0,
+        "f1_f5_conflict": False, "f1_f5_override": False,
+        "f1_vs_f2f3_conflict": False,
+        "away_collapse": False, "doubted_starter": False,
+        "call_1x2": reason,
+        "call_ou": "No Bet",
+        "expected_total": 0,
+        "model_version": "v4.3",
+        "no_bet_reason_1x2": reason_1x2,
+        "no_bet_reason_ou": reason_ou,
+        "venue_ppg_gap": venue_ppg_gap,
+        "venue_ppg_gap_home": home_ppg,
+        "venue_ppg_gap_away": away_ppg,
+    }
 
-    gap = prediction.get("total_gap") or 0
-    if gap >= GAP_THRESHOLD:
-        tags.append("gap_20")
-    else:
-        tags.append("gap_under_20")
-
-    leader = prediction.get("f1_leader") or prediction.get("leader")
-    if leader == "away":
-        tags.append("away_leader")
-    elif leader == "home":
-        tags.append("home_leader")
-
-    conflicts = bool(prediction.get("f1_f5_conflict")) or bool(prediction.get("f1_vs_f2f3_conflict"))
-    if conflicts or prediction.get("disagreements", 0) >= 2:
-        tags.append("team_disagreement")
-
-    home_played = row.get("home_home_played")
-    away_played = row.get("away_away_played")
-    if (home_played is None or home_played < 4
-            or away_played is None or away_played < 4):
-        tags.append("venue_incomplete")
-
-    return tags
-
-
-def decide_bet(prediction):
-    """
-    The v4.4 decision rule:
-      - bet DC on the composite leader only when total_gap >= 20
-      - skip if conflict or injury gates fire
-    Returns: ("BET", "DC 1X"/"DC X2") or ("SKIP", reason)
-    """
-    gap = prediction.get("total_gap") or 0
-    if gap < GAP_THRESHOLD:
-        return "SKIP", "gap_under_20"
-
-    if prediction.get("f1_f5_conflict") and not prediction.get("f1_f5_override"):
-        return "SKIP", "f1_f5_conflict"
-
-    if prediction.get("f1_vs_f2f3_conflict"):
-        return "SKIP", "f1_f2f3_conflict"
-
-    if prediction.get("_home_top_scorer_out"):
-        return "SKIP", "home_top_scorer_out"
-
-    if prediction.get("_away_top_scorer_out"):
-        return "SKIP", "away_top_scorer_out"
-
-    leader = prediction.get("f1_leader") or prediction.get("leader")
-    if leader == "home":
-        return "BET", "DC 1X"
-    else:
-        return "BET", "DC X2"
-
-
-def predict_v4_4(row):
-    """
-    Compute v4.3 factors, compute composite rank, apply v4.4 decision layer.
-    Attach tags. Return a full prediction dict.
-    """
-    base = predict_v4_3(row)
-
-    # composite leader — authoritative for v4.4
-    home_leader = "home" if base.get("f1_leader") == "home" else "away"
-    base["leader"] = home_leader
-
-    # scorer-availability flags (used by the injury gate)
-    home_top_scorer = row.get("home_top_scorer")
-    away_top_scorer = row.get("away_top_scorer")
-    home_injured_names = {i.get("player") for i in (row.get("home_injuries") or [])
-                          if i.get("status") == "injury"}
-    away_injured_names = {i.get("player") for i in (row.get("away_injuries") or [])
-                          if i.get("status") == "injury"}
-
-    base["_home_top_scorer_out"] = bool(home_top_scorer and home_top_scorer in home_injured_names)
-    base["_away_top_scorer_out"] = bool(away_top_scorer and away_top_scorer in away_injured_names)
-
-    # decide
-    decision, market = decide_bet(base)
-    base["v4_4_decision"] = decision
-    if decision == "BET":
-        base["v4_4_bet"] = market
-        base["v4_4_skip_reason"] = None
-    else:
-        base["v4_4_bet"] = None
-        base["v4_4_skip_reason"] = market
-
-    # tags
-    base["tags"] = compute_tags(row, base)
-
-    # also log the previous v4.3 call for comparison
-    base["v4_3_call"] = base.get("call_1x2")
-    base["v4_4_call"] = base["v4_4_bet"] if decision == "BET" else f"NO BET ({base['v4_4_skip_reason']})"
-
-    return base
-
-
-# ============================================================================
-# v4.3 factor pipeline preserved for reference and compatibility
-# ============================================================================
 
 def predict_v4_3(row):
     venue_ppg_gap, home_ppg, away_ppg = calc_venue_ppg_gap(row)
@@ -1388,38 +1315,102 @@ def predict_v4_3(row):
     }
 
 
-def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
-                      venue_ppg_gap=None, home_ppg=None, away_ppg=None):
-    return {
-        "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
-        "f2_home": 0, "f2_away": 0,
-        "f3_home": 0, "f3_away": 0,
-        "f4_home": 0, "f4_away": 0,
-        "f5_home": 0, "f5_away": 0, "f5_gap": 0, "f5_leader": None,
-        "f5_leader_raw": None,
-        "f6_home": 0, "f6_away": 0,
-        "home_total": 0, "away_total": 0, "raw_gap": 0, "total_gap": 0,
-        "disagreements": 0, "shrink_factor": 1.0,
-        "f1_f5_conflict": False, "f1_f5_override": False,
-        "f1_vs_f2f3_conflict": False,
-        "away_collapse": False, "doubted_starter": False,
-        "call_1x2": reason,
-        "call_ou": "No Bet",
-        "expected_total": 0,
-        "model_version": "v4.3",
-        "no_bet_reason_1x2": reason_1x2,
-        "no_bet_reason_ou": reason_ou,
-        "venue_ppg_gap": venue_ppg_gap,
-        "venue_ppg_gap_home": home_ppg,
-        "venue_ppg_gap_away": away_ppg,
-    }
+# ============================================================================
+# v4.4 DECISION LAYER — tags + shipped rule
+# ============================================================================
+
+def compute_tags(row, prediction):
+    tags = []
+
+    gap = prediction.get("total_gap") or 0
+    if gap >= GAP_THRESHOLD:
+        tags.append("gap_20")
+    else:
+        tags.append("gap_under_20")
+
+    leader = prediction.get("f1_leader")
+    if leader == "away":
+        tags.append("away_leader")
+    elif leader == "home":
+        tags.append("home_leader")
+
+    conflicts = bool(prediction.get("f1_f5_conflict")) or bool(prediction.get("f1_vs_f2f3_conflict"))
+    if conflicts or (prediction.get("disagreements") or 0) >= 2:
+        tags.append("team_disagreement")
+
+    home_played = row.get("home_home_played")
+    away_played = row.get("away_away_played")
+    if (home_played is None or home_played < 4
+            or away_played is None or away_played < 4):
+        tags.append("venue_incomplete")
+
+    return tags
+
+
+def decide_bet(prediction):
+    gap = prediction.get("total_gap") or 0
+    if gap < GAP_THRESHOLD:
+        return "SKIP", "gap_under_20"
+
+    if prediction.get("f1_f5_conflict") and not prediction.get("f1_f5_override"):
+        return "SKIP", "f1_f5_conflict"
+
+    if prediction.get("f1_vs_f2f3_conflict"):
+        return "SKIP", "f1_f2f3_conflict"
+
+    if prediction.get("_home_top_scorer_out"):
+        return "SKIP", "home_top_scorer_out"
+
+    if prediction.get("_away_top_scorer_out"):
+        return "SKIP", "away_top_scorer_out"
+
+    leader = prediction.get("f1_leader")
+    if leader == "home":
+        return "BET", "DC 1X"
+    else:
+        return "BET", "DC X2"
+
+
+def predict_v4_4(row):
+    base = predict_v4_3(row)
+    base["leader"] = base.get("f1_leader")
+
+    home_top_scorer = row.get("home_top_scorer")
+    away_top_scorer = row.get("away_top_scorer")
+    home_injured_names = {i.get("player") for i in (row.get("home_injuries") or [])
+                          if i.get("status") == "injury"}
+    away_injured_names = {i.get("player") for i in (row.get("away_injuries") or [])
+                          if i.get("status") == "injury"}
+
+    base["_home_top_scorer_out"] = bool(home_top_scorer and home_top_scorer in home_injured_names)
+    base["_away_top_scorer_out"] = bool(away_top_scorer and away_top_scorer in away_injured_names)
+
+    decision, market = decide_bet(base)
+    base["v4_4_decision"] = decision
+    if decision == "BET":
+        base["v4_4_bet"] = market
+        base["v4_4_skip_reason"] = None
+    else:
+        base["v4_4_bet"] = None
+        base["v4_4_skip_reason"] = market
+
+    base["tags"] = compute_tags(row, base)
+    base["v4_3_call"] = base.get("call_1x2")
+    base["v4_4_call"] = base["v4_4_bet"] if decision == "BET" else f"NO BET ({base['v4_4_skip_reason']})"
+
+    return base
 
 
 # ============================================================================
-# DB HELPERS
+# DB HELPERS — with the _sb fix
 # ============================================================================
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_table_columns(_sb, table_name="matches_raw"):
+    """
+    NOTE: argument is _sb (underscore prefix) so st.cache_data does not
+    attempt to hash the Supabase client. This is the fix for the hang.
+    """
     try:
         resp = _sb.table(table_name).select("*").limit(1).execute()
         if resp.data:
@@ -1469,11 +1460,15 @@ def save_prediction(sb, match_id, result):
     if sb is None:
         return False, "no client"
     try:
-        real_columns = _get_table_columns(sb)
-        if real_columns:
-            clean = {k: v for k, v in result.items() if k in real_columns}
-        else:
-            clean = result
+        real_columns = _get_table_columns(sb) or set()
+        # only send columns that exist; also drop private keys (leading _)
+        clean = {}
+        for k, v in result.items():
+            if k.startswith("_"):
+                continue
+            if real_columns and k not in real_columns:
+                continue
+            clean[k] = v
         sb.table("matches_raw").update(clean).eq("id", match_id).execute()
         return True, "saved"
     except Exception as e:
@@ -1492,10 +1487,6 @@ def load_all(sb):
 
 
 def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
-    """
-    Record the actual result.
-    Compute both the v4.3 is_correct_1x2 and the v4.4 dc_hit.
-    """
     if sb is None:
         return False, "no client"
 
@@ -1506,7 +1497,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
     else:
         actual = "Draw"
 
-    # v4.3 scoring (as before)
     is_correct = None
     if call_1x2.startswith("NO BET"):
         is_correct = None
@@ -1521,7 +1511,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
     else:
         is_correct = False
 
-    # v4.4 scoring — dc_hit for the tagged rule
     dc_hit = None
     if bet_v4_4 == "DC 1X":
         dc_hit = actual in ("Home", "Draw")
@@ -1533,7 +1522,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
         "actual_away_goals": ag,
         "is_correct_1x2": is_correct,
     }
-    # Only write dc_hit if the column exists in the table
     real_columns = _get_table_columns(sb) or set()
     if "dc_hit" in real_columns:
         payload["dc_hit"] = dc_hit
@@ -1550,6 +1538,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
 # ============================================================================
 # DISPLAY HELPERS
 # ============================================================================
+
 def render_tag(label):
     cls = "tag"
     if label.startswith("gap"):
@@ -1644,10 +1633,6 @@ def render_trigger(name, on):
 # ============================================================================
 
 def compute_tag_performance(rows):
-    """
-    For each tag and each tag pair, count picks, hits, and hit rate.
-    Only settled bets (dc_hit is not None) count.
-    """
     from collections import defaultdict
 
     singles = defaultdict(lambda: {"n": 0, "hits": 0})
@@ -1674,20 +1659,21 @@ def compute_tag_performance(rows):
                     pairs[key]["hits"] += 1
 
     def to_df(d):
-        rows_out = []
+        out = []
         for k, v in sorted(d.items(), key=lambda x: -x[1]["n"]):
             n = v["n"]
             h = v["hits"]
             rate = (h / n * 100) if n else 0
-            rows_out.append({"segment": k, "n": n, "hits": h, "rate": f"{rate:.1f}%"})
-        return rows_out
+            out.append({"segment": k, "n": n, "hits": h, "rate": f"{rate:.1f}%"})
+        return out
 
     return to_df(singles), to_df(pairs)
 
 
 # ============================================================================
-# UI
+# UI — single load, shared across tabs
 # ============================================================================
+
 def main():
     st.title("⚽ v4.4 Tagged Predictor")
     st.caption("Composite rank. DC on leader. Gap ≥ 20. Tags on every pick.")
@@ -1697,6 +1683,10 @@ def main():
         st.error(f"Supabase connection failed: {diag.get('error')}")
         return
 
+    # Load once. All tabs use this list.
+    with st.spinner("Loading matches..."):
+        rows = load_all(sb)
+
     tabs = st.tabs([
         "📥 Parse & Save",
         "⏳ Pending",
@@ -1705,6 +1695,7 @@ def main():
         "📋 Spec",
     ])
 
+    # ------------------------------------------------------------------
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
         st.caption("Parse → v4.4 predict → save with tags.")
@@ -1736,7 +1727,6 @@ def main():
                     if ok and row:
                         match_id = row.get("id")
                         if match_id:
-                            # persist only columns that exist
                             save_ok, save_msg = save_prediction(sb, match_id, result)
                     else:
                         save_msg = row if isinstance(row, str) else "unknown error"
@@ -1778,18 +1768,18 @@ def main():
                 render_factor_row("F5 H2H Psychology", result["f5_home"], result["f5_away"], "(10 pts)")
                 render_factor_row("F6 Attack Profile", result["f6_home"], result["f6_away"], "(15 pts)")
 
-                st.markdown('<div class="section-title">Modifiers & Overrides</div>', unsafe_allow_html=True)
+                st.markdown('<div class="section-title">Modifiers</div>', unsafe_allow_html=True)
                 render_trigger("F1 vs F5 Conflict", result["f1_f5_conflict"])
                 render_trigger("F1 vs F5 Override Applied", result["f1_f5_override"])
                 render_trigger("F1 vs F2/F3 Conflict", result["f1_vs_f2f3_conflict"])
                 render_trigger("Away Collapse", result["away_collapse"])
                 render_trigger("Doubt Starter IN XI", result["doubted_starter"])
 
-                st.info("👉 After the match, enter the score in the Pending tab.")
+                st.info("👉 Enter the final score in the Pending tab after the match.")
 
+    # ------------------------------------------------------------------
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
-        rows = load_all(sb)
         pending = [r for r in rows if r.get("actual_home_goals") is None]
         if not pending:
             st.success("No pending matches.")
@@ -1799,9 +1789,13 @@ def main():
                 match_id = r["id"]
                 call_v44 = r.get("v4_4_call") or "—"
                 bet_v44 = r.get("v4_4_bet")
-                gap = r.get("total_gap", 0)
+                gap = r.get("total_gap", 0) or 0
                 tags = r.get("tags") or []
-                header = f"{r.get('match_date','')} · {r.get('home_team','')} vs {r.get('away_team','')} · v4.4: {call_v44} (gap {gap})"
+                header = (
+                    f"{r.get('match_date','')} · "
+                    f"{r.get('home_team','')} vs {r.get('away_team','')} · "
+                    f"v4.4: {call_v44} (gap {gap})"
+                )
                 with st.expander(header):
                     st.markdown(render_tags(tags), unsafe_allow_html=True)
                     c1, c2, c3 = st.columns(3)
@@ -1824,9 +1818,9 @@ def main():
                         else:
                             st.error(msg)
 
+    # ------------------------------------------------------------------
     with tabs[2]:
         st.subheader("📊 Performance")
-        rows = load_all(sb)
         settled = [r for r in rows if r.get("actual_home_goals") is not None
                    and r.get("actual_away_goals") is not None]
         if not settled:
@@ -1857,9 +1851,9 @@ def main():
             } for r in placed])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
+    # ------------------------------------------------------------------
     with tabs[3]:
         st.subheader("🏷️ Tag Performance")
-        rows = load_all(sb)
         settled = [r for r in rows if r.get("dc_hit") is not None]
         if not settled:
             st.info("No settled bets with tags yet.")
@@ -1873,10 +1867,11 @@ def main():
             if pairs:
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
+    # ------------------------------------------------------------------
     with tabs[4]:
         st.subheader("v4.4 Spec")
         st.markdown(f"""
-        **Decision layer (v4.4):**
+        **Decision layer:**
 
         - Compute composite leader from f1_home..f6_away
         - Compute total_gap (raw_gap × shrink)
@@ -1895,13 +1890,11 @@ def main():
         - `team_disagreement` — any conflict flag fires OR disagreements ≥ 2
         - `venue_incomplete` — either side has < 4 venue games
 
-        **Settlement:**
-
-        - `dc_hit` computed from actual result and the v4.4 bet
-        - Tag performance dashboard recomputes on every settlement
-
-        **Do not add filters based on tags until each tag has 50+ settled picks.**
+        **Do not add any filter based on tags until each tag has 50+ settled picks.**
         """)
 
 
+# ============================================================================
+# Entry
+# ============================================================================
 main()
