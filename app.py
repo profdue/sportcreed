@@ -1,16 +1,13 @@
 """
-v4.4 TAGGED PREDICTOR — working version.
+v4.4 TAGGED PREDICTOR — full code with built-in diagnostics.
 
-Client construction reverted to v4.3's form:
-  @st.cache_resource + create_client(url, key) — no ClientOptions.
-
-Per-tab loading so nothing hangs at boot.
-Threaded timeout on load_all.
-_sb underscore on cached column introspection.
+Adds:
+  - Diagnostic banner under the title (shows URL/key shape, not values).
+  - Debug tab with connection tests and a live query check.
+  - Per-tab loading preserved from the last good version.
 
 Model: v4.3 factor pipeline unchanged.
 Decision layer: v4.4 shipped rule + tags.
-Rule: bet DC on the composite leader when total_gap >= 20.
 """
 
 import concurrent.futures
@@ -68,21 +65,329 @@ st.markdown("""
         text-transform: uppercase; letter-spacing: 1.5px; margin: 1.5rem 0 0.75rem 0; }
     .stButton button { background: linear-gradient(135deg, #10b981 0%, #059669 100%);
         color: white; font-weight: 700; border-radius: 10px; border: none; padding: 0.6rem 1.25rem; }
+    .diag-ok { background: #064e3b; color: #6ee7b7; padding: 0.4rem 0.75rem;
+        border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
+    .diag-bad { background: #7f1d1d; color: #fecaca; padding: 0.4rem 0.75rem;
+        border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
+    .diag-warn { background: #78350f; color: #fde68a; padding: 0.4rem 0.75rem;
+        border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================================
-# SUPABASE — exact v4.3 client construction (this is the working form)
+# DIAGNOSTIC HELPERS
 # ============================================================================
 
-@st.cache_resource(show_spinner=False)
+def _inspect_secret(name):
+    """Return a safe description of a secret without revealing its value."""
+    try:
+        raw = st.secrets[name]
+    except Exception:
+        return {"present": False, "reason": "not in st.secrets"}
+    if raw is None:
+        return {"present": False, "reason": "value is None"}
+    s = str(raw)
+    info = {
+        "present": True,
+        "length": len(s),
+        "has_leading_ws": bool(s) and s[0].isspace(),
+        "has_trailing_ws": bool(s) and s[-1].isspace(),
+        "has_inner_ws": any(c.isspace() for c in s.strip()),
+        "has_newline": "\n" in s or "\r" in s,
+        "has_quotes": s.startswith('"') or s.startswith("'"),
+        "prefix": s[:15] if len(s) >= 15 else s,
+        "suffix": s[-5:] if len(s) >= 5 else "",
+    }
+    return info
+
+
+def _describe_key(key_info):
+    """Classify a Supabase key by its format."""
+    if not key_info.get("present"):
+        return "MISSING"
+    p = key_info.get("prefix", "")
+    if p.startswith("sb_publishable_"):
+        return "publishable (new-style)"
+    if p.startswith("sb_secret_"):
+        return "SECRET KEY — do not use in browser code"
+    if p.startswith("eyJhbGciOi"):
+        return "legacy anon JWT"
+    if p.startswith("eyJ"):
+        return "JWT (unrecognized header)"
+    return f"unknown ({p!r})"
+
+
+def _check_url(url_info):
+    """Return issues with the URL, or empty list if clean."""
+    issues = []
+    if not url_info.get("present"):
+        return ["URL missing from st.secrets"]
+    if url_info.get("has_leading_ws") or url_info.get("has_trailing_ws"):
+        issues.append("URL has leading/trailing whitespace")
+    if url_info.get("has_newline"):
+        issues.append("URL contains a newline")
+    if url_info.get("has_quotes"):
+        issues.append("URL appears to be wrapped in quotes (Streamlit secrets already strip them — remove them if you added them manually)")
+    return issues
+
+
+def _check_key(key_info):
+    """Return issues with the key, or empty list if clean."""
+    issues = []
+    if not key_info.get("present"):
+        return ["Key missing from st.secrets"]
+    if key_info.get("has_leading_ws") or key_info.get("has_trailing_ws"):
+        issues.append("Key has leading/trailing whitespace — this alone causes 401")
+    if key_info.get("has_inner_ws"):
+        issues.append("Key contains whitespace in the middle")
+    if key_info.get("has_newline"):
+        issues.append("Key contains a newline — copy-paste likely split it")
+    if key_info.get("has_quotes"):
+        issues.append("Key appears to be wrapped in quotes")
+    if key_info.get("length", 0) < 100:
+        issues.append(f"Key length is only {key_info.get('length')} — expected 200+ for JWT")
+    return issues
+
+
+def _decode_jwt_ref(key):
+    """
+    Decode the JWT payload (middle segment) and extract the `ref` claim.
+    Returns None if not a JWT or if decoding fails.
+    """
+    if not key or not key.startswith("eyJ"):
+        return None
+    try:
+        import base64
+        parts = key.split(".")
+        if len(parts) < 2:
+            return None
+        payload_b64 = parts[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        decoded = base64.urlsafe_b64decode(payload_b64 + padding)
+        data = json.loads(decoded)
+        return data.get("ref")
+    except Exception:
+        return None
+
+
+def render_diagnostic_banner():
+    """A compact banner showing URL/key shape. Never reveals values."""
+    url_info = _inspect_secret("SUPABASE_URL")
+    key_info = _inspect_secret("SUPABASE_KEY")
+    url_issues = _check_url(url_info)
+    key_issues = _check_key(key_info)
+
+    st.markdown("### 🔍 Diagnostics")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("**URL**")
+        if url_info.get("present"):
+            cls = "diag-ok" if not url_issues else "diag-bad"
+            st.markdown(
+                f'<span class="{cls}">len={url_info["length"]} '
+                f'prefix={url_info["prefix"]!r}</span>',
+                unsafe_allow_html=True,
+            )
+            if url_issues:
+                for i in url_issues:
+                    st.error(i)
+        else:
+            st.markdown('<span class="diag-bad">MISSING</span>', unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("**KEY**")
+        if key_info.get("present"):
+            key_kind = _describe_key(key_info)
+            cls = "diag-ok" if not key_issues else "diag-bad"
+            st.markdown(
+                f'<span class="{cls}">len={key_info["length"]} '
+                f'kind={key_kind}</span>',
+                unsafe_allow_html=True,
+            )
+            if key_issues:
+                for i in key_issues:
+                    st.error(i)
+        else:
+            st.markdown('<span class="diag-bad">MISSING</span>', unsafe_allow_html=True)
+
+    # If both present, try to verify URL/key consistency
+    if url_info.get("present") and key_info.get("present"):
+        try:
+            raw_key = str(st.secrets["SUPABASE_KEY"]).strip()
+            raw_url = str(st.secrets["SUPABASE_URL"]).strip()
+        except Exception:
+            raw_key = raw_url = ""
+
+        # Try JWT ref match
+        ref = _decode_jwt_ref(raw_key)
+        if ref:
+            m = re.match(r"https://([^.]+)\.supabase\.co", raw_url)
+            url_ref = m.group(1) if m else None
+            if url_ref:
+                if ref == url_ref:
+                    st.success(f"✅ URL and JWT match — project ref: `{ref}`")
+                else:
+                    st.error(
+                        f"❌ URL and KEY belong to different projects. "
+                        f"URL ref = `{url_ref}`, KEY ref = `{ref}`. "
+                        f"Copy both from the same Supabase API page."
+                    )
+            else:
+                st.warning(
+                    f"Could not parse project ref from URL `{raw_url}`. "
+                    f"Expected format: https://<ref>.supabase.co"
+                )
+        elif raw_key.startswith("sb_publishable_"):
+            st.info(
+                "Publishable key detected. Cannot verify project match "
+                "from the key alone; ensure it was copied from the same "
+                "Supabase API page as the URL."
+            )
+        else:
+            st.warning(
+                "Could not decode JWT from key. If it is not `eyJ...`, "
+                "make sure you copied the full key."
+            )
+
+
+def render_debug_tab(sb):
+    """Full debug panel: connection status, live query, sample row."""
+    st.subheader("🛠 Debug")
+    st.caption("This panel is for diagnosing connection and schema issues. No values are revealed.")
+
+    # --- Secrets inspection ---
+    st.markdown('<div class="section-title">1. Secrets</div>', unsafe_allow_html=True)
+    url_info = _inspect_secret("SUPABASE_URL")
+    key_info = _inspect_secret("SUPABASE_KEY")
+
+    with st.expander("URL details", expanded=True):
+        if url_info.get("present"):
+            st.json({k: v for k, v in url_info.items() if k != "prefix"})
+            st.code(f"prefix: {url_info['prefix']!r}")
+        else:
+            st.error("URL not found in st.secrets.")
+
+    with st.expander("KEY details", expanded=True):
+        if key_info.get("present"):
+            st.json({k: v for k, v in key_info.items() if k not in ("prefix", "suffix")})
+            st.code(f"prefix: {key_info['prefix']!r}\nsuffix: {key_info['suffix']!r}")
+            st.write("**Key kind:**", _describe_key(key_info))
+        else:
+            st.error("KEY not found in st.secrets.")
+
+    # --- Client state ---
+    st.markdown('<div class="section-title">2. Client state</div>', unsafe_allow_html=True)
+    if sb is None:
+        st.error("Supabase client was NOT created. See the connection error above.")
+        return
+    st.success("Supabase client created.")
+    try:
+        # Some client versions expose the URL internally
+        url_attr = getattr(sb, "supabase_url", None) or getattr(sb, "_url", None)
+        if url_attr:
+            st.write(f"Client URL attribute: `{url_attr}`")
+    except Exception:
+        pass
+
+    # --- Live ping ---
+    st.markdown('<div class="section-title">3. Live ping</div>', unsafe_allow_html=True)
+    if st.button("🏓 Ping Supabase", key="debug_ping"):
+        with st.spinner("Pinging..."):
+            try:
+                resp = sb.table("matches_raw").select("id").limit(1).execute()
+                st.success(f"Ping OK. Returned {len(resp.data)} rows.")
+                if resp.data:
+                    st.write("Sample row id:", resp.data[0].get("id"))
+            except Exception as e:
+                st.error(f"Ping failed: {e}")
+
+    # --- Column check ---
+    st.markdown('<div class="section-title">4. Schema check</div>', unsafe_allow_html=True)
+    st.caption("Queries information_schema through the client. Requires the table to exist.")
+    if st.button("🔎 List matches_raw columns", key="debug_cols"):
+        with st.spinner("Querying information_schema..."):
+            try:
+                # Supabase's client does not expose information_schema directly.
+                # We fall back to selecting one row and reading its keys.
+                resp = sb.table("matches_raw").select("*").limit(1).execute()
+                if resp.data:
+                    cols = sorted(resp.data[0].keys())
+                    st.success(f"{len(cols)} columns returned by `SELECT *`.")
+                    st.write(cols)
+                else:
+                    st.info("Table is empty. Cannot list columns from a live row.")
+                    st.caption(
+                        "Fallback: run this in Supabase SQL Editor:\n"
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'public' AND table_name = 'matches_raw' "
+                        "ORDER BY ordinal_position;"
+                    )
+            except Exception as e:
+                st.error(f"Schema check failed: {e}")
+
+    # --- Full count ---
+    st.markdown('<div class="section-title">5. Row count</div>', unsafe_allow_html=True)
+    if st.button("🧮 Count rows", key="debug_count"):
+        with st.spinner("Counting..."):
+            try:
+                resp = sb.table("matches_raw").select("id").execute()
+                st.success(f"matches_raw has {len(resp.data)} row(s).")
+            except Exception as e:
+                st.error(f"Count failed: {e}")
+
+    # --- Test insert ---
+    st.markdown('<div class="section-title">6. Test insert</div>', unsafe_allow_html=True)
+    st.caption(
+        "Writes a throwaway row. Uses home_team='__DEBUG__' so it can be cleaned up. "
+        "Try this only after the ping succeeds."
+    )
+    if st.button("🧪 Insert test row", key="debug_insert"):
+        with st.spinner("Inserting..."):
+            try:
+                payload = {
+                    "match_date": "2099-12-31",
+                    "home_team": "__DEBUG__ Home",
+                    "away_team": "__DEBUG__ Away",
+                    "league_name": "DEBUG",
+                }
+                resp = sb.table("matches_raw").insert(payload).execute()
+                st.success(f"Insert succeeded. id = {resp.data[0].get('id') if resp.data else 'unknown'}")
+            except Exception as e:
+                st.error(f"Insert failed: {e}")
+                st.caption(
+                    "Common causes: RLS policy missing (if RLS enabled), "
+                    "column NOT NULL without default, or connection error."
+                )
+
+    if st.button("🧹 Delete test rows", key="debug_cleanup"):
+        with st.spinner("Deleting..."):
+            try:
+                sb.table("matches_raw").delete().eq("home_team", "__DEBUG__ Home").execute()
+                sb.table("matches_raw").delete().eq("away_team", "__DEBUG__ Away").execute()
+                st.success("Cleanup done.")
+            except Exception as e:
+                st.error(f"Cleanup failed: {e}")
+
+
+# ============================================================================
+# SUPABASE — no cache, timeout-wrapped
+# ============================================================================
+
 def get_supabase():
     try:
         from supabase import create_client
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key), {"ok": True, "url": url}
+        url = str(st.secrets["SUPABASE_URL"]).strip()
+        key = str(st.secrets["SUPABASE_KEY"]).strip()
+        try:
+            from supabase.client import ClientOptions
+            options = ClientOptions(postgrest_client_timeout=15)
+            client = create_client(url, key, options=options)
+        except Exception:
+            client = create_client(url, key)
+        return client, {"ok": True, "url": url}
     except Exception as e:
         return None, {"ok": False, "error": str(e)}
 
@@ -101,7 +406,6 @@ def _has_bs4():
 ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
-
 GAP_THRESHOLD = 20
 
 
@@ -131,7 +435,7 @@ KEYSTATS_PRIORITY_FIELDS = {
 
 
 # ============================================================================
-# PARSER — unchanged from v4.3
+# PARSER — unchanged
 # ============================================================================
 class SportsgamblerParser:
     def __init__(self, html: str):
@@ -204,8 +508,7 @@ class SportsgamblerParser:
         a_words = [w for w in a.split() if len(w) > 3]
         if not a_words:
             return False
-        primary = a_words[0]
-        return primary in b
+        return a_words[0] in b
 
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
@@ -240,13 +543,10 @@ class SportsgamblerParser:
         record["home_last5"] = self._parse_last5("home")
         record["away_last5"] = self._parse_last5("away")
 
-        home_last10 = self._parse_last10("home")
-        away_last10 = self._parse_last10("away")
-        record.update(home_last10)
-        record.update(away_last10)
+        record.update(self._parse_last10("home"))
+        record.update(self._parse_last10("away"))
 
-        keystats = self._parse_keystats_block()
-        for key, val in keystats.items():
+        for key, val in self._parse_keystats_block().items():
             if val is None:
                 continue
             if key in KEYSTATS_PRIORITY_FIELDS:
@@ -254,12 +554,10 @@ class SportsgamblerParser:
             elif key not in record or record.get(key) is None:
                 record[key] = val
 
-        home_players = self._parse_players("home")
-        away_players = self._parse_players("away")
-        for k, v in home_players.items():
+        for k, v in self._parse_players("home").items():
             if v is not None and (k not in record or record.get(k) is None):
                 record[k] = v
-        for k, v in away_players.items():
+        for k, v in self._parse_players("away").items():
             if v is not None and (k not in record or record.get(k) is None):
                 record[k] = v
 
@@ -308,18 +606,16 @@ class SportsgamblerParser:
                 data = json.loads(script.string or "")
             except (json.JSONDecodeError, TypeError):
                 continue
-            graph = data.get("@graph", [])
-            for node in graph:
+            for node in data.get("@graph", []):
                 article = node.get("mainEntity")
                 if not isinstance(article, dict):
                     continue
-                super_event = article.get("superEvent")
-                if isinstance(super_event, dict) and super_event.get("name"):
-                    league = super_event["name"].strip()
+                se = article.get("superEvent")
+                if isinstance(se, dict) and se.get("name"):
+                    league = se["name"].strip()
                     break
             if league:
                 break
-
         if not league:
             for link in self.soup.select(".t_top .t_info_link"):
                 text = link.get_text(strip=True)
@@ -332,9 +628,7 @@ class SportsgamblerParser:
                 ):
                     league = text
                     break
-
-        tier = None
-        group = None
+        tier = group = None
         if league:
             m = re.search(r"League\s+([A-C])", league)
             if m:
@@ -345,8 +639,8 @@ class SportsgamblerParser:
         return league or "Unknown", tier, group
 
     def _parse_venue(self):
-        venue_el = self.soup.select_one(".t_top .t_venue")
-        return venue_el.get_text(strip=True) if venue_el else None
+        el = self.soup.select_one(".t_top .t_venue")
+        return el.get_text(strip=True) if el else None
 
     def _parse_standings(self):
         out = {}
@@ -374,9 +668,9 @@ class SportsgamblerParser:
                 cells = row.select("td")
                 if len(cells) <= max(pos_idx, team_idx, pts_idx):
                     continue
-                team_clean = re.sub(r"\s*logo\s*", " ", cells[team_idx].get_text(strip=True), flags=re.I).strip()
-
-                gf, ga, gd = None, None, None
+                team_clean = re.sub(r"\s*logo\s*", " ",
+                                    cells[team_idx].get_text(strip=True), flags=re.I).strip()
+                gf = ga = gd = None
                 if gf_idx is not None and ga_idx is not None and ga_idx < len(cells):
                     gf = self._to_int(cells[gf_idx].get_text(strip=True))
                     ga = self._to_int(cells[ga_idx].get_text(strip=True))
@@ -396,9 +690,7 @@ class SportsgamblerParser:
                             gd_plain = self._parse_gd(txt)
                             if gd_plain is not None:
                                 gd = gd_plain
-
                 played = self._to_int(cells[2].get_text(strip=True)) if len(cells) > 2 else None
-
                 if self._team_matches(self.home_team, team_clean):
                     out["home_pos"] = self._to_int(cells[pos_idx].get_text(strip=True))
                     out["home_points"] = self._to_int(cells[pts_idx].get_text(strip=True))
@@ -417,16 +709,14 @@ class SportsgamblerParser:
                         out["away_ga"] = ga
                     if gd is not None:
                         out["away_gd"] = gd
-
         self._parse_split_table("#Homeleague", self.home_team, "home_home", out)
         self._parse_split_table("#Awayleague", self.home_team, "home_away", out)
         self._parse_split_table("#Homeleague", self.away_team, "away_home", out)
         self._parse_split_table("#Awayleague", self.away_team, "away_away", out)
-
         return out
 
-    def _parse_split_table(self, container_selector, team_name, prefix, out):
-        container = self.soup.select_one(container_selector)
+    def _parse_split_table(self, sel, team_name, prefix, out):
+        container = self.soup.select_one(sel)
         if not container:
             return
         table = container.find("table")
@@ -442,7 +732,8 @@ class SportsgamblerParser:
             cells = row.select("td")
             if len(cells) <= max(team_idx, pts_idx):
                 continue
-            team_clean = re.sub(r"\s*logo\s*", " ", cells[team_idx].get_text(strip=True), flags=re.I).strip()
+            team_clean = re.sub(r"\s*logo\s*", " ",
+                                cells[team_idx].get_text(strip=True), flags=re.I).strip()
             if not self._team_matches(team_name, team_clean):
                 continue
             played = self._to_int(cells[2].get_text(strip=True)) if len(cells) > 2 else None
@@ -481,47 +772,41 @@ class SportsgamblerParser:
         return None
 
     def _parse_last5(self, side):
-        container = self.soup.select_one("#last-matches #All")
-        if not container:
-            container = self.soup.select_one("#last-matches")
+        container = self.soup.select_one("#last-matches #All") or self.soup.select_one("#last-matches")
         if not container:
             return []
         block = container.select_one(".teamstats-left" if side == "home" else ".teamstats-right")
         if not block:
             return []
-
-        league_name = (self._parse_league()[0] or "")
+        league_name = self._parse_league()[0] or ""
         league_short = league_name.split(" - ")[-1] if " - " in league_name else league_name
         league_norm = self._norm_comp(league_short)
 
-        def collect(apply_league_filter: bool):
+        def collect(apply_filter):
             items = []
             for item in block.select("li.team-stat-list-item"):
                 if len(items) >= 5:
                     break
-                parsed = self._parse_last5_item(item, side, apply_league_filter, league_norm)
+                parsed = self._parse_last5_item(item, side, apply_filter, league_norm)
                 if parsed is not None:
                     items.append(parsed)
             return items
 
-        strict = collect(apply_league_filter=True)
+        strict = collect(True)
         if strict:
             return strict
-        return collect(apply_league_filter=False)
+        return collect(False)
 
-    def _parse_last5_item(self, item, side, apply_league_filter, league_norm):
+    def _parse_last5_item(self, item, side, apply_filter, league_norm):
         tracked = (self.home_team if side == "home" else self.away_team) or ""
-
         date_el = item.select_one(".team-stats-date")
         date_text = date_el.get_text(strip=True) if date_el else ""
-
-        if apply_league_filter and ":" in date_text:
+        if apply_filter and ":" in date_text:
             comp = date_text.split(":", 1)[0].strip()
             comp_norm = self._norm_comp(comp)
             if league_norm and comp_norm:
                 if league_norm not in comp_norm and comp_norm not in league_norm:
                     return None
-
         teams = item.select(".team-stats-team")
         if len(teams) < 2:
             return None
@@ -538,7 +823,6 @@ class SportsgamblerParser:
         a_score = self._to_int(a_score_el.get_text(strip=True)) if a_score_el else None
         if h_score is None or a_score is None:
             return None
-
         tracked_is_home = self._team_matches(tracked, home_name)
         tracked_is_away = self._team_matches(tracked, away_name)
         if tracked_is_home:
@@ -562,30 +846,21 @@ class SportsgamblerParser:
         out = {}
         prefix = "home" if side == "home" else "away"
         table = self.soup.select_one(".st-table")
-
         if table:
-            header_text = " ".join(
-                th.get_text(" ", strip=True) for th in table.select("th")
-            ).lower()
-
-            body_first_cells = []
+            header_text = " ".join(th.get_text(" ", strip=True) for th in table.select("th")).lower()
+            body_first = []
             for tr in table.select("tbody tr"):
                 tds = tr.select("td")
                 if tds:
-                    body_first_cells.append(tds[0].get_text(" ", strip=True))
-            body_text = " ".join(body_first_cells).lower()
-
-            combined = header_text + " || " + body_text
-            venue_markers = (
-                "home stats", "away stats",
-                "home form", "away form",
-                "home matches", "away matches",
-                "home league games", "away league games",
-                "home league", "away league",
+                    body_first.append(tds[0].get_text(" ", strip=True))
+            combined = header_text + " || " + " ".join(body_first).lower()
+            markers = (
+                "home stats", "away stats", "home form", "away form",
+                "home matches", "away matches", "home league games",
+                "away league games", "home league", "away league",
             )
-            if any(m in combined for m in venue_markers):
+            if any(m in combined for m in markers):
                 table = None
-
         if table:
             rows = table.select("tbody tr")
             idx = 0 if side == "home" else 1
@@ -604,9 +879,7 @@ class SportsgamblerParser:
                     if len(cells) >= 9:
                         out[f"{prefix}_last10_btts_yes"] = self._to_int(cells[7])
                         out[f"{prefix}_last10_btts_no"] = self._to_int(cells[8])
-
-        goals_block_id = f"#goals-{'hometeam' if side == 'home' else 'awayteam'}"
-        goals_block = self.soup.select_one(goals_block_id)
+        goals_block = self.soup.select_one(f"#goals-{'hometeam' if side == 'home' else 'awayteam'}")
         if goals_block:
             text = goals_block.get_text(" ", strip=True)
             m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 home matches", text)
@@ -617,45 +890,31 @@ class SportsgamblerParser:
             if m:
                 out[f"{prefix}_away_last10_avg_scored"] = float(m.group(1))
                 out[f"{prefix}_away_last10_avg_conceded"] = float(m.group(2))
-
-        w_key = f"{prefix}_last10_w"
-        if w_key in out and out[w_key] is not None:
-            out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
+        if f"{prefix}_last10_w" in out and out[f"{prefix}_last10_w"] is not None:
+            out[f"{prefix}_last10_win_pct"] = (out[f"{prefix}_last10_w"] / 10) * 100
         return out
 
     def _parse_keystats_block(self):
         out = {}
-
-        home_team = self.home_team
-        away_team = self.away_team
-        if not home_team or not away_team:
+        if not self.home_team or not self.away_team:
             return out
-
         keystats = self.soup.select_one(".keystats")
         if not keystats:
             return out
-
         for item in keystats.select(".keystat-item"):
             title_sub = item.select_one(".stats-title-sub")
             if not title_sub:
                 continue
             title_text = title_sub.get_text(" ", strip=True)
-
             is_away = "awaystats" in item.get("class", [])
             prefix = "away" if is_away else "home"
-
             text = item.get_text(" ", strip=True)
-
             if "Full-Time Result" in title_text:
-                m = re.search(
-                    r"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+matches",
-                    text, re.I,
-                )
+                m = re.search(r"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_w"] = int(m.group(1))
                     out[f"{prefix}_last10_l"] = int(m.group(2))
                     out[f"{prefix}_last10_d"] = int(m.group(3))
-
                 venue = "home" if not is_away else "away"
                 m = re.search(
                     rf"(\d+)\s+wins?,\s*(\d+)\s+defeats?\s+and\s+(\d+)\s+draws?\s+in\s+the\s+previous\s+10\s+{venue}\s+matches",
@@ -668,107 +927,69 @@ class SportsgamblerParser:
                         out["home_home_played"] = out.get("home_home_played") or played
                     else:
                         out["away_away_played"] = out.get("away_away_played") or played
-
             elif "Goals" in title_text:
-                m = re.search(
-                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 matches",
-                    text, re.I,
-                )
+                m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_avg_scored"] = float(m.group(1))
                     out[f"{prefix}_last10_avg_conceded"] = float(m.group(2))
-
-                m = re.search(
-                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 home matches",
-                    text, re.I,
-                )
+                m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 home matches", text, re.I)
                 if m:
                     out[f"{prefix}_home_last10_avg_scored"] = float(m.group(1))
                     out[f"{prefix}_home_last10_avg_conceded"] = float(m.group(2))
-
-                m = re.search(
-                    r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 away matches",
-                    text, re.I,
-                )
+                m = re.search(r"average of ([\d.]+) goals scored and ([\d.]+) conceded in the previous 10 away matches", text, re.I)
                 if m:
                     out[f"{prefix}_away_last10_avg_scored"] = float(m.group(1))
                     out[f"{prefix}_away_last10_avg_conceded"] = float(m.group(2))
-
                 m = re.search(r"BTTS Yes in (\d+) of the previous 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_btts_yes"] = int(m.group(1))
                     out[f"{prefix}_last10_btts_no"] = 10 - int(m.group(1))
-
                 m = re.search(r"Over 2\.5 Goals in (\d+) of the previous 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_over25"] = int(m.group(1))
                     out[f"{prefix}_last10_under25"] = 10 - int(m.group(1))
-
             elif "Corners" in title_text:
-                m = re.search(
-                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 matches",
-                    text, re.I,
-                )
+                m = re.search(r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_corners_for"] = float(m.group(1))
                     out[f"{prefix}_last10_corners_against"] = float(m.group(2))
-
-                m = re.search(
-                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 home matches",
-                    text, re.I,
-                )
+                m = re.search(r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 home matches", text, re.I)
                 if m:
                     out[f"{prefix}_home_last10_corners_for"] = float(m.group(1))
                     out[f"{prefix}_home_last10_corners_against"] = float(m.group(2))
-
-                m = re.search(
-                    r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 away matches",
-                    text, re.I,
-                )
+                m = re.search(r"average of ([\d.]+) corners awarded and ([\d.]+) corners (?:conceded|against) in the last 10 away matches", text, re.I)
                 if m:
                     out[f"{prefix}_away_last10_corners_for"] = float(m.group(1))
                     out[f"{prefix}_away_last10_corners_against"] = float(m.group(2))
-
             elif "Possession" in title_text:
                 m = re.search(r"average of ([\d.]+)% possession in the last 10 matches", text, re.I)
                 if m:
                     out[f"{prefix}_last10_possession"] = float(m.group(1))
-
             elif "Top Scorers" in title_text:
-                m = re.search(
-                    r"Top Scorers for .+? this season are\s+(.+?)(?:Top Assistors|$)",
-                    text,
-                )
+                m = re.search(r"Top Scorers for .+? this season are\s+(.+?)(?:Top Assistors|$)", text)
                 if m:
                     first = m.group(1).split(",")[0].strip()
                     mm = re.match(r"(.+?)\s*\((\d+)\)", first)
                     if mm:
                         out[f"{prefix}_top_scorer"] = mm.group(1).strip()
                         out[f"{prefix}_top_scorer_goals"] = int(mm.group(2))
-
-                m = re.search(
-                    r"Top Assistors for .+? this season are\s+(.+?)$",
-                    text,
-                )
+                m = re.search(r"Top Assistors for .+? this season are\s+(.+?)$", text)
                 if m:
                     first = m.group(1).split(",")[0].strip()
                     mm = re.match(r"(.+?)\s*\((\d+)\)", first)
                     if mm:
                         out[f"{prefix}_top_assister"] = mm.group(1).strip()
                         out[f"{prefix}_top_assister_assists"] = int(mm.group(2))
-
         for prefix in ("home", "away"):
             w_key = f"{prefix}_last10_w"
             if out.get(w_key) is not None and f"{prefix}_last10_win_pct" not in out:
                 out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
-
         return out
 
     def _parse_players(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
-        block_id = f"#{'ht' if side == 'home' else 'at'}-goalassist"
-        block = self.soup.select_one(block_id)
+        block = self.soup.select_one(f"#{'ht' if side == 'home' else 'at'}-goalassist")
         if not block:
             return out
         text = block.get_text(" ", strip=True)
@@ -796,8 +1017,7 @@ class SportsgamblerParser:
             header = outline.select_one(".light-header strong")
             if not header:
                 continue
-            header_text = header.get_text(" ", strip=True)
-            if not self._team_matches_strict(target, header_text):
+            if not self._team_matches_strict(target, header.get_text(" ", strip=True)):
                 continue
             for row in outline.select(".inj-two-row"):
                 if "inj-two-title" in row.get("class", []):
@@ -818,15 +1038,12 @@ class SportsgamblerParser:
                     status = "suspended"
                 else:
                     status = "injury"
-
                 expected_return = None
                 detail_el = row.select_one(".inj-two-hidden")
                 if detail_el:
-                    detail_text = detail_el.get_text(" ", strip=True)
-                    m = re.search(r"Expected return:\s*(\d{4}-\d{2}-\d{2})", detail_text)
+                    m = re.search(r"Expected return:\s*(\d{4}-\d{2}-\d{2})", detail_el.get_text(" ", strip=True))
                     if m:
                         expected_return = m.group(1)
-
                 out.append({
                     "player": player,
                     "status": status,
@@ -838,23 +1055,19 @@ class SportsgamblerParser:
     def _parse_xi(self, side):
         out = []
         side_class = "lineups-home" if side == "home" else "lineups-away"
-
         content_block = self.soup.select_one(".content-block#lineups")
         if not content_block:
             for cb in self.soup.select(".content-block"):
                 if cb.select_one(".lineups-formation") and cb.select_one(".lineups-home"):
                     content_block = cb
                     break
-
         if not content_block:
             return out
-
         block = content_block.select_one(f".{side_class}")
         if not block:
             return out
-
-        for player in block.select(".lineups-player .player-name"):
-            name = player.get_text(strip=True)
+        for p in block.select(".lineups-player .player-name"):
+            name = p.get_text(strip=True)
             if name:
                 out.append(name)
         return out
@@ -987,9 +1200,8 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER — unchanged from v4.3
+# FACTOR LAYER
 # ============================================================================
-
 def smooth_rate(wins, draws, games):
     if games is None or games <= 0:
         return PRIOR_FORM
@@ -1008,10 +1220,8 @@ def calc_f1(row):
     f1_away = 10 - (pts_gap * 1.33) - (gd_gap * 0.66)
     f1_home = max(2, min(18, f1_home))
     f1_away = max(2, min(18, f1_away))
-
     away_collapse = False
-    if (row.get("away_away_points") == 0
-            and (row.get("away_away_played") or 0) >= 3):
+    if (row.get("away_away_points") == 0 and (row.get("away_away_played") or 0) >= 3):
         f1_home = min(18, f1_home + 8)
         away_collapse = True
     return f1_home, f1_away, away_collapse
@@ -1042,7 +1252,6 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
         f4 -= 5
     if top_assister and top_assister in injured and top_assister not in xi:
         f4 -= 4
-
     doubted_starter = False
     for name in doubts:
         if name in xi and (name == top_scorer or name == top_assister):
@@ -1052,7 +1261,6 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
         if name in xi and (name == top_scorer or name == top_assister):
             f4 += 5
             doubted_starter = True
-
     return max(0, min(20, f4)), doubted_starter
 
 
@@ -1076,10 +1284,8 @@ def calc_f6(h_avg, a_avg):
 def apply_override(f1_home, f1_away, f5_home, f5_away):
     f1_gap = abs(f1_home - f1_away)
     f5_gap = abs(f5_home - f5_away)
-
     f1_leader = "home" if f1_home > f1_away else "away"
     f5_leader_raw = "home" if f5_home > f5_away else "away"
-
     conflict = (f1_leader != f5_leader_raw and f1_gap >= 12 and f5_gap >= 4)
     override = False
     if conflict and f1_gap > f5_gap:
@@ -1092,18 +1298,10 @@ def apply_override(f1_home, f1_away, f5_home, f5_away):
 
 
 def calc_expected_total(row):
-    h1 = row.get("home_home_last10_avg_scored")
-    a1 = row.get("away_away_last10_avg_conceded")
-    a2 = row.get("away_away_last10_avg_scored")
-    h2 = row.get("home_home_last10_avg_conceded")
-    if h1 is None:
-        h1 = row.get("home_last10_avg_scored")
-    if a1 is None:
-        a1 = row.get("away_last10_avg_conceded")
-    if a2 is None:
-        a2 = row.get("away_last10_avg_scored")
-    if h2 is None:
-        h2 = row.get("home_last10_avg_conceded")
+    h1 = row.get("home_home_last10_avg_scored") or row.get("home_last10_avg_scored")
+    a1 = row.get("away_away_last10_avg_conceded") or row.get("away_last10_avg_conceded")
+    a2 = row.get("away_away_last10_avg_scored") or row.get("away_last10_avg_scored")
+    h2 = row.get("home_home_last10_avg_conceded") or row.get("home_last10_avg_conceded")
     h1 = h1 if h1 is not None else 1.0
     a1 = a1 if a1 is not None else 1.0
     a2 = a2 if a2 is not None else 1.0
@@ -1116,41 +1314,32 @@ def calc_venue_ppg_gap(row):
     hg = row.get("home_home_played")
     ap = row.get("away_away_points")
     ag = row.get("away_away_played")
-
     home_ppg = (hp / hg) if (hp is not None and hg) else None
     away_ppg = (ap / ag) if (ap is not None and ag) else None
-
     if home_ppg is None or away_ppg is None:
         return None, home_ppg, away_ppg
-
     return round(home_ppg - away_ppg, 4), round(home_ppg, 4), round(away_ppg, 4)
 
 
 # ============================================================================
-# v4.3 predictor — factor pipeline
+# v4.3 pipeline
 # ============================================================================
-
 def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
                       venue_ppg_gap=None, home_ppg=None, away_ppg=None):
     return {
         "f1_home": 0, "f1_away": 0, "f1_gap": 0, "f1_leader": None,
-        "f2_home": 0, "f2_away": 0,
-        "f3_home": 0, "f3_away": 0,
-        "f4_home": 0, "f4_away": 0,
-        "f5_home": 0, "f5_away": 0, "f5_gap": 0, "f5_leader": None,
-        "f5_leader_raw": None,
+        "f2_home": 0, "f2_away": 0, "f3_home": 0, "f3_away": 0,
+        "f4_home": 0, "f4_away": 0, "f5_home": 0, "f5_away": 0,
+        "f5_gap": 0, "f5_leader": None, "f5_leader_raw": None,
         "f6_home": 0, "f6_away": 0,
         "home_total": 0, "away_total": 0, "raw_gap": 0, "total_gap": 0,
         "disagreements": 0, "shrink_factor": 1.0,
         "f1_f5_conflict": False, "f1_f5_override": False,
         "f1_vs_f2f3_conflict": False,
         "away_collapse": False, "doubted_starter": False,
-        "call_1x2": reason,
-        "call_ou": "No Bet",
-        "expected_total": 0,
-        "model_version": "v4.4",
-        "no_bet_reason_1x2": reason_1x2,
-        "no_bet_reason_ou": reason_ou,
+        "call_1x2": reason, "call_ou": "No Bet", "expected_total": 0,
+        "model_version": "v4.3",
+        "no_bet_reason_1x2": reason_1x2, "no_bet_reason_ou": reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
         "venue_ppg_gap_home": home_ppg,
         "venue_ppg_gap_away": away_ppg,
@@ -1159,24 +1348,17 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
 
 def predict_v4_3(row):
     venue_ppg_gap, home_ppg, away_ppg = calc_venue_ppg_gap(row)
-
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
-    home_played = row.get("home_played")
-    away_played = row.get("away_played")
-    home_played = home_played if home_played is not None else 0
-    away_played = away_played if away_played is not None else 0
-
+    home_played = row.get("home_played") or 0
+    away_played = row.get("away_played") or 0
     if not (has_home_last5 and has_away_last5 and has_standings
             and home_played >= 3 and away_played >= 3):
         return _empty_prediction(
             "NO BET (insufficient data)",
-            reason_1x2="insufficient_data",
-            reason_ou="insufficient_data",
-            venue_ppg_gap=venue_ppg_gap,
-            home_ppg=home_ppg,
-            away_ppg=away_ppg,
+            reason_1x2="insufficient_data", reason_ou="insufficient_data",
+            venue_ppg_gap=venue_ppg_gap, home_ppg=home_ppg, away_ppg=away_ppg,
         )
 
     f1_home, f1_away, away_collapse = calc_f1(row)
@@ -1185,13 +1367,9 @@ def predict_v4_3(row):
     if f2_home is None or f2_away is None:
         return _empty_prediction(
             "NO BET (insufficient form)",
-            reason_1x2="insufficient_form",
-            reason_ou="insufficient_form",
-            venue_ppg_gap=venue_ppg_gap,
-            home_ppg=home_ppg,
-            away_ppg=away_ppg,
+            reason_1x2="insufficient_form", reason_ou="insufficient_form",
+            venue_ppg_gap=venue_ppg_gap, home_ppg=home_ppg, away_ppg=away_ppg,
         )
-
     f3_home = calc_f3(row.get("home_home_win_pct"),
                       row.get("home_home_last10_avg_scored"),
                       row.get("home_home_last10_avg_conceded"))
@@ -1203,23 +1381,19 @@ def predict_v4_3(row):
     f4_away, doubt_a = calc_f4(row.get("away_top_scorer"), row.get("away_top_assister"),
                                 row.get("away_injuries"), row.get("away_xi"))
     doubted_starter = doubt_h or doubt_a
-
     f5_home, f5_away = calc_f5(row.get("h2h_home_wins") or 0,
                                 row.get("h2h_away_wins") or 0,
                                 len(row.get("h2h") or []))
     f6_home, f6_away = calc_f6(row.get("home_last10_avg_scored"),
                                 row.get("away_last10_avg_scored"))
-
     f5_home, f5_away, conflict, override, f5_leader_raw = apply_override(
         f1_home, f1_away, f5_home, f5_away
     )
 
     home_total_raw = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
     away_total_raw = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
-
     leader = "home" if home_total_raw > away_total_raw else "away"
     raw_gap = abs(home_total_raw - away_total_raw)
-
     leaders = {
         "F1": "home" if f1_home > f1_away else "away",
         "F2": "home" if f2_home > f2_away else "away",
@@ -1229,7 +1403,6 @@ def predict_v4_3(row):
     disagreements = sum(1 for l in leaders.values() if l != leader)
     shrink = max(0.0, 1.0 - disagreements * 0.15)
     gap = raw_gap * shrink
-
     if leader == "home":
         home_total = home_total_raw
         away_total = home_total_raw - gap
@@ -1256,7 +1429,6 @@ def predict_v4_3(row):
         and abs(f1_home - f1_away) >= 12
         and abs(f2f3_home - f2f3_away) >= 5
     )
-
     expected = calc_expected_total(row)
     if expected < 2.4:
         call_ou = "Under 2.5"
@@ -1267,7 +1439,6 @@ def predict_v4_3(row):
     else:
         call_ou = "No Bet"
         no_bet_reason_ou = "expected_in_middle_band"
-
     if (away_collapse or doubted_starter) and expected >= 2.4:
         call_ou = "Over 2.5"
         no_bet_reason_ou = None
@@ -1295,10 +1466,9 @@ def predict_v4_3(row):
         "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
         "away_collapse": away_collapse,
         "doubted_starter": doubted_starter,
-        "call_1x2": call_1x2,
-        "call_ou": call_ou,
+        "call_1x2": call_1x2, "call_ou": call_ou,
         "expected_total": round(expected, 2),
-        "model_version": "v4.4",
+        "model_version": "v4.3",
         "no_bet_reason_1x2": no_bet_reason_1x2,
         "no_bet_reason_ou": no_bet_reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
@@ -1308,34 +1478,25 @@ def predict_v4_3(row):
 
 
 # ============================================================================
-# v4.4 DECISION LAYER — tags + shipped rule
+# v4.4 decision layer
 # ============================================================================
-
 def compute_tags(row, prediction):
     tags = []
-
     gap = prediction.get("total_gap") or 0
-    if gap >= GAP_THRESHOLD:
-        tags.append("gap_20")
-    else:
-        tags.append("gap_under_20")
-
+    tags.append("gap_20" if gap >= GAP_THRESHOLD else "gap_under_20")
     leader = prediction.get("f1_leader")
     if leader == "away":
         tags.append("away_leader")
     elif leader == "home":
         tags.append("home_leader")
-
     conflicts = bool(prediction.get("f1_f5_conflict")) or bool(prediction.get("f1_vs_f2f3_conflict"))
     if conflicts or (prediction.get("disagreements") or 0) >= 2:
         tags.append("team_disagreement")
-
     home_played = row.get("home_home_played")
     away_played = row.get("away_away_played")
     if (home_played is None or home_played < 4
             or away_played is None or away_played < 4):
         tags.append("venue_incomplete")
-
     return tags
 
 
@@ -1343,40 +1504,27 @@ def decide_bet(prediction):
     gap = prediction.get("total_gap") or 0
     if gap < GAP_THRESHOLD:
         return "SKIP", "gap_under_20"
-
     if prediction.get("f1_f5_conflict") and not prediction.get("f1_f5_override"):
         return "SKIP", "f1_f5_conflict"
-
     if prediction.get("f1_vs_f2f3_conflict"):
         return "SKIP", "f1_f2f3_conflict"
-
     if prediction.get("_home_top_scorer_out"):
         return "SKIP", "home_top_scorer_out"
-
     if prediction.get("_away_top_scorer_out"):
         return "SKIP", "away_top_scorer_out"
-
     leader = prediction.get("f1_leader")
-    if leader == "home":
-        return "BET", "DC 1X"
-    else:
-        return "BET", "DC X2"
+    return ("BET", "DC 1X") if leader == "home" else ("BET", "DC X2")
 
 
 def predict_v4_4(row):
     base = predict_v4_3(row)
     base["leader"] = base.get("f1_leader")
-
     home_top_scorer = row.get("home_top_scorer")
     away_top_scorer = row.get("away_top_scorer")
-    home_injured_names = {i.get("player") for i in (row.get("home_injuries") or [])
-                          if i.get("status") == "injury"}
-    away_injured_names = {i.get("player") for i in (row.get("away_injuries") or [])
-                          if i.get("status") == "injury"}
-
-    base["_home_top_scorer_out"] = bool(home_top_scorer and home_top_scorer in home_injured_names)
-    base["_away_top_scorer_out"] = bool(away_top_scorer and away_top_scorer in away_injured_names)
-
+    home_inj = {i.get("player") for i in (row.get("home_injuries") or []) if i.get("status") == "injury"}
+    away_inj = {i.get("player") for i in (row.get("away_injuries") or []) if i.get("status") == "injury"}
+    base["_home_top_scorer_out"] = bool(home_top_scorer and home_top_scorer in home_inj)
+    base["_away_top_scorer_out"] = bool(away_top_scorer and away_top_scorer in away_inj)
     decision, market = decide_bet(base)
     base["v4_4_decision"] = decision
     if decision == "BET":
@@ -1385,23 +1533,18 @@ def predict_v4_4(row):
     else:
         base["v4_4_bet"] = None
         base["v4_4_skip_reason"] = market
-
     base["tags"] = compute_tags(row, base)
     base["v4_3_call"] = base.get("call_1x2")
-    base["v4_4_call"] = base["v4_4_bet"] if decision == "BET" else f"NO BET ({base['v4_4_skip_reason']})"
-
+    base["v4_4_call"] = (base["v4_4_bet"] if decision == "BET"
+                         else f"NO BET ({base['v4_4_skip_reason']})")
     return base
 
 
 # ============================================================================
-# DB HELPERS
+# DB helpers
 # ============================================================================
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_table_columns(_sb, table_name="matches_raw"):
-    """
-    _sb starts with underscore so st.cache_data does not hash the client.
-    """
     try:
         resp = _sb.table(table_name).select("*").limit(1).execute()
         if resp.data:
@@ -1416,33 +1559,24 @@ def upsert_match(sb, record):
         return False, "no client"
     try:
         real_columns = _get_table_columns(sb)
-        if real_columns:
-            clean = {k: v for k, v in record.items() if k in real_columns}
-        else:
-            clean = record
-
+        clean = ({k: v for k, v in record.items() if k in real_columns}
+                 if real_columns else record)
         if not clean.get("league_name"):
             clean["league_name"] = "Unknown"
-        if not clean.get("match_date"):
-            clean["match_date"] = None
         if not clean.get("home_team"):
             return False, "missing home_team"
         if not clean.get("away_team"):
             return False, "missing away_team"
-
-        for jsonb_field in ["home_last5", "away_last5", "home_injuries",
-                            "away_injuries", "h2h", "odds"]:
-            if jsonb_field in clean and clean[jsonb_field] is None:
-                clean[jsonb_field] = []
-        for arr_field in ["home_xi", "away_xi"]:
-            if arr_field in clean and clean[arr_field] is None:
-                clean[arr_field] = []
-
+        for f in ["home_last5", "away_last5", "home_injuries", "away_injuries", "h2h", "odds"]:
+            if f in clean and clean[f] is None:
+                clean[f] = []
+        for f in ["home_xi", "away_xi"]:
+            if f in clean and clean[f] is None:
+                clean[f] = []
         resp = sb.table("matches_raw").upsert(
             clean, on_conflict="match_date,home_team,away_team"
         ).execute()
-        row = resp.data[0] if resp.data else None
-        return True, row
+        return True, (resp.data[0] if resp.data else None)
     except Exception as e:
         return False, str(e)
 
@@ -1452,13 +1586,8 @@ def save_prediction(sb, match_id, result):
         return False, "no client"
     try:
         real_columns = _get_table_columns(sb) or set()
-        clean = {}
-        for k, v in result.items():
-            if k.startswith("_"):
-                continue
-            if real_columns and k not in real_columns:
-                continue
-            clean[k] = v
+        clean = {k: v for k, v in result.items()
+                 if not k.startswith("_") and (not real_columns or k in real_columns)}
         sb.table("matches_raw").update(clean).eq("id", match_id).execute()
         return True, "saved"
     except Exception as e:
@@ -1466,15 +1595,10 @@ def save_prediction(sb, match_id, result):
 
 
 def load_all(sb, timeout_seconds=15):
-    """
-    Per-tab loader. Timeout-wrapped so a slow Supabase never hangs the app.
-    """
     if sb is None:
         return []
-
     def _fetch():
         return sb.table("matches_raw").select("*").order("match_date", desc=True).execute()
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
         fut = ex.submit(_fetch)
         try:
@@ -1491,34 +1615,27 @@ def load_all(sb, timeout_seconds=15):
 def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
     if sb is None:
         return False, "no client"
-
     if hg > ag:
         actual = "Home"
     elif hg < ag:
         actual = "Away"
     else:
         actual = "Draw"
-
     is_correct = None
-    if call_1x2.startswith("NO BET"):
-        is_correct = None
-    elif "Straight Win Home" in call_1x2 and actual == "Home":
-        is_correct = True
-    elif "Straight Win Away" in call_1x2 and actual == "Away":
-        is_correct = True
-    elif "Double Chance 1X" in call_1x2 and actual in ("Home", "Draw"):
-        is_correct = True
-    elif "Double Chance X2" in call_1x2 and actual in ("Away", "Draw"):
-        is_correct = True
-    else:
-        is_correct = False
-
+    if not call_1x2.startswith("NO BET"):
+        if "Straight Win Home" in call_1x2:
+            is_correct = (actual == "Home")
+        elif "Straight Win Away" in call_1x2:
+            is_correct = (actual == "Away")
+        elif "Double Chance 1X" in call_1x2:
+            is_correct = actual in ("Home", "Draw")
+        elif "Double Chance X2" in call_1x2:
+            is_correct = actual in ("Away", "Draw")
     dc_hit = None
     if bet_v4_4 == "DC 1X":
         dc_hit = actual in ("Home", "Draw")
     elif bet_v4_4 == "DC X2":
         dc_hit = actual in ("Away", "Draw")
-
     payload = {
         "actual_home_goals": hg,
         "actual_away_goals": ag,
@@ -1529,7 +1646,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
         payload["dc_hit"] = dc_hit
     if "v4_4_bet" in real_columns and bet_v4_4:
         payload["v4_4_bet"] = bet_v4_4
-
     try:
         sb.table("matches_raw").update(payload).eq("id", match_id).execute()
         return True, "ok"
@@ -1538,9 +1654,8 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
 
 
 # ============================================================================
-# DISPLAY HELPERS
+# Display helpers
 # ============================================================================
-
 def render_tag(label):
     cls = "tag"
     if label.startswith("gap"):
@@ -1555,9 +1670,7 @@ def render_tag(label):
 
 
 def render_tags(tags):
-    if not tags:
-        return ""
-    return "".join(render_tag(t) for t in tags)
+    return "".join(render_tag(t) for t in (tags or []))
 
 
 def render_verdict_v44(result):
@@ -1565,7 +1678,6 @@ def render_verdict_v44(result):
     bet = result.get("v4_4_bet")
     skip_reason = result.get("v4_4_skip_reason")
     tags = result.get("tags", [])
-
     if decision == "BET":
         st.markdown(f"""
         <div class="verdict-bet">
@@ -1631,15 +1743,12 @@ def render_trigger(name, on):
 
 
 # ============================================================================
-# TAG PERFORMANCE
+# Tag performance
 # ============================================================================
-
 def compute_tag_performance(rows):
     from collections import defaultdict
-
     singles = defaultdict(lambda: {"n": 0, "hits": 0})
     pairs = defaultdict(lambda: {"n": 0, "hits": 0})
-
     for r in rows:
         dc_hit = r.get("dc_hit")
         if dc_hit is None:
@@ -1647,19 +1756,16 @@ def compute_tag_performance(rows):
         tags = r.get("tags") or []
         if not tags:
             continue
-
         for t in tags:
             singles[t]["n"] += 1
             if dc_hit:
                 singles[t]["hits"] += 1
-
         for i in range(len(tags)):
             for j in range(i + 1, len(tags)):
                 key = " + ".join(sorted([tags[i], tags[j]]))
                 pairs[key]["n"] += 1
                 if dc_hit:
                     pairs[key]["hits"] += 1
-
     def to_df(d):
         out = []
         for k, v in sorted(d.items(), key=lambda x: -x[1]["n"]):
@@ -1668,21 +1774,26 @@ def compute_tag_performance(rows):
             rate = (h / n * 100) if n else 0
             out.append({"segment": k, "n": n, "hits": h, "rate": f"{rate:.1f}%"})
         return out
-
     return to_df(singles), to_df(pairs)
 
 
 # ============================================================================
-# UI — per-tab loading
+# UI
 # ============================================================================
-
 def main():
     st.title("⚽ v4.4 Tagged Predictor")
     st.caption("Composite rank. DC on leader. Gap ≥ 20. Tags on every pick.")
 
+    # Diagnostics banner — always visible, minimal, no values revealed
+    with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
+        render_diagnostic_banner()
+
     sb, diag = get_supabase()
     if sb is None:
-        st.error(f"Supabase connection failed: {diag.get('error')}")
+        st.error(f"Supabase client could not be created: {diag.get('error')}")
+        st.info("Open the Debug tab below to see exactly what is wrong.")
+        # Still render the Debug tab so the user can inspect
+        render_debug_tab(None)
         return
 
     tabs = st.tabs([
@@ -1691,15 +1802,13 @@ def main():
         "📊 Performance",
         "🏷️ Tag Performance",
         "📋 Spec",
+        "🛠 Debug",
     ])
 
-    # ---------------------------------------------------------------- Parse
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
         st.caption("Parse → v4.4 predict → save with tags.")
-
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
-
         if st.button("⚽ Parse, Predict & Save (v4.4)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
@@ -1710,14 +1819,11 @@ def main():
                     except Exception as e:
                         st.error(f"Parser failed: {e}")
                         return
-
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-
                 with st.spinner("Running v4.4..."):
                     result = predict_v4_4(parsed)
-
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
                     save_ok = False
@@ -1728,7 +1834,6 @@ def main():
                             save_ok, save_msg = save_prediction(sb, match_id, result)
                     else:
                         save_msg = row if isinstance(row, str) else "unknown error"
-
                 st.markdown("---")
                 st.markdown(f"""
                 <div class="team-header">
@@ -1741,23 +1846,19 @@ def main():
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-
                 if ok and save_ok:
                     st.success(f"✅ Saved. Match ID: `{row.get('id')}`")
                 elif ok and not save_ok:
                     st.warning(f"⚠️ Row saved but prediction update failed: {save_msg}")
                 else:
                     st.error(f"❌ Save failed: {save_msg}")
-
                 c1, c2 = st.columns([2, 1])
                 with c1:
                     render_verdict_v44(result)
                 with c2:
                     render_ou_verdict(result)
-
                 st.markdown('<div class="section-title">Tags</div>', unsafe_allow_html=True)
                 st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
-
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
                 render_factor_row("F1 League Momentum", result["f1_home"], result["f1_away"], "(20 pts)")
                 render_factor_row("F2 Current Form (smoothed)", result["f2_home"], result["f2_away"], "(25 pts)")
@@ -1765,70 +1866,58 @@ def main():
                 render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(15 pts)")
                 render_factor_row("F5 H2H Psychology", result["f5_home"], result["f5_away"], "(10 pts)")
                 render_factor_row("F6 Attack Profile", result["f6_home"], result["f6_away"], "(15 pts)")
-
                 st.markdown('<div class="section-title">Modifiers</div>', unsafe_allow_html=True)
                 render_trigger("F1 vs F5 Conflict", result["f1_f5_conflict"])
                 render_trigger("F1 vs F5 Override Applied", result["f1_f5_override"])
                 render_trigger("F1 vs F2/F3 Conflict", result["f1_vs_f2f3_conflict"])
                 render_trigger("Away Collapse", result["away_collapse"])
                 render_trigger("Doubt Starter IN XI", result["doubted_starter"])
-
                 st.info("👉 Enter the final score in the Pending tab after the match.")
 
-    # ------------------------------------------------------------- Pending
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
         with st.spinner("Loading pending matches..."):
             rows = load_all(sb)
-
-        if not rows:
-            st.info("No rows loaded (or Supabase timed out).")
+        pending = [r for r in rows if r.get("actual_home_goals") is None]
+        if not pending:
+            st.success("No pending matches.")
         else:
-            pending = [r for r in rows if r.get("actual_home_goals") is None]
-            if not pending:
-                st.success("No pending matches.")
-            else:
-                st.write(f"**{len(pending)} pending matches**")
-                for r in pending:
-                    match_id = r["id"]
-                    call_v44 = r.get("v4_4_call") or "—"
-                    bet_v44 = r.get("v4_4_bet")
-                    gap = r.get("total_gap", 0) or 0
-                    tags = r.get("tags") or []
-                    header = (
-                        f"{r.get('match_date','')} · "
-                        f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                        f"v4.4: {call_v44} (gap {gap})"
-                    )
-                    with st.expander(header):
-                        st.markdown(render_tags(tags), unsafe_allow_html=True)
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("v4.4 call", call_v44)
-                        c2.metric("Gap", f"{gap:.1f}")
-                        c3.metric("Leader", r.get("f1_leader", "—"))
-                        st.markdown("**Enter actual score:**")
-                        col1, col2, col3 = st.columns([1, 1, 2])
-                        hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
-                        ag = col2.number_input("Away goals", 0, 15, 0, key=f"ag_{match_id}")
-                        if col3.button("📝 Save Result", key=f"save_{match_id}"):
-                            ok, msg = update_audit(
-                                sb, match_id, hg, ag,
-                                r.get("call_1x2") or "",
-                                bet_v4_4=bet_v44,
-                            )
-                            if ok:
-                                st.success("Result recorded.")
-                                st.rerun()
-                            else:
-                                st.error(msg)
+            st.write(f"**{len(pending)} pending matches**")
+            for r in pending:
+                match_id = r["id"]
+                call_v44 = r.get("v4_4_call") or "—"
+                bet_v44 = r.get("v4_4_bet")
+                gap = r.get("total_gap", 0) or 0
+                tags = r.get("tags") or []
+                header = (f"{r.get('match_date','')} · "
+                          f"{r.get('home_team','')} vs {r.get('away_team','')} · "
+                          f"v4.4: {call_v44} (gap {gap})")
+                with st.expander(header):
+                    st.markdown(render_tags(tags), unsafe_allow_html=True)
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("v4.4 call", call_v44)
+                    c2.metric("Gap", f"{gap:.1f}")
+                    c3.metric("Leader", r.get("f1_leader", "—"))
+                    st.markdown("**Enter actual score:**")
+                    col1, col2, col3 = st.columns([1, 1, 2])
+                    hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
+                    ag = col2.number_input("Away goals", 0, 15, 0, key=f"ag_{match_id}")
+                    if col3.button("📝 Save Result", key=f"save_{match_id}"):
+                        ok, msg = update_audit(sb, match_id, hg, ag,
+                                                r.get("call_1x2") or "",
+                                                bet_v4_4=bet_v44)
+                        if ok:
+                            st.success("Result recorded.")
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
-    # --------------------------------------------------------- Performance
     with tabs[2]:
         st.subheader("📊 Performance")
         with st.spinner("Loading performance data..."):
             rows = load_all(sb)
-
-        settled = [r for r in rows if r.get("actual_home_goals") is not None
+        settled = [r for r in rows
+                   if r.get("actual_home_goals") is not None
                    and r.get("actual_away_goals") is not None]
         if not settled:
             st.info("No settled matches yet.")
@@ -1836,14 +1925,12 @@ def main():
             placed = [r for r in settled if r.get("v4_4_bet")]
             dc_hits = [r for r in placed if r.get("dc_hit") is True]
             dc_misses = [r for r in placed if r.get("dc_hit") is False]
-
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Settled", len(settled))
             c2.metric("Bets placed", len(placed))
             hit_rate = (len(dc_hits) / len(placed) * 100) if placed else 0
             c3.metric("DC hits", f"{len(dc_hits)}/{len(placed)} ({hit_rate:.1f}%)")
             c4.metric("Misses", len(dc_misses))
-
             st.markdown('<div class="section-title">All Placed Bets</div>', unsafe_allow_html=True)
             df = pd.DataFrame([{
                 "Date": r.get("match_date"),
@@ -1858,12 +1945,10 @@ def main():
             } for r in placed])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # ------------------------------------------------------- Tag Performance
     with tabs[3]:
         st.subheader("🏷️ Tag Performance")
         with st.spinner("Loading tag data..."):
             rows = load_all(sb)
-
         settled = [r for r in rows if r.get("dc_hit") is not None]
         if not settled:
             st.info("No settled bets with dc_hit recorded yet.")
@@ -1877,31 +1962,27 @@ def main():
             if pairs:
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
-    # ---------------------------------------------------------------- Spec
     with tabs[4]:
         st.subheader("v4.4 Spec")
         st.markdown(f"""
         **Decision layer:**
 
-        - Compute composite leader from f1_home..f6_away
-        - Compute total_gap (raw_gap × shrink)
+        - Composite leader from f1_home..f6_away
         - Skip if `total_gap < {GAP_THRESHOLD}`
         - Skip if `f1_f5_conflict` fires without override
         - Skip if `f1_vs_f2f3_conflict` fires
         - Skip if a top scorer is injured and not in the XI
-        - Otherwise: bet DC on the composite leader
+        - Otherwise bet DC on the leader
 
-        **Market:** DC 1X if leader home, DC X2 if leader away.
+        **Market:** DC 1X if home, DC X2 if away.
 
-        **Tags logged on every bet:**
+        **Tags:** gap_20, home_leader/away_leader, team_disagreement, venue_incomplete.
 
-        - `gap_20` — total_gap ≥ 20
-        - `home_leader` / `away_leader`
-        - `team_disagreement` — any conflict flag fires OR disagreements ≥ 2
-        - `venue_incomplete` — either side has < 4 venue games
-
-        **Do not add any tag-based filter until each tag has 50+ settled picks.**
+        **No tag becomes a filter until it has 50+ settled picks.**
         """)
+
+    with tabs[5]:
+        render_debug_tab(sb)
 
 
 # ============================================================================
