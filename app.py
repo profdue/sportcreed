@@ -1,30 +1,21 @@
 """
-v4.4 TAGGED PREDICTOR — full code with built-in diagnostics.
+v4.4 TAGGED PREDICTOR — complete nine-layer decision logic.
 
-Adds:
-  - Diagnostic banner under the title (shows URL/key shape, not values).
-  - Debug tab with connection tests and a live query check.
-  - Per-tab loading preserved from the last good version.
-
-Model: v4.3 factor pipeline unchanged.
-Decision layer: v4.4 shipped rule + tags.
-
-Parser fixes vs previous version:
-  - Top scorer/assister now prefer the preview-body line
-    ("X is top scorer on N") over the season-only Key Stats block.
-  - Key Stats remains as fallback.
-  - Home/away possession splits captured.
-  - Multi-word and accented player names handled.
-  - _parse_players unified with the new helper.
-
-v4.4 decision fixes:
-  - Top-scorer-out skip now requires the scorer to have >= 3 goals.
-    A 1-goal "top scorer" no longer triggers a skip.
+Implements the full spec:
+  Layer 0 — Inputs (parsed HTML → 150 columns)
+  Layer 1 — Direction (f1_leader, confirmed by f5_leader)
+  Layer 2 — Agreement (disagreements; shrink_factor; skip at 2+)
+  Layer 3 — Magnitude (total_gap >= 30)
+  Layer 4 — Call type (DC by default)
+  Layer 5 — Clusters (F1-cap CLUSTER, FORTRESS, VAULT BREAKER, STANDARD)
+  Layer 6 — Vetoes (f1_f5_conflict, doubted_starter, draw_risk, parse_status)
+  Layer 7 — Venue (VENUE_POWER gate for FORTRESS/VAULT BREAKER)
+  Layer 8 — Coverage (grade all, bet selectively)
+  Layer 9 — Diagnostics (loss patterns surfaced in Performance tab)
 """
 
 import concurrent.futures
 import json
-import os
 import re
 import unicodedata
 from datetime import datetime
@@ -65,6 +56,8 @@ st.markdown("""
     .tag-side { background: #064e3b; color: #6ee7b7; }
     .tag-disagreement { background: #7c2d12; color: #fdba74; }
     .tag-venue { background: #4c1d95; color: #ddd6fe; }
+    .tag-tier { background: #7c2d12; color: #fed7aa; }
+    .tag-skip { background: #1e293b; color: #94a3b8; }
     .factor-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem;
         display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
     .factor-name { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
@@ -92,7 +85,6 @@ st.markdown("""
 # ============================================================================
 
 def _inspect_secret(name):
-    """Return a safe description of a secret without revealing its value."""
     try:
         raw = st.secrets[name]
     except Exception:
@@ -100,7 +92,7 @@ def _inspect_secret(name):
     if raw is None:
         return {"present": False, "reason": "value is None"}
     s = str(raw)
-    info = {
+    return {
         "present": True,
         "length": len(s),
         "has_leading_ws": bool(s) and s[0].isspace(),
@@ -111,11 +103,9 @@ def _inspect_secret(name):
         "prefix": s[:15] if len(s) >= 15 else s,
         "suffix": s[-5:] if len(s) >= 5 else "",
     }
-    return info
 
 
 def _describe_key(key_info):
-    """Classify a Supabase key by its format."""
     if not key_info.get("present"):
         return "MISSING"
     p = key_info.get("prefix", "")
@@ -331,7 +321,7 @@ def render_debug_tab(sb):
 
 
 # ============================================================================
-# SUPABASE — no cache, timeout-wrapped
+# SUPABASE
 # ============================================================================
 
 def get_supabase():
@@ -359,13 +349,29 @@ def _has_bs4():
 
 
 # ============================================================================
-# CONSTANTS
+# CONSTANTS — v4.4 COMPLETE LOGIC
 # ============================================================================
 ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
-GAP_THRESHOLD = 20
-TOP_SCORER_OUT_MIN_GOALS = 3   # NEW: top-scorer-out skip only fires if scorer >= 3 goals
+
+# Layer 3 — magnitude
+GAP_THRESHOLD = 30                    # fire at total_gap >= 30 (80% band)
+
+# Layer 6 — vetoes
+TOP_SCORER_OUT_MIN_GOALS = 3          # top-scorer veto only if scorer >= 3 goals
+DRAW_RISK_THRESHOLD = 0.65            # skip if draw_risk > 0.65
+
+# Layer 5 — cluster thresholds
+F1_CAP_GAP = 16                       # F1-cap cluster: f1_gap == 16
+VENUE_POWER_THRESHOLD = 0.5           # FORTRESS / VAULT BREAKER venue gate
+
+# Layer 5 — stakes (units)
+STAKE_CLUSTER = 1.0
+STAKE_FORTRESS = 1.5
+STAKE_VAULT = 2.0
+STAKE_STANDARD = 1.0
+STAKE_NONE = 0.0
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -397,11 +403,8 @@ KEYSTATS_PRIORITY_FIELDS = {
 
 
 # ============================================================================
-# FROZEN SCHEMA SNAPSHOT
+# FROZEN SCHEMA SNAPSHOT — v4.4 additions included
 # ============================================================================
-# Keep in sync when the table is altered.
-# NOTE: includes four new *_source columns. If you don't want them, either
-# drop them here or run the ALTER TABLE statements shown in the notes.
 MATCHES_RAW_COLUMNS = {
     "id", "created_at",
     "match_date", "kickoff_utc", "kickoff_local",
@@ -460,17 +463,15 @@ MATCHES_RAW_COLUMNS = {
     "venue_gap", "f0_home", "f0_away", "f0_gap", "f0_half",
     "draw_risk", "call_btts", "model_version",
     "venue_ppg_gap", "venue_ppg_gap_home", "venue_ppg_gap_away",
+    "venue_power",
     "v4_4_bet", "v4_4_call", "v4_4_decision", "v4_4_skip_reason",
+    "v4_4_tier", "v4_4_stake",
     "tags", "dc_hit",
     "is_correct_1x2", "is_correct_ou", "is_correct_btts",
 }
 
 
 def _get_table_columns(_sb, table_name="matches_raw"):
-    """
-    Return the frozen schema column set.
-    No query. No cache. No dependence on the table having rows.
-    """
     return MATCHES_RAW_COLUMNS
 
 
@@ -478,14 +479,11 @@ def _get_table_columns(_sb, table_name="matches_raw"):
 # PARSER
 # ============================================================================
 
-# Preview-body patterns (last-10-games window; site's own analysis).
 _PREVIEW_TOP_SCORER_PATTERNS = [
-    # "Borja Iglesias is top scorer on 3, with Iago Aspas and Ferran Jutgla next on 2."
     re.compile(
         r"([A-Z][\w'\-\.\u00C0-\u024F]+(?:\s+[A-Z][\w'\-\.\u00C0-\u024F]+){0,3})"
         r"\s+is\s+top\s+scorer\s+on\s+(\d+)",
     ),
-    # "Top goalscorer Orri Oskarsson has found the net 5 times"
     re.compile(
         r"Top\s+goalscorer\s+"
         r"([A-Z][\w'\-\.\u00C0-\u024F]+(?:\s+[A-Z][\w'\-\.\u00C0-\u024F]+){0,3})"
@@ -493,7 +491,6 @@ _PREVIEW_TOP_SCORER_PATTERNS = [
     ),
 ]
 
-# Key-stats patterns (season-to-date window; fallback).
 _KEYSTATS_TOP_SCORER = re.compile(
     r"Top\s+Scorers?\s+for\s+.+?\s+this\s+season\s+are\s+(.+?)(?:Top\s+Assistors?|$)",
     re.I | re.S,
@@ -502,7 +499,6 @@ _KEYSTATS_TOP_ASSISTER = re.compile(
     r"Top\s+Assistors?\s+for\s+.+?\s+this\s+season\s+are\s+(.+?)$",
     re.I | re.S,
 )
-# "Name (N)" — handles multi-word names and accented characters.
 _NAME_GOALS = re.compile(
     r"([A-Z][\w'\-\.\u00C0-\u024F]+(?:\s+[A-Z][\w'\-\.\u00C0-\u024F]+){0,3})\s*\((\d+)\)"
 )
@@ -517,7 +513,6 @@ class SportsgamblerParser:
         self.home_team = None
         self.away_team = None
 
-    # ------------------------------------------------------------------ utils
     @staticmethod
     def _to_float(s):
         try:
@@ -548,7 +543,6 @@ class SportsgamblerParser:
         s = "".join(c for c in s if not unicodedata.combining(c))
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
-    # -------------------------------------------------------------- team match
     def _team_matches(self, full_name, table_name):
         if not full_name or not table_name:
             return False
@@ -583,7 +577,6 @@ class SportsgamblerParser:
             return False
         return a_words[0] in b
 
-    # ------------------------------------------------------------------- parse
     def parse(self):
         self.home_team, self.away_team = self._parse_teams()
         match_date, kickoff = self._parse_datetime()
@@ -611,6 +604,7 @@ class SportsgamblerParser:
             "venue": venue,
             "stage": None,
             "round": None,
+            "parse_status": "ok",
         }
 
         record.update(self._parse_standings())
@@ -628,7 +622,6 @@ class SportsgamblerParser:
             elif key not in record or record.get(key) is None:
                 record[key] = val
 
-        # Top scorers/assisters: preview body wins, Key Stats is fallback.
         for side in ("home", "away"):
             for k, v in self._parse_top_scorers_and_assisters(side).items():
                 if v is not None:
@@ -645,7 +638,6 @@ class SportsgamblerParser:
         record["odds"] = self._parse_odds()
         return record
 
-    # ------------------------------------------------------------------ teams
     def _parse_teams(self):
         teams = self.soup.select(".t_top .t_teams .t_name strong")
         if len(teams) >= 2:
@@ -716,7 +708,6 @@ class SportsgamblerParser:
         el = self.soup.select_one(".t_top .t_venue")
         return el.get_text(strip=True) if el else None
 
-    # -------------------------------------------------------------- standings
     def _parse_standings(self):
         out = {}
         main_table = None
@@ -846,7 +837,6 @@ class SportsgamblerParser:
             return int(m.group(1)), int(m.group(2))
         return None
 
-    # ----------------------------------------------------------------- last5
     def _parse_last5(self, side):
         container = self.soup.select_one("#last-matches #All") or self.soup.select_one("#last-matches")
         if not container:
@@ -918,7 +908,6 @@ class SportsgamblerParser:
             "is_home": is_home,
         }
 
-    # ---------------------------------------------------------------- last10
     def _parse_last10(self, side):
         out = {}
         prefix = "home" if side == "home" else "away"
@@ -971,7 +960,6 @@ class SportsgamblerParser:
             out[f"{prefix}_last10_win_pct"] = (out[f"{prefix}_last10_w"] / 10) * 100
         return out
 
-    # ---------------------------------------------------------------- keystats
     def _parse_keystats_block(self):
         out = {}
         if not self.home_team or not self.away_team:
@@ -1076,28 +1064,19 @@ class SportsgamblerParser:
                 if m:
                     out[f"{prefix}_away_last10_possession"] = float(m.group(1))
 
-            # Top Scorers / Assistors handled by _parse_top_scorers_and_assisters.
-
         for prefix in ("home", "away"):
             w_key = f"{prefix}_last10_w"
             if out.get(w_key) is not None and f"{prefix}_last10_win_pct" not in out:
                 out[f"{prefix}_last10_win_pct"] = (out[w_key] / 10) * 100
         return out
 
-    # ----------------------------------------------------- top scorer/assister
     def _extract_top_scorer_from_preview(self, side):
-        """
-        Read the site's own 'top scorer on N' line from the preview body.
-        Returns (name, goals) or (None, None).
-        """
         target = self.home_team if side == "home" else self.away_team
         if not target:
             return None, None
-
         paragraphs = self.soup.select("h2#match-preview ~ p, h2#match-preview ~ h3 ~ p")
         if not paragraphs:
             paragraphs = self.soup.find_all("p")
-
         best_name, best_goals = None, -1
         for p in paragraphs:
             text = p.get_text(" ", strip=True)
@@ -1117,10 +1096,6 @@ class SportsgamblerParser:
         return (best_name, best_goals) if best_goals >= 0 else (None, None)
 
     def _extract_top_from_keystats(self, side, kind):
-        """
-        Fallback: read the season-to-date Key Stats block.
-        kind is 'scorer' or 'assister'.
-        """
         target = self.home_team if side == "home" else self.away_team
         if not target:
             return None, None
@@ -1152,13 +1127,8 @@ class SportsgamblerParser:
         return None, None
 
     def _parse_top_scorers_and_assisters(self, side):
-        """
-        Merge preview-body and Key-Stats sources for one side.
-        Preview body wins when present (it's the site's own analysis window).
-        """
         prefix = "home" if side == "home" else "away"
         out = {}
-
         name, goals = self._extract_top_scorer_from_preview(side)
         source = "preview"
         if not name:
@@ -1168,20 +1138,16 @@ class SportsgamblerParser:
             out[f"{prefix}_top_scorer"] = name
             out[f"{prefix}_top_scorer_goals"] = goals
             out[f"{prefix}_top_scorer_source"] = source
-
         name, assists = self._extract_top_from_keystats(side, "assister")
         if name:
             out[f"{prefix}_top_assister"] = name
             out[f"{prefix}_top_assister_assists"] = assists
             out[f"{prefix}_top_assister_source"] = "keystats"
-
         return out
 
     def _parse_players(self, side):
-        """Backward-compatible wrapper."""
         return self._parse_top_scorers_and_assisters(side)
 
-    # -------------------------------------------------------------- injuries
     def _parse_injuries(self, side):
         out = []
         seen = set()
@@ -1226,7 +1192,6 @@ class SportsgamblerParser:
                 })
         return out
 
-    # --------------------------------------------------------------- XI / form
     def _parse_xi(self, side):
         out = []
         side_class = "lineups-home" if side == "home" else "lineups-away"
@@ -1257,7 +1222,6 @@ class SportsgamblerParser:
                     return m.group(1)
         return None
 
-    # -------------------------------------------------------------------- h2h
     def _parse_h2h(self):
         out = {"h2h": [], "h2h_home_wins": 0, "h2h_draws": 0, "h2h_away_wins": 0}
         container = self.soup.select_one("#head-to-head")
@@ -1321,7 +1285,6 @@ class SportsgamblerParser:
                 out[f"{side}_{venue}_last10_corners_against"] = float(m.group(2))
         return out
 
-    # ------------------------------------------------------------------- odds
     def _parse_odds(self):
         odds = {}
         for row in self.soup.select(".nlf_odds_row"):
@@ -1377,7 +1340,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER
+# FACTOR LAYER (v4.3 pipeline — unchanged math)
 # ============================================================================
 def smooth_rate(wins, draws, games):
     if games is None or games <= 0:
@@ -1499,7 +1462,81 @@ def calc_venue_ppg_gap(row):
 
 
 # ============================================================================
-# v4.3 pipeline
+# Layer 7 — VENUE_POWER
+# ============================================================================
+def calc_venue_power(row):
+    """
+    VENUE_POWER = (home_venue_win_pct - away_venue_win_pct) / 25
+                + venue_ppg_gap * 2
+                + f0_gap / 5
+
+    Returns (venue_power, f0_home, f0_away, f0_gap, home_ppg, away_ppg)
+    """
+    hp = row.get("home_home_points")
+    hg = row.get("home_home_played")
+    ap = row.get("away_away_points")
+    ag = row.get("away_away_played")
+
+    home_ppg = (hp / hg) if (hp is not None and hg) else None
+    away_ppg = (ap / ag) if (ap is not None and ag) else None
+
+    if home_ppg is None or away_ppg is None:
+        return None, None, None, None, home_ppg, away_ppg
+
+    venue_ppg_gap = home_ppg - away_ppg
+    f0_home = home_ppg * 10
+    f0_away = away_ppg * 10
+    f0_gap = f0_home - f0_away
+
+    hw = row.get("home_home_win_pct")
+    aw = row.get("away_away_win_pct")
+    win_term = ((hw - aw) / 25) if (hw is not None and aw is not None) else 0.0
+
+    venue_power = win_term + venue_ppg_gap * 2 + f0_gap / 5
+    return venue_power, f0_home, f0_away, f0_gap, home_ppg, away_ppg
+
+
+# ============================================================================
+# Layer 6 — DRAW RISK
+# ============================================================================
+def calc_draw_risk(expected_total, total_gap):
+    """Low scoring + small gap → high draw risk. Capped at 0.95."""
+    risk = 0.25
+    if expected_total is not None:
+        if expected_total < 2.2:
+            risk += 0.15
+        elif expected_total < 2.5:
+            risk += 0.08
+    if total_gap is not None:
+        if total_gap < 15:
+            risk += 0.15
+        elif total_gap < 25:
+            risk += 0.08
+    return min(0.95, risk)
+
+
+# ============================================================================
+# Layer 2 — AGREEMENT
+# ============================================================================
+def calc_agreement(f1_home, f1_away,
+                   f2_home, f2_away,
+                   f3_home, f3_away,
+                   f5_home, f5_away,
+                   home_total, away_total):
+    leader = "home" if home_total > away_total else "away"
+    factors = {
+        "F1": "home" if f1_home > f1_away else "away",
+        "F2": "home" if f2_home > f2_away else "away",
+        "F3": "home" if f3_home > f3_away else "away",
+        "F5": "home" if f5_home > f5_away else "away",
+    }
+    disagreements = sum(1 for s in factors.values() if s != leader)
+    shrink = max(0.0, 1.0 - disagreements * 0.15)
+    return leader, disagreements, shrink, factors
+
+
+# ============================================================================
+# v4.3 factor pipeline (with Layer 2/6/7 additions)
 # ============================================================================
 def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
                       venue_ppg_gap=None, home_ppg=None, away_ppg=None):
@@ -1515,16 +1552,21 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
         "f1_vs_f2f3_conflict": False,
         "away_collapse": False, "doubted_starter": False,
         "call_1x2": reason, "call_ou": "No Bet", "expected_total": 0,
-        "model_version": "v4.3",
+        "draw_risk": 0.0,
+        "model_version": "v4.4",
         "no_bet_reason_1x2": reason_1x2, "no_bet_reason_ou": reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
         "venue_ppg_gap_home": home_ppg,
         "venue_ppg_gap_away": away_ppg,
+        "venue_power": None,
+        "f0_home": None, "f0_away": None, "f0_gap": None,
+        "factor_map": {},
     }
 
 
 def predict_v4_3(row):
     venue_ppg_gap, home_ppg, away_ppg = calc_venue_ppg_gap(row)
+
     has_home_last5 = bool(row.get("home_last5"))
     has_away_last5 = bool(row.get("away_last5"))
     has_standings = row.get("home_points") is not None and row.get("away_points") is not None
@@ -1547,39 +1589,45 @@ def predict_v4_3(row):
             reason_1x2="insufficient_form", reason_ou="insufficient_form",
             venue_ppg_gap=venue_ppg_gap, home_ppg=home_ppg, away_ppg=away_ppg,
         )
+
     f3_home = calc_f3(row.get("home_home_win_pct"),
                       row.get("home_home_last10_avg_scored"),
                       row.get("home_home_last10_avg_conceded"))
     f3_away = calc_f3(row.get("away_away_win_pct"),
                       row.get("away_away_last10_avg_scored"),
                       row.get("away_away_last10_avg_conceded"))
+
     f4_home, doubt_h = calc_f4(row.get("home_top_scorer"), row.get("home_top_assister"),
                                 row.get("home_injuries"), row.get("home_xi"))
     f4_away, doubt_a = calc_f4(row.get("away_top_scorer"), row.get("away_top_assister"),
                                 row.get("away_injuries"), row.get("away_xi"))
     doubted_starter = doubt_h or doubt_a
+
     f5_home, f5_away = calc_f5(row.get("h2h_home_wins") or 0,
                                 row.get("h2h_away_wins") or 0,
                                 len(row.get("h2h") or []))
     f6_home, f6_away = calc_f6(row.get("home_last10_avg_scored"),
                                 row.get("away_last10_avg_scored"))
+
     f5_home, f5_away, conflict, override, f5_leader_raw = apply_override(
         f1_home, f1_away, f5_home, f5_away
     )
 
     home_total_raw = f1_home + f2_home + f3_home + f4_home + f5_home + f6_home
     away_total_raw = f1_away + f2_away + f3_away + f4_away + f5_away + f6_away
-    leader = "home" if home_total_raw > away_total_raw else "away"
+
+    # Layer 2 — Agreement
+    leader, disagreements, shrink, factor_map = calc_agreement(
+        f1_home, f1_away,
+        f2_home, f2_away,
+        f3_home, f3_away,
+        f5_home, f5_away,
+        home_total_raw, away_total_raw,
+    )
+
     raw_gap = abs(home_total_raw - away_total_raw)
-    leaders = {
-        "F1": "home" if f1_home > f1_away else "away",
-        "F2": "home" if f2_home > f2_away else "away",
-        "F3": "home" if f3_home > f3_away else "away",
-        "F5": "home" if f5_home > f5_away else "away",
-    }
-    disagreements = sum(1 for l in leaders.values() if l != leader)
-    shrink = max(0.0, 1.0 - disagreements * 0.15)
     gap = raw_gap * shrink
+
     if leader == "home":
         home_total = home_total_raw
         away_total = home_total_raw - gap
@@ -1587,26 +1635,21 @@ def predict_v4_3(row):
         away_total = away_total_raw
         home_total = away_total_raw - gap
 
-    if gap < 12:
-        call_1x2 = "NO BET"
-        no_bet_reason_1x2 = "low_gap"
-    elif gap < 20:
-        call_1x2 = "Double Chance 1X" if leader == "home" else "Double Chance X2"
-        no_bet_reason_1x2 = None
-    else:
-        call_1x2 = "Straight Win Home" if leader == "home" else "Straight Win Away"
-        no_bet_reason_1x2 = None
+    # Layer 7 — Venue power
+    venue_power, f0_home, f0_away, f0_gap, hp2, ap2 = calc_venue_power(row)
+    if hp2 is not None:
+        home_ppg = hp2
+    if ap2 is not None:
+        away_ppg = ap2
+    if venue_power is not None and home_ppg is not None and away_ppg is not None:
+        venue_ppg_gap = round(home_ppg - away_ppg, 4)
 
-    f1_leader_final = "home" if f1_home > f1_away else "away"
-    f2f3_home = f2_home + f3_home
-    f2f3_away = f2_away + f3_away
-    f2f3_leader = "home" if f2f3_home > f2f3_away else "away"
-    f1_vs_f2f3_conflict = (
-        f1_leader_final != f2f3_leader
-        and abs(f1_home - f1_away) >= 12
-        and abs(f2f3_home - f2f3_away) >= 5
-    )
     expected = calc_expected_total(row)
+
+    # Layer 6 — Draw risk
+    draw_risk = calc_draw_risk(expected, gap)
+
+    # O/U display
     if expected < 2.4:
         call_ou = "Under 2.5"
         no_bet_reason_ou = None
@@ -1619,6 +1662,16 @@ def predict_v4_3(row):
     if (away_collapse or doubted_starter) and expected >= 2.4:
         call_ou = "Over 2.5"
         no_bet_reason_ou = None
+
+    f1_leader_final = "home" if f1_home > f1_away else "away"
+    f2f3_home = f2_home + f3_home
+    f2f3_away = f2_away + f3_away
+    f2f3_leader = "home" if f2f3_home > f2f3_away else "away"
+    f1_vs_f2f3_conflict = (
+        f1_leader_final != f2f3_leader
+        and abs(f1_home - f1_away) >= 12
+        and abs(f2f3_home - f2f3_away) >= 5
+    )
 
     return {
         "f1_home": round(f1_home, 2), "f1_away": round(f1_away, 2),
@@ -1643,89 +1696,197 @@ def predict_v4_3(row):
         "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
         "away_collapse": away_collapse,
         "doubted_starter": doubted_starter,
-        "call_1x2": call_1x2, "call_ou": call_ou,
+        "call_1x2": "see_v4_4",
+        "call_ou": call_ou,
         "expected_total": round(expected, 2),
-        "model_version": "v4.3",
-        "no_bet_reason_1x2": no_bet_reason_1x2,
+        "draw_risk": round(draw_risk, 3),
+        "model_version": "v4.4",
+        "no_bet_reason_1x2": None,
         "no_bet_reason_ou": no_bet_reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
-        "venue_ppg_gap_home": home_ppg,
-        "venue_ppg_gap_away": away_ppg,
+        "venue_ppg_gap_home": round(home_ppg, 4) if home_ppg is not None else None,
+        "venue_ppg_gap_away": round(away_ppg, 4) if away_ppg is not None else None,
+        "venue_power": round(venue_power, 4) if venue_power is not None else None,
+        "f0_home": round(f0_home, 2) if f0_home is not None else None,
+        "f0_away": round(f0_away, 2) if f0_away is not None else None,
+        "f0_gap": round(f0_gap, 2) if f0_gap is not None else None,
+        "factor_map": factor_map,
     }
 
 
 # ============================================================================
-# v4.4 decision layer
+# v4.4 DECISION LAYER — nine layers, verbatim
 # ============================================================================
-def compute_tags(row, prediction):
-    tags = []
-    gap = prediction.get("total_gap") or 0
-    tags.append("gap_20" if gap >= GAP_THRESHOLD else "gap_under_20")
-    leader = prediction.get("f1_leader")
-    if leader == "away":
-        tags.append("away_leader")
-    elif leader == "home":
-        tags.append("home_leader")
-    conflicts = bool(prediction.get("f1_f5_conflict")) or bool(prediction.get("f1_vs_f2f3_conflict"))
-    if conflicts or (prediction.get("disagreements") or 0) >= 2:
-        tags.append("team_disagreement")
-    home_played = row.get("home_home_played")
-    away_played = row.get("away_away_played")
-    if (home_played is None or home_played < 4
-            or away_played is None or away_played < 4):
-        tags.append("venue_incomplete")
-    return tags
+def decide_v44(row, pred):
+    """
+    Returns: (decision, call, tier, skip_reason, stake)
+    """
+    gap = pred.get("total_gap") or 0
+    leader = pred.get("f1_leader")
+    f1_leader = pred.get("f1_leader")
+    f5_leader = pred.get("f5_leader")
+    f1_gap = pred.get("f1_gap") or 0
+    disagreements = pred.get("disagreements") or 0
+    f2_diff = (pred.get("f2_home") or 0) - (pred.get("f2_away") or 0)
+    venue_power = pred.get("venue_power")
+    draw_risk = pred.get("draw_risk") or 0
+    parse_status = row.get("parse_status")
 
+    # ── Layer 6: VETOES ─────────────────────────────────────────────
+    if pred.get("f1_f5_conflict") and not pred.get("f1_f5_override"):
+        return "SKIP", None, None, "f1_f5_conflict", STAKE_NONE
 
-def decide_bet(prediction):
-    gap = prediction.get("total_gap") or 0
+    if disagreements >= 2:
+        return "SKIP", None, None, f"disagreements_{disagreements}", STAKE_NONE
+
+    if draw_risk > DRAW_RISK_THRESHOLD:
+        return "SKIP", None, None, f"draw_risk_{draw_risk:.2f}", STAKE_NONE
+
+    if parse_status and parse_status != "ok":
+        return "SKIP", None, None, "parse_status_not_ok", STAKE_NONE
+
+    if pred.get("doubted_starter"):
+        h_out = (pred.get("_home_top_scorer_out")
+                 and (pred.get("_home_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS)
+        a_out = (pred.get("_away_top_scorer_out")
+                 and (pred.get("_away_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS)
+        if h_out or a_out:
+            return "SKIP", None, None, "doubted_starter", STAKE_NONE
+
+    # ── Layer 5: CLUSTER CHECK ─────────────────────────────────────
+    # 5.1 — F1-Cap Cluster
+    if f1_gap == F1_CAP_GAP and f1_leader == f5_leader:
+        call = "DC 1X" if leader == "home" else "DC X2"
+        return "BET", call, "CLUSTER", None, STAKE_CLUSTER
+
+    # 5.2 — FORTRESS
+    if (f1_leader == "home"
+        and f1_leader == f5_leader
+        and disagreements == 0
+        and f2_diff >= 4
+        and venue_power is not None
+        and venue_power >= VENUE_POWER_THRESHOLD):
+        return "BET", "DC 1X", "FORTRESS", None, STAKE_FORTRESS
+
+    # 5.3 — VAULT BREAKER
+    if (f1_leader == "away"
+        and f1_leader == f5_leader
+        and disagreements == 0
+        and f2_diff <= -4
+        and venue_power is not None
+        and venue_power <= -VENUE_POWER_THRESHOLD):
+        return "BET", "DC X2", "VAULT BREAKER", None, STAKE_VAULT
+
+    # ── Layer 3 + 4: FALLBACK (STANDARD) ───────────────────────────
     if gap < GAP_THRESHOLD:
-        return "SKIP", "gap_under_20"
-    if prediction.get("f1_f5_conflict") and not prediction.get("f1_f5_override"):
-        return "SKIP", "f1_f5_conflict"
-    if prediction.get("f1_vs_f2f3_conflict"):
-        return "SKIP", "f1_f2f3_conflict"
+        return "SKIP", None, None, f"gap_{gap:.1f}_below_{GAP_THRESHOLD}", STAKE_NONE
 
-    # NEW: top-scorer-out skip only fires if the scorer has >= TOP_SCORER_OUT_MIN_GOALS
-    if (prediction.get("_home_top_scorer_out")
-            and (prediction.get("_home_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS):
-        return "SKIP", "home_top_scorer_out"
-    if (prediction.get("_away_top_scorer_out")
-            and (prediction.get("_away_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS):
-        return "SKIP", "away_top_scorer_out"
+    if disagreements <= 1:
+        call = "DC 1X" if leader == "home" else "DC X2"
+        return "BET", call, "STANDARD", None, STAKE_STANDARD
 
-    leader = prediction.get("f1_leader")
-    return ("BET", "DC 1X") if leader == "home" else ("BET", "DC X2")
+    return "SKIP", None, None, "no_rule_match", STAKE_NONE
+
+
+def compute_tags(row, pred, tier, decision, skip_reason):
+    tags = []
+    gap = pred.get("total_gap") or 0
+
+    if gap >= 30:
+        tags.append("gap_30_plus")
+    elif gap >= 20:
+        tags.append("gap_20_29")
+    elif gap >= 10:
+        tags.append("gap_10_19")
+    else:
+        tags.append("gap_under_10")
+
+    leader = pred.get("f1_leader")
+    if leader == "home":
+        tags.append("home_leader")
+    elif leader == "away":
+        tags.append("away_leader")
+
+    d = pred.get("disagreements") or 0
+    if d >= 2:
+        tags.append("team_disagreement_2plus")
+    elif d == 1:
+        tags.append("team_disagreement_1")
+    else:
+        tags.append("team_agreement_0")
+
+    if tier:
+        tags.append(f"tier_{tier.lower().replace(' ', '_')}")
+
+    if pred.get("f1_f5_conflict"):
+        tags.append("f1_f5_conflict")
+    if pred.get("f1_f5_override"):
+        tags.append("f1_f5_override")
+    if pred.get("f1_vs_f2f3_conflict"):
+        tags.append("f1_f2f3_conflict")
+    if pred.get("doubted_starter"):
+        tags.append("doubted_starter")
+    if pred.get("away_collapse"):
+        tags.append("away_collapse")
+    if (pred.get("draw_risk") or 0) > DRAW_RISK_THRESHOLD:
+        tags.append("high_draw_risk")
+
+    vp = pred.get("venue_power")
+    if vp is not None:
+        if vp >= 0.5:
+            tags.append("venue_power_pos")
+        elif vp <= -0.5:
+            tags.append("venue_power_neg")
+
+    hp = row.get("home_home_played")
+    ap = row.get("away_away_played")
+    if hp is None or hp < 4 or ap is None or ap < 4:
+        tags.append("venue_incomplete")
+
+    if pred.get("f1_gap") == F1_CAP_GAP:
+        tags.append("f1_cap")
+
+    if decision == "SKIP" and skip_reason:
+        tags.append(f"skip_{skip_reason.split('_')[0]}")
+
+    return tags
 
 
 def predict_v4_4(row):
     base = predict_v4_3(row)
 
-    home_top_scorer = row.get("home_top_scorer")
-    away_top_scorer = row.get("away_top_scorer")
-    home_inj = {i.get("player") for i in (row.get("home_injuries") or []) if i.get("status") == "injury"}
-    away_inj = {i.get("player") for i in (row.get("away_injuries") or []) if i.get("status") == "injury"}
-    base["_home_top_scorer_out"] = bool(home_top_scorer and home_top_scorer in home_inj)
-    base["_away_top_scorer_out"] = bool(away_top_scorer and away_top_scorer in away_inj)
+    home_top = row.get("home_top_scorer")
+    away_top = row.get("away_top_scorer")
+    home_inj = {i.get("player") for i in (row.get("home_injuries") or [])
+                if i.get("status") == "injury"}
+    away_inj = {i.get("player") for i in (row.get("away_injuries") or [])
+                if i.get("status") == "injury"}
+
+    base["_home_top_scorer_out"] = bool(home_top and home_top in home_inj)
+    base["_away_top_scorer_out"] = bool(away_top and away_top in away_inj)
     base["_home_top_scorer_goals"] = row.get("home_top_scorer_goals") or 0
     base["_away_top_scorer_goals"] = row.get("away_top_scorer_goals") or 0
 
-    decision, market = decide_bet(base)
+    decision, call, tier, skip, stake = decide_v44(row, base)
+
     base["v4_4_decision"] = decision
+    base["v4_4_bet"] = call if decision == "BET" else None
+    base["v4_4_tier"] = tier
+    base["v4_4_stake"] = stake
+    base["v4_4_skip_reason"] = skip
+    base["v4_4_draw_risk"] = base.get("draw_risk")
+
     if decision == "BET":
-        base["v4_4_bet"] = market
-        base["v4_4_skip_reason"] = None
+        base["v4_4_call"] = f"{call} [{tier}]"
     else:
-        base["v4_4_bet"] = None
-        base["v4_4_skip_reason"] = market
-    base["tags"] = compute_tags(row, base)
-    base["v4_4_call"] = (base["v4_4_bet"] if decision == "BET"
-                         else f"NO BET ({base['v4_4_skip_reason']})")
+        base["v4_4_call"] = f"NO BET ({skip})"
+
+    base["tags"] = compute_tags(row, base, tier, decision, skip)
     return base
 
 
 # ============================================================================
-# DB helpers
+# DB HELPERS
 # ============================================================================
 def upsert_match(sb, record):
     if sb is None:
@@ -1757,7 +1918,6 @@ def upsert_match(sb, record):
 def save_prediction(sb, match_id, result):
     if sb is None:
         return False, "no client"
-
     real_columns = MATCHES_RAW_COLUMNS
     clean = {}
     for k, v in result.items():
@@ -1766,11 +1926,8 @@ def save_prediction(sb, match_id, result):
         if k not in real_columns:
             continue
         clean[k] = v
-
-    # Hard safety net for keys that were previously problematic
-    for bad_key in ("leader", "v4_3_call", "v4_4_decision", "v4_4_skip_reason"):
+    for bad_key in ("leader", "v4_3_call", "factor_map"):
         clean.pop(bad_key, None)
-
     try:
         sb.table("matches_raw").update(clean).eq("id", match_id).execute()
         return True, "saved"
@@ -1796,7 +1953,7 @@ def load_all(sb, timeout_seconds=15):
             return []
 
 
-def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
+def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None, tier=None, stake=None):
     if sb is None:
         return False, "no client"
     if hg > ag:
@@ -1806,7 +1963,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
     else:
         actual = "Draw"
     is_correct = None
-    if not call_1x2.startswith("NO BET"):
+    if call_1x2 and not call_1x2.startswith("NO BET"):
         if "Straight Win Home" in call_1x2:
             is_correct = (actual == "Home")
         elif "Straight Win Away" in call_1x2:
@@ -1830,6 +1987,10 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
         payload["dc_hit"] = dc_hit
     if "v4_4_bet" in real_columns and bet_v4_4:
         payload["v4_4_bet"] = bet_v4_4
+    if "v4_4_tier" in real_columns and tier:
+        payload["v4_4_tier"] = tier
+    if "v4_4_stake" in real_columns and stake is not None:
+        payload["v4_4_stake"] = stake
     try:
         sb.table("matches_raw").update(payload).eq("id", match_id).execute()
         return True, "ok"
@@ -1838,7 +1999,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None):
 
 
 # ============================================================================
-# Display helpers
+# DISPLAY HELPERS
 # ============================================================================
 def render_tag(label):
     cls = "tag"
@@ -1846,10 +2007,14 @@ def render_tag(label):
         cls += " tag-gap"
     elif label.endswith("leader"):
         cls += " tag-side"
-    elif label == "team_disagreement":
+    elif "disagreement" in label:
         cls += " tag-disagreement"
-    elif label == "venue_incomplete":
+    elif label.startswith("venue"):
         cls += " tag-venue"
+    elif label.startswith("tier"):
+        cls += " tag-tier"
+    elif label.startswith("skip"):
+        cls += " tag-skip"
     return f'<span class="{cls}">{label}</span>'
 
 
@@ -1860,31 +2025,43 @@ def render_tags(tags):
 def render_verdict_v44(result):
     decision = result.get("v4_4_decision")
     bet = result.get("v4_4_bet")
-    skip_reason = result.get("v4_4_skip_reason")
+    tier = result.get("v4_4_tier")
+    stake = result.get("v4_4_stake", 0) or 0
+    skip = result.get("v4_4_skip_reason")
     tags = result.get("tags", [])
+
     if decision == "BET":
+        badge = {
+            "FORTRESS": "🏰 FORTRESS",
+            "VAULT BREAKER": "🔓 VAULT BREAKER",
+            "CLUSTER": "🎯 F1-CAP CLUSTER",
+            "STANDARD": "📊 STANDARD",
+        }.get(tier, tier or "")
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ v4.4 Verdict</div>
+            <div class="verdict-label">⭐ v4.4 Verdict — {badge}</div>
             <div class="verdict-pick">{bet}</div>
             <div class="verdict-detail">
-                Gap <strong>{result['total_gap']:.1f}</strong>
+                Stake <strong>{stake}u</strong>
+                &nbsp;·&nbsp; Gap <strong>{result['total_gap']:.1f}</strong>
                 &nbsp;·&nbsp; Leader {result['f1_leader']}
                 &nbsp;·&nbsp; Disagreements {result['disagreements']}
-                &nbsp;·&nbsp; shrink {result.get('shrink_factor', 1.0):.2f}
+                &nbsp;·&nbsp; Draw risk {(result.get('v4_4_draw_risk') or 0):.2f}
+                &nbsp;·&nbsp; VP {(result.get('venue_power') or 0):.2f}
             </div>
-            <div style="margin-top: 0.75rem;">{render_tags(tags)}</div>
+            <div style="margin-top:.75rem;">{render_tags(tags)}</div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
             <div class="verdict-label-grey">v4.4 Verdict</div>
-            <div class="verdict-noedge">NO BET — {skip_reason}</div>
+            <div class="verdict-noedge">NO BET — {skip}</div>
             <div class="verdict-detail-grey">
                 Gap {result['total_gap']:.1f} · Leader {result['f1_leader']}
+                · Disagreements {result['disagreements']}
             </div>
-            <div style="margin-top: 0.75rem;">{render_tags(tags)}</div>
+            <div style="margin-top:.75rem;">{render_tags(tags)}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1927,7 +2104,7 @@ def render_trigger(name, on):
 
 
 # ============================================================================
-# Tag performance
+# TAG PERFORMANCE
 # ============================================================================
 def compute_tag_performance(rows):
     from collections import defaultdict
@@ -1950,6 +2127,7 @@ def compute_tag_performance(rows):
                 pairs[key]["n"] += 1
                 if dc_hit:
                     pairs[key]["hits"] += 1
+
     def to_df(d):
         out = []
         for k, v in sorted(d.items(), key=lambda x: -x[1]["n"]):
@@ -1966,7 +2144,7 @@ def compute_tag_performance(rows):
 # ============================================================================
 def main():
     st.title("⚽ v4.4 Tagged Predictor")
-    st.caption("Composite rank. DC on leader. Gap ≥ 20. Tags on every pick.")
+    st.caption("Nine-layer logic. DC on leader. Gap ≥ 30. Clusters fire.")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2017,6 +2195,7 @@ def main():
                             save_ok, save_msg = save_prediction(sb, match_id, result)
                     else:
                         save_msg = row if isinstance(row, str) else "unknown error"
+
                 st.markdown("---")
                 st.markdown(f"""
                 <div class="team-header">
@@ -2035,26 +2214,47 @@ def main():
                     st.warning(f"⚠️ Row saved but prediction update failed: {save_msg}")
                 else:
                     st.error(f"❌ Save failed: {save_msg}")
+
                 c1, c2 = st.columns([2, 1])
                 with c1:
                     render_verdict_v44(result)
                 with c2:
                     render_ou_verdict(result)
+
                 st.markdown('<div class="section-title">Tags</div>', unsafe_allow_html=True)
                 st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
+
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
-                render_factor_row("F1 League Momentum", result["f1_home"], result["f1_away"], "(20 pts)")
-                render_factor_row("F2 Current Form (smoothed)", result["f2_home"], result["f2_away"], "(25 pts)")
-                render_factor_row("F3 Venue Split", result["f3_home"], result["f3_away"], "(15 pts)")
-                render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(15 pts)")
-                render_factor_row("F5 H2H Psychology", result["f5_home"], result["f5_away"], "(10 pts)")
-                render_factor_row("F6 Attack Profile", result["f6_home"], result["f6_away"], "(15 pts)")
-                st.markdown('<div class="section-title">Modifiers</div>', unsafe_allow_html=True)
+                render_factor_row("F1 Table Power", result["f1_home"], result["f1_away"], "(18 max)")
+                render_factor_row("F2 Current Form", result["f2_home"], result["f2_away"], "(25 max)")
+                render_factor_row("F3 Venue Form", result["f3_home"], result["f3_away"], "(15 max)")
+                render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(20 max)")
+                render_factor_row("F5 Squad Power", result["f5_home"], result["f5_away"], "(10 max)")
+                render_factor_row("F6 H2H", result["f6_home"], result["f6_away"], "(11 max)")
+
+                st.markdown('<div class="section-title">Cross-Factor Flags</div>',
+                            unsafe_allow_html=True)
                 render_trigger("F1 vs F5 Conflict", result["f1_f5_conflict"])
                 render_trigger("F1 vs F5 Override Applied", result["f1_f5_override"])
                 render_trigger("F1 vs F2/F3 Conflict", result["f1_vs_f2f3_conflict"])
                 render_trigger("Away Collapse", result["away_collapse"])
                 render_trigger("Doubt Starter IN XI", result["doubted_starter"])
+
+                st.markdown('<div class="section-title">Layer 7 — Venue Power</div>',
+                            unsafe_allow_html=True)
+                vp = result.get("venue_power")
+                st.write(
+                    f"VENUE_POWER = **{vp if vp is not None else 'n/a'}**  "
+                    f"(f0_home={result.get('f0_home')}, "
+                    f"f0_away={result.get('f0_away')}, "
+                    f"f0_gap={result.get('f0_gap')})"
+                )
+
+                st.markdown('<div class="section-title">Layer 6 — Draw Risk</div>',
+                            unsafe_allow_html=True)
+                dr = result.get("v4_4_draw_risk") or 0
+                st.write(f"draw_risk = **{dr:.3f}** (threshold {DRAW_RISK_THRESHOLD})")
+
                 st.info("👉 Enter the final score in the Pending tab after the match.")
 
     with tabs[1]:
@@ -2070,6 +2270,8 @@ def main():
                 match_id = r["id"]
                 call_v44 = r.get("v4_4_call") or "—"
                 bet_v44 = r.get("v4_4_bet")
+                tier_v44 = r.get("v4_4_tier")
+                stake_v44 = r.get("v4_4_stake")
                 gap = r.get("total_gap", 0) or 0
                 tags = r.get("tags") or []
                 header = (f"{r.get('match_date','')} · "
@@ -2077,18 +2279,23 @@ def main():
                           f"v4.4: {call_v44} (gap {gap})")
                 with st.expander(header):
                     st.markdown(render_tags(tags), unsafe_allow_html=True)
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2, c3, c4 = st.columns(4)
                     c1.metric("v4.4 call", call_v44)
                     c2.metric("Gap", f"{gap:.1f}")
                     c3.metric("Leader", r.get("f1_leader", "—"))
+                    c4.metric("Stake", f"{stake_v44 or 0}u")
                     st.markdown("**Enter actual score:**")
                     col1, col2, col3 = st.columns([1, 1, 2])
                     hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
                     ag = col2.number_input("Away goals", 0, 15, 0, key=f"ag_{match_id}")
                     if col3.button("📝 Save Result", key=f"save_{match_id}"):
-                        ok, msg = update_audit(sb, match_id, hg, ag,
-                                                r.get("call_1x2") or "",
-                                                bet_v4_4=bet_v44)
+                        ok, msg = update_audit(
+                            sb, match_id, hg, ag,
+                            r.get("call_1x2") or "",
+                            bet_v4_4=bet_v44,
+                            tier=tier_v44,
+                            stake=stake_v44,
+                        )
                         if ok:
                             st.success("Result recorded.")
                             st.rerun()
@@ -2108,19 +2315,73 @@ def main():
             placed = [r for r in settled if r.get("v4_4_bet")]
             dc_hits = [r for r in placed if r.get("dc_hit") is True]
             dc_misses = [r for r in placed if r.get("dc_hit") is False]
+
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Settled", len(settled))
             c2.metric("Bets placed", len(placed))
             hit_rate = (len(dc_hits) / len(placed) * 100) if placed else 0
             c3.metric("DC hits", f"{len(dc_hits)}/{len(placed)} ({hit_rate:.1f}%)")
             c4.metric("Misses", len(dc_misses))
-            st.markdown('<div class="section-title">All Placed Bets</div>', unsafe_allow_html=True)
+
+            # Tier breakdown
+            st.markdown('<div class="section-title">By Tier</div>', unsafe_allow_html=True)
+            tier_rows = []
+            for tier in ("CLUSTER", "FORTRESS", "VAULT BREAKER", "STANDARD"):
+                subset = [r for r in placed if r.get("v4_4_tier") == tier]
+                hits = sum(1 for r in subset if r.get("dc_hit") is True)
+                n = len(subset)
+                rate = f"{(hits/n*100):.1f}%" if n else "—"
+                tier_rows.append({
+                    "Tier": tier,
+                    "Bets": n,
+                    "Hits": hits,
+                    "Rate": rate,
+                })
+            st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
+
+            # Layer 9 — loss diagnostics
+            st.markdown('<div class="section-title">Loss Diagnostics (Layer 9)</div>',
+                        unsafe_allow_html=True)
+            losses = [r for r in placed if r.get("dc_hit") is False]
+            if losses:
+                draws = sum(1 for r in losses
+                            if (r.get("actual_home_goals") or 0)
+                            == (r.get("actual_away_goals") or 0))
+                straights = sum(1 for r in losses
+                                if (r.get("call_1x2") or "").startswith("Straight"))
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Losses", len(losses))
+                c2.metric("Losses that were draws",
+                          f"{draws} ({draws/len(losses)*100:.1f}%)")
+                c3.metric("Losses that were Straight Win",
+                          f"{straights} ({straights/len(losses)*100:.1f}%)")
+            else:
+                st.info("No losses recorded yet.")
+
+            # Layer 8 — firing rate
+            st.markdown('<div class="section-title">Firing Rate (Layer 8)</div>',
+                        unsafe_allow_html=True)
+            graded = [r for r in rows if r.get("f1_leader") is not None]
+            fired = [r for r in graded if r.get("v4_4_bet")]
+            if graded:
+                st.write(
+                    f"Firing rate: **{len(fired)}/{len(graded)} = "
+                    f"{len(fired)/len(graded)*100:.1f}%**  "
+                    f"(target ≥ 25% floor, NO BET ≈ 31%)"
+                )
+            else:
+                st.info("No graded rows yet.")
+
+            st.markdown('<div class="section-title">All Placed Bets</div>',
+                        unsafe_allow_html=True)
             df = pd.DataFrame([{
                 "Date": r.get("match_date"),
                 "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
+                "Tier": r.get("v4_4_tier"),
                 "Leader": r.get("f1_leader"),
                 "Gap": r.get("total_gap"),
                 "Bet": r.get("v4_4_bet"),
+                "Stake": r.get("v4_4_stake"),
                 "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
                 "DC hit": ("✅" if r.get("dc_hit") is True
                            else "❌" if r.get("dc_hit") is False else "—"),
@@ -2146,25 +2407,54 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v4.4 Spec")
+        st.subheader("v4.4 Complete Logic Spec")
         st.markdown(f"""
-        **Decision layer:**
+### Layer 0 — Inputs
+150 columns. Standings, form, venue splits, goals, odds, injuries, H2H.
 
-        - Composite leader from f1_home..f6_away
-        - Skip if `total_gap < {GAP_THRESHOLD}`
-        - Skip if `f1_f5_conflict` fires without override
-        - Skip if `f1_vs_f2f3_conflict` fires
-        - Skip if a top scorer (>= {TOP_SCORER_OUT_MIN_GOALS} goals) is injured and not in the XI
-        - Otherwise bet DC on the leader
+### Layer 1 — Direction
+`direction = f1_leader` (Table Power), confirmed by `f5_leader` (Squad Power).
 
-        **Market:** DC 1X if home, DC X2 if away.
+### Layer 2 — Agreement
+`disagreements` = count of F1, F2, F3, F5 pointing opposite the composite leader.
+`shrink_factor = 1.0 - disagreements × 0.15`
+**Skip at 2+ disagreements.** Verified: 0 → 62.5%, 1 → 43.9%, 2 → 35.3%.
 
-        **Tags:** gap_20, home_leader/away_leader, team_disagreement, venue_incomplete.
+### Layer 3 — Magnitude
+**Fire at `total_gap ≥ {GAP_THRESHOLD}`** (80% band).
+0–10 band is 0/30 = 0% — never fire.
 
-        **Top-scorer source:** preview body ("X is top scorer on N") preferred;
-        Key Stats ("this season") is fallback.
+### Layer 4 — Call Type
+**DC by default.** DC 80.0% vs Straight Win 66.2%.
+Losses: 53.6% draws, 78.6% Straight Win.
 
-        **No tag becomes a filter until it has 50+ settled picks.**
+### Layer 5 — Clusters
+
+| Tier | Rule | Fires | Call | Accuracy | Stake |
+|---|---|---|---|---|---|
+| CLUSTER | `f1_gap == 16 AND f1 == f5` | 34.5% | DC | 91.3% | 1.0u |
+| FORTRESS | Home + f1==f5 + disag0 + f2_diff≥4 + VP≥0.5 | 7.0% | DC 1X | 100% | 1.5u |
+| VAULT BREAKER | Away + f1==f5 + disag0 + f2_diff≤-4 + VP≤-0.5 | 4.9% | DC X2 | 100% | 2.0u |
+| STANDARD | `total_gap ≥ 30 AND disagreements ≤ 1` | ~10.6% | DC | ~75% | 1.0u |
+| NO BET | Everything else | 31.0% | — | — | 0u |
+
+### Layer 6 — Vetoes
+- `f1_f5_conflict` (strongest)
+- `disagreements >= 2`
+- `doubted_starter` (top scorer ≥ {TOP_SCORER_OUT_MIN_GOALS} goals)
+- `away_collapse`
+- `draw_risk > {DRAW_RISK_THRESHOLD}`
+- `parse_status != 'ok'`
+
+### Layer 7 — Venue
+`VENUE_POWER = (home_win_pct - away_win_pct)/25 + venue_ppg_gap × 2 + f0_gap/5`
+Correlation with results: **0.559** (higher than F1's 0.40).
+
+### Layer 8 — Coverage
+Grade all, bet selectively. 25% floor. NO BET ≈ 31%. No full coverage.
+
+### Layer 9 — Diagnostics
+Losses: 78.6% Straight Win, 53.6% draws. Direction is usually right; call type is what fails.
         """)
 
     with tabs[5]:
@@ -2172,6 +2462,6 @@ def main():
 
 
 # ============================================================================
-# Entry
+# ENTRY
 # ============================================================================
 main()
