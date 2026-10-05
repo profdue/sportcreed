@@ -285,7 +285,6 @@ def render_debug_tab(sb):
         return
     st.success("Supabase client created.")
     try:
-        # Some client versions expose the URL internally
         url_attr = getattr(sb, "supabase_url", None) or getattr(sb, "_url", None)
         if url_attr:
             st.write(f"Client URL attribute: `{url_attr}`")
@@ -310,8 +309,6 @@ def render_debug_tab(sb):
     if st.button("🔎 List matches_raw columns", key="debug_cols"):
         with st.spinner("Querying information_schema..."):
             try:
-                # Supabase's client does not expose information_schema directly.
-                # We fall back to selecting one row and reading its keys.
                 resp = sb.table("matches_raw").select("*").limit(1).execute()
                 if resp.data:
                     cols = sorted(resp.data[0].keys())
@@ -432,6 +429,78 @@ KEYSTATS_PRIORITY_FIELDS = {
     "home_top_assister", "home_top_assister_assists",
     "away_top_assister", "away_top_assister_assists",
 }
+
+
+# ============================================================================
+# FROZEN SCHEMA SNAPSHOT
+# ============================================================================
+# Keep in sync when the table is altered.
+MATCHES_RAW_COLUMNS = {
+    "id", "created_at",
+    "match_date", "kickoff_utc", "kickoff_local",
+    "league_name", "tier", "group_name", "season",
+    "home_team", "away_team", "venue", "stage", "round", "parse_status",
+    "home_pos", "home_played", "home_points", "home_gd", "home_gf", "home_ga",
+    "away_pos", "away_played", "away_points", "away_gd", "away_gf", "away_ga",
+    "home_home_points", "home_home_played", "home_home_win_pct",
+    "home_away_points", "home_away_played",
+    "away_home_points", "away_home_played",
+    "away_away_points", "away_away_played", "away_away_win_pct",
+    "home_last5", "away_last5",
+    "home_last10_w", "home_last10_d", "home_last10_l",
+    "home_last10_avg_scored", "home_last10_avg_conceded",
+    "home_last10_possession", "home_last10_corners_for", "home_last10_corners_against",
+    "home_last10_win_pct", "home_last10_over25", "home_last10_under25",
+    "home_last10_btts_yes", "home_last10_btts_no",
+    "away_last10_w", "away_last10_d", "away_last10_l",
+    "away_last10_avg_scored", "away_last10_avg_conceded",
+    "away_last10_possession", "away_last10_corners_for", "away_last10_corners_against",
+    "away_last10_win_pct", "away_last10_over25", "away_last10_under25",
+    "away_last10_btts_yes", "away_last10_btts_no",
+    "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
+    "home_home_last10_corners_for", "home_home_last10_corners_against",
+    "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
+    "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
+    "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
+    "away_away_last10_corners_for", "away_away_last10_corners_against",
+    "home_top_scorer", "home_top_scorer_goals",
+    "home_top_assister", "home_top_assister_assists",
+    "away_top_scorer", "away_top_scorer_goals",
+    "away_top_assister", "away_top_assister_assists",
+    "home_injuries", "away_injuries", "home_xi", "away_xi",
+    "home_formation", "away_formation",
+    "h2h", "h2h_home_wins", "h2h_draws", "h2h_away_wins",
+    "odds",
+    "actual_home_goals", "actual_away_goals",
+    "actual_possession_home", "actual_xg_home", "actual_xg_away",
+    "actual_corners_home", "actual_corners_away", "actual_total_goals",
+    "f1_home", "f1_away", "f1_gap", "f1_leader",
+    "f2_home", "f2_away",
+    "f3_home", "f3_away",
+    "f4_home", "f4_away",
+    "f5_home", "f5_away", "f5_gap", "f5_leader", "f5_leader_raw",
+    "f6_home", "f6_away",
+    "home_total", "away_total", "raw_gap", "total_gap",
+    "disagreements", "shrink_factor",
+    "f1_f5_conflict", "f1_f5_override", "f1_vs_f2f3_conflict",
+    "away_collapse", "doubted_starter",
+    "call_1x2", "call_ou", "expected_total",
+    "no_bet_reason_1x2", "no_bet_reason_ou", "no_bet_reason",
+    "venue_gap", "f0_home", "f0_away", "f0_gap", "f0_half",
+    "draw_risk", "call_btts", "model_version",
+    "venue_ppg_gap", "venue_ppg_gap_home", "venue_ppg_gap_away",
+    "v4_4_bet", "v4_4_call", "v4_4_decision", "v4_4_skip_reason",
+    "tags", "dc_hit",
+    "is_correct_1x2", "is_correct_ou", "is_correct_btts",
+}
+
+
+def _get_table_columns(_sb, table_name="matches_raw"):
+    """
+    Return the frozen schema column set.
+    No query. No cache. No dependence on the table having rows.
+    """
+    return MATCHES_RAW_COLUMNS
 
 
 # ============================================================================
@@ -1518,7 +1587,7 @@ def decide_bet(prediction):
 
 def predict_v4_4(row):
     base = predict_v4_3(row)
-    base["leader"] = base.get("f1_leader")
+
     home_top_scorer = row.get("home_top_scorer")
     away_top_scorer = row.get("away_top_scorer")
     home_inj = {i.get("player") for i in (row.get("home_injuries") or []) if i.get("status") == "injury"}
@@ -1534,7 +1603,6 @@ def predict_v4_4(row):
         base["v4_4_bet"] = None
         base["v4_4_skip_reason"] = market
     base["tags"] = compute_tags(row, base)
-    base["v4_3_call"] = base.get("call_1x2")
     base["v4_4_call"] = (base["v4_4_bet"] if decision == "BET"
                          else f"NO BET ({base['v4_4_skip_reason']})")
     return base
@@ -1543,17 +1611,6 @@ def predict_v4_4(row):
 # ============================================================================
 # DB helpers
 # ============================================================================
-@st.cache_data(ttl=300, show_spinner=False)
-def _get_table_columns(_sb, table_name="matches_raw"):
-    try:
-        resp = _sb.table(table_name).select("*").limit(1).execute()
-        if resp.data:
-            return set(resp.data[0].keys())
-        return None
-    except Exception:
-        return None
-
-
 def upsert_match(sb, record):
     if sb is None:
         return False, "no client"
@@ -1584,10 +1641,23 @@ def upsert_match(sb, record):
 def save_prediction(sb, match_id, result):
     if sb is None:
         return False, "no client"
+
+    real_columns = MATCHES_RAW_COLUMNS
+    clean = {}
+    for k, v in result.items():
+        # Skip private flags (start with underscore)
+        if k.startswith("_"):
+            continue
+        # Strict filter: only keys that are known columns
+        if k not in real_columns:
+            continue
+        clean[k] = v
+
+    # Hard safety nets for keys that were previously problematic
+    for bad_key in ("leader", "v4_3_call", "v4_4_decision", "v4_4_skip_reason"):
+        clean.pop(bad_key, None)
+
     try:
-        real_columns = _get_table_columns(sb) or set()
-        clean = {k: v for k, v in result.items()
-                 if not k.startswith("_") and (not real_columns or k in real_columns)}
         sb.table("matches_raw").update(clean).eq("id", match_id).execute()
         return True, "saved"
     except Exception as e:
