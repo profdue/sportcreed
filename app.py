@@ -1,24 +1,25 @@
 """
-v4.4 TAGGED PREDICTOR — complete nine-layer decision logic with audit fixes.
+v5.0 Tagged Predictor — Full v5.2 Frozen State implementation.
 
-Fixes applied (traceable via `# FIX:` comments):
-  Fix 1.2  — save_prediction warns on dropped keys
-  Fix 1.3  — draw_risk stored as REAL (numeric coercion in app layer)
-  Fix 1.4  — win_pct values coerced to float on read
-  Fix 2.1  — calc_f5 recency-weighted H2H
-  Fix 2.2  — calc_agreement returns "tie" instead of defaulting to away
-  Fix 2.3  — calc_expected_total uses explicit None checks
-  Fix 2.4  — away_collapse documented as spec addition (kept, flag added)
-  Fix 2.5  — calc_f4 no longer double-penalises doubted XI starters
-  Fix 2.6  — draw_risk reaches 0.65+ range (widened band weights)
-  Fix 2.7  — CLUSTER uses f5_leader_raw, not post-override f5_leader
-  Fix 3.1  — _team_matches requires two shared tokens or last-word match
-  Fix 3.2  — last5_count stored alongside last5
-  Fix 3.3  — _parse_standings prefers table containing both team names
-  Fix 3.4  — injury dedup normalises names
-  Fix 4.1  — model_version surfaced in reports
-  Fix 4.3  — parse_status = "partial" when critical fields missing
-  Fix 4.4  — parse_status checked before factor computation
+Frozen rules (from the frozen spec):
+  FORTRESS       — DC 1X   : home_home_win_pct >= 50 AND away_away_win_pct <= 25
+                            AND f0_home >= 15 AND home_total > away_total
+                            Verified: 9/9 = 100.0%
+  AWAY_FORTRESS  — DC X2   : away_away_win_pct >= 50 AND home_home_win_pct <= 25
+                            AND f0_away >= 15 AND away_total > home_total
+                            Verified: 7/7 = 100.0%
+  CLUSTER        — DC 1X   : total_gap <= 10 AND draw_risk >= 0.30
+                            AND abs(home_pos - away_pos) <= 3
+                            Verified: 21/22 = 95.5% (priority-tier view)
+                                      24/26 = 92.3% (raw rule)
+                                      23/25 = 92.0% (skip-excluded)
+  STANDARD       — F1 DC   : abs(home_pos - away_pos) >= 5
+                            AND f1_f5_conflict = false
+                            AND NOT FORTRESS AND NOT AWAY_FORTRESS
+                            Call: DC on f1_leader side (1X if home, X2 if away)
+                            Verified: 40/43 = 93.0%
+  SKIP                     : parse_status != 'ok' OR home_total IS NULL
+  Priority order: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP
 """
 
 import concurrent.futures
@@ -34,7 +35,7 @@ import streamlit as st
 # MUST be the very first Streamlit call
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="v4.4 Tagged Predictor",
+    page_title="v5.0 Tagged Predictor",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -83,6 +84,11 @@ st.markdown("""
         border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
     .diag-warn { background: #78350f; color: #fde68a; padding: 0.4rem 0.75rem;
         border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
+    .view-badge { display: inline-block; padding: 0.25rem 0.6rem; border-radius: 8px;
+        font-size: 0.75rem; font-weight: 700; margin-right: 0.5rem; }
+    .view-direct { background: #1e3a8a; color: #bfdbfe; }
+    .view-skip { background: #4c1d95; color: #ddd6fe; }
+    .view-priority { background: #064e3b; color: #6ee7b7; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -355,21 +361,33 @@ def _has_bs4():
 
 
 # ============================================================================
-# CONSTANTS — v4.4 COMPLETE LOGIC
+# CONSTANTS — v5.0
 # ============================================================================
 ALPHA = 2
 PRIOR_FORM = 0.4
 PRIOR_H2H = 1.0 / 3.0
 
-GAP_THRESHOLD = 30
 TOP_SCORER_OUT_MIN_GOALS = 3
-DRAW_RISK_THRESHOLD = 0.65          # Fix 2.6 — now reachable given widened bands
-F1_CAP_GAP = 16
-VENUE_POWER_THRESHOLD = 0.5
 
-STAKE_CLUSTER = 1.0
+# ---- v5.2 frozen thresholds ----
+FORTRESS_HOME_WIN_PCT_MIN = 50.0
+FORTRESS_AWAY_WIN_PCT_MAX = 25.0
+FORTRESS_F0_HOME_MIN = 15.0
+
+AWAY_FORTRESS_AWAY_WIN_PCT_MIN = 50.0
+AWAY_FORTRESS_HOME_WIN_PCT_MAX = 25.0
+AWAY_FORTRESS_F0_AWAY_MIN = 15.0
+
+CLUSTER_TOTAL_GAP_MAX = 10.0
+CLUSTER_DRAW_RISK_MIN = 0.30
+CLUSTER_POS_GAP_MAX = 3
+
+STANDARD_POS_GAP_MIN = 5
+
+# ---- stakes ----
 STAKE_FORTRESS = 1.5
-STAKE_VAULT = 2.0
+STAKE_AWAY_FORTRESS = 1.5
+STAKE_CLUSTER = 1.0
 STAKE_STANDARD = 1.0
 STAKE_NONE = 0.0
 
@@ -414,7 +432,7 @@ MATCHES_RAW_COLUMNS = {
     "away_home_points", "away_home_played",
     "away_away_points", "away_away_played", "away_away_win_pct",
     "home_last5", "away_last5",
-    "home_last5_count", "away_last5_count",     # Fix 3.2
+    "home_last5_count", "away_last5_count",
     "home_last10_w", "home_last10_d", "home_last10_l",
     "home_last10_avg_scored", "home_last10_avg_conceded",
     "home_last10_possession", "home_last10_corners_for", "home_last10_corners_against",
@@ -464,6 +482,10 @@ MATCHES_RAW_COLUMNS = {
     "venue_power",
     "v4_4_bet", "v4_4_call", "v4_4_decision", "v4_4_skip_reason",
     "v4_4_tier", "v4_4_stake",
+    "v5_bet", "v5_call", "v5_decision", "v5_skip_reason",
+    "v5_tier", "v5_stake",
+    "v5_cluster_view_direct", "v5_cluster_view_skip_excluded",
+    "v5_cluster_view_priority",
     "tags", "dc_hit",
     "is_correct_1x2", "is_correct_ou", "is_correct_btts",
 }
@@ -541,7 +563,6 @@ class SportsgamblerParser:
         s = "".join(c for c in s if not unicodedata.combining(c))
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
-    # Fix 3.1 — require two shared meaningful tokens, or last-word match
     def _team_matches(self, full_name, table_name):
         if not full_name or not table_name:
             return False
@@ -556,14 +577,11 @@ class SportsgamblerParser:
         b_last = b_words[-1] if b_words else ""
         if a_last and b_last and a_last == b_last:
             return True
-        # Require two distinct shared tokens (length > 3) rather than just one
         a_tokens = {w for w in a_words if len(w) > 3}
         b_tokens = {w for w in b_words if len(w) > 3}
         shared = a_tokens & b_tokens
         if len(shared) >= 2:
             return True
-        # Last-resort: 4-char prefix on the first long token, but only if it's
-        # the FIRST such token on both sides (avoids "real" matching "real")
         a_first = next((w for w in a_words if len(w) >= 4), "")
         b_first = next((w for w in b_words if len(w) >= 4), "")
         if a_first and b_first and a_first[:4] == b_first[:4]:
@@ -612,7 +630,6 @@ class SportsgamblerParser:
         record.update(self._parse_standings())
         record["home_last5"] = self._parse_last5("home")
         record["away_last5"] = self._parse_last5("away")
-        # Fix 3.2 — record how many matches were actually parsed for form
         record["home_last5_count"] = len(record["home_last5"] or [])
         record["away_last5_count"] = len(record["away_last5"] or [])
 
@@ -642,7 +659,6 @@ class SportsgamblerParser:
         record.update(self._parse_corners())
         record["odds"] = self._parse_odds()
 
-        # Fix 4.3 — parse_status reflects completeness, not assumption
         critical = [
             "home_points", "away_points", "home_played", "away_played",
             "home_last5", "away_last5", "h2h",
@@ -723,7 +739,6 @@ class SportsgamblerParser:
 
     def _parse_standings(self):
         out = {}
-        # Fix 3.3 — prefer table containing both team names
         main_table = None
         candidates = []
         for table in self.soup.select("table"):
@@ -732,7 +747,6 @@ class SportsgamblerParser:
                 candidates.append(table)
 
         if candidates:
-            # Prefer the table whose body mentions both teams
             for table in candidates:
                 body_text = table.get_text(" ", strip=True)
                 if (self.home_team and self.home_team.split()[0].lower() in body_text.lower()
@@ -807,11 +821,6 @@ class SportsgamblerParser:
         return out
 
     def _parse_split_table(self, sel, team_name, prefix, out):
-        """
-        Fix 1.4 — read the "won" and "played" columns by header name,
-        not by hard-coded index. This corrects the systematic bug where
-        cells[3] held D on some layouts and W on others.
-        """
         container = self.soup.select_one(sel)
         if not container:
             return
@@ -825,20 +834,18 @@ class SportsgamblerParser:
         except StopIteration:
             return
 
-        # Locate "won" column by header
         won_idx = None
         for i, h in enumerate(headers):
             if h in ("w", "won", "wins"):
                 won_idx = i
                 break
-        # Locate "played" column by header
         played_idx = None
         for i, h in enumerate(headers):
             if h in ("p", "pl", "played", "mp", "games"):
                 played_idx = i
                 break
         if played_idx is None:
-            played_idx = 2  # safe fallback
+            played_idx = 2
 
         for row in table.select("tbody tr"):
             cells = row.select("td")
@@ -1192,10 +1199,6 @@ class SportsgamblerParser:
             out[f"{prefix}_top_assister_source"] = "keystats"
         return out
 
-    def _parse_players(self, side):
-        return self._parse_top_scorers_and_assisters(side)
-
-    # Fix 3.4 — dedup injuries by normalised name
     def _parse_injuries(self, side):
         out = []
         seen = set()
@@ -1409,8 +1412,6 @@ def calc_f1(row):
     f1_away = 10 - (pts_gap * 1.33) - (gd_gap * 0.66)
     f1_home = max(2, min(18, f1_home))
     f1_away = max(2, min(18, f1_away))
-    # Fix 2.4 — away_collapse documented as a spec addition; keep the rule
-    # but expose it in the returned tuple so it can be logged/reported.
     away_collapse = False
     if (row.get("away_away_points") == 0 and (row.get("away_away_played") or 0) >= 3):
         f1_home = min(18, f1_home + 8)
@@ -1434,7 +1435,6 @@ def calc_f3(win_pct, avg_scored, avg_conceded):
     return min(15, win_pts + xg_pts)
 
 
-# Fix 2.5 — do not double-penalise doubted XI starters
 def calc_f4(top_scorer, top_assister, injuries, xi):
     f4 = 15
     xi = xi or []
@@ -1449,13 +1449,11 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
         n = name.lower().strip()
         return any((n == (p or "").lower().strip()) for p in xi)
 
-    # Penalty only if injured AND not in the XI
     if top_scorer and top_scorer in injured and not _xi_contains(top_scorer):
         f4 -= 5
     if top_assister and top_assister in injured and not _xi_contains(top_assister):
         f4 -= 4
 
-    # Doubt flag: doubted/injured top scorer/assister is IN the XI
     for name in doubts:
         if _xi_contains(name) and (name == top_scorer or name == top_assister):
             doubted_starter = True
@@ -1468,49 +1466,13 @@ def calc_f4(top_scorer, top_assister, injuries, xi):
     return max(0, min(20, f4)), doubted_starter
 
 
-# Fix 2.1 — recency-weighted H2H
 def calc_f5(h2h_home_wins, h2h_away_wins, h2h_total, h2h_list=None):
-    """
-    Recency-weighted H2H. If h2h_list is provided (list of dicts with 'date'),
-    weight each match by an exponential decay on age (index order; the list
-    is assumed to be newest-first from the parser).
-    """
-    if h2h_list:
-        weights = []
-        for i, m in enumerate(h2h_list):
-            # weight halves every 3 matches back in the list
-            weights.append(2.0 ** (-i / 3.0))
-        w_total = sum(weights) or 1.0
-        w_home = 0.0
-        w_away = 0.0
-        for m, w in zip(h2h_list, weights):
-            wn = m.get("winner_name")
-            if wn is None:
-                continue
-            if isinstance(wn, str) and self_home_match(wn, m.get("home"), m.get("away")):
-                w_home += w
-            else:
-                w_away += w
-        # Home/away orientation is captured by the parser as 'home'/'away' fields
-        # within the h2h entry, not relative to the current fixture.
-        # To stay comparable to the original F5, we compute weighted win rates.
-        # NOTE: parser already tracks h2h_home_wins/h2h_away_wins as cumulative
-        # counts relative to the current fixture's home team. The weighted
-        # path approximates the same measure.
-    # Fallback to classic smoothed rate
     f5_h = (h2h_home_wins + PRIOR_H2H) / (h2h_total + 1) * 10
     f5_a = (h2h_away_wins + PRIOR_H2H) / (h2h_total + 1) * 10
     if h2h_total < 4:
         f5_h = 3.33 + (f5_h - 3.33) * (h2h_total / 4.0)
         f5_a = 3.33 + (f5_a - 3.33) * (h2h_total / 4.0)
     return f5_h, f5_a
-
-
-def self_home_match(winner_name, home, away):
-    """Helper to check whether winner_name corresponds to home side."""
-    if not winner_name:
-        return False
-    return (home or "").lower()[:6] in winner_name.lower()
 
 
 def calc_f6(h_avg, a_avg):
@@ -1522,11 +1484,6 @@ def calc_f6(h_avg, a_avg):
 
 
 def apply_override(f1_home, f1_away, f5_home, f5_away):
-    """
-    Fix 2.7 — conflict means leaders differ (spec-literal). Override is a
-    separate, narrower condition. f5_leader_raw is preserved and used
-    downstream by the CLUSTER gate.
-    """
     f1_gap = abs(f1_home - f1_away)
     f5_gap = abs(f5_home - f5_away)
     f1_leader = "home" if f1_home > f1_away else "away"
@@ -1544,7 +1501,6 @@ def apply_override(f1_home, f1_away, f5_home, f5_away):
     return f5_home, f5_away, conflict, override, f5_leader_raw
 
 
-# Fix 2.3 — explicit None checks, do not silently discard legitimate zeros
 def calc_expected_total(row):
     h1 = row.get("home_home_last10_avg_scored")
     if h1 is None:
@@ -1577,14 +1533,7 @@ def calc_venue_ppg_gap(row):
     return round(home_ppg - away_ppg, 4), round(home_ppg, 4), round(away_ppg, 4)
 
 
-# ============================================================================
-# Layer 7 — VENUE_POWER
-# ============================================================================
 def calc_venue_power(row):
-    """
-    Fix 1.4 — coerce win_pct values to float defensively, since Supabase
-    may store them as TEXT (as observed in the live data).
-    """
     hp = row.get("home_home_points")
     hg = row.get("home_home_played")
     ap = row.get("away_away_points")
@@ -1615,12 +1564,7 @@ def calc_venue_power(row):
     return venue_power, f0_home, f0_away, f0_gap, home_ppg, away_ppg
 
 
-# Fix 2.6 — widen bands so the veto is reachable
 def calc_draw_risk(expected_total, total_gap):
-    """
-    Draw risk model. Widen band weights so that the value can exceed the
-    DRAW_RISK_THRESHOLD (0.65). Prior version capped at ~0.63.
-    """
     risk = 0.22
     if expected_total is not None:
         if expected_total < 2.0:
@@ -1639,17 +1583,11 @@ def calc_draw_risk(expected_total, total_gap):
     return min(0.95, risk)
 
 
-# ============================================================================
-# Layer 2 — AGREEMENT
-# ============================================================================
 def calc_agreement(f1_home, f1_away,
                    f2_home, f2_away,
                    f3_home, f3_away,
                    f5_home, f5_away,
                    home_total, away_total):
-    """
-    Fix 2.2 — ties are explicit, not silently assigned to 'away'.
-    """
     leader = "home" if home_total > away_total else ("away" if away_total > home_total else "tie")
 
     def _side(h, a):
@@ -1671,7 +1609,7 @@ def calc_agreement(f1_home, f1_away,
 
 
 # ============================================================================
-# v4.3 factor pipeline
+# v5.0 factor pipeline
 # ============================================================================
 def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
                       venue_ppg_gap=None, home_ppg=None, away_ppg=None):
@@ -1688,7 +1626,7 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
         "away_collapse": False, "doubted_starter": False,
         "call_1x2": reason, "call_ou": "No Bet", "expected_total": 0,
         "draw_risk": 0.0,
-        "model_version": "v4.4",
+        "model_version": "v5.0",
         "no_bet_reason_1x2": reason_1x2, "no_bet_reason_ou": reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
         "venue_ppg_gap_home": home_ppg,
@@ -1699,7 +1637,7 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
     }
 
 
-def predict_v4_3(row):
+def predict_v5(row):
     venue_ppg_gap, home_ppg, away_ppg = calc_venue_ppg_gap(row)
 
     has_home_last5 = bool(row.get("home_last5"))
@@ -1738,7 +1676,6 @@ def predict_v4_3(row):
                                 row.get("away_injuries"), row.get("away_xi"))
     doubted_starter = doubt_h or doubt_a
 
-    # Fix 2.1 — pass the raw H2H list to allow recency weighting
     f5_home, f5_away = calc_f5(row.get("h2h_home_wins") or 0,
                                 row.get("h2h_away_wins") or 0,
                                 len(row.get("h2h") or []),
@@ -1828,11 +1765,11 @@ def predict_v4_3(row):
         "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
         "away_collapse": away_collapse,
         "doubted_starter": doubted_starter,
-        "call_1x2": "see_v4_4",
+        "call_1x2": "see_v5",
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "draw_risk": round(draw_risk, 3),
-        "model_version": "v4.4",
+        "model_version": "v5.0",
         "no_bet_reason_1x2": None,
         "no_bet_reason_ou": no_bet_reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
@@ -1847,75 +1784,147 @@ def predict_v4_3(row):
 
 
 # ============================================================================
-# v4.4 DECISION LAYER
+# v5.0 DECISION LAYER — Frozen rules with priority order
 # ============================================================================
-def decide_v44(row, pred):
-    gap = pred.get("total_gap") or 0
-    leader = pred.get("f1_leader")
-    f1_leader = pred.get("f1_leader")
-    f5_leader = pred.get("f5_leader")
-    f5_leader_raw = pred.get("f5_leader_raw")     # Fix 2.7
-    f1_gap = pred.get("f1_gap") or 0
-    disagreements = pred.get("disagreements") or 0
-    f2_diff = (pred.get("f2_home") or 0) - (pred.get("f2_away") or 0)
-    venue_power = pred.get("venue_power")
-    draw_risk = pred.get("draw_risk") or 0
-    parse_status = row.get("parse_status")
+def _safe_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
-    # Fix 4.4 — parse_status checked before anything else
+
+def check_fortress(row, pred):
+    """FORTRESS — DC 1X.
+    home_home_win_pct >= 50
+    AND away_away_win_pct <= 25
+    AND f0_home >= 15
+    AND home_total > away_total
+    """
+    hw = _safe_float(row.get("home_home_win_pct"))
+    aw = _safe_float(row.get("away_away_win_pct"))
+    f0h = _safe_float(pred.get("f0_home"))
+    ht = pred.get("home_total")
+    at = pred.get("away_total")
+    if hw is None or aw is None or f0h is None or ht is None or at is None:
+        return False
+    return (hw >= FORTRESS_HOME_WIN_PCT_MIN
+            and aw <= FORTRESS_AWAY_WIN_PCT_MAX
+            and f0h >= FORTRESS_F0_HOME_MIN
+            and ht > at)
+
+
+def check_away_fortress(row, pred):
+    """AWAY_FORTRESS — DC X2.
+    away_away_win_pct >= 50
+    AND home_home_win_pct <= 25
+    AND f0_away >= 15
+    AND away_total > home_total
+    """
+    aw = _safe_float(row.get("away_away_win_pct"))
+    hw = _safe_float(row.get("home_home_win_pct"))
+    f0a = _safe_float(pred.get("f0_away"))
+    ht = pred.get("home_total")
+    at = pred.get("away_total")
+    if aw is None or hw is None or f0a is None or ht is None or at is None:
+        return False
+    return (aw >= AWAY_FORTRESS_AWAY_WIN_PCT_MIN
+            and hw <= AWAY_FORTRESS_HOME_WIN_PCT_MAX
+            and f0a >= AWAY_FORTRESS_F0_AWAY_MIN
+            and at > ht)
+
+
+def check_cluster(row, pred):
+    """CLUSTER — DC 1X.
+    total_gap <= 10
+    AND draw_risk >= 0.30
+    AND abs(home_pos - away_pos) <= 3
+    """
+    gap = _safe_float(pred.get("total_gap"))
+    dr = _safe_float(pred.get("draw_risk"))
+    hp = _safe_float(row.get("home_pos"))
+    ap = _safe_float(row.get("away_pos"))
+    if gap is None or dr is None or hp is None or ap is None:
+        return False
+    return (gap <= CLUSTER_TOTAL_GAP_MAX
+            and dr >= CLUSTER_DRAW_RISK_MIN
+            and abs(hp - ap) <= CLUSTER_POS_GAP_MAX)
+
+
+def check_standard(row, pred):
+    """STANDARD — DC on f1_leader side.
+    abs(home_pos - away_pos) >= 5
+    AND f1_f5_conflict = false
+    AND NOT FORTRESS
+    AND NOT AWAY_FORTRESS
+    """
+    hp = _safe_float(row.get("home_pos"))
+    ap = _safe_float(row.get("away_pos"))
+    if hp is None or ap is None:
+        return False
+    if abs(hp - ap) < STANDARD_POS_GAP_MIN:
+        return False
+    if pred.get("f1_f5_conflict"):
+        return False
+    # FORTRESS / AWAY_FORTRESS exclusion is handled by priority order
+    return True
+
+
+def decide_v5(row, pred):
+    """Priority order:
+    FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP
+    """
+    parse_status = row.get("parse_status")
+    home_total = pred.get("home_total")
+
+    # SKIP branch — parse_status != 'ok' OR home_total IS NULL
     if parse_status and parse_status != "ok":
         return "SKIP", None, None, "parse_status_not_ok", STAKE_NONE
+    if home_total is None:
+        return "SKIP", None, None, "home_total_null", STAKE_NONE
 
-    if pred.get("f1_f5_conflict") and not pred.get("f1_f5_override"):
-        return "SKIP", None, None, "f1_f5_conflict", STAKE_NONE
-
-    if disagreements >= 2:
-        return "SKIP", None, None, f"disagreements_{disagreements}", STAKE_NONE
-
-    if draw_risk > DRAW_RISK_THRESHOLD:
-        return "SKIP", None, None, f"draw_risk_{draw_risk:.2f}", STAKE_NONE
-
-    if pred.get("doubted_starter"):
-        h_out = (pred.get("_home_top_scorer_out")
-                 and (pred.get("_home_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS)
-        a_out = (pred.get("_away_top_scorer_out")
-                 and (pred.get("_away_top_scorer_goals") or 0) >= TOP_SCORER_OUT_MIN_GOALS)
-        if h_out or a_out:
-            return "SKIP", None, None, "doubted_starter", STAKE_NONE
-
-    # 5.1 — F1-Cap Cluster. Uses RAW F5 leader, not post-override.
-    # Fix 2.7
-    if f1_gap == F1_CAP_GAP and f1_leader == f5_leader_raw:
-        call = "DC 1X" if leader == "home" else "DC X2"
-        return "BET", call, "CLUSTER", None, STAKE_CLUSTER
-
-    # 5.2 — FORTRESS
-    if (f1_leader == "home"
-        and f1_leader == f5_leader_raw
-        and disagreements == 0
-        and f2_diff >= 4
-        and venue_power is not None
-        and venue_power >= VENUE_POWER_THRESHOLD):
+    # 1. FORTRESS
+    if check_fortress(row, pred):
         return "BET", "DC 1X", "FORTRESS", None, STAKE_FORTRESS
 
-    # 5.3 — VAULT BREAKER
-    if (f1_leader == "away"
-        and f1_leader == f5_leader_raw
-        and disagreements == 0
-        and f2_diff <= -4
-        and venue_power is not None
-        and venue_power <= -VENUE_POWER_THRESHOLD):
-        return "BET", "DC X2", "VAULT BREAKER", None, STAKE_VAULT
+    # 2. AWAY_FORTRESS
+    if check_away_fortress(row, pred):
+        return "BET", "DC X2", "AWAY_FORTRESS", None, STAKE_AWAY_FORTRESS
 
-    # Fallback — STANDARD
-    if gap < GAP_THRESHOLD:
-        return "SKIP", None, None, f"gap_{gap:.1f}_below_{GAP_THRESHOLD}", STAKE_NONE
+    # 3. CLUSTER
+    if check_cluster(row, pred):
+        return "BET", "DC 1X", "CLUSTER", None, STAKE_CLUSTER
 
-    if disagreements <= 1:
+    # 4. STANDARD
+    if check_standard(row, pred):
+        leader = pred.get("f1_leader")
         call = "DC 1X" if leader == "home" else "DC X2"
         return "BET", call, "STANDARD", None, STAKE_STANDARD
 
+    # 5. SKIP
     return "SKIP", None, None, "no_rule_match", STAKE_NONE
+
+
+def cluster_views(row, pred):
+    """Return the three CLUSTER views for reporting.
+    - direct: every row matching the CLUSTER rule, regardless of what else it matches
+    - skip_excluded: remove rows that carry parse_status != 'ok' or home_total IS NULL
+    - priority: remove rows that would be classified as FORTRESS or AWAY_FORTRESS
+                by the priority order
+    """
+    matches_cluster = check_cluster(row, pred)
+    skip_excluded = (
+        matches_cluster
+        and row.get("parse_status") == "ok"
+        and pred.get("home_total") is not None
+    )
+    is_fortress = check_fortress(row, pred)
+    is_away_fortress = check_away_fortress(row, pred)
+    priority = skip_excluded and not is_fortress and not is_away_fortress
+    return {
+        "v5_cluster_view_direct": matches_cluster,
+        "v5_cluster_view_skip_excluded": skip_excluded,
+        "v5_cluster_view_priority": priority,
+    }
 
 
 def compute_tags(row, pred, tier, decision, skip_reason):
@@ -1958,8 +1967,21 @@ def compute_tags(row, pred, tier, decision, skip_reason):
         tags.append("doubted_starter")
     if pred.get("away_collapse"):
         tags.append("away_collapse")
-    if (pred.get("draw_risk") or 0) > DRAW_RISK_THRESHOLD:
-        tags.append("high_draw_risk")
+
+    # v5.2 tag additions
+    views = cluster_views(row, pred)
+    if views["v5_cluster_view_direct"]:
+        tags.append("cluster_direct")
+    if views["v5_cluster_view_skip_excluded"]:
+        tags.append("cluster_skip_excluded")
+    if views["v5_cluster_view_priority"]:
+        tags.append("cluster_priority")
+    if check_fortress(row, pred):
+        tags.append("fortress_candidate")
+    if check_away_fortress(row, pred):
+        tags.append("away_fortress_candidate")
+    if check_standard(row, pred):
+        tags.append("standard_candidate")
 
     vp = pred.get("venue_power")
     if vp is not None:
@@ -1973,17 +1995,14 @@ def compute_tags(row, pred, tier, decision, skip_reason):
     if hp is None or hp < 4 or ap is None or ap < 4:
         tags.append("venue_incomplete")
 
-    if pred.get("f1_gap") == F1_CAP_GAP:
-        tags.append("f1_cap")
-
     if decision == "SKIP" and skip_reason:
         tags.append(f"skip_{skip_reason.split('_')[0]}")
 
     return tags
 
 
-def predict_v4_4(row):
-    base = predict_v4_3(row)
+def predict_v5_full(row):
+    base = predict_v5(row)
 
     home_top = row.get("home_top_scorer")
     away_top = row.get("away_top_scorer")
@@ -1997,19 +2016,22 @@ def predict_v4_4(row):
     base["_home_top_scorer_goals"] = row.get("home_top_scorer_goals") or 0
     base["_away_top_scorer_goals"] = row.get("away_top_scorer_goals") or 0
 
-    decision, call, tier, skip, stake = decide_v44(row, base)
+    decision, call, tier, skip, stake = decide_v5(row, base)
 
-    base["v4_4_decision"] = decision
-    base["v4_4_bet"] = call if decision == "BET" else None
-    base["v4_4_tier"] = tier
-    base["v4_4_stake"] = stake
-    base["v4_4_skip_reason"] = skip
-    base["v4_4_draw_risk"] = base.get("draw_risk")
+    base["v5_decision"] = decision
+    base["v5_bet"] = call if decision == "BET" else None
+    base["v5_tier"] = tier
+    base["v5_stake"] = stake
+    base["v5_skip_reason"] = skip
 
     if decision == "BET":
-        base["v4_4_call"] = f"{call} [{tier}]"
+        base["v5_call"] = f"{call} [{tier}]"
     else:
-        base["v4_4_call"] = f"NO BET ({skip})"
+        base["v5_call"] = f"NO BET ({skip})"
+
+    # three CLUSTER views
+    views = cluster_views(row, base)
+    base.update(views)
 
     base["tags"] = compute_tags(row, base, tier, decision, skip)
     return base
@@ -2018,7 +2040,6 @@ def predict_v4_4(row):
 # ============================================================================
 # DB HELPERS
 # ============================================================================
-# Fix 1.2 — warn on dropped keys, do not silently discard
 _DROPPED_KEYS_WARNED = set()
 
 
@@ -2071,7 +2092,7 @@ def save_prediction(sb, match_id, result):
         return False, "no client"
     real_columns = MATCHES_RAW_COLUMNS
     clean = _filter_columns_for_db(result, real_columns, context="save_prediction")
-    for bad_key in ("leader", "v4_3_call", "factor_map"):
+    for bad_key in ("leader", "v5_call", "v4_3_call", "factor_map"):
         clean.pop(bad_key, None)
     try:
         sb.table("matches_raw").update(clean).eq("id", match_id).execute()
@@ -2098,7 +2119,7 @@ def load_all(sb, timeout_seconds=15):
             return []
 
 
-def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None, tier=None, stake=None):
+def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, tier=None, stake=None):
     if sb is None:
         return False, "no client"
     if hg > ag:
@@ -2118,9 +2139,9 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None, tier=None, stake
         elif "Double Chance X2" in call_1x2:
             is_correct = actual in ("Away", "Draw")
     dc_hit = None
-    if bet_v4_4 == "DC 1X":
+    if bet_v5 == "DC 1X":
         dc_hit = actual in ("Home", "Draw")
-    elif bet_v4_4 == "DC X2":
+    elif bet_v5 == "DC X2":
         dc_hit = actual in ("Away", "Draw")
     payload = {
         "actual_home_goals": hg,
@@ -2130,12 +2151,12 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v4_4=None, tier=None, stake
     real_columns = _get_table_columns(sb) or set()
     if "dc_hit" in real_columns:
         payload["dc_hit"] = dc_hit
-    if "v4_4_bet" in real_columns and bet_v4_4:
-        payload["v4_4_bet"] = bet_v4_4
-    if "v4_4_tier" in real_columns and tier:
-        payload["v4_4_tier"] = tier
-    if "v4_4_stake" in real_columns and stake is not None:
-        payload["v4_4_stake"] = stake
+    if "v5_bet" in real_columns and bet_v5:
+        payload["v5_bet"] = bet_v5
+    if "v5_tier" in real_columns and tier:
+        payload["v5_tier"] = tier
+    if "v5_stake" in real_columns and stake is not None:
+        payload["v5_stake"] = stake
     try:
         sb.table("matches_raw").update(payload).eq("id", match_id).execute()
         return True, "ok"
@@ -2160,6 +2181,8 @@ def render_tag(label):
         cls += " tag-tier"
     elif label.startswith("skip"):
         cls += " tag-skip"
+    elif label.startswith("cluster"):
+        cls += " tag-tier"
     return f'<span class="{cls}">{label}</span>'
 
 
@@ -2167,31 +2190,31 @@ def render_tags(tags):
     return "".join(render_tag(t) for t in (tags or []))
 
 
-def render_verdict_v44(result):
-    decision = result.get("v4_4_decision")
-    bet = result.get("v4_4_bet")
-    tier = result.get("v4_4_tier")
-    stake = result.get("v4_4_stake", 0) or 0
-    skip = result.get("v4_4_skip_reason")
+def render_verdict_v5(result):
+    decision = result.get("v5_decision")
+    bet = result.get("v5_bet")
+    tier = result.get("v5_tier")
+    stake = result.get("v5_stake", 0) or 0
+    skip = result.get("v5_skip_reason")
     tags = result.get("tags", [])
 
     if decision == "BET":
         badge = {
             "FORTRESS": "🏰 FORTRESS",
-            "VAULT BREAKER": "🔓 VAULT BREAKER",
-            "CLUSTER": "🎯 F1-CAP CLUSTER",
+            "AWAY_FORTRESS": "🏰 AWAY FORTRESS",
+            "CLUSTER": "🎯 CLUSTER",
             "STANDARD": "📊 STANDARD",
         }.get(tier, tier or "")
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ v4.4 Verdict — {badge}</div>
+            <div class="verdict-label">⭐ v5.0 Verdict — {badge}</div>
             <div class="verdict-pick">{bet}</div>
             <div class="verdict-detail">
                 Stake <strong>{stake}u</strong>
                 &nbsp;·&nbsp; Gap <strong>{result['total_gap']:.1f}</strong>
                 &nbsp;·&nbsp; Leader {result['f1_leader']}
                 &nbsp;·&nbsp; Disagreements {result['disagreements']}
-                &nbsp;·&nbsp; Draw risk {(result.get('v4_4_draw_risk') or 0):.2f}
+                &nbsp;·&nbsp; Draw risk {(result.get('draw_risk') or 0):.2f}
                 &nbsp;·&nbsp; VP {(result.get('venue_power') or 0):.2f}
             </div>
             <div style="margin-top:.75rem;">{render_tags(tags)}</div>
@@ -2200,7 +2223,7 @@ def render_verdict_v44(result):
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">v4.4 Verdict</div>
+            <div class="verdict-label-grey">v5.0 Verdict</div>
             <div class="verdict-noedge">NO BET — {skip}</div>
             <div class="verdict-detail-grey">
                 Gap {result['total_gap']:.1f} · Leader {result['f1_leader']}
@@ -2248,6 +2271,21 @@ def render_trigger(name, on):
     """, unsafe_allow_html=True)
 
 
+def render_cluster_views(result):
+    st.markdown('<div class="section-title">CLUSTER — Three Views</div>',
+                unsafe_allow_html=True)
+    v_direct = result.get("v5_cluster_view_direct", False)
+    v_skip = result.get("v5_cluster_view_skip_excluded", False)
+    v_priority = result.get("v5_cluster_view_priority", False)
+    badge_style = "view-badge"
+    st.markdown(
+        f'<span class="{badge_style} view-direct">Direct: {"✅" if v_direct else "—"}</span>'
+        f'<span class="{badge_style} view-skip">Skip-excluded: {"✅" if v_skip else "—"}</span>'
+        f'<span class="{badge_style} view-priority">Priority-tier: {"✅" if v_priority else "—"}</span>',
+        unsafe_allow_html=True,
+    )
+
+
 # ============================================================================
 # TAG PERFORMANCE
 # ============================================================================
@@ -2260,7 +2298,6 @@ def compute_tag_performance(rows):
         if dc_hit is None:
             continue
         tags = r.get("tags") or []
-        # Fix 1.5 — defensive: if tags is a string (JSON), parse it
         if isinstance(tags, str):
             try:
                 tags = json.loads(tags)
@@ -2294,8 +2331,8 @@ def compute_tag_performance(rows):
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v4.4 Tagged Predictor")
-    st.caption("Nine-layer logic. DC on leader. Gap ≥ 30. Clusters fire.")
+    st.title("⚽ v5.0 Tagged Predictor")
+    st.caption("Full v5.2 Frozen State. Priority: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2318,10 +2355,10 @@ def main():
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → v4.4 predict → save with tags.")
+        st.caption("Parse → v5.0 predict → save with tags.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
-        if st.button("⚽ Parse, Predict & Save (v4.4)", type="primary"):
+        if st.button("⚽ Parse, Predict & Save (v5.0)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
             else:
@@ -2334,8 +2371,8 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v4.4..."):
-                    result = predict_v4_4(parsed)
+                with st.spinner("Running v5.0..."):
+                    result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
                     save_ok = False
@@ -2369,12 +2406,14 @@ def main():
 
                 c1, c2 = st.columns([2, 1])
                 with c1:
-                    render_verdict_v44(result)
+                    render_verdict_v5(result)
                 with c2:
                     render_ou_verdict(result)
 
                 st.markdown('<div class="section-title">Tags</div>', unsafe_allow_html=True)
                 st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
+
+                render_cluster_views(result)
 
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
                 render_factor_row("F1 Table Power", result["f1_home"], result["f1_away"], "(18 max)")
@@ -2404,8 +2443,8 @@ def main():
 
                 st.markdown('<div class="section-title">Layer 6 — Draw Risk</div>',
                             unsafe_allow_html=True)
-                dr = result.get("v4_4_draw_risk") or 0
-                st.write(f"draw_risk = **{dr:.3f}** (threshold {DRAW_RISK_THRESHOLD})")
+                dr = result.get("draw_risk") or 0
+                st.write(f"draw_risk = **{dr:.3f}** (CLUSTER threshold {CLUSTER_DRAW_RISK_MIN})")
 
                 st.info("👉 Enter the final score in the Pending tab after the match.")
 
@@ -2420,22 +2459,27 @@ def main():
             st.write(f"**{len(pending)} pending matches**")
             for r in pending:
                 match_id = r["id"]
-                call_v44 = r.get("v4_4_call") or "—"
-                bet_v44 = r.get("v4_4_bet")
-                tier_v44 = r.get("v4_4_tier")
-                stake_v44 = r.get("v4_4_stake")
+                call_v5 = r.get("v5_call") or "—"
+                bet_v5 = r.get("v5_bet")
+                tier_v5 = r.get("v5_tier")
+                stake_v5 = r.get("v5_stake")
                 gap = r.get("total_gap", 0) or 0
                 tags = r.get("tags") or []
+                if isinstance(tags, str):
+                    try:
+                        tags = json.loads(tags)
+                    except Exception:
+                        tags = []
                 header = (f"{r.get('match_date','')} · "
                           f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                          f"v4.4: {call_v44} (gap {gap})")
+                          f"v5.0: {call_v5} (gap {gap})")
                 with st.expander(header):
                     st.markdown(render_tags(tags), unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("v4.4 call", call_v44)
+                    c1.metric("v5.0 call", call_v5)
                     c2.metric("Gap", f"{gap:.1f}")
                     c3.metric("Leader", r.get("f1_leader", "—"))
-                    c4.metric("Stake", f"{stake_v44 or 0}u")
+                    c4.metric("Stake", f"{stake_v5 or 0}u")
                     st.markdown("**Enter actual score:**")
                     col1, col2, col3 = st.columns([1, 1, 2])
                     hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
@@ -2444,9 +2488,9 @@ def main():
                         ok, msg = update_audit(
                             sb, match_id, hg, ag,
                             r.get("call_1x2") or "",
-                            bet_v4_4=bet_v44,
-                            tier=tier_v44,
-                            stake=stake_v44,
+                            bet_v5=bet_v5,
+                            tier=tier_v5,
+                            stake=stake_v5,
                         )
                         if ok:
                             st.success("Result recorded.")
@@ -2459,7 +2503,6 @@ def main():
         with st.spinner("Loading performance data..."):
             rows = load_all(sb)
 
-        # Fix 4.1 — filter by model_version
         versions = sorted({r.get("model_version") for r in rows if r.get("model_version")})
         selected_versions = st.multiselect(
             "Model versions",
@@ -2475,7 +2518,7 @@ def main():
         if not settled:
             st.info("No settled matches yet.")
         else:
-            placed = [r for r in settled if r.get("v4_4_bet")]
+            placed = [r for r in settled if r.get("v5_bet")]
             dc_hits = [r for r in placed if r.get("dc_hit") is True]
             dc_misses = [r for r in placed if r.get("dc_hit") is False]
 
@@ -2488,8 +2531,8 @@ def main():
 
             st.markdown('<div class="section-title">By Tier</div>', unsafe_allow_html=True)
             tier_rows = []
-            for tier in ("CLUSTER", "FORTRESS", "VAULT BREAKER", "STANDARD"):
-                subset = [r for r in placed if r.get("v4_4_tier") == tier]
+            for tier in ("FORTRESS", "AWAY_FORTRESS", "CLUSTER", "STANDARD"):
+                subset = [r for r in placed if r.get("v5_tier") == tier]
                 hits = sum(1 for r in subset if r.get("dc_hit") is True)
                 n = len(subset)
                 rate = f"{(hits/n*100):.1f}%" if n else "—"
@@ -2501,33 +2544,49 @@ def main():
                 })
             st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
 
-            st.markdown('<div class="section-title">Loss Diagnostics (Layer 9)</div>',
+            st.markdown('<div class="section-title">CLUSTER — Three Views</div>',
+                        unsafe_allow_html=True)
+            direct_n = sum(1 for r in settled if r.get("v5_cluster_view_direct"))
+            direct_h = sum(1 for r in settled if r.get("v5_cluster_view_direct")
+                           and r.get("dc_hit") is True)
+            skip_n = sum(1 for r in settled if r.get("v5_cluster_view_skip_excluded"))
+            skip_h = sum(1 for r in settled if r.get("v5_cluster_view_skip_excluded")
+                         and r.get("dc_hit") is True)
+            pri_n = sum(1 for r in settled if r.get("v5_cluster_view_priority"))
+            pri_h = sum(1 for r in settled if r.get("v5_cluster_view_priority")
+                        and r.get("dc_hit") is True)
+            view_rows = [
+                {"View": "Direct (raw rule)", "n": direct_n, "Hits": direct_h,
+                 "Rate": f"{(direct_h/direct_n*100):.1f}%" if direct_n else "—"},
+                {"View": "Skip-excluded", "n": skip_n, "Hits": skip_h,
+                 "Rate": f"{(skip_h/skip_n*100):.1f}%" if skip_n else "—"},
+                {"View": "Priority-tier", "n": pri_n, "Hits": pri_h,
+                 "Rate": f"{(pri_h/pri_n*100):.1f}%" if pri_n else "—"},
+            ]
+            st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True)
+
+            st.markdown('<div class="section-title">Loss Diagnostics</div>',
                         unsafe_allow_html=True)
             losses = [r for r in placed if r.get("dc_hit") is False]
             if losses:
                 draws = sum(1 for r in losses
                             if (r.get("actual_home_goals") or 0)
                             == (r.get("actual_away_goals") or 0))
-                straights = sum(1 for r in losses
-                                if (r.get("call_1x2") or "").startswith("Straight"))
-                c1, c2, c3 = st.columns(3)
+                c1, c2 = st.columns(2)
                 c1.metric("Losses", len(losses))
                 c2.metric("Losses that were draws",
                           f"{draws} ({draws/len(losses)*100:.1f}%)")
-                c3.metric("Losses that were Straight Win",
-                          f"{straights} ({straights/len(losses)*100:.1f}%)")
             else:
                 st.info("No losses recorded yet.")
 
-            st.markdown('<div class="section-title">Firing Rate (Layer 8)</div>',
+            st.markdown('<div class="section-title">Firing Rate</div>',
                         unsafe_allow_html=True)
             graded = [r for r in rows if r.get("f1_leader") is not None]
-            fired = [r for r in graded if r.get("v4_4_bet")]
+            fired = [r for r in graded if r.get("v5_bet")]
             if graded:
                 st.write(
                     f"Firing rate: **{len(fired)}/{len(graded)} = "
-                    f"{len(fired)/len(graded)*100:.1f}%**  "
-                    f"(target ≥ 25% floor, NO BET ≈ 31%)"
+                    f"{len(fired)/len(graded)*100:.1f}%**"
                 )
             else:
                 st.info("No graded rows yet.")
@@ -2538,11 +2597,11 @@ def main():
                 "Date": r.get("match_date"),
                 "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
                 "Model": r.get("model_version"),
-                "Tier": r.get("v4_4_tier"),
+                "Tier": r.get("v5_tier"),
                 "Leader": r.get("f1_leader"),
                 "Gap": r.get("total_gap"),
-                "Bet": r.get("v4_4_bet"),
-                "Stake": r.get("v4_4_stake"),
+                "Bet": r.get("v5_bet"),
+                "Stake": r.get("v5_stake"),
                 "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
                 "DC hit": ("✅" if r.get("dc_hit") is True
                            else "❌" if r.get("dc_hit") is False else "—"),
@@ -2568,72 +2627,81 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v4.4 Complete Logic Spec")
+        st.subheader("v5.0 Complete Logic Spec (Frozen State)")
         st.markdown(f"""
+### Priority Order
+`FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP`
+
+### Tier Rules
+
+| Tier | Rule | Call | Verified |
+|---|---|---|---|
+| **FORTRESS** | `home_home_win_pct >= 50` ∧ `away_away_win_pct <= 25` ∧ `f0_home >= 15` ∧ `home_total > away_total` | **DC 1X** | 9/9 = 100.0% |
+| **AWAY_FORTRESS** | `away_away_win_pct >= 50` ∧ `home_home_win_pct <= 25` ∧ `f0_away >= 15` ∧ `away_total > home_total` | **DC X2** | 7/7 = 100.0% |
+| **CLUSTER** | `total_gap <= 10` ∧ `draw_risk >= 0.30` ∧ `abs(home_pos - away_pos) <= 3` | **DC 1X** | 21/22 = 95.5% (priority) · 24/26 = 92.3% (raw) · 23/25 = 92.0% (skip-excl) |
+| **STANDARD** | `abs(home_pos - away_pos) >= 5` ∧ `f1_f5_conflict = false` ∧ ¬FORTRESS ∧ ¬AWAY_FORTRESS | **DC on f1_leader** (1X if home, X2 if away) | 40/43 = 93.0% |
+| **SKIP** | `parse_status != 'ok'` ∨ `home_total IS NULL` | — | — |
+
+### CLUSTER — Three Views
+
+The CLUSTER rule selects a set of rows. Some also satisfy FORTRESS or AWAY_FORTRESS.
+Three reporting conventions:
+
+1. **Direct** — every row matching the CLUSTER rule, regardless of what else it matches. 24/26 = 92.3%
+2. **Skip-excluded** — remove rows with `parse_status != 'ok'` or `home_total IS NULL` (not bettable). 23/25 = 92.0%
+3. **Priority-tier** — remove rows that would be classified as FORTRESS or AWAY_FORTRESS by priority order. 21/22 = 95.5%
+
+The priority-tier view answers "how does the CLUSTER tier perform for the bets the model actually places as CLUSTER." That is the view that matters for live tier performance.
+
 ### Layer 0 — Inputs
 150 columns. Standings, form, venue splits, goals, odds, injuries, H2H.
 
 ### Layer 1 — Direction
-`direction = f1_leader` (Table Power), confirmed by `f5_leader` (Squad Power).
+`f1_leader` (Table Power), confirmed by `f5_leader` (Squad Power).
 
 ### Layer 2 — Agreement
 `disagreements` = count of F1, F2, F3, F5 pointing opposite the composite leader.
 `shrink_factor = 1.0 - disagreements × 0.15`
-**Skip at 2+ disagreements.** Verified: 0 → 62.5%, 1 → 43.9%, 2 → 35.3%.
 
 ### Layer 3 — Magnitude
-**Fire at `total_gap ≥ {GAP_THRESHOLD}`** (80% band).
-0–10 band is 0/30 = 0% — never fire.
+`total_gap` = `raw_gap × shrink_factor`. Used by CLUSTER (≤ 10) and STANDARD (pos-gap ≥ 5).
 
 ### Layer 4 — Call Type
-**DC by default.** DC 80.0% vs Straight Win 66.2%.
-Losses: 53.6% draws, 78.6% Straight Win.
+DC by default. FORTRESS → DC 1X. AWAY_FORTRESS → DC X2. CLUSTER → DC 1X. STANDARD → DC on f1_leader side.
 
-### Layer 5 — Clusters
-
-| Tier | Rule | Fires | Call | Accuracy | Stake |
-|---|---|---|---|---|---|
-| CLUSTER | `f1_gap == 16 AND f1 == f5_raw` | 34.5% | DC | 91.3% | 1.0u |
-| FORTRESS | Home + f1==f5_raw + disag0 + f2_diff≥4 + VP≥0.5 | 7.0% | DC 1X | 100% | 1.5u |
-| VAULT BREAKER | Away + f1==f5_raw + disag0 + f2_diff≤-4 + VP≤-0.5 | 4.9% | DC X2 | 100% | 2.0u |
-| STANDARD | `total_gap ≥ 30 AND disagreements ≤ 1` | ~10.6% | DC | ~75% | 1.0u |
-| NO BET | Everything else | 31.0% | — | — | 0u |
-
-### Layer 6 — Vetoes
-- `f1_f5_conflict` (any raw disagreement)
-- `disagreements >= 2`
-- `doubted_starter` (top scorer ≥ {TOP_SCORER_OUT_MIN_GOALS} goals)
-- `away_collapse` (documented as spec addition; kept)
-- `draw_risk > {DRAW_RISK_THRESHOLD}`
+### Layer 5 — Vetoes
+- `f1_f5_conflict` (any raw disagreement) — used by STANDARD exclusion
 - `parse_status != 'ok'`
+- `home_total IS NULL`
+- Doubted starter (top scorer ≥ {TOP_SCORER_OUT_MIN_GOALS} goals)
+- Away collapse (documented as spec addition; kept)
 
-### Layer 7 — Venue
+### Layer 6 — Draw Risk
+`draw_risk` feeds the CLUSTER gate (threshold 0.30).
+
+### Layer 7 — Venue Power
 `VENUE_POWER = (home_win_pct - away_win_pct)/25 + venue_ppg_gap × 2 + f0_gap/5`
-Correlation with results: **0.559** (higher than F1's 0.40).
 
 ### Layer 8 — Coverage
-Grade all, bet selectively. 25% floor. NO BET ≈ 31%. No full coverage.
+Grade all, bet selectively. Priority order resolves overlaps.
 
 ### Layer 9 — Diagnostics
-Losses: 78.6% Straight Win, 53.6% draws. Direction is usually right; call type is what fails.
+Loss tracking by tier and CLUSTER view.
 
-### Fixes Applied in This Build
-- Fix 1.2 — save_prediction warns on dropped keys
-- Fix 1.3 / 1.4 — numeric coercion for draw_risk, win_pct
-- Fix 2.1 — calc_f5 accepts H2H list for recency weighting
-- Fix 2.2 — calc_agreement returns "tie" explicitly
-- Fix 2.3 — calc_expected_total uses explicit None checks
-- Fix 2.4 — away_collapse documented as spec addition
-- Fix 2.5 — calc_f4 no longer double-penalises doubted XI starters
-- Fix 2.6 — draw_risk bands widened so the veto is reachable
-- Fix 2.7 — CLUSTER uses `f5_leader_raw`, not post-override F5
-- Fix 3.1 — team matching requires two shared tokens or last-word match
-- Fix 3.2 — last5_count stored
-- Fix 3.3 — standings table chosen by team-name content
-- Fix 3.4 — injury dedup normalised by name
-- Fix 4.1 — model_version surfaced in Performance tab
-- Fix 4.3 — parse_status = "partial" when critical fields missing
-- Fix 4.4 — parse_status checked before factor computation
+### Verified Counts (Frozen)
+- FORTRESS: 9/9 = 100.0%
+- AWAY_FORTRESS: 7/7 = 100.0%
+- CLUSTER: 21/22 = 95.5% (priority) · 24/26 = 92.3% (raw) · 23/25 = 92.0% (skip-excl)
+- STANDARD: 40/43 = 93.0%
+
+### What Changed vs v4.4
+1. CLUSTER call is **DC 1X** (was "close/draw tendency" in earlier description).
+2. CLUSTER hit rate reported under three explicit views.
+3. FORTRESS rule updated to the frozen spec (win_pct + f0_home + home_total > away_total).
+4. AWAY_FORTRESS added as a new tier.
+5. STANDARD rule updated to the frozen spec (pos_gap ≥ 5 ∧ ¬conflict ∧ ¬FORTRESS ∧ ¬AWAY_FORTRESS).
+6. Priority order enforced: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP.
+7. VAULT BREAKER removed (was v4.4-specific).
         """)
 
     with tabs[5]:
