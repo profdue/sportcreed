@@ -1384,7 +1384,7 @@ class SportsgamblerParser:
                 winner_name = a_name
             else:
                 winner_name = None            
-              if winner_name:
+            if winner_name:
                 if self._team_matches(self.home_team, winner_name):
                     out["h2h_home_wins"] += 1
                 elif self._team_matches(self.away_team, winner_name):
