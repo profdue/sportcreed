@@ -1,38 +1,35 @@
 """
 v5.0 Tagged Predictor — Full v5.2 Frozen State implementation.
 
-Frozen rules (from the frozen spec):
+Frozen rules:
   FORTRESS       — DC 1X   : home_home_win_pct >= 50 AND away_away_win_pct <= 25
                             AND f0_home >= 15 AND home_total > away_total
-                            Verified: 9/9 = 100.0%
   AWAY_FORTRESS  — DC X2   : away_away_win_pct >= 50 AND home_home_win_pct <= 25
                             AND f0_away >= 15 AND away_total > home_total
-                            Verified: 7/7 = 100.0%
   CLUSTER        — DC 1X   : total_gap <= 10 AND draw_risk >= 0.30
                             AND abs(home_pos - away_pos) <= 3
-                            Verified: 21/22 = 95.5% (priority-tier view)
-                                      24/26 = 92.3% (raw rule)
-                                      23/25 = 92.0% (skip-excluded)
   STANDARD       — F1 DC   : abs(home_pos - away_pos) >= 5
                             AND f1_f5_conflict = false
                             AND NOT FORTRESS AND NOT AWAY_FORTRESS
-                            Call: DC on f1_leader side (1X if home, X2 if away)
-                            Verified: 40/43 = 93.0%
   SKIP                     : parse_status != 'ok' OR home_total IS NULL
-  Priority order: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP
+
+Priority: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP
+
+Schema safety: the app discovers the live Supabase column list at runtime
+and only ever writes columns that actually exist. Missing columns are
+logged to stderr, not silently dropped.
 """
 
 import concurrent.futures
 import json
 import re
+import sys
 import unicodedata
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# MUST be the very first Streamlit call
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="v5.0 Tagged Predictor",
@@ -91,6 +88,61 @@ st.markdown("""
     .view-priority { background: #064e3b; color: #6ee7b7; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# RUNTIME SCHEMA DISCOVERY
+# ============================================================================
+# The app never assumes which columns exist in Supabase. On first use it
+# probes the live table with SELECT * LIMIT 1 and caches the real column
+# list. Every write is filtered against that list.
+#
+# This means: (a) you can add v5_* columns via SQL and immediately use them,
+# (b) you can leave the DB as-is and the app still works, dropping unknown
+# keys with a console warning, (c) no more PGRST204 errors.
+
+_LIVE_SCHEMA_CACHE = {"columns": None, "table": None}
+
+
+def _probe_live_schema(sb, table="matches_raw"):
+    """Query Supabase for the real column list. Cache per session."""
+    if sb is None:
+        return None
+    if _LIVE_SCHEMA_CACHE["columns"] is not None and _LIVE_SCHEMA_CACHE["table"] == table:
+        return _LIVE_SCHEMA_CACHE["columns"]
+    try:
+        resp = sb.table(table).select("*").limit(1).execute()
+        if resp.data and len(resp.data) > 0:
+            cols = set(resp.data[0].keys())
+            _LIVE_SCHEMA_CACHE["columns"] = cols
+            _LIVE_SCHEMA_CACHE["table"] = table
+            return cols
+        # Table is empty — fall back to a metadata probe via RPC if available,
+        # otherwise fall back to the declared superset.
+        _LIVE_SCHEMA_CACHE["columns"] = None
+        return None
+    except Exception as e:
+        print(f"[schema] probe failed: {e}", file=sys.stderr)
+        return None
+
+
+def reload_schema_cache():
+    _LIVE_SCHEMA_CACHE["columns"] = None
+    _LIVE_SCHEMA_CACHE["table"] = None
+
+
+def _get_table_columns(sb, table="matches_raw"):
+    """
+    Return the set of columns the app may write.
+
+    Preference order:
+      1. Live schema discovered from Supabase (authoritative).
+      2. Declared MATCHES_RAW_COLUMNS superset (fallback when table empty).
+    """
+    live = _probe_live_schema(sb, table)
+    if live is not None:
+        return live
+    return MATCHES_RAW_COLUMNS
 
 
 # ============================================================================
@@ -252,14 +304,14 @@ def render_debug_tab(sb):
     url_info = _inspect_secret("SUPABASE_URL")
     key_info = _inspect_secret("SUPABASE_KEY")
 
-    with st.expander("URL details", expanded=True):
+    with st.expander("URL details", expanded=False):
         if url_info.get("present"):
             st.json({k: v for k, v in url_info.items() if k != "prefix"})
             st.code(f"prefix: {url_info['prefix']!r}")
         else:
             st.error("URL not found in st.secrets.")
 
-    with st.expander("KEY details", expanded=True):
+    with st.expander("KEY details", expanded=False):
         if key_info.get("present"):
             st.json({k: v for k, v in key_info.items() if k not in ("prefix", "suffix")})
             st.code(f"prefix: {key_info['prefix']!r}\nsuffix: {key_info['suffix']!r}")
@@ -273,7 +325,33 @@ def render_debug_tab(sb):
         return
     st.success("Supabase client created.")
 
-    st.markdown('<div class="section-title">3. Live ping</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">3. Live schema</div>', unsafe_allow_html=True)
+    st.caption("The app discovers the real column list from Supabase. "
+               "Writes are filtered against this list, so missing columns "
+               "never cause PGRST204 errors.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔄 Reload schema cache", key="debug_reload_schema"):
+            reload_schema_cache()
+            st.success("Schema cache cleared. Next write will re-probe.")
+    with c2:
+        if st.button("🔎 Discover live schema now", key="debug_probe_schema"):
+            reload_schema_cache()
+            live = _probe_live_schema(sb, "matches_raw")
+            if live is None:
+                st.warning("Could not discover live schema (table may be empty). "
+                           "Falling back to declared superset.")
+            else:
+                st.success(f"Live schema has {len(live)} columns.")
+                missing = sorted(MATCHES_RAW_COLUMNS - live)
+                if missing:
+                    st.warning(f"{len(missing)} declared columns are missing from "
+                               f"the live table:")
+                    st.code("\n".join(missing))
+                else:
+                    st.success("All declared columns exist in the live table.")
+
+    st.markdown('<div class="section-title">4. Live ping</div>', unsafe_allow_html=True)
     if st.button("🏓 Ping Supabase", key="debug_ping"):
         with st.spinner("Pinging..."):
             try:
@@ -284,7 +362,8 @@ def render_debug_tab(sb):
             except Exception as e:
                 st.error(f"Ping failed: {e}")
 
-    st.markdown('<div class="section-title">4. Schema check</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">5. Schema check (SELECT *)</div>',
+                unsafe_allow_html=True)
     if st.button("🔎 List matches_raw columns", key="debug_cols"):
         with st.spinner("Querying..."):
             try:
@@ -298,7 +377,7 @@ def render_debug_tab(sb):
             except Exception as e:
                 st.error(f"Schema check failed: {e}")
 
-    st.markdown('<div class="section-title">5. Row count</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">6. Row count</div>', unsafe_allow_html=True)
     if st.button("🧮 Count rows", key="debug_count"):
         with st.spinner("Counting..."):
             try:
@@ -307,7 +386,26 @@ def render_debug_tab(sb):
             except Exception as e:
                 st.error(f"Count failed: {e}")
 
-    st.markdown('<div class="section-title">6. Test insert</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">7. Migration helper</div>',
+                unsafe_allow_html=True)
+    st.caption("Copy this SQL into the Supabase SQL Editor to add the v5.0 columns. "
+               "Idempotent — safe to run more than once.")
+    st.code("""
+ALTER TABLE public.matches_raw
+    ADD COLUMN IF NOT EXISTS v5_bet TEXT,
+    ADD COLUMN IF NOT EXISTS v5_call TEXT,
+    ADD COLUMN IF NOT EXISTS v5_decision TEXT,
+    ADD COLUMN IF NOT EXISTS v5_skip_reason TEXT,
+    ADD COLUMN IF NOT EXISTS v5_tier TEXT,
+    ADD COLUMN IF NOT EXISTS v5_stake REAL,
+    ADD COLUMN IF NOT EXISTS v5_cluster_view_direct BOOLEAN,
+    ADD COLUMN IF NOT EXISTS v5_cluster_view_skip_excluded BOOLEAN,
+    ADD COLUMN IF NOT EXISTS v5_cluster_view_priority BOOLEAN;
+
+NOTIFY pgrst, 'reload schema';
+    """.strip(), language="sql")
+
+    st.markdown('<div class="section-title">8. Test insert</div>', unsafe_allow_html=True)
     if st.button("🧪 Insert test row", key="debug_insert"):
         with st.spinner("Inserting..."):
             try:
@@ -369,7 +467,6 @@ PRIOR_H2H = 1.0 / 3.0
 
 TOP_SCORER_OUT_MIN_GOALS = 3
 
-# ---- v5.2 frozen thresholds ----
 FORTRESS_HOME_WIN_PCT_MIN = 50.0
 FORTRESS_AWAY_WIN_PCT_MAX = 25.0
 FORTRESS_F0_HOME_MIN = 15.0
@@ -384,7 +481,6 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-# ---- stakes ----
 STAKE_FORTRESS = 1.5
 STAKE_AWAY_FORTRESS = 1.5
 STAKE_CLUSTER = 1.0
@@ -491,12 +587,8 @@ MATCHES_RAW_COLUMNS = {
 }
 
 
-def _get_table_columns(_sb, table_name="matches_raw"):
-    return MATCHES_RAW_COLUMNS
-
-
 # ============================================================================
-# PARSER
+# PARSER  (unchanged from the previous v5 build)
 # ============================================================================
 
 _PREVIEW_TOP_SCORER_PATTERNS = [
@@ -1784,7 +1876,7 @@ def predict_v5(row):
 
 
 # ============================================================================
-# v5.0 DECISION LAYER — Frozen rules with priority order
+# v5.0 DECISION LAYER
 # ============================================================================
 def _safe_float(v):
     try:
@@ -1794,12 +1886,6 @@ def _safe_float(v):
 
 
 def check_fortress(row, pred):
-    """FORTRESS — DC 1X.
-    home_home_win_pct >= 50
-    AND away_away_win_pct <= 25
-    AND f0_home >= 15
-    AND home_total > away_total
-    """
     hw = _safe_float(row.get("home_home_win_pct"))
     aw = _safe_float(row.get("away_away_win_pct"))
     f0h = _safe_float(pred.get("f0_home"))
@@ -1814,12 +1900,6 @@ def check_fortress(row, pred):
 
 
 def check_away_fortress(row, pred):
-    """AWAY_FORTRESS — DC X2.
-    away_away_win_pct >= 50
-    AND home_home_win_pct <= 25
-    AND f0_away >= 15
-    AND away_total > home_total
-    """
     aw = _safe_float(row.get("away_away_win_pct"))
     hw = _safe_float(row.get("home_home_win_pct"))
     f0a = _safe_float(pred.get("f0_away"))
@@ -1834,11 +1914,6 @@ def check_away_fortress(row, pred):
 
 
 def check_cluster(row, pred):
-    """CLUSTER — DC 1X.
-    total_gap <= 10
-    AND draw_risk >= 0.30
-    AND abs(home_pos - away_pos) <= 3
-    """
     gap = _safe_float(pred.get("total_gap"))
     dr = _safe_float(pred.get("draw_risk"))
     hp = _safe_float(row.get("home_pos"))
@@ -1851,12 +1926,6 @@ def check_cluster(row, pred):
 
 
 def check_standard(row, pred):
-    """STANDARD — DC on f1_leader side.
-    abs(home_pos - away_pos) >= 5
-    AND f1_f5_conflict = false
-    AND NOT FORTRESS
-    AND NOT AWAY_FORTRESS
-    """
     hp = _safe_float(row.get("home_pos"))
     ap = _safe_float(row.get("away_pos"))
     if hp is None or ap is None:
@@ -1865,52 +1934,36 @@ def check_standard(row, pred):
         return False
     if pred.get("f1_f5_conflict"):
         return False
-    # FORTRESS / AWAY_FORTRESS exclusion is handled by priority order
     return True
 
 
 def decide_v5(row, pred):
-    """Priority order:
-    FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP
-    """
     parse_status = row.get("parse_status")
     home_total = pred.get("home_total")
 
-    # SKIP branch — parse_status != 'ok' OR home_total IS NULL
     if parse_status and parse_status != "ok":
         return "SKIP", None, None, "parse_status_not_ok", STAKE_NONE
     if home_total is None:
         return "SKIP", None, None, "home_total_null", STAKE_NONE
 
-    # 1. FORTRESS
     if check_fortress(row, pred):
         return "BET", "DC 1X", "FORTRESS", None, STAKE_FORTRESS
 
-    # 2. AWAY_FORTRESS
     if check_away_fortress(row, pred):
         return "BET", "DC X2", "AWAY_FORTRESS", None, STAKE_AWAY_FORTRESS
 
-    # 3. CLUSTER
     if check_cluster(row, pred):
         return "BET", "DC 1X", "CLUSTER", None, STAKE_CLUSTER
 
-    # 4. STANDARD
     if check_standard(row, pred):
         leader = pred.get("f1_leader")
         call = "DC 1X" if leader == "home" else "DC X2"
         return "BET", call, "STANDARD", None, STAKE_STANDARD
 
-    # 5. SKIP
     return "SKIP", None, None, "no_rule_match", STAKE_NONE
 
 
 def cluster_views(row, pred):
-    """Return the three CLUSTER views for reporting.
-    - direct: every row matching the CLUSTER rule, regardless of what else it matches
-    - skip_excluded: remove rows that carry parse_status != 'ok' or home_total IS NULL
-    - priority: remove rows that would be classified as FORTRESS or AWAY_FORTRESS
-                by the priority order
-    """
     matches_cluster = check_cluster(row, pred)
     skip_excluded = (
         matches_cluster
@@ -1968,7 +2021,6 @@ def compute_tags(row, pred, tier, decision, skip_reason):
     if pred.get("away_collapse"):
         tags.append("away_collapse")
 
-    # v5.2 tag additions
     views = cluster_views(row, pred)
     if views["v5_cluster_view_direct"]:
         tags.append("cluster_direct")
@@ -2029,7 +2081,6 @@ def predict_v5_full(row):
     else:
         base["v5_call"] = f"NO BET ({skip})"
 
-    # three CLUSTER views
     views = cluster_views(row, base)
     base.update(views)
 
@@ -2038,12 +2089,23 @@ def predict_v5_full(row):
 
 
 # ============================================================================
-# DB HELPERS
+# DB HELPERS — schema-safe
 # ============================================================================
 _DROPPED_KEYS_WARNED = set()
 
 
 def _filter_columns_for_db(result, real_columns, context=""):
+    """
+    Filter a result dict to only keys the live schema accepts.
+
+    `real_columns` may be:
+      - a set (discovered live schema), or
+      - the declared MATCHES_RAW_COLUMNS superset (fallback when the table
+        is empty and the live probe couldn't run).
+
+    Unknown keys are collected and printed to stderr once per context, so
+    schema drift is visible without spamming the console.
+    """
     clean = {}
     dropped = []
     for k, v in result.items():
@@ -2055,8 +2117,7 @@ def _filter_columns_for_db(result, real_columns, context=""):
         clean[k] = v
     if dropped and context not in _DROPPED_KEYS_WARNED:
         _DROPPED_KEYS_WARNED.add(context)
-        import sys
-        print(f"[save_prediction:{context}] dropped keys not in schema: {dropped}",
+        print(f"[{context}] dropped keys not in live schema: {dropped}",
               file=sys.stderr)
     return clean
 
@@ -2065,7 +2126,7 @@ def upsert_match(sb, record):
     if sb is None:
         return False, "no client"
     try:
-        real_columns = _get_table_columns(sb)
+        real_columns = _get_table_columns(sb, "matches_raw")
         clean = _filter_columns_for_db(record, real_columns, context="upsert")
         if not clean.get("league_name"):
             clean["league_name"] = "Unknown"
@@ -2088,17 +2149,45 @@ def upsert_match(sb, record):
 
 
 def save_prediction(sb, match_id, result):
+    """
+    Write the prediction fields. Only keys present in the live schema are
+    written. Unknown keys are dropped with a stderr warning — never a hard
+    failure.
+
+    If the live probe couldn't run (empty table), we still filter against
+    MATCHES_RAW_COLUMNS, which is the declared superset. That means the
+    first insert after a migration always succeeds even before any row
+    exists to probe.
+    """
     if sb is None:
         return False, "no client"
-    real_columns = MATCHES_RAW_COLUMNS
+    real_columns = _get_table_columns(sb, "matches_raw")
     clean = _filter_columns_for_db(result, real_columns, context="save_prediction")
+
+    # Explicitly drop anything that would never be a column.
     for bad_key in ("leader", "v5_call", "v4_3_call", "factor_map"):
         clean.pop(bad_key, None)
+
+    if not clean:
+        return False, "no writable keys after schema filter"
+
     try:
         sb.table("matches_raw").update(clean).eq("id", match_id).execute()
         return True, "saved"
     except Exception as e:
-        return False, str(e)
+        msg = str(e)
+        # If PostgREST still complains about a column, surface which one
+        # and invalidate the cache so the next call re-probes.
+        m = re.search(r"Could not find the '([^']+)' column", msg)
+        if m:
+            bad_col = m.group(1)
+            reload_schema_cache()
+            return False, (
+                f"Live schema rejected column '{bad_col}'. "
+                f"Run the migration SQL in the Debug tab, then click "
+                f"'Reload schema cache'. Original error: {msg}"
+            )
+        return False, msg
 
 
 def load_all(sb, timeout_seconds=15):
@@ -2148,7 +2237,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, tier=None, stake=N
         "actual_away_goals": ag,
         "is_correct_1x2": is_correct,
     }
-    real_columns = _get_table_columns(sb) or set()
+    real_columns = _get_table_columns(sb, "matches_raw") or set()
     if "dc_hit" in real_columns:
         payload["dc_hit"] = dc_hit
     if "v5_bet" in real_columns and bet_v5:
@@ -2401,6 +2490,9 @@ def main():
                     st.success(f"✅ Saved. Match ID: `{row.get('id')}`")
                 elif ok and not save_ok:
                     st.warning(f"⚠️ Row saved but prediction update failed: {save_msg}")
+                    st.info("Open the **Debug** tab → section 7 — copy the SQL "
+                            "into the Supabase SQL Editor, then click "
+                            "**Reload schema cache**.")
                 else:
                     st.error(f"❌ Save failed: {save_msg}")
 
@@ -2639,69 +2731,22 @@ def main():
 | **FORTRESS** | `home_home_win_pct >= 50` ∧ `away_away_win_pct <= 25` ∧ `f0_home >= 15` ∧ `home_total > away_total` | **DC 1X** | 9/9 = 100.0% |
 | **AWAY_FORTRESS** | `away_away_win_pct >= 50` ∧ `home_home_win_pct <= 25` ∧ `f0_away >= 15` ∧ `away_total > home_total` | **DC X2** | 7/7 = 100.0% |
 | **CLUSTER** | `total_gap <= 10` ∧ `draw_risk >= 0.30` ∧ `abs(home_pos - away_pos) <= 3` | **DC 1X** | 21/22 = 95.5% (priority) · 24/26 = 92.3% (raw) · 23/25 = 92.0% (skip-excl) |
-| **STANDARD** | `abs(home_pos - away_pos) >= 5` ∧ `f1_f5_conflict = false` ∧ ¬FORTRESS ∧ ¬AWAY_FORTRESS | **DC on f1_leader** (1X if home, X2 if away) | 40/43 = 93.0% |
+| **STANDARD** | `abs(home_pos - away_pos) >= 5` ∧ `f1_f5_conflict = false` ∧ ¬FORTRESS ∧ ¬AWAY_FORTRESS | **DC on f1_leader** | 40/43 = 93.0% |
 | **SKIP** | `parse_status != 'ok'` ∨ `home_total IS NULL` | — | — |
 
 ### CLUSTER — Three Views
+1. **Direct** — every row matching the CLUSTER rule. 24/26 = 92.3%
+2. **Skip-excluded** — remove rows with `parse_status != 'ok'` or `home_total IS NULL`. 23/25 = 92.0%
+3. **Priority-tier** — remove rows that would be classified as FORTRESS or AWAY_FORTRESS. 21/22 = 95.5%
 
-The CLUSTER rule selects a set of rows. Some also satisfy FORTRESS or AWAY_FORTRESS.
-Three reporting conventions:
+### Schema Safety
+The app discovers the live Supabase column list at runtime and only writes
+columns that actually exist. If a `v5_*` column is missing from the live
+table, the write is filtered (dropped with a console warning), and the app
+tells you to run the migration SQL in the Debug tab.
 
-1. **Direct** — every row matching the CLUSTER rule, regardless of what else it matches. 24/26 = 92.3%
-2. **Skip-excluded** — remove rows with `parse_status != 'ok'` or `home_total IS NULL` (not bettable). 23/25 = 92.0%
-3. **Priority-tier** — remove rows that would be classified as FORTRESS or AWAY_FORTRESS by priority order. 21/22 = 95.5%
-
-The priority-tier view answers "how does the CLUSTER tier perform for the bets the model actually places as CLUSTER." That is the view that matters for live tier performance.
-
-### Layer 0 — Inputs
-150 columns. Standings, form, venue splits, goals, odds, injuries, H2H.
-
-### Layer 1 — Direction
-`f1_leader` (Table Power), confirmed by `f5_leader` (Squad Power).
-
-### Layer 2 — Agreement
-`disagreements` = count of F1, F2, F3, F5 pointing opposite the composite leader.
-`shrink_factor = 1.0 - disagreements × 0.15`
-
-### Layer 3 — Magnitude
-`total_gap` = `raw_gap × shrink_factor`. Used by CLUSTER (≤ 10) and STANDARD (pos-gap ≥ 5).
-
-### Layer 4 — Call Type
-DC by default. FORTRESS → DC 1X. AWAY_FORTRESS → DC X2. CLUSTER → DC 1X. STANDARD → DC on f1_leader side.
-
-### Layer 5 — Vetoes
-- `f1_f5_conflict` (any raw disagreement) — used by STANDARD exclusion
-- `parse_status != 'ok'`
-- `home_total IS NULL`
-- Doubted starter (top scorer ≥ {TOP_SCORER_OUT_MIN_GOALS} goals)
-- Away collapse (documented as spec addition; kept)
-
-### Layer 6 — Draw Risk
-`draw_risk` feeds the CLUSTER gate (threshold 0.30).
-
-### Layer 7 — Venue Power
-`VENUE_POWER = (home_win_pct - away_win_pct)/25 + venue_ppg_gap × 2 + f0_gap/5`
-
-### Layer 8 — Coverage
-Grade all, bet selectively. Priority order resolves overlaps.
-
-### Layer 9 — Diagnostics
-Loss tracking by tier and CLUSTER view.
-
-### Verified Counts (Frozen)
-- FORTRESS: 9/9 = 100.0%
-- AWAY_FORTRESS: 7/7 = 100.0%
-- CLUSTER: 21/22 = 95.5% (priority) · 24/26 = 92.3% (raw) · 23/25 = 92.0% (skip-excl)
-- STANDARD: 40/43 = 93.0%
-
-### What Changed vs v4.4
-1. CLUSTER call is **DC 1X** (was "close/draw tendency" in earlier description).
-2. CLUSTER hit rate reported under three explicit views.
-3. FORTRESS rule updated to the frozen spec (win_pct + f0_home + home_total > away_total).
-4. AWAY_FORTRESS added as a new tier.
-5. STANDARD rule updated to the frozen spec (pos_gap ≥ 5 ∧ ¬conflict ∧ ¬FORTRESS ∧ ¬AWAY_FORTRESS).
-6. Priority order enforced: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP.
-7. VAULT BREAKER removed (was v4.4-specific).
+### Migration SQL
+See Debug tab → section 7.
         """)
 
     with tabs[5]:
