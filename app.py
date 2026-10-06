@@ -1,23 +1,27 @@
 """
-v5.0 Tagged Predictor — Six-Core Strategy implementation.
+v5.4 Tagged Predictor — Tiered directional filter.
 
-Decision layer:
-  Priority A > B > C > D > E > F. If none fires, SKIP.
+Decision layer (four betting tiers + skip):
 
-  X2 cores (away does not lose):
-    A: f1_cap  AND venue_incomplete AND venue_power_neg
-    C: tier_cluster AND team_agreement_0 AND away_leader
-    E: tier_cluster AND away_leader AND venue_power_neg
+  Tier 1  COMBO_STRONG   2+ combo pairs fire              1.5u (1.0u away)
+  Tier 2  COMBO          1 combo pair fires               0.5u
+  Tier 3  CORE_FALLBACK  a six-core rule fires            0.5u
+  Tier 4  F1_GAP_HIGH    no combo, no core, f1_gap >= 16  0.5u
+  Tier 5  SKIP           everything else                  0
 
-  1X cores (home does not lose):
-    B: home_leader AND gap_under_10
-    D: f1_cap AND home_leader AND gap_20_29
-    F: home_leader AND team_disagreement_2plus
+  Combo pairs (three, all measured at 96%+ on settled rows):
+    1. team_agreement_0 + tier_cluster
+    2. venue_power_neg + tier_cluster
+    3. home_leader + f1_cap
 
-  f1_cap is defined as f1_gap >= 16.0, the calc_f1() saturation point.
+  Direction is always f1_leader: home -> DC 1X, away -> DC X2.
 
-Schema safety: the app discovers the live Supabase column list at runtime
-and only ever writes columns that actually exist.
+  Removed from v5.2:
+    - gap_20_29 as a combo pair (dropped to 87% on settled rows)
+    - venue_power_pos penalty (behaved backwards in test)
+
+  Schema safety: the app discovers the live Supabase column list at
+  runtime and only writes columns that exist.
 """
 
 import concurrent.futures
@@ -32,7 +36,7 @@ import streamlit as st
 
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="v5.0 Tagged Predictor",
+    page_title="v5.4 Tagged Predictor",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -63,6 +67,8 @@ st.markdown("""
     .tag-venue { background: #4c1d95; color: #ddd6fe; }
     .tag-tier { background: #7c2d12; color: #fed7aa; }
     .tag-skip { background: #1e293b; color: #94a3b8; }
+    .tag-pair { background: #065f46; color: #a7f3d0; }
+    .tag-core { background: #7c2d12; color: #fed7aa; }
     .factor-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem;
         display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
     .factor-name { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
@@ -81,11 +87,13 @@ st.markdown("""
         border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
     .diag-warn { background: #78350f; color: #fde68a; padding: 0.4rem 0.75rem;
         border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
-    .view-badge { display: inline-block; padding: 0.25rem 0.6rem; border-radius: 8px;
-        font-size: 0.75rem; font-weight: 700; margin-right: 0.5rem; }
-    .view-direct { background: #1e3a8a; color: #bfdbfe; }
-    .view-skip { background: #4c1d95; color: #ddd6fe; }
-    .view-priority { background: #064e3b; color: #6ee7b7; }
+    .path-badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 8px;
+        font-size: 0.72rem; font-weight: 700; margin-right: 0.35rem; }
+    .path-combo-strong { background: #064e3b; color: #6ee7b7; }
+    .path-combo { background: #065f46; color: #a7f3d0; }
+    .path-core { background: #7c2d12; color: #fed7aa; }
+    .path-f1-high { background: #1e3a8a; color: #bfdbfe; }
+    .path-skip { background: #1e293b; color: #94a3b8; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -371,21 +379,17 @@ def render_debug_tab(sb):
 
     st.markdown('<div class="section-title">7. Migration helper</div>',
                 unsafe_allow_html=True)
-    st.caption("Copy this SQL into the Supabase SQL Editor to add the v5.0 columns. "
-               "Idempotent — safe to run more than once.")
+    st.caption("Full drop-and-recreate SQL for the v5.4 schema. "
+               "Copy into the Supabase SQL Editor. Back up first.")
     st.code("""
-ALTER TABLE public.matches_raw
-    ADD COLUMN IF NOT EXISTS v5_bet TEXT,
-    ADD COLUMN IF NOT EXISTS v5_call TEXT,
-    ADD COLUMN IF NOT EXISTS v5_decision TEXT,
-    ADD COLUMN IF NOT EXISTS v5_skip_reason TEXT,
-    ADD COLUMN IF NOT EXISTS v5_tier TEXT,
-    ADD COLUMN IF NOT EXISTS v5_stake REAL,
-    ADD COLUMN IF NOT EXISTS v5_cluster_view_direct BOOLEAN,
-    ADD COLUMN IF NOT EXISTS v5_cluster_view_skip_excluded BOOLEAN,
-    ADD COLUMN IF NOT EXISTS v5_cluster_view_priority BOOLEAN;
+-- Back up current table
+CREATE TABLE matches_raw_backup_20261006 AS
+    SELECT * FROM matches_raw;
 
-NOTIFY pgrst, 'reload schema';
+-- Verify backup
+SELECT count(*) FROM matches_raw_backup_20261006;
+
+-- Then run the DROP/CREATE from the v5.4 schema document.
     """.strip(), language="sql")
 
     st.markdown('<div class="section-title">8. Test insert</div>', unsafe_allow_html=True)
@@ -464,13 +468,22 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-# Stakes for the pure-tier cores.
-STAKE_CORE_HIGH = 1.5   # A, B, C
-STAKE_CORE_BASE = 1.0   # D, E, F
+# Stakes for the four betting tiers
+STAKE_COMBO_STRONG = 1.5
+STAKE_COMBO_STRONG_AWAY = 1.0
+STAKE_COMBO = 0.5
+STAKE_CORE_FALLBACK = 0.5
+STAKE_F1_GAP_HIGH = 0.5
 STAKE_NONE = 0.0
 
-# f1_cap threshold. The calc_f1() clamp puts the ceiling at f1_gap == 16.0.
+# f1_cap threshold — the calc_f1() clamp puts the ceiling at f1_gap == 16.0
 F1_CAP_THRESHOLD = 16.0
+
+# Six-core stakes (only STAKE_CORE_FALLBACK is used in v5.4)
+STAKE_CORE_HIGH = 0.5
+STAKE_CORE_BASE = 0.5
+
+DECISION_VERSION = "v5.4"
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -502,7 +515,7 @@ KEYSTATS_PRIORITY_FIELDS = {
 
 
 MATCHES_RAW_COLUMNS = {
-    "id", "created_at",
+    "id", "created_at", "settled_at",
     "match_date", "kickoff_utc", "kickoff_local",
     "league_name", "tier", "group_name", "season",
     "home_team", "away_team", "venue", "stage", "round", "parse_status",
@@ -542,9 +555,6 @@ MATCHES_RAW_COLUMNS = {
     "home_formation", "away_formation",
     "h2h", "h2h_home_wins", "h2h_draws", "h2h_away_wins",
     "odds",
-    "actual_home_goals", "actual_away_goals",
-    "actual_possession_home", "actual_xg_home", "actual_xg_away",
-    "actual_corners_home", "actual_corners_away", "actual_total_goals",
     "f1_home", "f1_away", "f1_gap", "f1_leader",
     "f2_home", "f2_away",
     "f3_home", "f3_away",
@@ -555,20 +565,25 @@ MATCHES_RAW_COLUMNS = {
     "disagreements", "shrink_factor",
     "f1_f5_conflict", "f1_f5_override", "f1_vs_f2f3_conflict",
     "away_collapse", "doubted_starter",
-    "call_1x2", "call_ou", "expected_total",
-    "no_bet_reason_1x2", "no_bet_reason_ou", "no_bet_reason",
-    "venue_gap", "f0_home", "f0_away", "f0_gap", "f0_half",
-    "draw_risk", "call_btts", "model_version",
+    "call_1x2", "call_ou", "call_btts", "expected_total",
+    "no_bet_reason_1x2", "no_bet_reason_ou",
     "venue_ppg_gap", "venue_ppg_gap_home", "venue_ppg_gap_away",
     "venue_power",
-    "v4_4_bet", "v4_4_call", "v4_4_decision", "v4_4_skip_reason",
-    "v4_4_tier", "v4_4_stake",
-    "v5_bet", "v5_call", "v5_decision", "v5_skip_reason",
-    "v5_tier", "v5_stake",
-    "v5_cluster_view_direct", "v5_cluster_view_skip_excluded",
-    "v5_cluster_view_priority",
-    "tags", "dc_hit",
-    "is_correct_1x2", "is_correct_ou", "is_correct_btts",
+    "f0_home", "f0_away", "f0_gap",
+    "draw_risk",
+    "tags",
+    # v5.4 decision trace
+    "decision_version",
+    "v5_decision_path", "v5_decision", "v5_bet", "v5_stake",
+    "v5_combo_pair_count", "v5_combo_pairs_fired", "v5_core_fired",
+    "v5_skip_reason",
+    # v5.4 counterfactual
+    "counterfactual_call", "counterfactual_odds", "counterfactual_won",
+    # audit
+    "actual_home_goals", "actual_away_goals",
+    "actual_possession_home", "actual_xg_home", "actual_xg_away",
+    "actual_corners_home", "actual_corners_away", "actual_total_goals",
+    "dc_hit", "is_correct_1x2", "is_correct_ou", "is_correct_btts",
 }
 
 
@@ -1469,7 +1484,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER  (unchanged)
+# FACTOR LAYER
 # ============================================================================
 def smooth_rate(wins, draws, games):
     if games is None or games <= 0:
@@ -1703,7 +1718,7 @@ def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
         "away_collapse": False, "doubted_starter": False,
         "call_1x2": reason, "call_ou": "No Bet", "expected_total": 0,
         "draw_risk": 0.0,
-        "model_version": "v5.0",
+        "model_version": DECISION_VERSION,
         "no_bet_reason_1x2": reason_1x2, "no_bet_reason_ou": reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
         "venue_ppg_gap_home": home_ppg,
@@ -1846,7 +1861,7 @@ def predict_v5(row):
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "draw_risk": round(draw_risk, 3),
-        "model_version": "v5.0",
+        "model_version": DECISION_VERSION,
         "no_bet_reason_1x2": None,
         "no_bet_reason_ou": no_bet_reason_ou,
         "venue_ppg_gap": venue_ppg_gap,
@@ -1861,23 +1876,8 @@ def predict_v5(row):
 
 
 # ============================================================================
-# SIX-CORE DECISION LAYER
+# TAGS
 # ============================================================================
-#
-# X2 cores (away does not lose):
-#   A: f1_cap  AND venue_incomplete AND venue_power_neg
-#   C: tier_cluster AND team_agreement_0 AND away_leader
-#   E: tier_cluster AND away_leader AND venue_power_neg
-#
-# 1X cores (home does not lose):
-#   B: home_leader AND gap_under_10
-#   D: f1_cap AND home_leader AND gap_20_29
-#   F: home_leader AND team_disagreement_2plus
-#
-# Priority A > B > C > D > E > F. If none fires, SKIP.
-# f1_cap is defined as f1_gap >= 16.0, the calc_f1() saturation point.
-
-
 def _safe_float(v):
     try:
         return float(v)
@@ -1956,53 +1956,85 @@ def check_standard(row, pred):
     return True
 
 
+# ============================================================================
+# COMBO PAIRS (v5.4 — the primary betting path)
+# ============================================================================
+# Three pairs, all measured at 96%+ on the settled sample.
+# gap_20_29 was removed after dropping to 87% on settled rows.
+# venue_power_pos penalty removed (behaved backwards in test).
+
+COMBO_PAIR_DEFS = [
+    ("team_agreement_0+tier_cluster",
+     lambda tags: "team_agreement_0" in tags and "tier_cluster" in tags),
+    ("venue_power_neg+tier_cluster",
+     lambda tags: "venue_power_neg" in tags and "tier_cluster" in tags),
+    ("home_leader+f1_cap",
+     lambda tags: "home_leader" in tags and "f1_cap" in tags),
+]
+
+
+def _combo_pairs_fired(tags):
+    fired = []
+    for name, fn in COMBO_PAIR_DEFS:
+        try:
+            if fn(tags):
+                fired.append(name)
+        except Exception:
+            continue
+    return fired
+
+
+# ============================================================================
+# SIX-CORE FALLBACK
+# ============================================================================
+# A: f1_cap AND venue_incomplete AND venue_power_neg  -> X2
+# B: home_leader AND gap_under_10                     -> 1X
+# C: tier_cluster AND team_agreement_0 AND away_leader -> X2
+# D: f1_cap AND home_leader AND gap_20_29             -> 1X
+# E: tier_cluster AND away_leader AND venue_power_neg -> X2
+# F: home_leader AND team_disagreement_2plus          -> 1X
+
 def core_A(row, pred, tags):
-    """X2 — f1_cap + venue_incomplete + venue_power_neg."""
     return (_is_f1_cap(pred)
             and _has_tag(tags, "venue_incomplete")
             and _has_tag(tags, "venue_power_neg"))
 
 
 def core_B(row, pred, tags):
-    """1X — home_leader + gap_under_10."""
     return (pred.get("f1_leader") == "home"
             and _gap_bucket(pred) == "gap_under_10")
 
 
 def core_C(row, pred, tags):
-    """X2 — tier_cluster + team_agreement_0 + away_leader."""
     return (_has_tag(tags, "tier_cluster")
             and _has_tag(tags, "team_agreement_0")
             and pred.get("f1_leader") == "away")
 
 
 def core_D(row, pred, tags):
-    """1X — f1_cap + home_leader + gap_20_29."""
     return (_is_f1_cap(pred)
             and pred.get("f1_leader") == "home"
             and _gap_bucket(pred) == "gap_20_29")
 
 
 def core_E(row, pred, tags):
-    """X2 — tier_cluster + away_leader + venue_power_neg."""
     return (_has_tag(tags, "tier_cluster")
             and pred.get("f1_leader") == "away"
             and _has_tag(tags, "venue_power_neg"))
 
 
 def core_F(row, pred, tags):
-    """1X — home_leader + team_disagreement_2plus."""
     return (pred.get("f1_leader") == "home"
             and _has_tag(tags, "team_disagreement_2plus"))
 
 
 CORE_DEFS = [
-    ("A", "X2", core_A, STAKE_CORE_HIGH),
-    ("B", "1X", core_B, STAKE_CORE_HIGH),
-    ("C", "X2", core_C, STAKE_CORE_HIGH),
-    ("D", "1X", core_D, STAKE_CORE_BASE),
-    ("E", "X2", core_E, STAKE_CORE_BASE),
-    ("F", "1X", core_F, STAKE_CORE_BASE),
+    ("A", "X2", core_A),
+    ("B", "1X", core_B),
+    ("C", "X2", core_C),
+    ("D", "1X", core_D),
+    ("E", "X2", core_E),
+    ("F", "1X", core_F),
 ]
 
 CORE_PRIORITY = ["A", "B", "C", "D", "E", "F"]
@@ -2010,7 +2042,7 @@ CORE_PRIORITY = ["A", "B", "C", "D", "E", "F"]
 
 def _cores_firing(row, pred, tags):
     fired = []
-    for letter, _side, fn, _stake in CORE_DEFS:
+    for letter, _side, fn in CORE_DEFS:
         try:
             if fn(row, pred, tags):
                 fired.append(letter)
@@ -2019,42 +2051,67 @@ def _cores_firing(row, pred, tags):
     return [c for c in CORE_PRIORITY if c in fired]
 
 
+# ============================================================================
+# DECISION LAYER (v5.4 — tiered)
+# ============================================================================
 def decide_v5(row, pred):
     """
-    Returns (decision, call, tier, skip_reason, stake).
-    Priority A > B > C > D > E > F. If none fire, SKIP.
+    Returns (decision, call, path, tier, skip_reason, stake).
+
+    Tiers:
+      COMBO_STRONG   2+ combo pairs      1.5u (1.0u if away)
+      COMBO          1 combo pair        0.5u
+      CORE_FALLBACK  a six-core rule     0.5u
+      F1_GAP_HIGH    no combo/core, f1_cap present, valid leader  0.5u
+      SKIP           everything else     0
     """
     parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
-        return "SKIP", None, None, "parse_status_not_ok", STAKE_NONE
+        return "SKIP", None, "SKIP", None, "parse_status_not_ok", STAKE_NONE
     if pred.get("home_total") is None:
-        return "SKIP", None, None, "home_total_null", STAKE_NONE
+        return "SKIP", None, "SKIP", None, "home_total_null", STAKE_NONE
 
     tags = pred.get("tags") or []
+    leader = pred.get("f1_leader")
+
+    if leader not in ("home", "away"):
+        return "SKIP", None, "SKIP", None, "no_leader", STAKE_NONE
+
+    call = "DC 1X" if leader == "home" else "DC X2"
+    away_led = (leader == "away")
+
+    # ---- Tier 1 & 2: combo path ----
+    pairs = _combo_pairs_fired(tags)
+
+    if len(pairs) >= 2:
+        stake = STAKE_COMBO_STRONG_AWAY if away_led else STAKE_COMBO_STRONG
+        return "BET", call, "COMBO_STRONG", None, None, stake
+
+    if len(pairs) == 1:
+        return "BET", call, "COMBO", None, None, STAKE_COMBO
+
+    # ---- Tier 3: six-core fallback ----
     fired = _cores_firing(row, pred, tags)
+    if fired:
+        winner = fired[0]
+        for letter, side, _fn in CORE_DEFS:
+            if letter == winner:
+                expected_call = "DC 1X" if side == "1X" else "DC X2"
+                if expected_call != call:
+                    return "SKIP", None, "SKIP", None, "core_leader_mismatch", STAKE_NONE
+                return "BET", call, "CORE_FALLBACK", f"CORE_{letter}", None, STAKE_CORE_FALLBACK
 
-    if not fired:
-        return "SKIP", None, None, "no_core_match", STAKE_NONE
+    # ---- Tier 4: F1_GAP_HIGH (no combo, no core, but f1_cap present) ----
+    if "f1_cap" in tags:
+        return "BET", call, "F1_GAP_HIGH", "F1_GAP_HIGH", None, STAKE_F1_GAP_HIGH
 
-    winner = fired[0]
-    for letter, side, _fn, stake in CORE_DEFS:
-        if letter == winner:
-            call = "DC 1X" if side == "1X" else "DC X2"
-            return "BET", call, f"CORE_{letter}", None, stake
-
-    return "SKIP", None, None, "no_core_match", STAKE_NONE
-
-
-def cluster_views(row, pred):
-    tags = pred.get("tags") or []
-    fired = _cores_firing(row, pred, tags)
-    return {
-        "v5_cluster_view_direct": bool(fired),
-        "v5_cluster_view_skip_excluded": bool(fired) and row.get("parse_status") == "ok",
-        "v5_cluster_view_priority": len(fired) > 1,
-    }
+    # ---- Tier 5: skip ----
+    return "SKIP", None, "SKIP", None, "no_tier_match", STAKE_NONE
 
 
+# ============================================================================
+# TAGS COMPUTATION
+# ============================================================================
 def compute_tags(row, pred, tier, decision, skip_reason):
     tags = []
     gap = pred.get("total_gap") or 0
@@ -2096,14 +2153,6 @@ def compute_tags(row, pred, tier, decision, skip_reason):
     if pred.get("away_collapse"):
         tags.append("away_collapse")
 
-    views = cluster_views(row, pred)
-    if views["v5_cluster_view_direct"]:
-        tags.append("cluster_direct")
-    if views["v5_cluster_view_skip_excluded"]:
-        tags.append("cluster_skip_excluded")
-    if views["v5_cluster_view_priority"]:
-        tags.append("cluster_priority")
-
     if check_cluster(row, pred):
         tags.append("tier_cluster")
     if _is_f1_cap(pred):
@@ -2134,41 +2183,52 @@ def compute_tags(row, pred, tier, decision, skip_reason):
     return tags
 
 
+# ============================================================================
+# FULL PREDICTION (v5.4)
+# ============================================================================
 def predict_v5_full(row):
     base = predict_v5(row)
 
-    home_top = row.get("home_top_scorer")
-    away_top = row.get("away_top_scorer")
-    home_inj = {i.get("player") for i in (row.get("home_injuries") or [])
-                if i.get("status") == "injury"}
-    away_inj = {i.get("player") for i in (row.get("away_injuries") or [])
-                if i.get("status") == "injury"}
+    # Compute tags ONCE. This is what the decision layer sees AND what gets stored.
+    tags = compute_tags(row, base, None, None, None)
+    base["tags"] = tags
 
-    base["_home_top_scorer_out"] = bool(home_top and home_top in home_inj)
-    base["_away_top_scorer_out"] = bool(away_top and away_top in away_inj)
-    base["_home_top_scorer_goals"] = row.get("home_top_scorer_goals") or 0
-    base["_away_top_scorer_goals"] = row.get("away_top_scorer_goals") or 0
+    decision, call, path, tier, skip, stake = decide_v5(row, base)
 
-    # First pass: tags needed by the cores.
-    base["tags"] = compute_tags(row, base, None, None, None)
-    decision, call, tier, skip, stake = decide_v5(row, base)
+    # Recompute tags now that we know tier/decision/skip
+    final_tags = compute_tags(row, base, tier, decision, skip)
+    base["tags"] = final_tags
 
+    pairs = _combo_pairs_fired(final_tags)
+    fired_cores = _cores_firing(row, base, final_tags)
+
+    base["decision_version"] = DECISION_VERSION
+    base["v5_decision_path"] = path
     base["v5_decision"] = decision
     base["v5_bet"] = call if decision == "BET" else None
-    base["v5_tier"] = tier
     base["v5_stake"] = stake
+    base["v5_combo_pair_count"] = len(pairs)
+    base["v5_combo_pairs_fired"] = pairs if pairs else None
+    base["v5_core_fired"] = fired_cores if fired_cores else None
     base["v5_skip_reason"] = skip
 
-    if decision == "BET":
-        base["v5_call"] = f"{call} [{tier}]"
+    # Counterfactual — always written
+    leader = base.get("f1_leader")
+    if leader == "home":
+        base["counterfactual_call"] = "DC 1X"
+    elif leader == "away":
+        base["counterfactual_call"] = "DC X2"
     else:
-        base["v5_call"] = f"NO BET ({skip})"
+        base["counterfactual_call"] = None
 
-    views = cluster_views(row, base)
-    base.update(views)
+    odds = row.get("odds") or {}
+    if base["counterfactual_call"] == "DC 1X":
+        base["counterfactual_odds"] = odds.get("dc_1x")
+    elif base["counterfactual_call"] == "DC X2":
+        base["counterfactual_odds"] = odds.get("dc_x2")
+    else:
+        base["counterfactual_odds"] = None
 
-    # Second pass: tags now include tier/skip-derived entries.
-    base["tags"] = compute_tags(row, base, tier, decision, skip)
     return base
 
 
@@ -2268,7 +2328,7 @@ def load_all(sb, timeout_seconds=15):
             return []
 
 
-def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, tier=None, stake=None):
+def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, counterfactual_call=None):
     if sb is None:
         return False, "no client"
     if hg > ag:
@@ -2277,6 +2337,33 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, tier=None, stake=N
         actual = "Away"
     else:
         actual = "Draw"
+
+    payload = {
+        "actual_home_goals": hg,
+        "actual_away_goals": ag,
+    }
+
+    real_columns = _get_table_columns(sb, "matches_raw") or set()
+
+    # dc_hit — did the actual v5 bet win
+    dc_hit = None
+    if bet_v5 == "DC 1X":
+        dc_hit = actual in ("Home", "Draw")
+    elif bet_v5 == "DC X2":
+        dc_hit = actual in ("Away", "Draw")
+    if "dc_hit" in real_columns:
+        payload["dc_hit"] = dc_hit
+
+    # counterfactual_won — did f1_leader direction win
+    cf_won = None
+    if counterfactual_call == "DC 1X":
+        cf_won = actual in ("Home", "Draw")
+    elif counterfactual_call == "DC X2":
+        cf_won = actual in ("Away", "Draw")
+    if "counterfactual_won" in real_columns:
+        payload["counterfactual_won"] = cf_won
+
+    # legacy is_correct_1x2
     is_correct = None
     if call_1x2 and not call_1x2.startswith("NO BET"):
         if "Straight Win Home" in call_1x2:
@@ -2287,25 +2374,12 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, tier=None, stake=N
             is_correct = actual in ("Home", "Draw")
         elif "Double Chance X2" in call_1x2:
             is_correct = actual in ("Away", "Draw")
-    dc_hit = None
-    if bet_v5 == "DC 1X":
-        dc_hit = actual in ("Home", "Draw")
-    elif bet_v5 == "DC X2":
-        dc_hit = actual in ("Away", "Draw")
-    payload = {
-        "actual_home_goals": hg,
-        "actual_away_goals": ag,
-        "is_correct_1x2": is_correct,
-    }
-    real_columns = _get_table_columns(sb, "matches_raw") or set()
-    if "dc_hit" in real_columns:
-        payload["dc_hit"] = dc_hit
-    if "v5_bet" in real_columns and bet_v5:
-        payload["v5_bet"] = bet_v5
-    if "v5_tier" in real_columns and tier:
-        payload["v5_tier"] = tier
-    if "v5_stake" in real_columns and stake is not None:
-        payload["v5_stake"] = stake
+    if "is_correct_1x2" in real_columns:
+        payload["is_correct_1x2"] = is_correct
+
+    if "settled_at" in real_columns:
+        payload["settled_at"] = datetime.utcnow().isoformat()
+
     try:
         sb.table("matches_raw").update(payload).eq("id", match_id).execute()
         return True, "ok"
@@ -2330,6 +2404,8 @@ def render_tag(label):
         cls += " tag-tier"
     elif label.startswith("skip"):
         cls += " tag-skip"
+    elif "+" in label:
+        cls += " tag-pair"
     return f'<span class="{cls}">{label}</span>'
 
 
@@ -2337,32 +2413,41 @@ def render_tags(tags):
     return "".join(render_tag(t) for t in (tags or []))
 
 
+def render_path_badge(path):
+    cls = {
+        "COMBO_STRONG": "path-combo-strong",
+        "COMBO": "path-combo",
+        "CORE_FALLBACK": "path-core",
+        "F1_GAP_HIGH": "path-f1-high",
+        "SKIP": "path-skip",
+    }.get(path, "path-skip")
+    return f'<span class="path-badge {cls}">{path}</span>'
+
+
 def render_verdict_v5(result):
     decision = result.get("v5_decision")
+    path = result.get("v5_decision_path")
     bet = result.get("v5_bet")
-    tier = result.get("v5_tier")
+    tier = result.get("v5_core_fired") or result.get("v5_combo_pairs_fired") or ""
     stake = result.get("v5_stake", 0) or 0
     skip = result.get("v5_skip_reason")
     tags = result.get("tags", [])
 
     if decision == "BET":
-        badge = {
-            "CORE_A": "🧩 CORE_A · X2",
-            "CORE_B": "🧩 CORE_B · 1X",
-            "CORE_C": "🧩 CORE_C · X2",
-            "CORE_D": "🧩 CORE_D · 1X",
-            "CORE_E": "🧩 CORE_E · X2",
-            "CORE_F": "🧩 CORE_F · 1X",
-        }.get(tier, tier or "")
+        tier_label = ""
+        if result.get("v5_combo_pairs_fired"):
+            tier_label = " · " + " + ".join(result["v5_combo_pairs_fired"])
+        elif result.get("v5_core_fired"):
+            tier_label = " · CORE " + ",".join(result["v5_core_fired"])
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ v5.0 Verdict — {badge}</div>
+            <div class="verdict-label">⭐ v5.4 Verdict {render_path_badge(path)}{tier_label}</div>
             <div class="verdict-pick">{bet}</div>
             <div class="verdict-detail">
                 Stake <strong>{stake}u</strong>
-                &nbsp;·&nbsp; Gap <strong>{result['total_gap']:.1f}</strong>
+                &nbsp;·&nbsp; F1 Gap <strong>{(result.get('f1_gap') or 0):.1f}</strong>
                 &nbsp;·&nbsp; Leader {result['f1_leader']}
-                &nbsp;·&nbsp; Disagreements {result['disagreements']}
+                &nbsp;·&nbsp; Total Gap <strong>{result['total_gap']:.1f}</strong>
                 &nbsp;·&nbsp; Draw risk {(result.get('draw_risk') or 0):.2f}
                 &nbsp;·&nbsp; VP {(result.get('venue_power') or 0):.2f}
             </div>
@@ -2372,11 +2457,11 @@ def render_verdict_v5(result):
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">v5.0 Verdict</div>
+            <div class="verdict-label-grey">v5.4 Verdict {render_path_badge(path)}</div>
             <div class="verdict-noedge">NO BET — {skip}</div>
             <div class="verdict-detail-grey">
-                Gap {result['total_gap']:.1f} · Leader {result['f1_leader']}
-                · Disagreements {result['disagreements']}
+                F1 Gap {(result.get('f1_gap') or 0):.1f} · Leader {result['f1_leader']}
+                · Total Gap {result['total_gap']:.1f}
             </div>
             <div style="margin-top:.75rem;">{render_tags(tags)}</div>
         </div>
@@ -2420,25 +2505,11 @@ def render_trigger(name, on):
     """, unsafe_allow_html=True)
 
 
-def render_cluster_views(result):
-    st.markdown('<div class="section-title">Cores — Views</div>',
-                unsafe_allow_html=True)
-    v_direct = result.get("v5_cluster_view_direct", False)
-    v_skip = result.get("v5_cluster_view_skip_excluded", False)
-    v_priority = result.get("v5_cluster_view_priority", False)
-    badge_style = "view-badge"
-    st.markdown(
-        f'<span class="{badge_style} view-direct">Any core fired: {"✅" if v_direct else "—"}</span>'
-        f'<span class="{badge_style} view-skip">Skip-excluded: {"✅" if v_skip else "—"}</span>'
-        f'<span class="{badge_style} view-priority">Multi-core: {"✅" if v_priority else "—"}</span>',
-        unsafe_allow_html=True,
-    )
-
-
 def render_core_breakdown(row, pred):
     tags = pred.get("tags") or []
     firing = _cores_firing(row, pred, tags)
-    st.markdown('<div class="section-title">Core Firing</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Six-Core Firing (fallback path)</div>',
+                unsafe_allow_html=True)
     core_labels = {
         "A": "A · X2 · f1_cap + venue_incomplete + venue_power_neg",
         "B": "B · 1X · home_leader + gap_under_10",
@@ -2450,6 +2521,15 @@ def render_core_breakdown(row, pred):
     for letter in CORE_PRIORITY:
         on = letter in firing
         render_trigger(core_labels[letter], on)
+
+
+def render_combo_breakdown(pred):
+    tags = pred.get("tags") or []
+    st.markdown('<div class="section-title">Combo Pairs (primary path)</div>',
+                unsafe_allow_html=True)
+    pairs = _combo_pairs_fired(tags)
+    for name, _fn in COMBO_PAIR_DEFS:
+        render_trigger(name, name in pairs)
 
 
 # ============================================================================
@@ -2497,8 +2577,9 @@ def compute_tag_performance(rows):
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v5.0 Tagged Predictor")
-    st.caption("Six-core strategy. Priority: A > B > C > D > E > F. No match: SKIP.")
+    st.title("⚽ v5.4 Tagged Predictor")
+    st.caption("Four betting tiers. Combo pairs primary, six-core fallback, "
+               "F1 gap high tier, skip otherwise.")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2521,10 +2602,10 @@ def main():
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → six-core predict → save with tags.")
+        st.caption("Parse → v5.4 four-tier predict → save with full decision trace.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
-        if st.button("⚽ Parse, Predict & Save (v5.0)", type="primary"):
+        if st.button("⚽ Parse, Predict & Save (v5.4)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
             else:
@@ -2537,7 +2618,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running six-core decision..."):
+                with st.spinner("Running v5.4 decision..."):
                     result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2567,9 +2648,6 @@ def main():
                     st.success(f"✅ Saved. Match ID: `{row.get('id')}`")
                 elif ok and not save_ok:
                     st.warning(f"⚠️ Row saved but prediction update failed: {save_msg}")
-                    st.info("Open the **Debug** tab → section 7 — copy the SQL "
-                            "into the Supabase SQL Editor, then click "
-                            "**Reload schema cache**.")
                 else:
                     st.error(f"❌ Save failed: {save_msg}")
 
@@ -2582,7 +2660,7 @@ def main():
                 st.markdown('<div class="section-title">Tags</div>', unsafe_allow_html=True)
                 st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
 
-                render_cluster_views(result)
+                render_combo_breakdown(result)
                 render_core_breakdown(parsed, result)
 
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
@@ -2601,21 +2679,6 @@ def main():
                 render_trigger("Away Collapse", result["away_collapse"])
                 render_trigger("Doubt Starter IN XI", result["doubted_starter"])
 
-                st.markdown('<div class="section-title">Layer 7 — Venue Power</div>',
-                            unsafe_allow_html=True)
-                vp = result.get("venue_power")
-                st.write(
-                    f"VENUE_POWER = **{vp if vp is not None else 'n/a'}**  "
-                    f"(f0_home={result.get('f0_home')}, "
-                    f"f0_away={result.get('f0_away')}, "
-                    f"f0_gap={result.get('f0_gap')})"
-                )
-
-                st.markdown('<div class="section-title">Layer 6 — Draw Risk</div>',
-                            unsafe_allow_html=True)
-                dr = result.get("draw_risk") or 0
-                st.write(f"draw_risk = **{dr:.3f}** (CLUSTER threshold {CLUSTER_DRAW_RISK_MIN})")
-
                 st.info("👉 Enter the final score in the Pending tab after the match.")
 
     with tabs[1]:
@@ -2629,11 +2692,10 @@ def main():
             st.write(f"**{len(pending)} pending matches**")
             for r in pending:
                 match_id = r["id"]
-                call_v5 = r.get("v5_call") or "—"
-                bet_v5 = r.get("v5_bet")
-                tier_v5 = r.get("v5_tier")
-                stake_v5 = r.get("v5_stake")
-                gap = r.get("total_gap", 0) or 0
+                path = r.get("v5_decision_path") or "—"
+                call = r.get("v5_bet") or "—"
+                stake = r.get("v5_stake") or 0
+                f1_gap = r.get("f1_gap") or 0
                 tags = r.get("tags") or []
                 if isinstance(tags, str):
                     try:
@@ -2642,14 +2704,14 @@ def main():
                         tags = []
                 header = (f"{r.get('match_date','')} · "
                           f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                          f"v5.0: {call_v5} (gap {gap})")
+                          f"{path} · {call} ({stake}u) · F1 gap {f1_gap}")
                 with st.expander(header):
                     st.markdown(render_tags(tags), unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("v5.0 call", call_v5)
-                    c2.metric("Gap", f"{gap:.1f}")
-                    c3.metric("Leader", r.get("f1_leader", "—"))
-                    c4.metric("Stake", f"{stake_v5 or 0}u")
+                    c1.metric("Path", path)
+                    c2.metric("Bet", call)
+                    c3.metric("Stake", f"{stake}u")
+                    c4.metric("F1 Leader", r.get("f1_leader", "—"))
                     st.markdown("**Enter actual score:**")
                     col1, col2, col3 = st.columns([1, 1, 2])
                     hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
@@ -2658,9 +2720,8 @@ def main():
                         ok, msg = update_audit(
                             sb, match_id, hg, ag,
                             r.get("call_1x2") or "",
-                            bet_v5=bet_v5,
-                            tier=tier_v5,
-                            stake=stake_v5,
+                            bet_v5=r.get("v5_bet"),
+                            counterfactual_call=r.get("counterfactual_call"),
                         )
                         if ok:
                             st.success("Result recorded.")
@@ -2673,111 +2734,96 @@ def main():
         with st.spinner("Loading performance data..."):
             rows = load_all(sb)
 
-        versions = sorted({r.get("model_version") for r in rows if r.get("model_version")})
-        selected_versions = st.multiselect(
-            "Model versions",
-            versions,
-            default=versions,
-            help="Filter rows by the model_version they were computed with.",
-        )
-        rows = [r for r in rows if r.get("model_version") in selected_versions]
+        versions = sorted({r.get("decision_version") for r in rows if r.get("decision_version")})
+        if versions:
+            selected_versions = st.multiselect(
+                "Decision versions", versions, default=versions,
+                help="Filter rows by the decision logic version that produced them.",
+            )
+            rows = [r for r in rows if r.get("decision_version") in selected_versions]
 
         settled = [r for r in rows
                    if r.get("actual_home_goals") is not None
                    and r.get("actual_away_goals") is not None]
+
         if not settled:
             st.info("No settled matches yet.")
         else:
-            placed = [r for r in settled if r.get("v5_bet")]
-            dc_hits = [r for r in placed if r.get("dc_hit") is True]
-            dc_misses = [r for r in placed if r.get("dc_hit") is False]
+            # Bet performance by path
+            st.markdown('<div class="section-title">By Decision Path</div>',
+                        unsafe_allow_html=True)
+            path_rows = []
+            for path in ["COMBO_STRONG", "COMBO", "CORE_FALLBACK", "F1_GAP_HIGH"]:
+                subset = [r for r in settled if r.get("v5_decision_path") == path]
+                scored = [r for r in subset if r.get("dc_hit") is not None]
+                hits = sum(1 for r in scored if r.get("dc_hit") is True)
+                n = len(scored)
+                rate = f"{(hits/n*100):.1f}%" if n else "—"
+                path_rows.append({"Path": path, "Bets": n, "Hits": hits, "Rate": rate})
+            st.dataframe(pd.DataFrame(path_rows), use_container_width=True, hide_index=True)
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Settled", len(settled))
-            c2.metric("Bets placed", len(placed))
-            hit_rate = (len(dc_hits) / len(placed) * 100) if placed else 0
-            c3.metric("DC hits", f"{len(dc_hits)}/{len(placed)} ({hit_rate:.1f}%)")
-            c4.metric("Misses", len(dc_misses))
+            # Counterfactual — f1_leader baseline on all rows
+            st.markdown('<div class="section-title">Counterfactual (f1_leader baseline)</div>',
+                        unsafe_allow_html=True)
+            cf_scored = [r for r in settled if r.get("counterfactual_won") is not None]
+            cf_hits = sum(1 for r in cf_scored if r.get("counterfactual_won") is True)
+            cf_n = len(cf_scored)
+            cf_rate = f"{(cf_hits/cf_n*100):.1f}%" if cf_n else "—"
 
-            st.markdown('<div class="section-title">By Core</div>', unsafe_allow_html=True)
-            core_rows = []
-            for letter in CORE_PRIORITY:
-                subset = [r for r in placed if r.get("v5_tier") == f"CORE_{letter}"]
-                hits = sum(1 for r in subset if r.get("dc_hit") is True)
+            # Split by whether the row was a bet or a skip
+            cf_bet = [r for r in cf_scored if r.get("v5_decision") == "BET"]
+            cf_skip = [r for r in cf_scored if r.get("v5_decision") == "SKIP"]
+            cf_bet_hits = sum(1 for r in cf_bet if r.get("counterfactual_won") is True)
+            cf_skip_hits = sum(1 for r in cf_skip if r.get("counterfactual_won") is True)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Counterfactual overall", f"{cf_hits}/{cf_n} ({cf_rate})")
+            c2.metric("On bet rows",
+                      f"{cf_bet_hits}/{len(cf_bet)} "
+                      f"({(cf_bet_hits/len(cf_bet)*100) if cf_bet else 0:.1f}%)")
+            c3.metric("On skip rows",
+                      f"{cf_skip_hits}/{len(cf_skip)} "
+                      f"({(cf_skip_hits/len(cf_skip)*100) if cf_skip else 0:.1f}%)")
+
+            # Skip region by F1 gap band
+            st.markdown('<div class="section-title">Skip Region by F1 Gap</div>',
+                        unsafe_allow_html=True)
+            bands = [
+                ("f1_gap >= 16", lambda r: (r.get("f1_gap") or 0) >= 16),
+                ("10 <= f1_gap < 16", lambda r: 10 <= (r.get("f1_gap") or 0) < 16),
+                ("5 <= f1_gap < 10", lambda r: 5 <= (r.get("f1_gap") or 0) < 10),
+                ("f1_gap < 5", lambda r: (r.get("f1_gap") or 0) < 5),
+            ]
+            skip_rows = []
+            for label, fn in bands:
+                subset = [r for r in cf_skip if fn(r)]
+                hits = sum(1 for r in subset if r.get("counterfactual_won") is True)
                 n = len(subset)
                 rate = f"{(hits/n*100):.1f}%" if n else "—"
-                core_rows.append({
-                    "Core": f"CORE_{letter}",
-                    "Bets": n,
-                    "Hits": hits,
-                    "Rate": rate,
-                })
-            st.dataframe(pd.DataFrame(core_rows), use_container_width=True, hide_index=True)
+                skip_rows.append({"Band": label, "n": n, "Hits": hits, "Rate": rate})
+            st.dataframe(pd.DataFrame(skip_rows), use_container_width=True, hide_index=True)
 
-            st.markdown('<div class="section-title">Cores — Views</div>',
-                        unsafe_allow_html=True)
-            direct_n = sum(1 for r in settled if r.get("v5_cluster_view_direct"))
-            direct_h = sum(1 for r in settled if r.get("v5_cluster_view_direct")
-                           and r.get("dc_hit") is True)
-            skip_n = sum(1 for r in settled if r.get("v5_cluster_view_skip_excluded"))
-            skip_h = sum(1 for r in settled if r.get("v5_cluster_view_skip_excluded")
-                         and r.get("dc_hit") is True)
-            pri_n = sum(1 for r in settled if r.get("v5_cluster_view_priority"))
-            pri_h = sum(1 for r in settled if r.get("v5_cluster_view_priority")
-                        and r.get("dc_hit") is True)
-            view_rows = [
-                {"View": "Any core fired", "n": direct_n, "Hits": direct_h,
-                 "Rate": f"{(direct_h/direct_n*100):.1f}%" if direct_n else "—"},
-                {"View": "Skip-excluded", "n": skip_n, "Hits": skip_h,
-                 "Rate": f"{(skip_h/skip_n*100):.1f}%" if skip_n else "—"},
-                {"View": "Multi-core", "n": pri_n, "Hits": pri_h,
-                 "Rate": f"{(pri_h/pri_n*100):.1f}%" if pri_n else "—"},
-            ]
-            st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True)
-
-            st.markdown('<div class="section-title">Loss Diagnostics</div>',
-                        unsafe_allow_html=True)
-            losses = [r for r in placed if r.get("dc_hit") is False]
-            if losses:
-                draws = sum(1 for r in losses
-                            if (r.get("actual_home_goals") or 0)
-                            == (r.get("actual_away_goals") or 0))
-                c1, c2 = st.columns(2)
-                c1.metric("Losses", len(losses))
-                c2.metric("Losses that were draws",
-                          f"{draws} ({draws/len(losses)*100:.1f}%)")
-            else:
-                st.info("No losses recorded yet.")
-
-            st.markdown('<div class="section-title">Firing Rate</div>',
-                        unsafe_allow_html=True)
-            graded = [r for r in rows if r.get("f1_leader") is not None]
-            fired = [r for r in graded if r.get("v5_bet")]
-            if graded:
-                st.write(
-                    f"Firing rate: **{len(fired)}/{len(graded)} = "
-                    f"{len(fired)/len(graded)*100:.1f}%**"
-                )
-            else:
-                st.info("No graded rows yet.")
-
+            # All placed bets
             st.markdown('<div class="section-title">All Placed Bets</div>',
                         unsafe_allow_html=True)
-            df = pd.DataFrame([{
-                "Date": r.get("match_date"),
-                "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
-                "Model": r.get("model_version"),
-                "Core": r.get("v5_tier"),
-                "Leader": r.get("f1_leader"),
-                "Gap": r.get("total_gap"),
-                "Bet": r.get("v5_bet"),
-                "Stake": r.get("v5_stake"),
-                "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
-                "DC hit": ("✅" if r.get("dc_hit") is True
-                           else "❌" if r.get("dc_hit") is False else "—"),
-                "Tags": ", ".join(r.get("tags") or []),
-            } for r in placed])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            placed = [r for r in settled if r.get("v5_decision") == "BET"]
+            if placed:
+                df = pd.DataFrame([{
+                    "Date": r.get("match_date"),
+                    "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
+                    "Version": r.get("decision_version"),
+                    "Path": r.get("v5_decision_path"),
+                    "Bet": r.get("v5_bet"),
+                    "Stake": r.get("v5_stake"),
+                    "F1 gap": r.get("f1_gap"),
+                    "Leader": r.get("f1_leader"),
+                    "Total gap": r.get("total_gap"),
+                    "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
+                    "DC hit": ("✅" if r.get("dc_hit") is True
+                               else "❌" if r.get("dc_hit") is False else "—"),
+                    "Tags": ", ".join(r.get("tags") or []),
+                } for r in placed])
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tabs[3]:
         st.subheader("🏷️ Tag Performance")
@@ -2797,54 +2843,68 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v5.0 Six-Core Logic Spec")
+        st.subheader("v5.4 Tiered Logic Spec")
         st.markdown(f"""
-### Priority
+### Four betting tiers + skip
 
-`A > B > C > D > E > F`. If none fires, the match is SKIP.
-
-When a match fires multiple cores, priority decides which is credited. The
-call is identical either way, because 1X cores and X2 cores are mutually
-exclusive on leader direction.
-
-### X2 cores (away does not lose)
-
-| Core | Rule | Call | Stake |
+| Tier | Rule | Direction | Stake |
 |---|---|---|---|
-| **A** | `f1_cap` ∧ `venue_incomplete` ∧ `venue_power_neg` | DC X2 | 1.5u |
-| **C** | `tier_cluster` ∧ `team_agreement_0` ∧ `away_leader` | DC X2 | 1.5u |
-| **E** | `tier_cluster` ∧ `away_leader` ∧ `venue_power_neg` | DC X2 | 1.0u |
+| **COMBO_STRONG** | 2+ combo pairs fire | f1_leader | 1.5u (1.0u if away) |
+| **COMBO** | exactly 1 combo pair fires | f1_leader | 0.5u |
+| **CORE_FALLBACK** | a six-core rule fires | core's side | 0.5u |
+| **F1_GAP_HIGH** | no combo, no core, `f1_gap >= 16`, valid leader | f1_leader | 0.5u |
+| **SKIP** | everything else | — | 0 |
 
-### 1X cores (home does not lose)
+### The three combo pairs
 
-| Core | Rule | Call | Stake |
-|---|---|---|---|
-| **B** | `home_leader` ∧ `gap_under_10` | DC 1X | 1.5u |
-| **D** | `f1_cap` ∧ `home_leader` ∧ `gap_20_29` | DC 1X | 1.0u |
-| **F** | `home_leader` ∧ `team_disagreement_2plus` | DC 1X | 1.0u |
+1. `team_agreement_0 + tier_cluster`
+2. `venue_power_neg + tier_cluster`
+3. `home_leader + f1_cap`
 
-### Tag definitions used by the cores
+Direction is always `f1_leader` — home → DC 1X, away → DC X2.
 
-- `home_leader` — `f1_leader == 'home'`
-- `away_leader` — `f1_leader == 'away'`
-- `gap_under_10` — `total_gap < 10`
-- `gap_20_29` — `20 <= total_gap < 30`
-- `venue_power_neg` — `venue_power <= -0.5`
-- `venue_incomplete` — `home_home_played < 4 or away_away_played < 4`
-- `tier_cluster` — the CLUSTER rule fires (gap ≤ 10, draw_risk ≥ 0.30, |pos gap| ≤ 3)
-- `team_agreement_0` — `disagreements == 0`
-- `team_disagreement_2plus` — `disagreements >= 2`
-- `f1_cap` — `f1_gap >= {F1_CAP_THRESHOLD}` (calc_f1 saturation)
+### Six-core fallback (unchanged from v5.0)
+
+| Core | Rule | Side |
+|---|---|---|
+| **A** | f1_cap ∧ venue_incomplete ∧ venue_power_neg | X2 |
+| **B** | home_leader ∧ gap_under_10 | 1X |
+| **C** | tier_cluster ∧ team_agreement_0 ∧ away_leader | X2 |
+| **D** | f1_cap ∧ home_leader ∧ gap_20_29 | 1X |
+| **E** | tier_cluster ∧ away_leader ∧ venue_power_neg | X2 |
+| **F** | home_leader ∧ team_disagreement_2plus | 1X |
+
+Priority: A > B > C > D > E > F. First one fires wins.
+
+### Removed from earlier versions
+
+- `gap_20_29` as a combo pair (dropped to 87% on settled rows)
+- `venue_power_pos` penalty (behaved backwards in test)
+- Stored `v5_tier` and `v5_call` strings (replaced by `v5_decision_path`)
+
+### Measured performance (in-sample, for reference)
+
+| Tier | Sample | Rate |
+|---|---|---|
+| COMBO_STRONG | 27 | 96.3% |
+| COMBO | 21 | 100% |
+| CORE_FALLBACK | 12 | 83.3% |
+| F1_GAP_HIGH (skip region, f1_gap >= 16) | 23 | 95.7% |
+| Skip region overall | 43 | 83.7% |
+
+These are in-sample. Out-of-sample measurement is the next milestone.
+
+### Counterfactual
+
+Every row carries a `counterfactual_call` (always `f1_leader` direction) and,
+once settled, a `counterfactual_won`. This lets the skip region be measured
+on the same footing as the bets without any reconstruction.
 
 ### Schema safety
 
 The app discovers the live Supabase column list at runtime and only writes
 columns that actually exist. Missing columns are dropped with a console
 warning, never a hard failure.
-
-### Migration SQL
-
-See Debug tab → section 7.
         """)
 
     with tabs[5]:
