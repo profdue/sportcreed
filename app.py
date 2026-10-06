@@ -1,15 +1,13 @@
 """
-v5.0 Tagged Predictor — Seven-Core Strategy implementation.
+v5.0 Tagged Predictor — Six-Core Strategy implementation.
 
 Decision layer:
-  Priority A > B > C > D > E > F (pure tier). If none fires, evaluate
-  Core G (away-monster tier). If G misses, SKIP.
+  Priority A > B > C > D > E > F. If none fires, SKIP.
 
   X2 cores (away does not lose):
     A: f1_cap  AND venue_incomplete AND venue_power_neg
     C: tier_cluster AND team_agreement_0 AND away_leader
     E: tier_cluster AND away_leader AND venue_power_neg
-    G: away_leader AND f1_cap AND gap_30_plus       (fallback tier)
 
   1X cores (home does not lose):
     B: home_leader AND gap_under_10
@@ -466,10 +464,9 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-# Stakes for the cores.
+# Stakes for the pure-tier cores.
 STAKE_CORE_HIGH = 1.5   # A, B, C
 STAKE_CORE_BASE = 1.0   # D, E, F
-STAKE_CORE_G = 0.75     # G — fallback tier
 STAKE_NONE = 0.0
 
 # f1_cap threshold. The calc_f1() clamp puts the ceiling at f1_gap == 16.0.
@@ -1864,23 +1861,21 @@ def predict_v5(row):
 
 
 # ============================================================================
-# SEVEN-CORE DECISION LAYER
+# SIX-CORE DECISION LAYER
 # ============================================================================
 #
 # X2 cores (away does not lose):
 #   A: f1_cap  AND venue_incomplete AND venue_power_neg
 #   C: tier_cluster AND team_agreement_0 AND away_leader
 #   E: tier_cluster AND away_leader AND venue_power_neg
-#   G: away_leader AND f1_cap AND gap_30_plus        (fallback tier)
 #
 # 1X cores (home does not lose):
 #   B: home_leader AND gap_under_10
 #   D: f1_cap AND home_leader AND gap_20_29
 #   F: home_leader AND team_disagreement_2plus
 #
-# Priority A > B > C > D > E > F. Core G is evaluated only if A–F miss.
-# Core G is deliberately excluded from CORE_PRIORITY so it never appears
-# as a "co-firing" core on matches where a pure core already won.
+# Priority A > B > C > D > E > F. If none fires, SKIP.
+# f1_cap is defined as f1_gap >= 16.0, the calc_f1() saturation point.
 
 
 def _safe_float(v):
@@ -2001,18 +1996,6 @@ def core_F(row, pred, tags):
             and _has_tag(tags, "team_disagreement_2plus"))
 
 
-def core_G(row, pred, tags):
-    """X2 — away_leader + f1_cap + gap_30_plus.
-
-    Fallback tier. Fires only when none of A–F matched. Catches big away
-    favourites with F1 saturation where the pure cores miss.
-    """
-    return (pred.get("f1_leader") == "away"
-            and _is_f1_cap(pred)
-            and _gap_bucket(pred) == "gap_30_plus")
-
-
-# Pure-tier cores. Core G is evaluated separately in decide_v5().
 CORE_DEFS = [
     ("A", "X2", core_A, STAKE_CORE_HIGH),
     ("B", "1X", core_B, STAKE_CORE_HIGH),
@@ -2022,7 +2005,6 @@ CORE_DEFS = [
     ("F", "1X", core_F, STAKE_CORE_BASE),
 ]
 
-# Priority is A > B > C > D > E > F. Core G is not in this list.
 CORE_PRIORITY = ["A", "B", "C", "D", "E", "F"]
 
 
@@ -2040,11 +2022,7 @@ def _cores_firing(row, pred, tags):
 def decide_v5(row, pred):
     """
     Returns (decision, call, tier, skip_reason, stake).
-
-    Priority:
-      A > B > C > D > E > F   (pure tier)
-      G                       (away-monster tier, fallback only)
-      SKIP
+    Priority A > B > C > D > E > F. If none fire, SKIP.
     """
     parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
@@ -2055,17 +2033,14 @@ def decide_v5(row, pred):
     tags = pred.get("tags") or []
     fired = _cores_firing(row, pred, tags)
 
-    # Pure tier first.
-    if fired:
-        winner = fired[0]
-        for letter, side, _fn, stake in CORE_DEFS:
-            if letter == winner:
-                call = "DC 1X" if side == "1X" else "DC X2"
-                return "BET", call, f"CORE_{letter}", None, stake
+    if not fired:
+        return "SKIP", None, None, "no_core_match", STAKE_NONE
 
-    # Core G: away monsters.
-    if core_G(row, pred, tags):
-        return "BET", "DC X2", "CORE_G", None, STAKE_CORE_G
+    winner = fired[0]
+    for letter, side, _fn, stake in CORE_DEFS:
+        if letter == winner:
+            call = "DC 1X" if side == "1X" else "DC X2"
+            return "BET", call, f"CORE_{letter}", None, stake
 
     return "SKIP", None, None, "no_core_match", STAKE_NONE
 
@@ -2129,7 +2104,6 @@ def compute_tags(row, pred, tier, decision, skip_reason):
     if views["v5_cluster_view_priority"]:
         tags.append("cluster_priority")
 
-    # Six-core tag dependencies.
     if check_cluster(row, pred):
         tags.append("tier_cluster")
     if _is_f1_cap(pred):
@@ -2373,13 +2347,12 @@ def render_verdict_v5(result):
 
     if decision == "BET":
         badge = {
-            "CORE_A": "🧩 CORE_A · X2 (pure)",
-            "CORE_B": "🧩 CORE_B · 1X (pure)",
-            "CORE_C": "🧩 CORE_C · X2 (pure)",
-            "CORE_D": "🧩 CORE_D · 1X (pure)",
-            "CORE_E": "🧩 CORE_E · X2 (pure)",
-            "CORE_F": "🧩 CORE_F · 1X (pure)",
-            "CORE_G": "🎯 CORE_G · X2 (away monster)",
+            "CORE_A": "🧩 CORE_A · X2",
+            "CORE_B": "🧩 CORE_B · 1X",
+            "CORE_C": "🧩 CORE_C · X2",
+            "CORE_D": "🧩 CORE_D · 1X",
+            "CORE_E": "🧩 CORE_E · X2",
+            "CORE_F": "🧩 CORE_F · 1X",
         }.get(tier, tier or "")
         st.markdown(f"""
         <div class="verdict-bet">
@@ -2455,7 +2428,7 @@ def render_cluster_views(result):
     v_priority = result.get("v5_cluster_view_priority", False)
     badge_style = "view-badge"
     st.markdown(
-        f'<span class="{badge_style} view-direct">Any pure core fired: {"✅" if v_direct else "—"}</span>'
+        f'<span class="{badge_style} view-direct">Any core fired: {"✅" if v_direct else "—"}</span>'
         f'<span class="{badge_style} view-skip">Skip-excluded: {"✅" if v_skip else "—"}</span>'
         f'<span class="{badge_style} view-priority">Multi-core: {"✅" if v_priority else "—"}</span>',
         unsafe_allow_html=True,
@@ -2477,10 +2450,6 @@ def render_core_breakdown(row, pred):
     for letter in CORE_PRIORITY:
         on = letter in firing
         render_trigger(core_labels[letter], on)
-
-    # Core G is a fallback, not part of the priority loop.
-    g_on = core_G(row, pred, tags)
-    render_trigger("G · X2 · away_leader + f1_cap + gap_30_plus (fallback)", g_on)
 
 
 # ============================================================================
@@ -2529,7 +2498,7 @@ def compute_tag_performance(rows):
 # ============================================================================
 def main():
     st.title("⚽ v5.0 Tagged Predictor")
-    st.caption("Seven-core strategy. Pure tier: A > B > C > D > E > F. Fallback: G.")
+    st.caption("Six-core strategy. Priority: A > B > C > D > E > F. No match: SKIP.")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2552,7 +2521,7 @@ def main():
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → seven-core predict → save with tags.")
+        st.caption("Parse → six-core predict → save with tags.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
         if st.button("⚽ Parse, Predict & Save (v5.0)", type="primary"):
@@ -2568,7 +2537,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running seven-core decision..."):
+                with st.spinner("Running six-core decision..."):
                     result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2732,14 +2701,13 @@ def main():
 
             st.markdown('<div class="section-title">By Core</div>', unsafe_allow_html=True)
             core_rows = []
-            for letter in CORE_PRIORITY + ["G"]:
+            for letter in CORE_PRIORITY:
                 subset = [r for r in placed if r.get("v5_tier") == f"CORE_{letter}"]
                 hits = sum(1 for r in subset if r.get("dc_hit") is True)
                 n = len(subset)
                 rate = f"{(hits/n*100):.1f}%" if n else "—"
                 core_rows.append({
                     "Core": f"CORE_{letter}",
-                    "Tier": "pure" if letter in CORE_PRIORITY else "fallback",
                     "Bets": n,
                     "Hits": hits,
                     "Rate": rate,
@@ -2758,7 +2726,7 @@ def main():
             pri_h = sum(1 for r in settled if r.get("v5_cluster_view_priority")
                         and r.get("dc_hit") is True)
             view_rows = [
-                {"View": "Any pure core fired", "n": direct_n, "Hits": direct_h,
+                {"View": "Any core fired", "n": direct_n, "Hits": direct_h,
                  "Rate": f"{(direct_h/direct_n*100):.1f}%" if direct_n else "—"},
                 {"View": "Skip-excluded", "n": skip_n, "Hits": skip_h,
                  "Rate": f"{(skip_h/skip_n*100):.1f}%" if skip_n else "—"},
@@ -2829,34 +2797,31 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v5.0 Seven-Core Logic Spec")
+        st.subheader("v5.0 Six-Core Logic Spec")
         st.markdown(f"""
 ### Priority
 
-Pure tier: `A > B > C > D > E > F`
-Fallback tier: `G` (only evaluated if the pure tier misses)
-No match: `SKIP`
+`A > B > C > D > E > F`. If none fires, the match is SKIP.
 
-When a match fires multiple pure cores, priority decides which is credited.
-The call is identical either way, because 1X cores and X2 cores are mutually
+When a match fires multiple cores, priority decides which is credited. The
+call is identical either way, because 1X cores and X2 cores are mutually
 exclusive on leader direction.
 
 ### X2 cores (away does not lose)
 
-| Core | Rule | Call | Stake | Tier |
-|---|---|---|---|---|
-| **A** | `f1_cap` ∧ `venue_incomplete` ∧ `venue_power_neg` | DC X2 | 1.5u | pure |
-| **C** | `tier_cluster` ∧ `team_agreement_0` ∧ `away_leader` | DC X2 | 1.5u | pure |
-| **E** | `tier_cluster` ∧ `away_leader` ∧ `venue_power_neg` | DC X2 | 1.0u | pure |
-| **G** | `away_leader` ∧ `f1_cap` ∧ `gap_30_plus` | DC X2 | 0.75u | fallback |
+| Core | Rule | Call | Stake |
+|---|---|---|---|
+| **A** | `f1_cap` ∧ `venue_incomplete` ∧ `venue_power_neg` | DC X2 | 1.5u |
+| **C** | `tier_cluster` ∧ `team_agreement_0` ∧ `away_leader` | DC X2 | 1.5u |
+| **E** | `tier_cluster` ∧ `away_leader` ∧ `venue_power_neg` | DC X2 | 1.0u |
 
 ### 1X cores (home does not lose)
 
-| Core | Rule | Call | Stake | Tier |
-|---|---|---|---|---|
-| **B** | `home_leader` ∧ `gap_under_10` | DC 1X | 1.5u | pure |
-| **D** | `f1_cap` ∧ `home_leader` ∧ `gap_20_29` | DC 1X | 1.0u | pure |
-| **F** | `home_leader` ∧ `team_disagreement_2plus` | DC 1X | 1.0u | pure |
+| Core | Rule | Call | Stake |
+|---|---|---|---|
+| **B** | `home_leader` ∧ `gap_under_10` | DC 1X | 1.5u |
+| **D** | `f1_cap` ∧ `home_leader` ∧ `gap_20_29` | DC 1X | 1.0u |
+| **F** | `home_leader` ∧ `team_disagreement_2plus` | DC 1X | 1.0u |
 
 ### Tag definitions used by the cores
 
@@ -2864,20 +2829,12 @@ exclusive on leader direction.
 - `away_leader` — `f1_leader == 'away'`
 - `gap_under_10` — `total_gap < 10`
 - `gap_20_29` — `20 <= total_gap < 30`
-- `gap_30_plus` — `total_gap >= 30`
 - `venue_power_neg` — `venue_power <= -0.5`
 - `venue_incomplete` — `home_home_played < 4 or away_away_played < 4`
 - `tier_cluster` — the CLUSTER rule fires (gap ≤ 10, draw_risk ≥ 0.30, |pos gap| ≤ 3)
 - `team_agreement_0` — `disagreements == 0`
 - `team_disagreement_2plus` — `disagreements >= 2`
 - `f1_cap` — `f1_gap >= {F1_CAP_THRESHOLD}` (calc_f1 saturation)
-
-### Core G note
-
-Core G is the "away monster" fallback. It fires only when the pure tier
-(A–F) misses, so it never competes with a pure core for credit. Its stake
-is lower than the pure tier and its dashboard label is distinct
-(`CORE_G · away monster`) so hit rates do not get conflated.
 
 ### Schema safety
 
