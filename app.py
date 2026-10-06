@@ -1,23 +1,27 @@
 """
-v5.0 Tagged Predictor — Full v5.2 Frozen State implementation.
+v5.0 Tagged Predictor — Six-Core Strategy implementation.
 
-Frozen rules:
-  FORTRESS       — DC 1X   : home_home_win_pct >= 50 AND away_away_win_pct <= 25
-                            AND f0_home >= 15 AND home_total > away_total
-  AWAY_FORTRESS  — DC X2   : away_away_win_pct >= 50 AND home_home_win_pct <= 25
-                            AND f0_away >= 15 AND away_total > home_total
-  CLUSTER        — DC 1X   : total_gap <= 10 AND draw_risk >= 0.30
-                            AND abs(home_pos - away_pos) <= 3
-  STANDARD       — F1 DC   : abs(home_pos - away_pos) >= 5
-                            AND f1_f5_conflict = false
-                            AND NOT FORTRESS AND NOT AWAY_FORTRESS
-  SKIP                     : parse_status != 'ok' OR home_total IS NULL
+Decision layer:
+  Six tag-defined cores fire on matches. When a match fires multiple cores,
+  priority decides which core is credited (the call is the same either way,
+  because 1X cores and X2 cores are mutually exclusive on leader direction).
 
-Priority: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP
+  X2 cores (away does not lose):
+    A: f1_cap  AND venue_incomplete AND venue_power_neg
+    C: tier_cluster AND team_agreement_0 AND away_leader
+    E: tier_cluster AND away_leader AND venue_power_neg
+
+  1X cores (home does not lose):
+    B: home_leader AND gap_under_10
+    D: f1_cap AND home_leader AND gap_20_29
+    F: home_leader AND team_disagreement_2plus
+
+  Priority: A > B > C > D > E > F
+
+  f1_cap is defined as f1_gap >= 16.0, the calc_f1() saturation point.
 
 Schema safety: the app discovers the live Supabase column list at runtime
-and only ever writes columns that actually exist. Missing columns are
-logged to stderr, not silently dropped.
+and only ever writes columns that actually exist.
 """
 
 import concurrent.futures
@@ -93,19 +97,11 @@ st.markdown("""
 # ============================================================================
 # RUNTIME SCHEMA DISCOVERY
 # ============================================================================
-# The app never assumes which columns exist in Supabase. On first use it
-# probes the live table with SELECT * LIMIT 1 and caches the real column
-# list. Every write is filtered against that list.
-#
-# This means: (a) you can add v5_* columns via SQL and immediately use them,
-# (b) you can leave the DB as-is and the app still works, dropping unknown
-# keys with a console warning, (c) no more PGRST204 errors.
 
 _LIVE_SCHEMA_CACHE = {"columns": None, "table": None}
 
 
 def _probe_live_schema(sb, table="matches_raw"):
-    """Query Supabase for the real column list. Cache per session."""
     if sb is None:
         return None
     if _LIVE_SCHEMA_CACHE["columns"] is not None and _LIVE_SCHEMA_CACHE["table"] == table:
@@ -117,8 +113,6 @@ def _probe_live_schema(sb, table="matches_raw"):
             _LIVE_SCHEMA_CACHE["columns"] = cols
             _LIVE_SCHEMA_CACHE["table"] = table
             return cols
-        # Table is empty — fall back to a metadata probe via RPC if available,
-        # otherwise fall back to the declared superset.
         _LIVE_SCHEMA_CACHE["columns"] = None
         return None
     except Exception as e:
@@ -132,13 +126,6 @@ def reload_schema_cache():
 
 
 def _get_table_columns(sb, table="matches_raw"):
-    """
-    Return the set of columns the app may write.
-
-    Preference order:
-      1. Live schema discovered from Supabase (authoritative).
-      2. Declared MATCHES_RAW_COLUMNS superset (fallback when table empty).
-    """
     live = _probe_live_schema(sb, table)
     if live is not None:
         return live
@@ -459,7 +446,7 @@ def _has_bs4():
 
 
 # ============================================================================
-# CONSTANTS — v5.0
+# CONSTANTS
 # ============================================================================
 ALPHA = 2
 PRIOR_FORM = 0.4
@@ -481,11 +468,13 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-STAKE_FORTRESS = 1.5
-STAKE_AWAY_FORTRESS = 1.5
-STAKE_CLUSTER = 1.0
-STAKE_STANDARD = 1.0
+# Stakes for the six cores.
+STAKE_CORE_HIGH = 1.5   # A, B, C
+STAKE_CORE_BASE = 1.0   # D, E, F
 STAKE_NONE = 0.0
+
+# f1_cap threshold. See decision layer comment.
+F1_CAP_THRESHOLD = 16.0
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -588,7 +577,7 @@ MATCHES_RAW_COLUMNS = {
 
 
 # ============================================================================
-# PARSER  (unchanged from the previous v5 build)
+# PARSER  (unchanged)
 # ============================================================================
 
 _PREVIEW_TOP_SCORER_PATTERNS = [
@@ -1394,8 +1383,7 @@ class SportsgamblerParser:
             elif a_score > h_score:
                 winner_name = a_name
             else:
-                winner_name = None
-            if winner_name:
+                winner_name = None            if winner_name:
                 if self._team_matches(self.home_team, winner_name):
                     out["h2h_home_wins"] += 1
                 elif self._team_matches(self.away_team, winner_name):
@@ -1484,7 +1472,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER
+# FACTOR LAYER  (unchanged)
 # ============================================================================
 def smooth_rate(wins, draws, games):
     if games is None or games <= 0:
@@ -1701,7 +1689,7 @@ def calc_agreement(f1_home, f1_away,
 
 
 # ============================================================================
-# v5.0 factor pipeline
+# PREDICTION PIPELINE
 # ============================================================================
 def _empty_prediction(reason, reason_1x2=None, reason_ou=None,
                       venue_ppg_gap=None, home_ppg=None, away_ppg=None):
@@ -1876,13 +1864,48 @@ def predict_v5(row):
 
 
 # ============================================================================
-# v5.0 DECISION LAYER
+# SIX-CORE DECISION LAYER
 # ============================================================================
+#
+# X2 cores (away does not lose):
+#   A: f1_cap  AND venue_incomplete AND venue_power_neg
+#   C: tier_cluster AND team_agreement_0 AND away_leader
+#   E: tier_cluster AND away_leader AND venue_power_neg
+#
+# 1X cores (home does not lose):
+#   B: home_leader AND gap_under_10
+#   D: f1_cap AND home_leader AND gap_20_29
+#   F: home_leader AND team_disagreement_2plus
+#
+# Priority: A > B > C > D > E > F.
+#
+# f1_cap is defined as f1_gap >= 16.0, the calc_f1() saturation point.
+
+
 def _safe_float(v):
     try:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _has_tag(tags, name):
+    return name in (tags or [])
+
+
+def _is_f1_cap(pred):
+    return (pred.get("f1_gap") or 0) >= F1_CAP_THRESHOLD
+
+
+def _gap_bucket(pred):
+    g = pred.get("total_gap") or 0
+    if g >= 30:
+        return "gap_30_plus"
+    if g >= 20:
+        return "gap_20_29"
+    if g >= 10:
+        return "gap_10_19"
+    return "gap_under_10"
 
 
 def check_fortress(row, pred):
@@ -1937,46 +1960,102 @@ def check_standard(row, pred):
     return True
 
 
-def decide_v5(row, pred):
-    parse_status = row.get("parse_status")
-    home_total = pred.get("home_total")
+def core_A(row, pred, tags):
+    """X2 — f1_cap + venue_incomplete + venue_power_neg."""
+    return (_is_f1_cap(pred)
+            and _has_tag(tags, "venue_incomplete")
+            and _has_tag(tags, "venue_power_neg"))
 
+
+def core_B(row, pred, tags):
+    """1X — home_leader + gap_under_10."""
+    return (pred.get("f1_leader") == "home"
+            and _gap_bucket(pred) == "gap_under_10")
+
+
+def core_C(row, pred, tags):
+    """X2 — tier_cluster + team_agreement_0 + away_leader."""
+    return (_has_tag(tags, "tier_cluster")
+            and _has_tag(tags, "team_agreement_0")
+            and pred.get("f1_leader") == "away")
+
+
+def core_D(row, pred, tags):
+    """1X — f1_cap + home_leader + gap_20_29."""
+    return (_is_f1_cap(pred)
+            and pred.get("f1_leader") == "home"
+            and _gap_bucket(pred) == "gap_20_29")
+
+
+def core_E(row, pred, tags):
+    """X2 — tier_cluster + away_leader + venue_power_neg."""
+    return (_has_tag(tags, "tier_cluster")
+            and pred.get("f1_leader") == "away"
+            and _has_tag(tags, "venue_power_neg"))
+
+
+def core_F(row, pred, tags):
+    """1X — home_leader + team_disagreement_2plus."""
+    return (pred.get("f1_leader") == "home"
+            and _has_tag(tags, "team_disagreement_2plus"))
+
+
+# (letter, dc side, function, stake)
+CORE_DEFS = [
+    ("A", "X2", core_A, STAKE_CORE_HIGH),
+    ("B", "1X", core_B, STAKE_CORE_HIGH),
+    ("C", "X2", core_C, STAKE_CORE_HIGH),
+    ("D", "1X", core_D, STAKE_CORE_BASE),
+    ("E", "X2", core_E, STAKE_CORE_BASE),
+    ("F", "1X", core_F, STAKE_CORE_BASE),
+]
+
+CORE_PRIORITY = ["A", "B", "C", "D", "E", "F"]
+
+
+def _cores_firing(row, pred, tags):
+    fired = []
+    for letter, _side, fn, _stake in CORE_DEFS:
+        try:
+            if fn(row, pred, tags):
+                fired.append(letter)
+        except Exception:
+            continue
+    return [c for c in CORE_PRIORITY if c in fired]
+
+
+def decide_v5(row, pred):
+    """
+    Returns (decision, call, tier, skip_reason, stake).
+    """
+    parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
         return "SKIP", None, None, "parse_status_not_ok", STAKE_NONE
-    if home_total is None:
+    if pred.get("home_total") is None:
         return "SKIP", None, None, "home_total_null", STAKE_NONE
 
-    if check_fortress(row, pred):
-        return "BET", "DC 1X", "FORTRESS", None, STAKE_FORTRESS
+    tags = pred.get("tags") or []
+    fired = _cores_firing(row, pred, tags)
 
-    if check_away_fortress(row, pred):
-        return "BET", "DC X2", "AWAY_FORTRESS", None, STAKE_AWAY_FORTRESS
+    if not fired:
+        return "SKIP", None, None, "no_core_match", STAKE_NONE
 
-    if check_cluster(row, pred):
-        return "BET", "DC 1X", "CLUSTER", None, STAKE_CLUSTER
+    winner = fired[0]
+    for letter, side, _fn, stake in CORE_DEFS:
+        if letter == winner:
+            call = "DC 1X" if side == "1X" else "DC X2"
+            return "BET", call, f"CORE_{letter}", None, stake
 
-    if check_standard(row, pred):
-        leader = pred.get("f1_leader")
-        call = "DC 1X" if leader == "home" else "DC X2"
-        return "BET", call, "STANDARD", None, STAKE_STANDARD
-
-    return "SKIP", None, None, "no_rule_match", STAKE_NONE
+    return "SKIP", None, None, "no_core_match", STAKE_NONE
 
 
 def cluster_views(row, pred):
-    matches_cluster = check_cluster(row, pred)
-    skip_excluded = (
-        matches_cluster
-        and row.get("parse_status") == "ok"
-        and pred.get("home_total") is not None
-    )
-    is_fortress = check_fortress(row, pred)
-    is_away_fortress = check_away_fortress(row, pred)
-    priority = skip_excluded and not is_fortress and not is_away_fortress
+    tags = pred.get("tags") or []
+    fired = _cores_firing(row, pred, tags)
     return {
-        "v5_cluster_view_direct": matches_cluster,
-        "v5_cluster_view_skip_excluded": skip_excluded,
-        "v5_cluster_view_priority": priority,
+        "v5_cluster_view_direct": bool(fired),
+        "v5_cluster_view_skip_excluded": bool(fired) and row.get("parse_status") == "ok",
+        "v5_cluster_view_priority": len(fired) > 1,
     }
 
 
@@ -2028,6 +2107,13 @@ def compute_tags(row, pred, tier, decision, skip_reason):
         tags.append("cluster_skip_excluded")
     if views["v5_cluster_view_priority"]:
         tags.append("cluster_priority")
+
+    # Six-core tag dependencies.
+    if check_cluster(row, pred):
+        tags.append("tier_cluster")
+    if _is_f1_cap(pred):
+        tags.append("f1_cap")
+
     if check_fortress(row, pred):
         tags.append("fortress_candidate")
     if check_away_fortress(row, pred):
@@ -2068,6 +2154,8 @@ def predict_v5_full(row):
     base["_home_top_scorer_goals"] = row.get("home_top_scorer_goals") or 0
     base["_away_top_scorer_goals"] = row.get("away_top_scorer_goals") or 0
 
+    # First pass: tags needed by the cores.
+    base["tags"] = compute_tags(row, base, None, None, None)
     decision, call, tier, skip, stake = decide_v5(row, base)
 
     base["v5_decision"] = decision
@@ -2084,28 +2172,18 @@ def predict_v5_full(row):
     views = cluster_views(row, base)
     base.update(views)
 
+    # Second pass: tags now include tier/skip-derived entries.
     base["tags"] = compute_tags(row, base, tier, decision, skip)
     return base
 
 
 # ============================================================================
-# DB HELPERS — schema-safe
+# DB HELPERS
 # ============================================================================
 _DROPPED_KEYS_WARNED = set()
 
 
 def _filter_columns_for_db(result, real_columns, context=""):
-    """
-    Filter a result dict to only keys the live schema accepts.
-
-    `real_columns` may be:
-      - a set (discovered live schema), or
-      - the declared MATCHES_RAW_COLUMNS superset (fallback when the table
-        is empty and the live probe couldn't run).
-
-    Unknown keys are collected and printed to stderr once per context, so
-    schema drift is visible without spamming the console.
-    """
     clean = {}
     dropped = []
     for k, v in result.items():
@@ -2149,23 +2227,12 @@ def upsert_match(sb, record):
 
 
 def save_prediction(sb, match_id, result):
-    """
-    Write the prediction fields. Only keys present in the live schema are
-    written. Unknown keys are dropped with a stderr warning — never a hard
-    failure.
-
-    If the live probe couldn't run (empty table), we still filter against
-    MATCHES_RAW_COLUMNS, which is the declared superset. That means the
-    first insert after a migration always succeeds even before any row
-    exists to probe.
-    """
     if sb is None:
         return False, "no client"
     real_columns = _get_table_columns(sb, "matches_raw")
     clean = _filter_columns_for_db(result, real_columns, context="save_prediction")
 
-    # Explicitly drop anything that would never be a column.
-    for bad_key in ("leader", "v5_call", "v4_3_call", "factor_map"):
+    for bad_key in ("leader", "factor_map"):
         clean.pop(bad_key, None)
 
     if not clean:
@@ -2176,8 +2243,6 @@ def save_prediction(sb, match_id, result):
         return True, "saved"
     except Exception as e:
         msg = str(e)
-        # If PostgREST still complains about a column, surface which one
-        # and invalidate the cache so the next call re-probes.
         m = re.search(r"Could not find the '([^']+)' column", msg)
         if m:
             bad_col = m.group(1)
@@ -2266,12 +2331,10 @@ def render_tag(label):
         cls += " tag-disagreement"
     elif label.startswith("venue"):
         cls += " tag-venue"
-    elif label.startswith("tier"):
+    elif label.startswith("tier") or label.startswith("cluster"):
         cls += " tag-tier"
     elif label.startswith("skip"):
         cls += " tag-skip"
-    elif label.startswith("cluster"):
-        cls += " tag-tier"
     return f'<span class="{cls}">{label}</span>'
 
 
@@ -2289,10 +2352,12 @@ def render_verdict_v5(result):
 
     if decision == "BET":
         badge = {
-            "FORTRESS": "🏰 FORTRESS",
-            "AWAY_FORTRESS": "🏰 AWAY FORTRESS",
-            "CLUSTER": "🎯 CLUSTER",
-            "STANDARD": "📊 STANDARD",
+            "CORE_A": "🧩 CORE_A · X2",
+            "CORE_B": "🧩 CORE_B · 1X",
+            "CORE_C": "🧩 CORE_C · X2",
+            "CORE_D": "🧩 CORE_D · 1X",
+            "CORE_E": "🧩 CORE_E · X2",
+            "CORE_F": "🧩 CORE_F · 1X",
         }.get(tier, tier or "")
         st.markdown(f"""
         <div class="verdict-bet">
@@ -2361,18 +2426,35 @@ def render_trigger(name, on):
 
 
 def render_cluster_views(result):
-    st.markdown('<div class="section-title">CLUSTER — Three Views</div>',
+    st.markdown('<div class="section-title">Cores — Views</div>',
                 unsafe_allow_html=True)
     v_direct = result.get("v5_cluster_view_direct", False)
     v_skip = result.get("v5_cluster_view_skip_excluded", False)
     v_priority = result.get("v5_cluster_view_priority", False)
     badge_style = "view-badge"
     st.markdown(
-        f'<span class="{badge_style} view-direct">Direct: {"✅" if v_direct else "—"}</span>'
+        f'<span class="{badge_style} view-direct">Any core fired: {"✅" if v_direct else "—"}</span>'
         f'<span class="{badge_style} view-skip">Skip-excluded: {"✅" if v_skip else "—"}</span>'
-        f'<span class="{badge_style} view-priority">Priority-tier: {"✅" if v_priority else "—"}</span>',
+        f'<span class="{badge_style} view-priority">Multi-core: {"✅" if v_priority else "—"}</span>',
         unsafe_allow_html=True,
     )
+
+
+def render_core_breakdown(row, pred):
+    tags = pred.get("tags") or []
+    firing = _cores_firing(row, pred, tags)
+    st.markdown('<div class="section-title">Core Firing</div>', unsafe_allow_html=True)
+    core_labels = {
+        "A": "A · X2 · f1_cap + venue_incomplete + venue_power_neg",
+        "B": "B · 1X · home_leader + gap_under_10",
+        "C": "C · X2 · tier_cluster + team_agreement_0 + away_leader",
+        "D": "D · 1X · f1_cap + home_leader + gap_20_29",
+        "E": "E · X2 · tier_cluster + away_leader + venue_power_neg",
+        "F": "F · 1X · home_leader + team_disagreement_2plus",
+    }
+    for letter in CORE_PRIORITY:
+        on = letter in firing
+        render_trigger(core_labels[letter], on)
 
 
 # ============================================================================
@@ -2421,7 +2503,7 @@ def compute_tag_performance(rows):
 # ============================================================================
 def main():
     st.title("⚽ v5.0 Tagged Predictor")
-    st.caption("Full v5.2 Frozen State. Priority: FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP")
+    st.caption("Six-core strategy. Priority: A > B > C > D > E > F")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2444,7 +2526,7 @@ def main():
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → v5.0 predict → save with tags.")
+        st.caption("Parse → six-core predict → save with tags.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
         if st.button("⚽ Parse, Predict & Save (v5.0)", type="primary"):
@@ -2460,7 +2542,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v5.0..."):
+                with st.spinner("Running six-core decision..."):
                     result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2506,6 +2588,7 @@ def main():
                 st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
 
                 render_cluster_views(result)
+                render_core_breakdown(parsed, result)
 
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
                 render_factor_row("F1 Table Power", result["f1_home"], result["f1_away"], "(18 max)")
@@ -2621,22 +2704,22 @@ def main():
             c3.metric("DC hits", f"{len(dc_hits)}/{len(placed)} ({hit_rate:.1f}%)")
             c4.metric("Misses", len(dc_misses))
 
-            st.markdown('<div class="section-title">By Tier</div>', unsafe_allow_html=True)
-            tier_rows = []
-            for tier in ("FORTRESS", "AWAY_FORTRESS", "CLUSTER", "STANDARD"):
-                subset = [r for r in placed if r.get("v5_tier") == tier]
+            st.markdown('<div class="section-title">By Core</div>', unsafe_allow_html=True)
+            core_rows = []
+            for letter in CORE_PRIORITY:
+                subset = [r for r in placed if r.get("v5_tier") == f"CORE_{letter}"]
                 hits = sum(1 for r in subset if r.get("dc_hit") is True)
                 n = len(subset)
                 rate = f"{(hits/n*100):.1f}%" if n else "—"
-                tier_rows.append({
-                    "Tier": tier,
+                core_rows.append({
+                    "Core": f"CORE_{letter}",
                     "Bets": n,
                     "Hits": hits,
                     "Rate": rate,
                 })
-            st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(core_rows), use_container_width=True, hide_index=True)
 
-            st.markdown('<div class="section-title">CLUSTER — Three Views</div>',
+            st.markdown('<div class="section-title">Cores — Views</div>',
                         unsafe_allow_html=True)
             direct_n = sum(1 for r in settled if r.get("v5_cluster_view_direct"))
             direct_h = sum(1 for r in settled if r.get("v5_cluster_view_direct")
@@ -2648,11 +2731,11 @@ def main():
             pri_h = sum(1 for r in settled if r.get("v5_cluster_view_priority")
                         and r.get("dc_hit") is True)
             view_rows = [
-                {"View": "Direct (raw rule)", "n": direct_n, "Hits": direct_h,
+                {"View": "Any core fired", "n": direct_n, "Hits": direct_h,
                  "Rate": f"{(direct_h/direct_n*100):.1f}%" if direct_n else "—"},
                 {"View": "Skip-excluded", "n": skip_n, "Hits": skip_h,
                  "Rate": f"{(skip_h/skip_n*100):.1f}%" if skip_n else "—"},
-                {"View": "Priority-tier", "n": pri_n, "Hits": pri_h,
+                {"View": "Multi-core", "n": pri_n, "Hits": pri_h,
                  "Rate": f"{(pri_h/pri_n*100):.1f}%" if pri_n else "—"},
             ]
             st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True)
@@ -2689,7 +2772,7 @@ def main():
                 "Date": r.get("match_date"),
                 "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
                 "Model": r.get("model_version"),
-                "Tier": r.get("v5_tier"),
+                "Core": r.get("v5_tier"),
                 "Leader": r.get("f1_leader"),
                 "Gap": r.get("total_gap"),
                 "Bet": r.get("v5_bet"),
@@ -2719,33 +2802,53 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v5.0 Complete Logic Spec (Frozen State)")
+        st.subheader("v5.0 Six-Core Logic Spec")
         st.markdown(f"""
-### Priority Order
-`FORTRESS > AWAY_FORTRESS > CLUSTER > STANDARD > SKIP`
+### Priority
 
-### Tier Rules
+`A > B > C > D > E > F`
 
-| Tier | Rule | Call | Verified |
+When a match fires multiple cores, the priority determines which core is
+credited. The call is identical either way, because the 1X cores and the X2
+cores are mutually exclusive on leader direction.
+
+### X2 cores (away does not lose)
+
+| Core | Rule | Call | Stake |
 |---|---|---|---|
-| **FORTRESS** | `home_home_win_pct >= 50` ∧ `away_away_win_pct <= 25` ∧ `f0_home >= 15` ∧ `home_total > away_total` | **DC 1X** | 9/9 = 100.0% |
-| **AWAY_FORTRESS** | `away_away_win_pct >= 50` ∧ `home_home_win_pct <= 25` ∧ `f0_away >= 15` ∧ `away_total > home_total` | **DC X2** | 7/7 = 100.0% |
-| **CLUSTER** | `total_gap <= 10` ∧ `draw_risk >= 0.30` ∧ `abs(home_pos - away_pos) <= 3` | **DC 1X** | 21/22 = 95.5% (priority) · 24/26 = 92.3% (raw) · 23/25 = 92.0% (skip-excl) |
-| **STANDARD** | `abs(home_pos - away_pos) >= 5` ∧ `f1_f5_conflict = false` ∧ ¬FORTRESS ∧ ¬AWAY_FORTRESS | **DC on f1_leader** | 40/43 = 93.0% |
-| **SKIP** | `parse_status != 'ok'` ∨ `home_total IS NULL` | — | — |
+| **A** | `f1_cap` ∧ `venue_incomplete` ∧ `venue_power_neg` | DC X2 | 1.5u |
+| **C** | `tier_cluster` ∧ `team_agreement_0` ∧ `away_leader` | DC X2 | 1.5u |
+| **E** | `tier_cluster` ∧ `away_leader` ∧ `venue_power_neg` | DC X2 | 1.0u |
 
-### CLUSTER — Three Views
-1. **Direct** — every row matching the CLUSTER rule. 24/26 = 92.3%
-2. **Skip-excluded** — remove rows with `parse_status != 'ok'` or `home_total IS NULL`. 23/25 = 92.0%
-3. **Priority-tier** — remove rows that would be classified as FORTRESS or AWAY_FORTRESS. 21/22 = 95.5%
+### 1X cores (home does not lose)
 
-### Schema Safety
+| Core | Rule | Call | Stake |
+|---|---|---|---|
+| **B** | `home_leader` ∧ `gap_under_10` | DC 1X | 1.5u |
+| **D** | `f1_cap` ∧ `home_leader` ∧ `gap_20_29` | DC 1X | 1.0u |
+| **F** | `home_leader` ∧ `team_disagreement_2plus` | DC 1X | 1.0u |
+
+### Tag definitions used by the cores
+
+- `home_leader` — `f1_leader == 'home'`
+- `away_leader` — `f1_leader == 'away'`
+- `gap_under_10` — `total_gap < 10`
+- `gap_20_29` — `20 <= total_gap < 30`
+- `venue_power_neg` — `venue_power <= -0.5`
+- `venue_incomplete` — `home_home_played < 4 or away_away_played < 4`
+- `tier_cluster` — the CLUSTER rule fires (gap ≤ 10, draw_risk ≥ 0.30, |pos gap| ≤ 3)
+- `team_agreement_0` — `disagreements == 0`
+- `team_disagreement_2plus` — `disagreements >= 2`
+- `f1_cap` — `f1_gap >= {F1_CAP_THRESHOLD}` (calc_f1 saturation)
+
+### Schema safety
+
 The app discovers the live Supabase column list at runtime and only writes
-columns that actually exist. If a `v5_*` column is missing from the live
-table, the write is filtered (dropped with a console warning), and the app
-tells you to run the migration SQL in the Debug tab.
+columns that actually exist. Missing columns are dropped with a console
+warning, never a hard failure.
 
 ### Migration SQL
+
 See Debug tab → section 7.
         """)
 
