@@ -51,25 +51,19 @@ def unbreakable(match):
     return SKIP('no_match')
 
 """
-v5.5 Tagged Predictor — Rebuilt from the updated data.
+v5.6-formula — THE FORMULA.
 
-Decision order:
-  1. UNBREAKABLE  (5 segments, 100% / 96.2%)   1.5u / 1.0u
-  2. STRONG       (5 segments, 90%+)           0.75u
-  3. MEDIUM       (2 segments, 85%+)           0.5u
-  4. HARD TRAPS   (4 traps)                    SKIP
-  5. F1_GAP_HIGH  (filtered)                   0.5u
-  6. SKIP         everything else              0
+Flat list of 100% segments. Direction from the formula's rule.
+Priority: highest n, then alphabetical. Skip everything else.
 
-Unbreakable core (priority order):
-  1. standard_candidate + team_agreement_0    19/19  100%
-  2. home_leader + standard_candidate         18/18  100%
-  3. gap_30_plus + home_leader                15/15  100%
-  4. gap_30_plus + standard_candidate         15/15  100%
-  5. f1_cap + home_leader                     26/26  96.2%
-
-Direction is always the segment's own call (all DC 1X).
-F1_GAP_HIGH uses f1_leader directly.
+Pre-ship checklist status:
+  [x] Direction rule confirmed (with leaderless fallback)
+  [x] Priority rule confirmed
+  [x] Stakes confirmed
+  [x] Derby row resolves to DC X2 correctly
+  [ ] Tier 2 / Tier 3 lists validated against DB (run Query A)
+  [ ] Overlap with disconfirming segments checked (run Query C)
+  [x] standard_candidate verified pre-match safe
 
 Schema safety: live Supabase columns discovered at runtime.
 """
@@ -86,7 +80,7 @@ import streamlit as st
 
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="v5.5 Tagged Predictor",
+    page_title="v5.6 The Formula",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -139,10 +133,9 @@ st.markdown("""
         border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
     .path-badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 8px;
         font-size: 0.72rem; font-weight: 700; margin-right: 0.35rem; }
-    .path-combo-strong { background: #064e3b; color: #6ee7b7; }
-    .path-combo { background: #065f46; color: #a7f3d0; }
-    .path-core { background: #7c2d12; color: #fed7aa; }
-    .path-f1-high { background: #1e3a8a; color: #bfdbfe; }
+    .path-tier1 { background: #064e3b; color: #6ee7b7; }
+    .path-tier2 { background: #065f46; color: #a7f3d0; }
+    .path-tier3 { background: #7c2d12; color: #fed7aa; }
     .path-skip { background: #1e293b; color: #94a3b8; }
 </style>
 """, unsafe_allow_html=True)
@@ -429,17 +422,17 @@ def render_debug_tab(sb):
 
     st.markdown('<div class="section-title">7. Migration helper</div>',
                 unsafe_allow_html=True)
-    st.caption("Full drop-and-recreate SQL for the v5.5 schema. "
+    st.caption("Full drop-and-recreate SQL for the v5.6 schema. "
                "Copy into the Supabase SQL Editor. Back up first.")
     st.code("""
 -- Back up current table
-CREATE TABLE matches_raw_backup_20261006 AS
+CREATE TABLE matches_raw_backup_20261007 AS
     SELECT * FROM matches_raw;
 
 -- Verify backup
-SELECT count(*) FROM matches_raw_backup_20261006;
+SELECT count(*) FROM matches_raw_backup_20261007;
 
--- Then run the DROP/CREATE from the v5.5 schema document.
+-- Then run the DROP/CREATE from the v5.6 schema document.
     """.strip(), language="sql")
 
     st.markdown('<div class="section-title">8. Test insert</div>', unsafe_allow_html=True)
@@ -518,18 +511,15 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-# ---- v5.5 stakes ----
-STAKE_UNBREAKABLE = 1.5
-STAKE_UNBREAKABLE_SOFT = 1.0
-STAKE_STRONG = 0.75
-STAKE_MEDIUM = 0.5
-STAKE_F1_GAP_HIGH = 0.5
+# ---- v5.6-formula stakes ----
+STAKE_TIER1 = 1.5
+STAKE_TIER2 = 0.75
+STAKE_TIER3 = 0.5
 STAKE_NONE = 0.0
 
-# f1_cap threshold — the calc_f1() clamp puts the ceiling at f1_gap == 16.0
 F1_CAP_THRESHOLD = 16.0
 
-DECISION_VERSION = "v5.5"
+DECISION_VERSION = "v5.6-formula"
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -618,14 +608,11 @@ MATCHES_RAW_COLUMNS = {
     "f0_home", "f0_away", "f0_gap",
     "draw_risk",
     "tags",
-    # v5.5 decision trace
     "decision_version",
     "v5_decision_path", "v5_decision", "v5_bet", "v5_stake",
     "v5_combo_pair_count", "v5_combo_pairs_fired", "v5_core_fired",
     "v5_skip_reason",
-    # counterfactual
     "counterfactual_call", "counterfactual_odds", "counterfactual_won",
-    # audit
     "actual_home_goals", "actual_away_goals",
     "actual_possession_home", "actual_xg_home", "actual_xg_away",
     "actual_corners_home", "actual_corners_away", "actual_total_goals",
@@ -634,7 +621,7 @@ MATCHES_RAW_COLUMNS = {
 
 
 # ============================================================================
-# PARSER  (unchanged from v5.4)
+# PARSER (unchanged from v5.5)
 # ============================================================================
 
 _PREVIEW_TOP_SCORER_PATTERNS = [
@@ -2003,92 +1990,167 @@ def check_standard(row, pred):
 
 
 # ============================================================================
-# v5.5 UNBREAKABLE CORE (checked first — 100% / 96.2% segments)
+# THE FORMULA — flat list of 100% segments
 # ============================================================================
-UNBREAKABLE_DEFS = [
-    ("standard_candidate+team_agreement_0",
-     {"standard_candidate", "team_agreement_0"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 19),
-    ("home_leader+standard_candidate",
-     {"home_leader", "standard_candidate"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 18),
-    ("gap_30_plus+home_leader",
-     {"gap_30_plus", "home_leader"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 15),
-    ("gap_30_plus+standard_candidate",
-     {"gap_30_plus", "standard_candidate"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 15),
-    ("f1_cap+home_leader",
-     {"f1_cap", "home_leader"}, "DC 1X", STAKE_UNBREAKABLE_SOFT, 0.962, 26),
+# Each entry: (name, required_tags, n, explicit_call_or_None)
+# Direction rule (applied at decision time by _formula_direction):
+#   - explicit_call given: use it
+#   - has away_leader and home_leader: use f1_leader
+#   - has away_leader only: DC X2
+#   - has home_leader only: DC 1X
+#   - no leader tag: use f1_leader (leaderless fallback)
+# Priority rule: highest n, then alphabetical by name.
+
+# ---- Tier 1: n >= 15 ----
+FORMULA_TIER1 = [
+    ("standard_candidate+team_agreement_0", {"standard_candidate", "team_agreement_0"}, 21, None),
+    ("home_leader+standard_candidate",      {"home_leader", "standard_candidate"},      19, None),
+    ("gap_30_plus+home_leader",             {"gap_30_plus", "home_leader"},             17, None),
 ]
 
-STRONG_DEFS = [
-    ("home_leader+team_agreement_0",
-     {"home_leader", "team_agreement_0"}, "DC 1X", STAKE_STRONG, 0.955, 22),
-    ("standard_candidate+venue_incomplete",
-     {"standard_candidate", "venue_incomplete"}, "DC 1X", STAKE_STRONG, 0.938, 16),
-    ("team_agreement_0+venue_incomplete",
-     {"team_agreement_0", "venue_incomplete"}, "DC 1X", STAKE_STRONG, 0.933, 15),
-    ("f1_cap+gap_30_plus",
-     {"f1_cap", "gap_30_plus"}, "DC 1X", STAKE_STRONG, 0.923, 26),
-    ("gap_30_plus+team_agreement_0",
-     {"gap_30_plus", "team_agreement_0"}, "DC 1X", STAKE_STRONG, 0.923, 26),
+# ---- Tier 2: n >= 5 ----
+FORMULA_TIER2 = [
+    ("away_leader+tier_core_a",             {"away_leader", "tier_core_a"},             5, None),
+    ("away_leader+team_disagreement_2plus", {"away_leader", "team_disagreement_2plus"}, 5, None),
+    ("away_leader+venue_power_neg",         {"away_leader", "venue_power_neg"},         5, None),
+    ("f1_cap+tier_core_a",                  {"f1_cap", "tier_core_a"},                  5, None),
+    ("f1_cap+team_disagreement_2plus",      {"f1_cap", "team_disagreement_2plus"},      5, None),
+    ("f1_f5_conflict+team_disagreement_1",  {"f1_f5_conflict", "team_disagreement_1"},  5, None),
+    ("f1_f5_conflict+venue_incomplete",     {"f1_f5_conflict", "venue_incomplete"},     5, None),
+    ("f1_f5_override+home_leader",          {"f1_f5_override", "home_leader"},          5, None),
+    ("gap_10_19+standard_candidate",        {"gap_10_19", "standard_candidate"},        5, None),
+    ("gap_10_19+venue_incomplete",          {"gap_10_19", "venue_incomplete"},          5, None),
+    ("gap_30_plus+tier_core_a",             {"gap_30_plus", "tier_core_a"},             5, None),
+    ("gap_30_plus+venue_power_neg",         {"gap_30_plus", "venue_power_neg"},         5, None),
+    ("home_leader+venue_power_pos",         {"home_leader", "venue_power_pos"},         5, None),
+    ("team_agreement_0+tier_core_a",        {"team_agreement_0", "tier_core_a"},        5, None),
+    ("team_agreement_0+venue_power_neg",    {"team_agreement_0", "venue_power_neg"},    5, None),
+    ("team_disagreement_2plus+tier_f1_gap_high",
+     {"team_disagreement_2plus", "tier_f1_gap_high"}, 5, None),
+    ("tier_core_a+venue_incomplete",        {"tier_core_a", "venue_incomplete"},        5, None),
+    ("tier_core_a+venue_power_neg",         {"tier_core_a", "venue_power_neg"},         5, None),
 ]
 
-MEDIUM_DEFS = [
-    ("f1_cap+team_agreement_0",
-     {"f1_cap", "team_agreement_0"}, "DC 1X", STAKE_MEDIUM, 0.909, 33),
-    ("f1_cap+venue_incomplete",
-     {"f1_cap", "venue_incomplete"}, "DC 1X", STAKE_MEDIUM, 0.917, 24),
+# ---- Tier 3: n >= 2 ----
+FORMULA_TIER3 = [
+    ("away_leader+f1_f2f3_conflict",       {"away_leader", "f1_f2f3_conflict"},        2, "DC X2"),
+    ("away_leader+gap_under_10",           {"away_leader", "gap_under_10"},            2, "DC X2"),
+    ("away_leader+venue_power_pos",        {"away_leader", "venue_power_pos"},         2, "DC X2"),
+    ("f1_cap+f1_f2f3_conflict",            {"f1_cap", "f1_f2f3_conflict"},             2, "DC 1X"),
+    ("f1_cap+gap_under_10",                {"f1_cap", "gap_under_10"},                 2, "DC 1X"),
+    ("f1_cap+venue_power_neg",             {"f1_cap", "venue_power_neg"},              2, "DC 1X"),
+    ("f1_f2f3_conflict+f1_f5_conflict",    {"f1_f2f3_conflict", "f1_f5_conflict"},     2, "DC 1X"),
+    ("f1_f2f3_conflict+f1_f5_override",    {"f1_f2f3_conflict", "f1_f5_override"},     2, "DC 1X"),
+    ("f1_f2f3_conflict+gap_10_19",         {"f1_f2f3_conflict", "gap_10_19"},          2, "DC 1X"),
+    ("f1_f2f3_conflict+gap_under_10",      {"f1_f2f3_conflict", "gap_under_10"},       2, "DC 1X"),
+    ("f1_f2f3_conflict+standard_candidate", {"f1_f2f3_conflict", "standard_candidate"}, 2, "DC 1X"),
+    ("f1_f2f3_conflict+team_disagreement_1", {"f1_f2f3_conflict", "team_disagreement_1"}, 2, "DC 1X"),
+    ("f1_f2f3_conflict+team_disagreement_2plus",
+     {"f1_f2f3_conflict", "team_disagreement_2plus"}, 2, "DC 1X"),
+    ("f1_f2f3_conflict+tier_f1_gap_high",  {"f1_f2f3_conflict", "tier_f1_gap_high"},   2, "DC 1X"),
+    ("f1_f5_conflict+gap_10_19",           {"f1_f5_conflict", "gap_10_19"},            2, "DC 1X"),
+    ("f1_f5_conflict+gap_20_29",           {"f1_f5_conflict", "gap_20_29"},            2, "DC 1X"),
+    ("f1_f5_conflict+team_disagreement_2plus",
+     {"f1_f5_conflict", "team_disagreement_2plus"}, 2, "DC 1X"),
+    ("f1_f5_conflict+tier_cluster",        {"f1_f5_conflict", "tier_cluster"},         2, "DC 1X"),
+    ("f1_f5_conflict+tier_core_a",         {"f1_f5_conflict", "tier_core_a"},          2, "DC 1X"),
+    ("f1_f5_conflict+venue_power_neg",     {"f1_f5_conflict", "venue_power_neg"},      2, "DC 1X"),
+    ("f1_f5_override+gap_10_19",           {"f1_f5_override", "gap_10_19"},            2, "DC 1X"),
+    ("f1_f5_override+gap_20_29",           {"f1_f5_override", "gap_20_29"},            2, "DC 1X"),
+    ("f1_f5_override+gap_under_10",        {"f1_f5_override", "gap_under_10"},         2, "DC 1X"),
+    ("f1_f5_override+team_disagreement_1", {"f1_f5_override", "team_disagreement_1"},  2, "DC 1X"),
+    ("f1_f5_override+team_disagreement_2plus",
+     {"f1_f5_override", "team_disagreement_2plus"}, 2, "DC 1X"),
+    ("f1_f5_override+tier_core_a",         {"f1_f5_override", "tier_core_a"},          2, "DC 1X"),
+    ("f1_f5_override+venue_incomplete",    {"f1_f5_override", "venue_incomplete"},     2, "DC 1X"),
+    ("f1_f5_override+venue_power_neg",     {"f1_f5_override", "venue_power_neg"},      2, "DC 1X"),
+    ("gap_10_19+home_leader",              {"gap_10_19", "home_leader"},               2, "DC 1X"),
+    ("gap_10_19+team_disagreement_2plus",  {"gap_10_19", "team_disagreement_2plus"},   2, "DC 1X"),
+    ("gap_10_19+tier_core_a",              {"gap_10_19", "tier_core_a"},               2, "DC 1X"),
+    ("gap_10_19+venue_power_neg",          {"gap_10_19", "venue_power_neg"},           2, "DC 1X"),
+    ("gap_10_19+venue_power_pos",          {"gap_10_19", "venue_power_pos"},           2, "DC 1X"),
+    ("gap_30_plus+venue_power_pos",        {"gap_30_plus", "venue_power_pos"},         2, "DC 1X"),
+    ("gap_under_10+standard_candidate",    {"gap_under_10", "standard_candidate"},     2, "DC 1X"),
+    ("gap_under_10+team_disagreement_2plus",
+     {"gap_under_10", "team_disagreement_2plus"}, 2, "DC 1X"),
+    ("gap_under_10+tier_core_a",           {"gap_under_10", "tier_core_a"},            2, "DC 1X"),
+    ("gap_under_10+venue_incomplete",      {"gap_under_10", "venue_incomplete"},       2, "DC 1X"),
+    ("gap_under_10+venue_power_pos",       {"gap_under_10", "venue_power_pos"},        2, "DC 1X"),
+    ("home_leader+team_disagreement_2plus", {"home_leader", "team_disagreement_2plus"}, 2, "DC 1X"),
+    ("standard_candidate+team_disagreement_2plus",
+     {"standard_candidate", "team_disagreement_2plus"}, 2, "DC 1X"),
+    ("standard_candidate+tier_core_a",     {"standard_candidate", "tier_core_a"},      2, "DC 1X"),
+    ("standard_candidate+venue_power_neg", {"standard_candidate", "venue_power_neg"},  2, "DC 1X"),
+    ("team_agreement_0+venue_power_pos",   {"team_agreement_0", "venue_power_pos"},    2, "DC 1X"),
+    ("team_disagreement_1+tier_core_a",    {"team_disagreement_1", "tier_core_a"},     2, "DC 1X"),
+    ("team_disagreement_1+tier_core_b",    {"team_disagreement_1", "tier_core_b"},     2, "DC 1X"),
+    ("team_disagreement_2plus+tier_cluster", {"team_disagreement_2plus", "tier_cluster"}, 2, "DC 1X"),
+    ("team_disagreement_2plus+venue_incomplete",
+     {"team_disagreement_2plus", "venue_incomplete"}, 2, "DC 1X"),
+    ("tier_cluster+tier_core_b",           {"tier_cluster", "tier_core_b"},            2, "DC 1X"),
+    ("tier_core_b+venue_incomplete",       {"tier_core_b", "venue_incomplete"},        2, "DC 1X"),
+    ("tier_core_b+venue_power_pos",        {"tier_core_b", "venue_power_pos"},         2, "DC 1X"),
+    ("venue_incomplete+venue_power_neg",   {"venue_incomplete", "venue_power_neg"},    2, "DC 1X"),
 ]
 
-# Traps — checked AFTER core/strong/medium. Trap_5 removed.
-TRAP_DEFS = [
-    ("trap_1", {"away_leader", "gap_20_29", "team_disagreement_1"}),
-    ("trap_2", {"away_leader", "gap_30_plus", "team_agreement_0", "tier_f1_gap_high"}),
-    ("trap_3", {"gap_under_10", "home_leader", "team_disagreement_1"}),
-    ("trap_4", {"gap_under_10", "home_leader", "team_disagreement_2plus"}),
-]
+FORMULA_ALL = FORMULA_TIER1 + FORMULA_TIER2 + FORMULA_TIER3
 
 
-def _check_trap(tags):
+def _formula_direction(required, explicit_call, leader):
+    """Apply the formula's direction rule.
+
+    - explicit call -> use it
+    - away_leader + home_leader -> follow f1_leader
+    - away_leader only -> DC X2
+    - home_leader only -> DC 1X
+    - neither -> follow f1_leader (leaderless fallback)
+    """
+    if explicit_call:
+        return explicit_call
+    has_away = "away_leader" in required
+    has_home = "home_leader" in required
+    if has_away and has_home:
+        return "DC 1X" if leader == "home" else "DC X2"
+    if has_away:
+        return "DC X2"
+    if has_home:
+        return "DC 1X"
+    # No leader tag -> resolve from match leader
+    return "DC 1X" if leader == "home" else "DC X2"
+
+
+def _formula_fired(tags, leader):
+    """Return list of (name, call, n, required) for every segment that fires,
+    sorted by the formula's priority rule (highest n, then alphabetical)."""
     tagset = set(tags or [])
-    for name, required in TRAP_DEFS:
+    fired = []
+    for name, required, n, explicit in FORMULA_ALL:
         if required <= tagset:
-            return name
-    return None
+            call = _formula_direction(required, explicit, leader)
+            fired.append((name, call, n, required))
+    fired.sort(key=lambda x: (-x[2], x[0]))
+    return fired
 
 
-def _unbreakable_fired(tags):
-    tagset = set(tags or [])
-    return [(n, c, s, r, k) for n, req, c, s, r, k in UNBREAKABLE_DEFS if req <= tagset]
-
-
-def _strong_fired(tags):
-    tagset = set(tags or [])
-    return [(n, c, s, r, k) for n, req, c, s, r, k in STRONG_DEFS if req <= tagset]
-
-
-def _medium_fired(tags):
-    tagset = set(tags or [])
-    return [(n, c, s, r, k) for n, req, c, s, r, k in MEDIUM_DEFS if req <= tagset]
-
-
-# Backwards-compat shim for the UI breakdown renderer
-COMBO_PAIR_DEFS = [
-    (name, (lambda req: (lambda tags: req <= set(tags or [])))(required))
-    for name, required, _c, _s, _r, _k in UNBREAKABLE_DEFS
-]
-
-
+# Backwards-compat shim
+COMBO_PAIR_DEFS = []
 def _combo_pairs_fired(tags):
-    return [name for name, fn in COMBO_PAIR_DEFS if fn(tags)]
+    return []
 
 
 # ============================================================================
-# DECISION LAYER (v5.5 — core-first, 5-tuple return)
+# DECISION LAYER — THE FORMULA
 # ============================================================================
 def decide_v5(row, pred):
     """
-    v5.5 decision layer.
+    THE FORMULA decision layer.
     Returns 5-tuple: (decision, call, path, detail, stake).
-    Order: Unbreakable → Strong → Medium → Traps → F1_GAP_HIGH → SKIP.
+
+    Rules:
+      - Find every 100% segment that fires.
+      - Priority: highest n, then alphabetical.
+      - Direction: formula's direction rule.
+      - If no segment fires: SKIP.
     """
     parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
@@ -2101,38 +2163,25 @@ def decide_v5(row, pred):
     if leader not in ("home", "away"):
         return "SKIP", None, "SKIP", "no_leader", STAKE_NONE
 
-    # 1. Unbreakable core — checked FIRST, no leader guard
-    unbreak = _unbreakable_fired(tags)
-    if unbreak:
-        name, call, stake, _rate, _n = unbreak[0]
-        return "BET", call, "UNBREAKABLE", name, stake
+    fired = _formula_fired(tags, leader)
+    if not fired:
+        return "SKIP", None, "SKIP", "no_segment_fired", STAKE_NONE
 
-    # 2. Strong
-    strong = _strong_fired(tags)
-    if strong:
-        name, call, stake, _rate, _n = strong[0]
-        return "BET", call, "STRONG", name, stake
+    name, call, n, required = fired[0]
+    if call is None:
+        call = "DC 1X" if leader == "home" else "DC X2"
 
-    # 3. Medium
-    medium = _medium_fired(tags)
-    if medium:
-        name, call, stake, _rate, _n = medium[0]
-        return "BET", call, "MEDIUM", name, stake
+    if n >= 15:
+        path = "TIER1"
+        stake = STAKE_TIER1
+    elif n >= 5:
+        path = "TIER2"
+        stake = STAKE_TIER2
+    else:
+        path = "TIER3"
+        stake = STAKE_TIER3
 
-    # 4. Traps — only reached if no core/strong/medium fired
-    trap = _check_trap(tags)
-    if trap:
-        return "SKIP", None, "SKIP", f"hard_{trap}", STAKE_NONE
-
-    # 5. F1_GAP_HIGH (filtered)
-    f1_gap = pred.get("f1_gap") or 0
-    if f1_gap >= 25 and leader == "away":
-        return "BET", "DC X2", "F1_GAP_HIGH", "away_high", STAKE_F1_GAP_HIGH
-    if f1_gap >= 16 and leader == "home":
-        return "BET", "DC 1X", "F1_GAP_HIGH", "home_mid", STAKE_F1_GAP_HIGH
-
-    # 6. Skip
-    return "SKIP", None, "SKIP", "no_tier_match", STAKE_NONE
+    return "BET", call, path, name, stake
 
 
 # ============================================================================
@@ -2210,12 +2259,12 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 
 
 # ============================================================================
-# FULL PREDICTION (v5.5)
+# FULL PREDICTION
 # ============================================================================
 def predict_v5_full(row):
     base = predict_v5(row)
 
-    # Compute tags ONCE. This is what the decision layer sees AND what gets stored.
+    # Compute tags with neutral tier so we see the full tag set
     tags = compute_tags(row, base, None, None, None)
     base["tags"] = tags
 
@@ -2225,24 +2274,22 @@ def predict_v5_full(row):
     final_tags = compute_tags(row, base, detail, decision, detail)
     base["tags"] = final_tags
 
-    unbreak_names = [u[0] for u in _unbreakable_fired(final_tags)]
-    strong_names = [s[0] for s in _strong_fired(final_tags)]
-    medium_names = [m[0] for m in _medium_fired(final_tags)]
-    trap_hit = _check_trap(final_tags)
+    # Compute the full firing list for the trace
+    leader = base.get("f1_leader") or "home"
+    fired = _formula_fired(final_tags, leader)
+    fired_names = [f[0] for f in fired]
 
     base["decision_version"] = DECISION_VERSION
     base["v5_decision_path"] = path
     base["v5_decision"] = decision
     base["v5_bet"] = call if decision == "BET" else None
     base["v5_stake"] = stake
-    base["v5_combo_pair_count"] = len(unbreak_names)
-    base["v5_combo_pairs_fired"] = unbreak_names or None
-    base["v5_core_fired"] = (strong_names or medium_names
-                             or ([trap_hit] if trap_hit else None))
+    base["v5_combo_pair_count"] = len(fired)
+    base["v5_combo_pairs_fired"] = fired_names or None
+    base["v5_core_fired"] = None
     base["v5_skip_reason"] = detail
 
-    # Counterfactual — always written
-    leader = base.get("f1_leader")
+    # Counterfactual
     if leader == "home":
         base["counterfactual_call"] = "DC 1X"
     elif leader == "away":
@@ -2374,7 +2421,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, counterfactual_cal
 
     real_columns = _get_table_columns(sb, "matches_raw") or set()
 
-    # dc_hit — did the actual v5 bet win
     dc_hit = None
     if bet_v5 == "DC 1X":
         dc_hit = actual in ("Home", "Draw")
@@ -2383,7 +2429,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, counterfactual_cal
     if "dc_hit" in real_columns:
         payload["dc_hit"] = dc_hit
 
-    # counterfactual_won — did f1_leader direction win
     cf_won = None
     if counterfactual_call == "DC 1X":
         cf_won = actual in ("Home", "Draw")
@@ -2392,7 +2437,6 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, counterfactual_cal
     if "counterfactual_won" in real_columns:
         payload["counterfactual_won"] = cf_won
 
-    # legacy is_correct_1x2
     is_correct = None
     if call_1x2 and not call_1x2.startswith("NO BET"):
         if "Straight Win Home" in call_1x2:
@@ -2444,10 +2488,9 @@ def render_tags(tags):
 
 def render_path_badge(path):
     cls = {
-        "UNBREAKABLE": "path-combo-strong",
-        "STRONG": "path-combo",
-        "MEDIUM": "path-core",
-        "F1_GAP_HIGH": "path-f1-high",
+        "TIER1": "path-tier1",
+        "TIER2": "path-tier2",
+        "TIER3": "path-tier3",
         "SKIP": "path-skip",
     }.get(path, "path-skip")
     return f'<span class="path-badge {cls}">{path}</span>'
@@ -2464,14 +2507,10 @@ def render_verdict_v5(result):
     if decision == "BET":
         tier_label = ""
         if result.get("v5_combo_pairs_fired"):
-            tier_label = " · " + " + ".join(result["v5_combo_pairs_fired"])
-        elif result.get("v5_core_fired"):
-            tier_label = " · " + ",".join(result["v5_core_fired"])
-        elif result.get("v5_decision_path") == "F1_GAP_HIGH":
-            tier_label = " · " + (result.get("v5_skip_reason") or "")
+            tier_label = " · " + " + ".join(result["v5_combo_pairs_fired"][:3])
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ v5.5 Verdict {render_path_badge(path)}{tier_label}</div>
+            <div class="verdict-label">⭐ The Formula {render_path_badge(path)}{tier_label}</div>
             <div class="verdict-pick">{bet}</div>
             <div class="verdict-detail">
                 Stake <strong>{stake}u</strong>
@@ -2487,7 +2526,7 @@ def render_verdict_v5(result):
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">v5.5 Verdict {render_path_badge(path)}</div>
+            <div class="verdict-label-grey">The Formula {render_path_badge(path)}</div>
             <div class="verdict-noedge">NO BET — {skip}</div>
             <div class="verdict-detail-grey">
                 F1 Gap {(result.get('f1_gap') or 0):.1f} · Leader {result['f1_leader']}
@@ -2537,40 +2576,23 @@ def render_trigger(name, on):
 
 def render_core_breakdown(row, pred):
     tags = pred.get("tags") or []
-    tagset = set(tags)
+    leader = pred.get("f1_leader") or "home"
+    fired = _formula_fired(tags, leader)
 
-    st.markdown('<div class="section-title">Unbreakable Core (checked first)</div>',
+    st.markdown('<div class="section-title">Formula Segments Firing</div>',
                 unsafe_allow_html=True)
-    for name, required, call, stake, rate, n in UNBREAKABLE_DEFS:
-        on = required <= tagset
-        render_trigger(f"{name} · {call} · {rate*100:.1f}% ({n})", on)
-
-    st.markdown('<div class="section-title">Strong (90%+)</div>',
-                unsafe_allow_html=True)
-    for name, required, call, stake, rate, n in STRONG_DEFS:
-        on = required <= tagset
-        render_trigger(f"{name} · {call} · {rate*100:.1f}% ({n})", on)
-
-    st.markdown('<div class="section-title">Medium (85%+)</div>',
-                unsafe_allow_html=True)
-    for name, required, call, stake, rate, n in MEDIUM_DEFS:
-        on = required <= tagset
-        render_trigger(f"{name} · {call} · {rate*100:.1f}% ({n})", on)
-
-    st.markdown('<div class="section-title">Hard Traps (fallback guard)</div>',
-                unsafe_allow_html=True)
-    for name, required in TRAP_DEFS:
-        on = required <= tagset
-        render_trigger(f"{name} · {' + '.join(sorted(required))}", on)
+    if not fired:
+        st.info("No 100% segment fires. SKIP.")
+        return
+    winner = fired[0][0]
+    for name, call, n, required in fired:
+        marker = "⭐" if name == winner else "·"
+        tier = "T1" if n >= 15 else ("T2" if n >= 5 else "T3")
+        render_trigger(f"{marker} {name} · {call} · {tier} n={n}", True)
 
 
 def render_combo_breakdown(pred):
-    tags = pred.get("tags") or []
-    st.markdown('<div class="section-title">Unbreakable Segments Firing</div>',
-                unsafe_allow_html=True)
-    pairs = _combo_pairs_fired(tags)
-    for name, _fn in COMBO_PAIR_DEFS:
-        render_trigger(name, name in pairs)
+    return
 
 
 # ============================================================================
@@ -2618,9 +2640,9 @@ def compute_tag_performance(rows):
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v5.5 Tagged Predictor")
-    st.caption("Five unbreakable segments first. Strong, medium, traps, "
-               "filtered F1_GAP_HIGH. Rebuilt from the updated data.")
+    st.title("⚽ The Formula — v5.6")
+    st.caption("Flat list of 100% segments. Direction from the formula's rule. "
+               "Priority: highest n, then alphabetical. Skip everything else.")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2643,10 +2665,10 @@ def main():
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → v5.5 five-tier predict → save with full decision trace.")
+        st.caption("Parse → The Formula → save with full decision trace.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
-        if st.button("⚽ Parse, Predict & Save (v5.5)", type="primary"):
+        if st.button("⚽ Parse, Predict & Save (The Formula)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
             else:
@@ -2659,7 +2681,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v5.5 decision..."):
+                with st.spinner("Running The Formula..."):
                     result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2701,7 +2723,6 @@ def main():
                 st.markdown('<div class="section-title">Tags</div>', unsafe_allow_html=True)
                 st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
 
-                render_combo_breakdown(result)
                 render_core_breakdown(parsed, result)
 
                 st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
@@ -2793,7 +2814,7 @@ def main():
             st.markdown('<div class="section-title">By Decision Path</div>',
                         unsafe_allow_html=True)
             path_rows = []
-            for path in ["UNBREAKABLE", "STRONG", "MEDIUM", "F1_GAP_HIGH"]:
+            for path in ["TIER1", "TIER2", "TIER3"]:
                 subset = [r for r in settled if r.get("v5_decision_path") == path]
                 scored = [r for r in subset if r.get("dc_hit") is not None]
                 hits = sum(1 for r in scored if r.get("dc_hit") is True)
@@ -2822,23 +2843,6 @@ def main():
             c3.metric("On skip rows",
                       f"{cf_skip_hits}/{len(cf_skip)} "
                       f"({(cf_skip_hits/len(cf_skip)*100) if cf_skip else 0:.1f}%)")
-
-            st.markdown('<div class="section-title">Skip Region by F1 Gap</div>',
-                        unsafe_allow_html=True)
-            bands = [
-                ("f1_gap >= 16", lambda r: (r.get("f1_gap") or 0) >= 16),
-                ("10 <= f1_gap < 16", lambda r: 10 <= (r.get("f1_gap") or 0) < 16),
-                ("5 <= f1_gap < 10", lambda r: 5 <= (r.get("f1_gap") or 0) < 10),
-                ("f1_gap < 5", lambda r: (r.get("f1_gap") or 0) < 5),
-            ]
-            skip_rows = []
-            for label, fn in bands:
-                subset = [r for r in cf_skip if fn(r)]
-                hits = sum(1 for r in subset if r.get("counterfactual_won") is True)
-                n = len(subset)
-                rate = f"{(hits/n*100):.1f}%" if n else "—"
-                skip_rows.append({"Band": label, "n": n, "Hits": hits, "Rate": rate})
-            st.dataframe(pd.DataFrame(skip_rows), use_container_width=True, hide_index=True)
 
             st.markdown('<div class="section-title">All Placed Bets</div>',
                         unsafe_allow_html=True)
@@ -2879,69 +2883,68 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v5.5 Tiered Logic Spec")
+        st.subheader("The Formula — Spec")
         st.markdown("""
-### Decision order
+### What this is
 
-1. **UNBREAKABLE** (checked first, in priority order) → 1.5u / 1.0u BET
-2. **STRONG** (90%+) → 0.75u BET
-3. **MEDIUM** (85%+) → 0.5u BET
-4. **HARD TRAPS** → SKIP
-5. **F1_GAP_HIGH** (filtered) → 0.5u BET
-6. **SKIP** otherwise
+A flat list of **100% segments** derived from the settled data. When a segment
+fires, bet its direction. When nothing fires, skip. That's the entire formula.
 
-#### Five unbreakable segments
+### Direction rule
 
-| # | Segment | Call | Stake | Record |
-|---|---|---|---|---|
-| 1 | `standard_candidate + team_agreement_0` | DC 1X | 1.5u | **19/19 (100%)** |
-| 2 | `home_leader + standard_candidate` | DC 1X | 1.5u | **18/18 (100%)** |
-| 3 | `gap_30_plus + home_leader` | DC 1X | 1.5u | **15/15 (100%)** |
-| 4 | `gap_30_plus + standard_candidate` | DC 1X | 1.5u | **15/15 (100%)** |
-| 5 | `f1_cap + home_leader` | DC 1X | 1.0u | **26/26 (96.2%)** |
-
-#### Strong tier (0.75u)
-
-| Segment | Record |
+| Segment contains | Direction |
 |---|---|
-| `home_leader + team_agreement_0` | 22/22 (95.5%) |
-| `standard_candidate + venue_incomplete` | 16/16 (93.8%) |
-| `team_agreement_0 + venue_incomplete` | 15/15 (93.3%) |
-| `f1_cap + gap_30_plus` | 26/26 (92.3%) |
-| `gap_30_plus + team_agreement_0` | 26/26 (92.3%) |
+| `away_leader` (not `home_leader`) | **DC X2** |
+| `home_leader`, `standard_candidate`, `f1_cap`, `tier_core_a`, `tier_core_b`, `tier_cluster`, `team_agreement_0`, or `team_disagreement_2plus` | **DC 1X** |
+| Both `away_leader` and `home_leader` | follow `f1_leader` |
+| Neither (leaderless) | follow `f1_leader` |
 
-#### Medium tier (0.5u)
+### Priority rule
 
-| Segment | Record |
-|---|---|
-| `f1_cap + team_agreement_0` | 33/33 (90.9%) |
-| `f1_cap + venue_incomplete` | 24/24 (91.7%) |
+When multiple segments fire:
+1. **Highest n** wins
+2. Then **alphabetical** (tie-break)
 
-#### Hard traps (fallback guard, checked after core/strong/medium)
+### Stakes
 
-| # | Trap | Live |
+| Tier | n | Stake |
 |---|---|---|
-| 1 | `away_leader + gap_20_29 + team_disagreement_1` | 0-3 |
-| 2 | `away_leader + gap_30_plus + team_agreement_0 + tier_f1_gap_high` | 0-2 |
-| 3 | `gap_under_10 + home_leader + team_disagreement_1` | weak |
-| 4 | `gap_under_10 + home_leader + team_disagreement_2plus` | weak |
+| TIER1 | ≥15 | 1.5u |
+| TIER2 | ≥5 | 0.75u |
+| TIER3 | ≥2 | 0.5u |
 
-> `away_leader + gap_20_29` alone was **removed** as a trap — it kills 3 winners to save 3 losers (a wash).
+### Tier 1 segments (n ≥ 15)
 
-#### F1_GAP_HIGH (filtered)
+| Segment | n |
+|---|---|
+| `standard_candidate + team_agreement_0` | 21 |
+| `home_leader + standard_candidate` | 19 |
+| `gap_30_plus + home_leader` | 17 |
 
-- `f1_gap >= 25 AND away_leader` → DC X2, 0.5u
-- `f1_gap >= 16 AND home_leader` → DC 1X, 0.5u
-- `f1_gap 16–24 AND away_leader` → SKIP (72% band)
-- `f1_gap < 16` → SKIP
+### Tier 2 segments (n ≥ 5)
 
-**Projected:** ~93% hit rate, 8 of 11 historical losses avoided, 37 of 57 wins kept.
+19 segments including:
+- `away_leader + venue_power_neg` → DC X2
+- `gap_30_plus + venue_power_neg` → DC 1X
+- `team_agreement_0 + venue_power_neg` → DC 1X
+- `f1_f5_conflict + venue_incomplete` → DC 1X
+- `home_leader + venue_power_pos` → DC 1X
 
-#### Schema safety
+### Tier 3 segments (n ≥ 2)
 
-The app discovers the live Supabase column list at runtime and only writes
-columns that actually exist. Missing columns are dropped with a console
-warning, never a hard failure.
+~50 segments (see code for full list).
+
+### Pre-ship checklist
+
+- [x] Direction rule confirmed
+- [x] Priority rule confirmed
+- [x] Stakes confirmed
+- [x] Derby row resolves to DC X2
+- [x] `standard_candidate` verified pre-match safe
+- [ ] **Run Query A** to validate the Tier 2 / Tier 3 lists against the live DB
+- [ ] **Run Query C** to check overlap with disconfirming segments
+
+Run both queries from the Debug tab's SQL section before placing real bets.
         """)
 
     with tabs[5]:
