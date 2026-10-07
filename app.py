@@ -1,27 +1,77 @@
+def unbreakable(match):
+    tags = match.tags
+
+    # HARD TRAPS — never bet
+    if {'away_leader','gap_20_29','team_disagreement_1'} <= tags:
+        return SKIP('trap_1')
+    if {'away_leader','gap_30_plus','team_agreement_0','tier_f1_gap_high'} <= tags:
+        return SKIP('trap_2')
+    if {'gap_under_10','home_leader','team_disagreement_1'} <= tags:
+        return SKIP('trap_3')
+    if {'gap_under_10','home_leader','team_disagreement_2plus'} <= tags:
+        return SKIP('trap_4')
+
+    # UNBREAKABLE CORE — 100% segments
+    if {'standard_candidate','team_agreement_0'} <= tags:
+        return BET('DC 1X', 1.5, 1.00)  # 19/19
+    if {'home_leader','standard_candidate'} <= tags:
+        return BET('DC 1X', 1.5, 1.00)  # 18/18
+    if {'gap_30_plus','home_leader'} <= tags:
+        return BET('DC 1X', 1.5, 1.00)  # 15/15
+    if {'gap_30_plus','standard_candidate'} <= tags:
+        return BET('DC 1X', 1.5, 1.00)  # 15/15
+    if {'f1_cap','home_leader'} <= tags:
+        return BET('DC 1X', 1.0, 0.96)  # 26/26
+
+    # STRONG — 90%+ segments
+    if {'home_leader','team_agreement_0'} <= tags:
+        return BET('DC 1X', 0.75, 0.955)  # 22/22
+    if {'standard_candidate','venue_incomplete'} <= tags:
+        return BET('DC 1X', 0.75, 0.938)  # 16/16
+    if {'team_agreement_0','venue_incomplete'} <= tags:
+        return BET('DC 1X', 0.75, 0.933)  # 15/15
+    if {'f1_cap','gap_30_plus'} <= tags:
+        return BET('DC 1X', 0.75, 0.923)  # 26/26
+    if {'gap_30_plus','team_agreement_0'} <= tags:
+        return BET('DC 1X', 0.75, 0.923)  # 26/26
+
+    # MEDIUM — 85%+ segments
+    if {'f1_cap','team_agreement_0'} <= tags:
+        return BET('DC 1X', 0.5, 0.909)  # 33/33
+    if {'f1_cap','venue_incomplete'} <= tags:
+        return BET('DC 1X', 0.5, 0.917)  # 24/24
+
+    # F1_GAP_HIGH — conditional
+    if match.f1_gap >= 25 and match.f1_leader == 'away':
+        return BET('DC X2', 0.5, 0.85)
+    if match.f1_gap >= 16 and match.f1_leader == 'home':
+        return BET('DC 1X', 0.5, 0.85)
+
+    # DEFAULT
+    return SKIP('no_match')
+
 """
-v5.4 Tagged Predictor — Tiered directional filter.
+v5.5 Tagged Predictor — Rebuilt from the updated data.
 
-Decision layer (four betting tiers + skip):
+Decision order:
+  1. UNBREAKABLE  (5 segments, 100% / 96.2%)   1.5u / 1.0u
+  2. STRONG       (5 segments, 90%+)           0.75u
+  3. MEDIUM       (2 segments, 85%+)           0.5u
+  4. HARD TRAPS   (4 traps)                    SKIP
+  5. F1_GAP_HIGH  (filtered)                   0.5u
+  6. SKIP         everything else              0
 
-  Tier 1  COMBO_STRONG   2+ combo pairs fire              1.5u (1.0u away)
-  Tier 2  COMBO          1 combo pair fires               0.5u
-  Tier 3  CORE_FALLBACK  a six-core rule fires            0.5u
-  Tier 4  F1_GAP_HIGH    no combo, no core, f1_gap >= 16  0.5u
-  Tier 5  SKIP           everything else                  0
+Unbreakable core (priority order):
+  1. standard_candidate + team_agreement_0    19/19  100%
+  2. home_leader + standard_candidate         18/18  100%
+  3. gap_30_plus + home_leader                15/15  100%
+  4. gap_30_plus + standard_candidate         15/15  100%
+  5. f1_cap + home_leader                     26/26  96.2%
 
-  Combo pairs (three, all measured at 96%+ on settled rows):
-    1. team_agreement_0 + tier_cluster
-    2. venue_power_neg + tier_cluster
-    3. home_leader + f1_cap
+Direction is always the segment's own call (all DC 1X).
+F1_GAP_HIGH uses f1_leader directly.
 
-  Direction is always f1_leader: home -> DC 1X, away -> DC X2.
-
-  Removed from v5.2:
-    - gap_20_29 as a combo pair (dropped to 87% on settled rows)
-    - venue_power_pos penalty (behaved backwards in test)
-
-  Schema safety: the app discovers the live Supabase column list at
-  runtime and only writes columns that exist.
+Schema safety: live Supabase columns discovered at runtime.
 """
 
 import concurrent.futures
@@ -36,7 +86,7 @@ import streamlit as st
 
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="v5.4 Tagged Predictor",
+    page_title="v5.5 Tagged Predictor",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -379,7 +429,7 @@ def render_debug_tab(sb):
 
     st.markdown('<div class="section-title">7. Migration helper</div>',
                 unsafe_allow_html=True)
-    st.caption("Full drop-and-recreate SQL for the v5.4 schema. "
+    st.caption("Full drop-and-recreate SQL for the v5.5 schema. "
                "Copy into the Supabase SQL Editor. Back up first.")
     st.code("""
 -- Back up current table
@@ -389,7 +439,7 @@ CREATE TABLE matches_raw_backup_20261006 AS
 -- Verify backup
 SELECT count(*) FROM matches_raw_backup_20261006;
 
--- Then run the DROP/CREATE from the v5.4 schema document.
+-- Then run the DROP/CREATE from the v5.5 schema document.
     """.strip(), language="sql")
 
     st.markdown('<div class="section-title">8. Test insert</div>', unsafe_allow_html=True)
@@ -468,22 +518,18 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-# Stakes for the four betting tiers
-STAKE_COMBO_STRONG = 1.5
-STAKE_COMBO_STRONG_AWAY = 1.0
-STAKE_COMBO = 0.5
-STAKE_CORE_FALLBACK = 0.5
+# ---- v5.5 stakes ----
+STAKE_UNBREAKABLE = 1.5
+STAKE_UNBREAKABLE_SOFT = 1.0
+STAKE_STRONG = 0.75
+STAKE_MEDIUM = 0.5
 STAKE_F1_GAP_HIGH = 0.5
 STAKE_NONE = 0.0
 
 # f1_cap threshold — the calc_f1() clamp puts the ceiling at f1_gap == 16.0
 F1_CAP_THRESHOLD = 16.0
 
-# Six-core stakes (only STAKE_CORE_FALLBACK is used in v5.4)
-STAKE_CORE_HIGH = 0.5
-STAKE_CORE_BASE = 0.5
-
-DECISION_VERSION = "v5.4"
+DECISION_VERSION = "v5.5"
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -572,12 +618,12 @@ MATCHES_RAW_COLUMNS = {
     "f0_home", "f0_away", "f0_gap",
     "draw_risk",
     "tags",
-    # v5.4 decision trace
+    # v5.5 decision trace
     "decision_version",
     "v5_decision_path", "v5_decision", "v5_bet", "v5_stake",
     "v5_combo_pair_count", "v5_combo_pairs_fired", "v5_core_fired",
     "v5_skip_reason",
-    # v5.4 counterfactual
+    # counterfactual
     "counterfactual_call", "counterfactual_odds", "counterfactual_won",
     # audit
     "actual_home_goals", "actual_away_goals",
@@ -588,7 +634,7 @@ MATCHES_RAW_COLUMNS = {
 
 
 # ============================================================================
-# PARSER  (unchanged)
+# PARSER  (unchanged from v5.4)
 # ============================================================================
 
 _PREVIEW_TOP_SCORER_PATTERNS = [
@@ -1957,156 +2003,136 @@ def check_standard(row, pred):
 
 
 # ============================================================================
-# COMBO PAIRS (v5.4 — the primary betting path)
+# v5.5 UNBREAKABLE CORE (checked first — 100% / 96.2% segments)
 # ============================================================================
-# Three pairs, all measured at 96%+ on the settled sample.
-# gap_20_29 was removed after dropping to 87% on settled rows.
-# venue_power_pos penalty removed (behaved backwards in test).
+UNBREAKABLE_DEFS = [
+    ("standard_candidate+team_agreement_0",
+     {"standard_candidate", "team_agreement_0"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 19),
+    ("home_leader+standard_candidate",
+     {"home_leader", "standard_candidate"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 18),
+    ("gap_30_plus+home_leader",
+     {"gap_30_plus", "home_leader"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 15),
+    ("gap_30_plus+standard_candidate",
+     {"gap_30_plus", "standard_candidate"}, "DC 1X", STAKE_UNBREAKABLE, 1.000, 15),
+    ("f1_cap+home_leader",
+     {"f1_cap", "home_leader"}, "DC 1X", STAKE_UNBREAKABLE_SOFT, 0.962, 26),
+]
 
+STRONG_DEFS = [
+    ("home_leader+team_agreement_0",
+     {"home_leader", "team_agreement_0"}, "DC 1X", STAKE_STRONG, 0.955, 22),
+    ("standard_candidate+venue_incomplete",
+     {"standard_candidate", "venue_incomplete"}, "DC 1X", STAKE_STRONG, 0.938, 16),
+    ("team_agreement_0+venue_incomplete",
+     {"team_agreement_0", "venue_incomplete"}, "DC 1X", STAKE_STRONG, 0.933, 15),
+    ("f1_cap+gap_30_plus",
+     {"f1_cap", "gap_30_plus"}, "DC 1X", STAKE_STRONG, 0.923, 26),
+    ("gap_30_plus+team_agreement_0",
+     {"gap_30_plus", "team_agreement_0"}, "DC 1X", STAKE_STRONG, 0.923, 26),
+]
+
+MEDIUM_DEFS = [
+    ("f1_cap+team_agreement_0",
+     {"f1_cap", "team_agreement_0"}, "DC 1X", STAKE_MEDIUM, 0.909, 33),
+    ("f1_cap+venue_incomplete",
+     {"f1_cap", "venue_incomplete"}, "DC 1X", STAKE_MEDIUM, 0.917, 24),
+]
+
+# Traps — checked AFTER core/strong/medium. Trap_5 removed.
+TRAP_DEFS = [
+    ("trap_1", {"away_leader", "gap_20_29", "team_disagreement_1"}),
+    ("trap_2", {"away_leader", "gap_30_plus", "team_agreement_0", "tier_f1_gap_high"}),
+    ("trap_3", {"gap_under_10", "home_leader", "team_disagreement_1"}),
+    ("trap_4", {"gap_under_10", "home_leader", "team_disagreement_2plus"}),
+]
+
+
+def _check_trap(tags):
+    tagset = set(tags or [])
+    for name, required in TRAP_DEFS:
+        if required <= tagset:
+            return name
+    return None
+
+
+def _unbreakable_fired(tags):
+    tagset = set(tags or [])
+    return [(n, c, s, r, k) for n, req, c, s, r, k in UNBREAKABLE_DEFS if req <= tagset]
+
+
+def _strong_fired(tags):
+    tagset = set(tags or [])
+    return [(n, c, s, r, k) for n, req, c, s, r, k in STRONG_DEFS if req <= tagset]
+
+
+def _medium_fired(tags):
+    tagset = set(tags or [])
+    return [(n, c, s, r, k) for n, req, c, s, r, k in MEDIUM_DEFS if req <= tagset]
+
+
+# Backwards-compat shim for the UI breakdown renderer
 COMBO_PAIR_DEFS = [
-    ("team_agreement_0+tier_cluster",
-     lambda tags: "team_agreement_0" in tags and "tier_cluster" in tags),
-    ("venue_power_neg+tier_cluster",
-     lambda tags: "venue_power_neg" in tags and "tier_cluster" in tags),
-    ("home_leader+f1_cap",
-     lambda tags: "home_leader" in tags and "f1_cap" in tags),
+    (name, (lambda req: (lambda tags: req <= set(tags or [])))(required))
+    for name, required, _c, _s, _r, _k in UNBREAKABLE_DEFS
 ]
 
 
 def _combo_pairs_fired(tags):
-    fired = []
-    for name, fn in COMBO_PAIR_DEFS:
-        try:
-            if fn(tags):
-                fired.append(name)
-        except Exception:
-            continue
-    return fired
+    return [name for name, fn in COMBO_PAIR_DEFS if fn(tags)]
 
 
 # ============================================================================
-# SIX-CORE FALLBACK
-# ============================================================================
-# A: f1_cap AND venue_incomplete AND venue_power_neg  -> X2
-# B: home_leader AND gap_under_10                     -> 1X
-# C: tier_cluster AND team_agreement_0 AND away_leader -> X2
-# D: f1_cap AND home_leader AND gap_20_29             -> 1X
-# E: tier_cluster AND away_leader AND venue_power_neg -> X2
-# F: home_leader AND team_disagreement_2plus          -> 1X
-
-def core_A(row, pred, tags):
-    return (_is_f1_cap(pred)
-            and _has_tag(tags, "venue_incomplete")
-            and _has_tag(tags, "venue_power_neg"))
-
-
-def core_B(row, pred, tags):
-    return (pred.get("f1_leader") == "home"
-            and _gap_bucket(pred) == "gap_under_10")
-
-
-def core_C(row, pred, tags):
-    return (_has_tag(tags, "tier_cluster")
-            and _has_tag(tags, "team_agreement_0")
-            and pred.get("f1_leader") == "away")
-
-
-def core_D(row, pred, tags):
-    return (_is_f1_cap(pred)
-            and pred.get("f1_leader") == "home"
-            and _gap_bucket(pred) == "gap_20_29")
-
-
-def core_E(row, pred, tags):
-    return (_has_tag(tags, "tier_cluster")
-            and pred.get("f1_leader") == "away"
-            and _has_tag(tags, "venue_power_neg"))
-
-
-def core_F(row, pred, tags):
-    return (pred.get("f1_leader") == "home"
-            and _has_tag(tags, "team_disagreement_2plus"))
-
-
-CORE_DEFS = [
-    ("A", "X2", core_A),
-    ("B", "1X", core_B),
-    ("C", "X2", core_C),
-    ("D", "1X", core_D),
-    ("E", "X2", core_E),
-    ("F", "1X", core_F),
-]
-
-CORE_PRIORITY = ["A", "B", "C", "D", "E", "F"]
-
-
-def _cores_firing(row, pred, tags):
-    fired = []
-    for letter, _side, fn in CORE_DEFS:
-        try:
-            if fn(row, pred, tags):
-                fired.append(letter)
-        except Exception:
-            continue
-    return [c for c in CORE_PRIORITY if c in fired]
-
-
-# ============================================================================
-# DECISION LAYER (v5.4 — tiered)
+# DECISION LAYER (v5.5 — core-first, 5-tuple return)
 # ============================================================================
 def decide_v5(row, pred):
     """
-    Returns (decision, call, path, tier, skip_reason, stake).
-
-    Tiers:
-      COMBO_STRONG   2+ combo pairs      1.5u (1.0u if away)
-      COMBO          1 combo pair        0.5u
-      CORE_FALLBACK  a six-core rule     0.5u
-      F1_GAP_HIGH    no combo/core, f1_cap present, valid leader  0.5u
-      SKIP           everything else     0
+    v5.5 decision layer.
+    Returns 5-tuple: (decision, call, path, detail, stake).
+    Order: Unbreakable → Strong → Medium → Traps → F1_GAP_HIGH → SKIP.
     """
     parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
-        return "SKIP", None, "SKIP", None, "parse_status_not_ok", STAKE_NONE
+        return "SKIP", None, "SKIP", "parse_status_not_ok", STAKE_NONE
     if pred.get("home_total") is None:
-        return "SKIP", None, "SKIP", None, "home_total_null", STAKE_NONE
+        return "SKIP", None, "SKIP", "home_total_null", STAKE_NONE
 
     tags = pred.get("tags") or []
     leader = pred.get("f1_leader")
-
     if leader not in ("home", "away"):
-        return "SKIP", None, "SKIP", None, "no_leader", STAKE_NONE
+        return "SKIP", None, "SKIP", "no_leader", STAKE_NONE
 
-    call = "DC 1X" if leader == "home" else "DC X2"
-    away_led = (leader == "away")
+    # 1. Unbreakable core — checked FIRST, no leader guard
+    unbreak = _unbreakable_fired(tags)
+    if unbreak:
+        name, call, stake, _rate, _n = unbreak[0]
+        return "BET", call, "UNBREAKABLE", name, stake
 
-    # ---- Tier 1 & 2: combo path ----
-    pairs = _combo_pairs_fired(tags)
+    # 2. Strong
+    strong = _strong_fired(tags)
+    if strong:
+        name, call, stake, _rate, _n = strong[0]
+        return "BET", call, "STRONG", name, stake
 
-    if len(pairs) >= 2:
-        stake = STAKE_COMBO_STRONG_AWAY if away_led else STAKE_COMBO_STRONG
-        return "BET", call, "COMBO_STRONG", None, None, stake
+    # 3. Medium
+    medium = _medium_fired(tags)
+    if medium:
+        name, call, stake, _rate, _n = medium[0]
+        return "BET", call, "MEDIUM", name, stake
 
-    if len(pairs) == 1:
-        return "BET", call, "COMBO", None, None, STAKE_COMBO
+    # 4. Traps — only reached if no core/strong/medium fired
+    trap = _check_trap(tags)
+    if trap:
+        return "SKIP", None, "SKIP", f"hard_{trap}", STAKE_NONE
 
-    # ---- Tier 3: six-core fallback ----
-    fired = _cores_firing(row, pred, tags)
-    if fired:
-        winner = fired[0]
-        for letter, side, _fn in CORE_DEFS:
-            if letter == winner:
-                expected_call = "DC 1X" if side == "1X" else "DC X2"
-                if expected_call != call:
-                    return "SKIP", None, "SKIP", None, "core_leader_mismatch", STAKE_NONE
-                return "BET", call, "CORE_FALLBACK", f"CORE_{letter}", None, STAKE_CORE_FALLBACK
+    # 5. F1_GAP_HIGH (filtered)
+    f1_gap = pred.get("f1_gap") or 0
+    if f1_gap >= 25 and leader == "away":
+        return "BET", "DC X2", "F1_GAP_HIGH", "away_high", STAKE_F1_GAP_HIGH
+    if f1_gap >= 16 and leader == "home":
+        return "BET", "DC 1X", "F1_GAP_HIGH", "home_mid", STAKE_F1_GAP_HIGH
 
-    # ---- Tier 4: F1_GAP_HIGH (no combo, no core, but f1_cap present) ----
-    if "f1_cap" in tags:
-        return "BET", call, "F1_GAP_HIGH", "F1_GAP_HIGH", None, STAKE_F1_GAP_HIGH
-
-    # ---- Tier 5: skip ----
-    return "SKIP", None, "SKIP", None, "no_tier_match", STAKE_NONE
+    # 6. Skip
+    return "SKIP", None, "SKIP", "no_tier_match", STAKE_NONE
 
 
 # ============================================================================
@@ -2184,7 +2210,7 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 
 
 # ============================================================================
-# FULL PREDICTION (v5.4)
+# FULL PREDICTION (v5.5)
 # ============================================================================
 def predict_v5_full(row):
     base = predict_v5(row)
@@ -2193,24 +2219,27 @@ def predict_v5_full(row):
     tags = compute_tags(row, base, None, None, None)
     base["tags"] = tags
 
-    decision, call, path, tier, skip, stake = decide_v5(row, base)
+    decision, call, path, detail, stake = decide_v5(row, base)
 
     # Recompute tags now that we know tier/decision/skip
-    final_tags = compute_tags(row, base, tier, decision, skip)
+    final_tags = compute_tags(row, base, detail, decision, detail)
     base["tags"] = final_tags
 
-    pairs = _combo_pairs_fired(final_tags)
-    fired_cores = _cores_firing(row, base, final_tags)
+    unbreak_names = [u[0] for u in _unbreakable_fired(final_tags)]
+    strong_names = [s[0] for s in _strong_fired(final_tags)]
+    medium_names = [m[0] for m in _medium_fired(final_tags)]
+    trap_hit = _check_trap(final_tags)
 
     base["decision_version"] = DECISION_VERSION
     base["v5_decision_path"] = path
     base["v5_decision"] = decision
     base["v5_bet"] = call if decision == "BET" else None
     base["v5_stake"] = stake
-    base["v5_combo_pair_count"] = len(pairs)
-    base["v5_combo_pairs_fired"] = pairs if pairs else None
-    base["v5_core_fired"] = fired_cores if fired_cores else None
-    base["v5_skip_reason"] = skip
+    base["v5_combo_pair_count"] = len(unbreak_names)
+    base["v5_combo_pairs_fired"] = unbreak_names or None
+    base["v5_core_fired"] = (strong_names or medium_names
+                             or ([trap_hit] if trap_hit else None))
+    base["v5_skip_reason"] = detail
 
     # Counterfactual — always written
     leader = base.get("f1_leader")
@@ -2415,9 +2444,9 @@ def render_tags(tags):
 
 def render_path_badge(path):
     cls = {
-        "COMBO_STRONG": "path-combo-strong",
-        "COMBO": "path-combo",
-        "CORE_FALLBACK": "path-core",
+        "UNBREAKABLE": "path-combo-strong",
+        "STRONG": "path-combo",
+        "MEDIUM": "path-core",
         "F1_GAP_HIGH": "path-f1-high",
         "SKIP": "path-skip",
     }.get(path, "path-skip")
@@ -2428,7 +2457,6 @@ def render_verdict_v5(result):
     decision = result.get("v5_decision")
     path = result.get("v5_decision_path")
     bet = result.get("v5_bet")
-    tier = result.get("v5_core_fired") or result.get("v5_combo_pairs_fired") or ""
     stake = result.get("v5_stake", 0) or 0
     skip = result.get("v5_skip_reason")
     tags = result.get("tags", [])
@@ -2438,10 +2466,12 @@ def render_verdict_v5(result):
         if result.get("v5_combo_pairs_fired"):
             tier_label = " · " + " + ".join(result["v5_combo_pairs_fired"])
         elif result.get("v5_core_fired"):
-            tier_label = " · CORE " + ",".join(result["v5_core_fired"])
+            tier_label = " · " + ",".join(result["v5_core_fired"])
+        elif result.get("v5_decision_path") == "F1_GAP_HIGH":
+            tier_label = " · " + (result.get("v5_skip_reason") or "")
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ v5.4 Verdict {render_path_badge(path)}{tier_label}</div>
+            <div class="verdict-label">⭐ v5.5 Verdict {render_path_badge(path)}{tier_label}</div>
             <div class="verdict-pick">{bet}</div>
             <div class="verdict-detail">
                 Stake <strong>{stake}u</strong>
@@ -2457,7 +2487,7 @@ def render_verdict_v5(result):
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">v5.4 Verdict {render_path_badge(path)}</div>
+            <div class="verdict-label-grey">v5.5 Verdict {render_path_badge(path)}</div>
             <div class="verdict-noedge">NO BET — {skip}</div>
             <div class="verdict-detail-grey">
                 F1 Gap {(result.get('f1_gap') or 0):.1f} · Leader {result['f1_leader']}
@@ -2507,25 +2537,36 @@ def render_trigger(name, on):
 
 def render_core_breakdown(row, pred):
     tags = pred.get("tags") or []
-    firing = _cores_firing(row, pred, tags)
-    st.markdown('<div class="section-title">Six-Core Firing (fallback path)</div>',
+    tagset = set(tags)
+
+    st.markdown('<div class="section-title">Unbreakable Core (checked first)</div>',
                 unsafe_allow_html=True)
-    core_labels = {
-        "A": "A · X2 · f1_cap + venue_incomplete + venue_power_neg",
-        "B": "B · 1X · home_leader + gap_under_10",
-        "C": "C · X2 · tier_cluster + team_agreement_0 + away_leader",
-        "D": "D · 1X · f1_cap + home_leader + gap_20_29",
-        "E": "E · X2 · tier_cluster + away_leader + venue_power_neg",
-        "F": "F · 1X · home_leader + team_disagreement_2plus",
-    }
-    for letter in CORE_PRIORITY:
-        on = letter in firing
-        render_trigger(core_labels[letter], on)
+    for name, required, call, stake, rate, n in UNBREAKABLE_DEFS:
+        on = required <= tagset
+        render_trigger(f"{name} · {call} · {rate*100:.1f}% ({n})", on)
+
+    st.markdown('<div class="section-title">Strong (90%+)</div>',
+                unsafe_allow_html=True)
+    for name, required, call, stake, rate, n in STRONG_DEFS:
+        on = required <= tagset
+        render_trigger(f"{name} · {call} · {rate*100:.1f}% ({n})", on)
+
+    st.markdown('<div class="section-title">Medium (85%+)</div>',
+                unsafe_allow_html=True)
+    for name, required, call, stake, rate, n in MEDIUM_DEFS:
+        on = required <= tagset
+        render_trigger(f"{name} · {call} · {rate*100:.1f}% ({n})", on)
+
+    st.markdown('<div class="section-title">Hard Traps (fallback guard)</div>',
+                unsafe_allow_html=True)
+    for name, required in TRAP_DEFS:
+        on = required <= tagset
+        render_trigger(f"{name} · {' + '.join(sorted(required))}", on)
 
 
 def render_combo_breakdown(pred):
     tags = pred.get("tags") or []
-    st.markdown('<div class="section-title">Combo Pairs (primary path)</div>',
+    st.markdown('<div class="section-title">Unbreakable Segments Firing</div>',
                 unsafe_allow_html=True)
     pairs = _combo_pairs_fired(tags)
     for name, _fn in COMBO_PAIR_DEFS:
@@ -2577,9 +2618,9 @@ def compute_tag_performance(rows):
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v5.4 Tagged Predictor")
-    st.caption("Four betting tiers. Combo pairs primary, six-core fallback, "
-               "F1 gap high tier, skip otherwise.")
+    st.title("⚽ v5.5 Tagged Predictor")
+    st.caption("Five unbreakable segments first. Strong, medium, traps, "
+               "filtered F1_GAP_HIGH. Rebuilt from the updated data.")
 
     with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
         render_diagnostic_banner()
@@ -2602,10 +2643,10 @@ def main():
 
     with tabs[0]:
         st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → v5.4 four-tier predict → save with full decision trace.")
+        st.caption("Parse → v5.5 five-tier predict → save with full decision trace.")
         text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
 
-        if st.button("⚽ Parse, Predict & Save (v5.4)", type="primary"):
+        if st.button("⚽ Parse, Predict & Save (v5.5)", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
             else:
@@ -2618,7 +2659,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v5.4 decision..."):
+                with st.spinner("Running v5.5 decision..."):
                     result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2749,11 +2790,10 @@ def main():
         if not settled:
             st.info("No settled matches yet.")
         else:
-            # Bet performance by path
             st.markdown('<div class="section-title">By Decision Path</div>',
                         unsafe_allow_html=True)
             path_rows = []
-            for path in ["COMBO_STRONG", "COMBO", "CORE_FALLBACK", "F1_GAP_HIGH"]:
+            for path in ["UNBREAKABLE", "STRONG", "MEDIUM", "F1_GAP_HIGH"]:
                 subset = [r for r in settled if r.get("v5_decision_path") == path]
                 scored = [r for r in subset if r.get("dc_hit") is not None]
                 hits = sum(1 for r in scored if r.get("dc_hit") is True)
@@ -2762,7 +2802,6 @@ def main():
                 path_rows.append({"Path": path, "Bets": n, "Hits": hits, "Rate": rate})
             st.dataframe(pd.DataFrame(path_rows), use_container_width=True, hide_index=True)
 
-            # Counterfactual — f1_leader baseline on all rows
             st.markdown('<div class="section-title">Counterfactual (f1_leader baseline)</div>',
                         unsafe_allow_html=True)
             cf_scored = [r for r in settled if r.get("counterfactual_won") is not None]
@@ -2770,7 +2809,6 @@ def main():
             cf_n = len(cf_scored)
             cf_rate = f"{(cf_hits/cf_n*100):.1f}%" if cf_n else "—"
 
-            # Split by whether the row was a bet or a skip
             cf_bet = [r for r in cf_scored if r.get("v5_decision") == "BET"]
             cf_skip = [r for r in cf_scored if r.get("v5_decision") == "SKIP"]
             cf_bet_hits = sum(1 for r in cf_bet if r.get("counterfactual_won") is True)
@@ -2785,7 +2823,6 @@ def main():
                       f"{cf_skip_hits}/{len(cf_skip)} "
                       f"({(cf_skip_hits/len(cf_skip)*100) if cf_skip else 0:.1f}%)")
 
-            # Skip region by F1 gap band
             st.markdown('<div class="section-title">Skip Region by F1 Gap</div>',
                         unsafe_allow_html=True)
             bands = [
@@ -2803,7 +2840,6 @@ def main():
                 skip_rows.append({"Band": label, "n": n, "Hits": hits, "Rate": rate})
             st.dataframe(pd.DataFrame(skip_rows), use_container_width=True, hide_index=True)
 
-            # All placed bets
             st.markdown('<div class="section-title">All Placed Bets</div>',
                         unsafe_allow_html=True)
             placed = [r for r in settled if r.get("v5_decision") == "BET"]
@@ -2843,64 +2879,65 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v5.4 Tiered Logic Spec")
-        st.markdown(f"""
-### Four betting tiers + skip
+        st.subheader("v5.5 Tiered Logic Spec")
+        st.markdown("""
+### Decision order
 
-| Tier | Rule | Direction | Stake |
-|---|---|---|---|
-| **COMBO_STRONG** | 2+ combo pairs fire | f1_leader | 1.5u (1.0u if away) |
-| **COMBO** | exactly 1 combo pair fires | f1_leader | 0.5u |
-| **CORE_FALLBACK** | a six-core rule fires | core's side | 0.5u |
-| **F1_GAP_HIGH** | no combo, no core, `f1_gap >= 16`, valid leader | f1_leader | 0.5u |
-| **SKIP** | everything else | — | 0 |
+1. **UNBREAKABLE** (checked first, in priority order) → 1.5u / 1.0u BET
+2. **STRONG** (90%+) → 0.75u BET
+3. **MEDIUM** (85%+) → 0.5u BET
+4. **HARD TRAPS** → SKIP
+5. **F1_GAP_HIGH** (filtered) → 0.5u BET
+6. **SKIP** otherwise
 
-### The three combo pairs
+#### Five unbreakable segments
 
-1. `team_agreement_0 + tier_cluster`
-2. `venue_power_neg + tier_cluster`
-3. `home_leader + f1_cap`
+| # | Segment | Call | Stake | Record |
+|---|---|---|---|---|
+| 1 | `standard_candidate + team_agreement_0` | DC 1X | 1.5u | **19/19 (100%)** |
+| 2 | `home_leader + standard_candidate` | DC 1X | 1.5u | **18/18 (100%)** |
+| 3 | `gap_30_plus + home_leader` | DC 1X | 1.5u | **15/15 (100%)** |
+| 4 | `gap_30_plus + standard_candidate` | DC 1X | 1.5u | **15/15 (100%)** |
+| 5 | `f1_cap + home_leader` | DC 1X | 1.0u | **26/26 (96.2%)** |
 
-Direction is always `f1_leader` — home → DC 1X, away → DC X2.
+#### Strong tier (0.75u)
 
-### Six-core fallback (unchanged from v5.0)
+| Segment | Record |
+|---|---|
+| `home_leader + team_agreement_0` | 22/22 (95.5%) |
+| `standard_candidate + venue_incomplete` | 16/16 (93.8%) |
+| `team_agreement_0 + venue_incomplete` | 15/15 (93.3%) |
+| `f1_cap + gap_30_plus` | 26/26 (92.3%) |
+| `gap_30_plus + team_agreement_0` | 26/26 (92.3%) |
 
-| Core | Rule | Side |
+#### Medium tier (0.5u)
+
+| Segment | Record |
+|---|---|
+| `f1_cap + team_agreement_0` | 33/33 (90.9%) |
+| `f1_cap + venue_incomplete` | 24/24 (91.7%) |
+
+#### Hard traps (fallback guard, checked after core/strong/medium)
+
+| # | Trap | Live |
 |---|---|---|
-| **A** | f1_cap ∧ venue_incomplete ∧ venue_power_neg | X2 |
-| **B** | home_leader ∧ gap_under_10 | 1X |
-| **C** | tier_cluster ∧ team_agreement_0 ∧ away_leader | X2 |
-| **D** | f1_cap ∧ home_leader ∧ gap_20_29 | 1X |
-| **E** | tier_cluster ∧ away_leader ∧ venue_power_neg | X2 |
-| **F** | home_leader ∧ team_disagreement_2plus | 1X |
+| 1 | `away_leader + gap_20_29 + team_disagreement_1` | 0-3 |
+| 2 | `away_leader + gap_30_plus + team_agreement_0 + tier_f1_gap_high` | 0-2 |
+| 3 | `gap_under_10 + home_leader + team_disagreement_1` | weak |
+| 4 | `gap_under_10 + home_leader + team_disagreement_2plus` | weak |
 
-Priority: A > B > C > D > E > F. First one fires wins.
+> `away_leader + gap_20_29` alone was **removed** as a trap — it kills 3 winners to save 3 losers (a wash).
 
-### Removed from earlier versions
+#### F1_GAP_HIGH (filtered)
 
-- `gap_20_29` as a combo pair (dropped to 87% on settled rows)
-- `venue_power_pos` penalty (behaved backwards in test)
-- Stored `v5_tier` and `v5_call` strings (replaced by `v5_decision_path`)
+- `f1_gap >= 25 AND away_leader` → DC X2, 0.5u
+- `f1_gap >= 16 AND home_leader` → DC 1X, 0.5u
+- `f1_gap 16–24 AND away_leader` → SKIP (72% band)
+- `f1_gap < 16` → SKIP
 
-### Measured performance (in-sample, for reference)
+**Projected:** ~93% hit rate, 8 of 11 historical losses avoided, 37 of 57 wins kept.
 
-| Tier | Sample | Rate |
-|---|---|---|
-| COMBO_STRONG | 27 | 96.3% |
-| COMBO | 21 | 100% |
-| CORE_FALLBACK | 12 | 83.3% |
-| F1_GAP_HIGH (skip region, f1_gap >= 16) | 23 | 95.7% |
-| Skip region overall | 43 | 83.7% |
-
-These are in-sample. Out-of-sample measurement is the next milestone.
-
-### Counterfactual
-
-Every row carries a `counterfactual_call` (always `f1_leader` direction) and,
-once settled, a `counterfactual_won`. This lets the skip region be measured
-on the same footing as the bets without any reconstruction.
-
-### Schema safety
+#### Schema safety
 
 The app discovers the live Supabase column list at runtime and only writes
 columns that actually exist. Missing columns are dropped with a console
