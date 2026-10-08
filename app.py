@@ -1,55 +1,19 @@
-def unbreakable(match):
-    tags = match.tags
-
-    if {'away_leader','gap_20_29','team_disagreement_1'} <= tags:
-        return SKIP('trap_1')
-    if {'away_leader','gap_30_plus','team_agreement_0','tier_f1_gap_high'} <= tags:
-        return SKIP('trap_2')
-    if {'gap_under_10','home_leader','team_disagreement_1'} <= tags:
-        return SKIP('trap_3')
-    if {'gap_under_10','home_leader','team_disagreement_2plus'} <= tags:
-        return SKIP('trap_4')
-
-    if {'standard_candidate','team_agreement_0'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)
-    if {'home_leader','standard_candidate'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)
-    if {'gap_30_plus','home_leader'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)
-    if {'gap_30_plus','standard_candidate'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)
-    if {'f1_cap','home_leader'} <= tags:
-        return BET('DC 1X', 1.0, 0.96)
-
-    if {'home_leader','team_agreement_0'} <= tags:
-        return BET('DC 1X', 0.75, 0.955)
-    if {'standard_candidate','venue_incomplete'} <= tags:
-        return BET('DC 1X', 0.75, 0.938)
-    if {'team_agreement_0','venue_incomplete'} <= tags:
-        return BET('DC 1X', 0.75, 0.933)
-    if {'f1_cap','gap_30_plus'} <= tags:
-        return BET('DC 1X', 0.75, 0.923)
-    if {'gap_30_plus','team_agreement_0'} <= tags:
-        return BET('DC 1X', 0.75, 0.923)
-
-    if {'f1_cap','team_agreement_0'} <= tags:
-        return BET('DC 1X', 0.5, 0.909)
-    if {'f1_cap','venue_incomplete'} <= tags:
-        return BET('DC 1X', 0.5, 0.917)
-
-    if match.f1_gap >= 25 and match.f1_leader == 'away':
-        return BET('DC X2', 0.5, 0.85)
-    if match.f1_gap >= 16 and match.f1_leader == 'home':
-        return BET('DC 1X', 0.5, 0.85)
-
-    return SKIP('no_match')
-
 """
-Sportcreed — v5.7-formula.
+Sportcreed — v6.0.
 
-TIER1 + TIER2 only.
-Direction from segment's own required tags.
-TIER3 removed. Parity with public.formula_replay is the acceptance test.
+NEW TIER1 (full stake — 1.5u):
+  standard_candidate + team_agreement_0   (14/14 backtest)
+  f1_f5_override + home_leader → DC 1X    (17/17 backtest)
+
+NEW TIER2 (standard stake — 0.75u):
+  gap_30_plus + home_leader
+  home_leader + standard_candidate
+
+NEW TIER3 (reduced stake — 0.5u):
+  the remaining 16 old-TIER2 segments
+
+SKIP:
+  everything else
 """
 
 import concurrent.futures
@@ -117,6 +81,7 @@ st.markdown("""
         font-size: 0.68rem; font-weight: 700; margin-left: 0.4rem; }
     .path-tier1 { background: #064e3b; color: #6ee7b7; }
     .path-tier2 { background: #065f46; color: #a7f3d0; }
+    .path-tier3 { background: #7c2d12; color: #fed7aa; }
     .path-skip { background: #1e293b; color: #94a3b8; }
 </style>
 """, unsafe_allow_html=True)
@@ -372,8 +337,9 @@ def render_debug_tab(sb):
             st.error(f"Count failed: {e}")
 
     st.markdown('<div class="section-title">6. Parity check</div>', unsafe_allow_html=True)
-    st.caption("Compares the app's v5.7 decisions to public.formula_replay. "
-               "Empty result = parity passes.")
+    st.caption("Compares the app's v6.0 decisions to public.formula_replay. "
+               "NOTE: the replay view still uses v5.7 rules. Update the view "
+               "before expecting zero differences. Empty result = parity passes.")
     st.code("""
 SELECT a.id, a.v5_decision_path AS app_path, a.v5_bet AS app_call,
        r.formula_path AS replay_path, r.formula_call AS replay_call
@@ -381,7 +347,7 @@ FROM public.matches_raw a
 JOIN public.formula_replay r ON r.id = a.id
 WHERE a.actual_home_goals IS NOT NULL
   AND a.actual_away_goals IS NOT NULL
-  AND a.decision_version = 'v5.7-formula'
+  AND a.decision_version = 'v6.0'
   AND (a.parse_status IS NULL OR a.parse_status = '' OR a.parse_status = 'ok')
   AND COALESCE(a.home_total, 0) > 0
   AND (a.v5_decision_path IS DISTINCT FROM r.formula_path
@@ -462,13 +428,15 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
+# v6.0 stakes
 STAKE_TIER1 = 1.5
 STAKE_TIER2 = 0.75
+STAKE_TIER3 = 0.5
 STAKE_NONE = 0.0
 
 F1_CAP_THRESHOLD = 16.0
 
-DECISION_VERSION = "v5.7-formula"
+DECISION_VERSION = "v6.0"
 
 
 KEYSTATS_PRIORITY_FIELDS = {
@@ -570,7 +538,7 @@ MATCHES_RAW_COLUMNS = {
 
 
 # ============================================================================
-# PARSER (unchanged)
+# PARSER
 # ============================================================================
 
 _PREVIEW_TOP_SCORER_PATTERNS = [
@@ -650,7 +618,7 @@ class SportsgamblerParser:
         a_last = a_words[-1] if a_words else ""
         b_last = b_words[-1] if b_words else ""
         if a_last and b_last and a_last == b_last:
-            return True        
+            return True
         a_tokens = {w for w in a_words if len(w) > 3}
         b_tokens = {w for w in b_words if len(w) > 3}
         shared = a_tokens & b_tokens
@@ -1839,7 +1807,7 @@ def predict_v5(row):
         "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
         "away_collapse": away_collapse,
         "doubted_starter": doubted_starter,
-        "call_1x2": "see_v5",
+        "call_1x2": "see_v6",
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "draw_risk": round(draw_risk, 3),
@@ -1939,52 +1907,67 @@ def check_standard(row, pred):
 
 
 # ============================================================================
-# THE FORMULA — TIER1 + TIER2 only
+# v6.0 — THE FORMULA
 # ============================================================================
+# NEW TIER1 — full stake (1.5u)
+#   - standard_candidate + team_agreement_0
+#   - f1_f5_override + home_leader  (FORCED DC 1X)
+#
+# NEW TIER2 — standard stake (0.75u)
+#   - gap_30_plus + home_leader
+#   - home_leader + standard_candidate
+#
+# NEW TIER3 — reduced stake (0.5u)
+#   - the remaining 16 old-TIER2 segments
+
 FORMULA_TIER1 = [
-    ("gap_30_plus+home_leader",
-     frozenset({"gap_30_plus", "home_leader"})),
-    ("home_leader+standard_candidate",
-     frozenset({"home_leader", "standard_candidate"})),
+    # (name, required_tags, forced_call_or_None)
+    ("f1_f5_override+home_leader",
+     frozenset({"f1_f5_override", "home_leader"}), "DC 1X"),
     ("standard_candidate+team_agreement_0",
-     frozenset({"standard_candidate", "team_agreement_0"})),
+     frozenset({"standard_candidate", "team_agreement_0"}), None),
 ]
 
 FORMULA_TIER2 = [
+    ("gap_30_plus+home_leader",
+     frozenset({"gap_30_plus", "home_leader"}), None),
+    ("home_leader+standard_candidate",
+     frozenset({"home_leader", "standard_candidate"}), None),
+]
+
+FORMULA_TIER3 = [
     ("away_leader+team_disagreement_2plus",
-     frozenset({"away_leader", "team_disagreement_2plus"})),
+     frozenset({"away_leader", "team_disagreement_2plus"}), None),
     ("away_leader+tier_core_a",
-     frozenset({"away_leader", "tier_core_a"})),
+     frozenset({"away_leader", "tier_core_a"}), None),
     ("away_leader+venue_power_neg",
-     frozenset({"away_leader", "venue_power_neg"})),
+     frozenset({"away_leader", "venue_power_neg"}), None),
     ("f1_cap+team_disagreement_2plus",
-     frozenset({"f1_cap", "team_disagreement_2plus"})),
+     frozenset({"f1_cap", "team_disagreement_2plus"}), None),
     ("f1_cap+tier_core_a",
-     frozenset({"f1_cap", "tier_core_a"})),
+     frozenset({"f1_cap", "tier_core_a"}), None),
     ("f1_f5_conflict+venue_incomplete",
-     frozenset({"f1_f5_conflict", "venue_incomplete"})),
-    ("f1_f5_override+home_leader",
-     frozenset({"f1_f5_override", "home_leader"})),
+     frozenset({"f1_f5_conflict", "venue_incomplete"}), None),
     ("gap_10_19+standard_candidate",
-     frozenset({"gap_10_19", "standard_candidate"})),
+     frozenset({"gap_10_19", "standard_candidate"}), None),
     ("gap_10_19+venue_incomplete",
-     frozenset({"gap_10_19", "venue_incomplete"})),
+     frozenset({"gap_10_19", "venue_incomplete"}), None),
     ("gap_30_plus+tier_core_a",
-     frozenset({"gap_30_plus", "tier_core_a"})),
+     frozenset({"gap_30_plus", "tier_core_a"}), None),
     ("gap_30_plus+venue_power_neg",
-     frozenset({"gap_30_plus", "venue_power_neg"})),
+     frozenset({"gap_30_plus", "venue_power_neg"}), None),
     ("home_leader+venue_power_pos",
-     frozenset({"home_leader", "venue_power_pos"})),
+     frozenset({"home_leader", "venue_power_pos"}), None),
     ("team_agreement_0+tier_core_a",
-     frozenset({"team_agreement_0", "tier_core_a"})),
+     frozenset({"team_agreement_0", "tier_core_a"}), None),
     ("team_agreement_0+venue_power_neg",
-     frozenset({"team_agreement_0", "venue_power_neg"})),
+     frozenset({"team_agreement_0", "venue_power_neg"}), None),
     ("team_disagreement_2plus+tier_f1_gap_high",
-     frozenset({"team_disagreement_2plus", "tier_f1_gap_high"})),
+     frozenset({"team_disagreement_2plus", "tier_f1_gap_high"}), None),
     ("tier_core_a+venue_incomplete",
-     frozenset({"tier_core_a", "venue_incomplete"})),
+     frozenset({"tier_core_a", "venue_incomplete"}), None),
     ("tier_core_a+venue_power_neg",
-     frozenset({"tier_core_a", "venue_power_neg"})),
+     frozenset({"tier_core_a", "venue_power_neg"}), None),
 ]
 
 
@@ -1999,13 +1982,21 @@ def _formula_direction(required, leader):
 
 
 def _formula_fired(tags, leader):
+    """Return (tier, name, call) for the highest-priority firing segment.
+    TIER1 → TIER2 → TIER3. Within tier, iterate in order (alphabetical)."""
     tagset = set(tags or [])
-    for name, required in FORMULA_TIER1:
+    for name, required, forced in FORMULA_TIER1:
         if required <= tagset:
-            return 1, name, _formula_direction(required, leader)
-    for name, required in FORMULA_TIER2:
+            call = forced if forced else _formula_direction(required, leader)
+            return 1, name, call
+    for name, required, forced in FORMULA_TIER2:
         if required <= tagset:
-            return 2, name, _formula_direction(required, leader)
+            call = forced if forced else _formula_direction(required, leader)
+            return 2, name, call
+    for name, required, forced in FORMULA_TIER3:
+        if required <= tagset:
+            call = forced if forced else _formula_direction(required, leader)
+            return 3, name, call
     return None
 
 
@@ -2013,6 +2004,7 @@ def _formula_fired(tags, leader):
 # DECISION LAYER
 # ============================================================================
 def decide_v5(row, pred):
+    """v6.0 decision. Returns (decision, call, path, detail, stake)."""
     parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
         return "SKIP", None, "SKIP", "parse_status_not_ok", STAKE_NONE
@@ -2030,7 +2022,7 @@ def decide_v5(row, pred):
 
     tier, name, call = fired
     path = f"TIER{tier}"
-    stake = STAKE_TIER1 if tier == 1 else STAKE_TIER2
+    stake = {1: STAKE_TIER1, 2: STAKE_TIER2, 3: STAKE_TIER3}.get(tier, STAKE_NONE)
     return "BET", call, path, name, stake
 
 
@@ -2325,6 +2317,7 @@ def render_path_badge(path):
     cls = {
         "TIER1": "path-tier1",
         "TIER2": "path-tier2",
+        "TIER3": "path-tier3",
         "SKIP": "path-skip",
     }.get(path, "path-skip")
     return f'<span class="path-badge {cls}">{path}</span>'
@@ -2334,14 +2327,18 @@ def _fire_summary(pred):
     tags = set(pred.get("tags") or [])
     leader = pred.get("f1_leader")
     fired = []
-    for name, required in FORMULA_TIER1:
+    for name, required, forced in FORMULA_TIER1:
         if required <= tags:
-            fired.append({"tier": 1, "name": name,
-                          "call": _formula_direction(required, leader)})
-    for name, required in FORMULA_TIER2:
+            call = forced if forced else _formula_direction(required, leader)
+            fired.append({"tier": 1, "name": name, "call": call})
+    for name, required, forced in FORMULA_TIER2:
         if required <= tags:
-            fired.append({"tier": 2, "name": name,
-                          "call": _formula_direction(required, leader)})
+            call = forced if forced else _formula_direction(required, leader)
+            fired.append({"tier": 2, "name": name, "call": call})
+    for name, required, forced in FORMULA_TIER3:
+        if required <= tags:
+            call = forced if forced else _formula_direction(required, leader)
+            fired.append({"tier": 3, "name": name, "call": call})
     return fired
 
 
@@ -2636,7 +2633,7 @@ def main():
             st.info("No settled matches yet.")
         else:
             path_rows = []
-            for path in ["TIER1", "TIER2"]:
+            for path in ["TIER1", "TIER2", "TIER3"]:
                 subset = [r for r in settled if r.get("v5_decision_path") == path]
                 scored = [r for r in subset if r.get("dc_hit") is not None]
                 hits = sum(1 for r in scored if r.get("dc_hit") is True)
@@ -2677,17 +2674,25 @@ def main():
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("The Formula")
+        st.subheader("The Formula — v6.0")
         st.markdown("""
-### TIER1 — priority 1, short-circuits TIER2
+### NEW TIER1 — full stake (1.5u)
+
+| Segment | Direction | Backtest |
+|---|---|---|
+| `standard_candidate + team_agreement_0` | f1_leader (default DC X2) | 14/14 = 100% |
+| `f1_f5_override + home_leader` | **DC 1X (forced)** | 17/17 = 100% |
+
+### NEW TIER2 — standard stake (0.75u)
 
 | Segment | Direction |
 |---|---|
 | `gap_30_plus + home_leader` | DC 1X |
 | `home_leader + standard_candidate` | DC 1X |
-| `standard_candidate + team_agreement_0` | DC 1X |
 
-### TIER2 — priority 2
+### NEW TIER3 — reduced stake (0.5u)
+
+16 segments (the remaining old TIER2):
 
 | Segment | Direction |
 |---|---|
@@ -2697,7 +2702,6 @@ def main():
 | `f1_cap + team_disagreement_2plus` | DC 1X |
 | `f1_cap + tier_core_a` | DC 1X |
 | `f1_f5_conflict + venue_incomplete` | f1_leader |
-| `f1_f5_override + home_leader` | DC 1X |
 | `gap_10_19 + standard_candidate` | DC 1X |
 | `gap_10_19 + venue_incomplete` | f1_leader |
 | `gap_30_plus + tier_core_a` | DC 1X |
@@ -2709,28 +2713,28 @@ def main():
 | `tier_core_a + venue_incomplete` | f1_leader |
 | `tier_core_a + venue_power_neg` | f1_leader |
 
-Direction is derived from the segment's own required tags, not the match's tags.
-When neither leader tag is required, direction follows `f1_leader`, defaulting to **DC X2** if null.
+### Priority
+
+1. **TIER1 first.** If any TIER1 segment fires, take it.
+2. **Then TIER2.** First firing segment (alphabetical) wins.
+3. **Then TIER3.** First firing segment (alphabetical) wins.
+4. **Otherwise SKIP.**
+
+### Direction rule
+
+Inspect the winning segment's **required tags**:
+
+- Contains `away_leader` (not `home_leader`) → **DC X2**
+- Contains `home_leader` (not `away_leader`) → **DC 1X**
+- Otherwise → **DC 1X** if `f1_leader == "home"`, else **DC X2**
+
+`f1_f5_override + home_leader` is forced to **DC 1X** regardless.
 
 ### Stakes
 
 - TIER1 → **1.5u**
 - TIER2 → **0.75u**
-
-### Removed
-
-- **TIER3** (33.3% on 9 bets)
-- **`f1_f5_conflict + team_disagreement_1`** (sole TIER2 loss)
-
-### In-sample replay
-
-| Tier | Bets | Wins | Rate |
-|---|---|---|---|
-| TIER1 | 37 | 37 | 100.0% |
-| TIER2 | 24 | 24 | 100.0% |
-| **Total** | **61** | **61** | **100.0%** |
-
-In-sample. Watch the next 60 new settled bets.
+- TIER3 → **0.5u**
         """)
 
     with tabs[5]:
