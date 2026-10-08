@@ -1,7 +1,6 @@
 def unbreakable(match):
     tags = match.tags
 
-    # HARD TRAPS — never bet
     if {'away_leader','gap_20_29','team_disagreement_1'} <= tags:
         return SKIP('trap_1')
     if {'away_leader','gap_30_plus','team_agreement_0','tier_f1_gap_high'} <= tags:
@@ -11,91 +10,46 @@ def unbreakable(match):
     if {'gap_under_10','home_leader','team_disagreement_2plus'} <= tags:
         return SKIP('trap_4')
 
-    # UNBREAKABLE CORE — 100% segments
     if {'standard_candidate','team_agreement_0'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)  # 19/19
+        return BET('DC 1X', 1.5, 1.00)
     if {'home_leader','standard_candidate'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)  # 18/18
+        return BET('DC 1X', 1.5, 1.00)
     if {'gap_30_plus','home_leader'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)  # 15/15
+        return BET('DC 1X', 1.5, 1.00)
     if {'gap_30_plus','standard_candidate'} <= tags:
-        return BET('DC 1X', 1.5, 1.00)  # 15/15
+        return BET('DC 1X', 1.5, 1.00)
     if {'f1_cap','home_leader'} <= tags:
-        return BET('DC 1X', 1.0, 0.96)  # 26/26
+        return BET('DC 1X', 1.0, 0.96)
 
-    # STRONG — 90%+ segments
     if {'home_leader','team_agreement_0'} <= tags:
-        return BET('DC 1X', 0.75, 0.955)  # 22/22
+        return BET('DC 1X', 0.75, 0.955)
     if {'standard_candidate','venue_incomplete'} <= tags:
-        return BET('DC 1X', 0.75, 0.938)  # 16/16
+        return BET('DC 1X', 0.75, 0.938)
     if {'team_agreement_0','venue_incomplete'} <= tags:
-        return BET('DC 1X', 0.75, 0.933)  # 15/15
+        return BET('DC 1X', 0.75, 0.933)
     if {'f1_cap','gap_30_plus'} <= tags:
-        return BET('DC 1X', 0.75, 0.923)  # 26/26
+        return BET('DC 1X', 0.75, 0.923)
     if {'gap_30_plus','team_agreement_0'} <= tags:
-        return BET('DC 1X', 0.75, 0.923)  # 26/26
+        return BET('DC 1X', 0.75, 0.923)
 
-    # MEDIUM — 85%+ segments
     if {'f1_cap','team_agreement_0'} <= tags:
-        return BET('DC 1X', 0.5, 0.909)  # 33/33
+        return BET('DC 1X', 0.5, 0.909)
     if {'f1_cap','venue_incomplete'} <= tags:
-        return BET('DC 1X', 0.5, 0.917)  # 24/24
+        return BET('DC 1X', 0.5, 0.917)
 
-    # F1_GAP_HIGH — conditional
     if match.f1_gap >= 25 and match.f1_leader == 'away':
         return BET('DC X2', 0.5, 0.85)
     if match.f1_gap >= 16 and match.f1_leader == 'home':
         return BET('DC 1X', 0.5, 0.85)
 
-    # DEFAULT
     return SKIP('no_match')
 
 """
-v5.7-formula — TIER1 + TIER2 only.
+Sportcreed — v5.7-formula.
 
-Decision layer is the formula, nothing else.
-
-TIER1 (3 segments, alphabetical priority):
-  gap_30_plus + home_leader
-  home_leader + standard_candidate
-  standard_candidate + team_agreement_0
-
-TIER2 (17 segments, alphabetical priority):
-  away_leader + team_disagreement_2plus
-  away_leader + tier_core_a
-  away_leader + venue_power_neg
-  f1_cap + team_disagreement_2plus
-  f1_cap + tier_core_a
-  f1_f5_conflict + venue_incomplete
-  f1_f5_override + home_leader
-  gap_10_19 + standard_candidate
-  gap_10_19 + venue_incomplete
-  gap_30_plus + tier_core_a
-  gap_30_plus + venue_power_neg
-  home_leader + venue_power_pos
-  team_agreement_0 + tier_core_a
-  team_agreement_0 + venue_power_neg
-  team_disagreement_2plus + tier_f1_gap_high
-  tier_core_a + venue_incomplete
-  tier_core_a + venue_power_neg
-
-Direction rule: inspect the segment's required tags only.
-  - away_leader without home_leader -> DC X2
-  - home_leader without away_leader -> DC 1X
-  - otherwise -> DC 1X if f1_leader == "home", else DC X2
-
-Priority: TIER1 first (short-circuit). Within tier, alphabetical by name.
-
-TIER3: removed entirely.
-f1_f5_conflict + team_disagreement_1: removed from TIER2.
-
-Parity with public.formula_replay is the acceptance test.
-
-In-sample replay (settled rows, before this code shipped):
-  TIER1: 37 bets, 37 wins, 0 losses (100.0%)
-  TIER2: 24 bets, 24 wins, 0 losses (100.0%)
-  Total: 61 bets, 61 wins, 0 losses (100.0%)
-Out-of-sample is unknown. Watch the next 60 new settled bets.
+TIER1 + TIER2 only.
+Direction from segment's own required tags.
+TIER3 removed. Parity with public.formula_replay is the acceptance test.
 """
 
 import concurrent.futures
@@ -108,9 +62,8 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="v5.7 Formula",
+    page_title="Sportcreed",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -118,23 +71,23 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main .block-container { padding-top: 1.5rem; max-width: 1400px; }
+    .main .block-container { padding-top: 1.25rem; max-width: 1200px; }
     .team-header { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        border-radius: 16px; padding: 1.5rem 2rem; color: #fff; margin-bottom: 1rem; }
-    .team-names { font-size: 2rem; font-weight: 800; margin: 0; }
-    .team-meta { color: #94a3b8; font-size: 0.9rem; margin-top: 0.25rem; }
+        border-radius: 14px; padding: 1.1rem 1.5rem; color: #fff; margin-bottom: 1rem; }
+    .team-names { font-size: 1.5rem; font-weight: 800; margin: 0; }
+    .team-meta { color: #94a3b8; font-size: 0.85rem; margin-top: 0.2rem; }
     .verdict-bet { background: linear-gradient(135deg, #064e3b 0%, #022c22 100%);
-        border-left: 6px solid #10b981; border-radius: 16px; padding: 1.5rem 1.75rem; margin: 1rem 0; }
+        border-left: 6px solid #10b981; border-radius: 14px; padding: 1.25rem 1.5rem; margin: 1rem 0; }
     .verdict-nobet { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border-left: 6px solid #64748b; border-radius: 16px; padding: 1.5rem 1.75rem; margin: 1rem 0; }
-    .verdict-label { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700; color: #6ee7b7; text-transform: uppercase; }
-    .verdict-label-grey { font-size: 0.75rem; letter-spacing: 2px; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
-    .verdict-pick { font-size: 2.4rem; font-weight: 800; color: #fff; margin: 0.35rem 0; line-height: 1.1; }
-    .verdict-noedge { font-size: 1.6rem; font-weight: 700; color: #cbd5e1; margin: 0.35rem 0; }
-    .verdict-detail { font-size: 1rem; color: #d1fae5; margin-top: 0.5rem; }
-    .verdict-detail-grey { font-size: 0.95rem; color: #94a3b8; margin-top: 0.5rem; }
-    .tag { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px;
-        font-size: 0.7rem; font-weight: 700; letter-spacing: 0.5px; margin-right: 0.35rem; }
+        border-left: 6px solid #64748b; border-radius: 14px; padding: 1.25rem 1.5rem; margin: 1rem 0; }
+    .verdict-label { font-size: 0.7rem; letter-spacing: 2px; font-weight: 700; color: #6ee7b7; text-transform: uppercase; }
+    .verdict-label-grey { font-size: 0.7rem; letter-spacing: 2px; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
+    .verdict-pick { font-size: 2rem; font-weight: 800; color: #fff; margin: 0.3rem 0; line-height: 1.1; }
+    .verdict-noedge { font-size: 1.3rem; font-weight: 700; color: #cbd5e1; margin: 0.3rem 0; }
+    .verdict-detail { font-size: 0.92rem; color: #d1fae5; margin-top: 0.4rem; }
+    .verdict-detail-grey { font-size: 0.88rem; color: #94a3b8; margin-top: 0.4rem; }
+    .tag { display: inline-block; padding: 0.12rem 0.45rem; border-radius: 5px;
+        font-size: 0.68rem; font-weight: 700; letter-spacing: 0.4px; margin-right: 0.3rem; margin-bottom:0.2rem; }
     .tag-gap { background: #1e3a8a; color: #bfdbfe; }
     .tag-side { background: #064e3b; color: #6ee7b7; }
     .tag-disagreement { background: #7c2d12; color: #fdba74; }
@@ -142,27 +95,26 @@ st.markdown("""
     .tag-tier { background: #7c2d12; color: #fed7aa; }
     .tag-skip { background: #1e293b; color: #94a3b8; }
     .tag-pair { background: #065f46; color: #a7f3d0; }
-    .tag-core { background: #7c2d12; color: #fed7aa; }
-    .factor-row { background: #0f172a; border-radius: 10px; padding: 0.75rem 1rem;
-        display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
-    .factor-name { color: #cbd5e1; font-weight: 600; font-size: 0.9rem; }
-    .factor-val { color: #3b82f6; font-weight: 800; font-size: 1.1rem; }
-    .trigger-row { background: #1e293b; border-radius: 8px; padding: 0.6rem 1rem;
-        margin-bottom: 0.4rem; font-size: 0.85rem; color: #94a3b8; display: flex; justify-content: space-between; }
+    .factor-row { background: #0f172a; border-radius: 10px; padding: 0.65rem 1rem;
+        display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; }
+    .factor-name { color: #cbd5e1; font-weight: 600; font-size: 0.88rem; }
+    .factor-val { color: #3b82f6; font-weight: 800; font-size: 1rem; }
+    .trigger-row { background: #1e293b; border-radius: 8px; padding: 0.55rem 1rem;
+        margin-bottom: 0.35rem; font-size: 0.85rem; color: #94a3b8; display: flex; justify-content: space-between; }
     .trigger-on { background: #064e3b; color: #6ee7b7; }
     .trigger-off { background: #1e293b; color: #64748b; }
-    .section-title { font-size: 0.85rem; font-weight: 700; color: #64748b;
-        text-transform: uppercase; letter-spacing: 1.5px; margin: 1.5rem 0 0.75rem 0; }
+    .section-title { font-size: 0.78rem; font-weight: 700; color: #64748b;
+        text-transform: uppercase; letter-spacing: 1.3px; margin: 1.25rem 0 0.6rem 0; }
     .stButton button { background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-        color: white; font-weight: 700; border-radius: 10px; border: none; padding: 0.6rem 1.25rem; }
-    .diag-ok { background: #064e3b; color: #6ee7b7; padding: 0.4rem 0.75rem;
-        border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
-    .diag-bad { background: #7f1d1d; color: #fecaca; padding: 0.4rem 0.75rem;
-        border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
-    .diag-warn { background: #78350f; color: #fde68a; padding: 0.4rem 0.75rem;
-        border-radius: 6px; font-family: monospace; font-size: 0.8rem; display: inline-block; margin-right: 0.5rem; }
-    .path-badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 8px;
-        font-size: 0.72rem; font-weight: 700; margin-right: 0.35rem; }
+        color: white; font-weight: 700; border-radius: 10px; border: none; padding: 0.55rem 1.2rem; }
+    .diag-ok { background: #064e3b; color: #6ee7b7; padding: 0.35rem 0.7rem;
+        border-radius: 6px; font-family: monospace; font-size: 0.78rem; display: inline-block; margin-right: 0.5rem; }
+    .diag-bad { background: #7f1d1d; color: #fecaca; padding: 0.35rem 0.7rem;
+        border-radius: 6px; font-family: monospace; font-size: 0.78rem; display: inline-block; margin-right: 0.5rem; }
+    .diag-warn { background: #78350f; color: #fde68a; padding: 0.35rem 0.7rem;
+        border-radius: 6px; font-family: monospace; font-size: 0.78rem; display: inline-block; margin-right: 0.5rem; }
+    .path-badge { display: inline-block; padding: 0.18rem 0.5rem; border-radius: 7px;
+        font-size: 0.68rem; font-weight: 700; margin-left: 0.4rem; }
     .path-tier1 { background: #064e3b; color: #6ee7b7; }
     .path-tier2 { background: #065f46; color: #a7f3d0; }
     .path-skip { background: #1e293b; color: #94a3b8; }
@@ -240,11 +192,11 @@ def _describe_key(key_info):
     if p.startswith("sb_publishable_"):
         return "publishable (new-style)"
     if p.startswith("sb_secret_"):
-        return "SECRET KEY — do not use in browser code"
+        return "SECRET KEY"
     if p.startswith("eyJhbGciOi"):
         return "legacy anon JWT"
     if p.startswith("eyJ"):
-        return "JWT (unrecognized header)"
+        return "JWT"
     return f"unknown ({p!r})"
 
 
@@ -266,15 +218,15 @@ def _check_key(key_info):
     if not key_info.get("present"):
         return ["Key missing from st.secrets"]
     if key_info.get("has_leading_ws") or key_info.get("has_trailing_ws"):
-        issues.append("Key has leading/trailing whitespace — this alone causes 401")
+        issues.append("Key has leading/trailing whitespace")
     if key_info.get("has_inner_ws"):
         issues.append("Key contains whitespace in the middle")
     if key_info.get("has_newline"):
-        issues.append("Key contains a newline — copy-paste likely split it")
+        issues.append("Key contains a newline")
     if key_info.get("has_quotes"):
         issues.append("Key appears to be wrapped in quotes")
     if key_info.get("length", 0) < 100:
-        issues.append(f"Key length is only {key_info.get('length')} — expected 200+ for JWT")
+        issues.append(f"Key length is only {key_info.get('length')}")
     return issues
 
 
@@ -301,7 +253,6 @@ def render_diagnostic_banner():
     url_issues = _check_url(url_info)
     key_issues = _check_key(key_info)
 
-    st.markdown("### 🔍 Diagnostics")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**URL**")
@@ -351,17 +302,12 @@ def render_diagnostic_banner():
                         f"❌ URL and KEY belong to different projects. "
                         f"URL ref = `{url_ref}`, KEY ref = `{ref}`."
                     )
-            else:
-                st.warning(f"Could not parse project ref from URL `{raw_url}`.")
         elif raw_key.startswith("sb_publishable_"):
-            st.info("Publishable key detected. Cannot verify project match from key alone.")
-        else:
-            st.warning("Could not decode JWT from key.")
+            st.info("Publishable key detected.")
 
 
 def render_debug_tab(sb):
     st.subheader("🛠 Debug")
-    st.caption("Connection and schema diagnostics. No values are revealed.")
 
     st.markdown('<div class="section-title">1. Secrets</div>', unsafe_allow_html=True)
     url_info = _inspect_secret("SUPABASE_URL")
@@ -372,7 +318,7 @@ def render_debug_tab(sb):
             st.json({k: v for k, v in url_info.items() if k != "prefix"})
             st.code(f"prefix: {url_info['prefix']!r}")
         else:
-            st.error("URL not found in st.secrets.")
+            st.error("URL not found.")
 
     with st.expander("KEY details", expanded=False):
         if key_info.get("present"):
@@ -380,7 +326,7 @@ def render_debug_tab(sb):
             st.code(f"prefix: {key_info['prefix']!r}\nsuffix: {key_info['suffix']!r}")
             st.write("**Key kind:**", _describe_key(key_info))
         else:
-            st.error("KEY not found in st.secrets.")
+            st.error("KEY not found.")
 
     st.markdown('<div class="section-title">2. Client state</div>', unsafe_allow_html=True)
     if sb is None:
@@ -389,81 +335,48 @@ def render_debug_tab(sb):
     st.success("Supabase client created.")
 
     st.markdown('<div class="section-title">3. Live schema</div>', unsafe_allow_html=True)
-    st.caption("The app discovers the real column list from Supabase. "
-               "Writes are filtered against this list, so missing columns "
-               "never cause PGRST204 errors.")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🔄 Reload schema cache", key="debug_reload_schema"):
             reload_schema_cache()
-            st.success("Schema cache cleared. Next write will re-probe.")
+            st.success("Schema cache cleared.")
     with c2:
-        if st.button("🔎 Discover live schema now", key="debug_probe_schema"):
+        if st.button("🔎 Discover live schema", key="debug_probe_schema"):
             reload_schema_cache()
             live = _probe_live_schema(sb, "matches_raw")
             if live is None:
-                st.warning("Could not discover live schema (table may be empty). "
-                           "Falling back to declared superset.")
+                st.warning("Could not discover live schema.")
             else:
                 st.success(f"Live schema has {len(live)} columns.")
                 missing = sorted(MATCHES_RAW_COLUMNS - live)
                 if missing:
-                    st.warning(f"{len(missing)} declared columns are missing from "
-                               f"the live table:")
+                    st.warning(f"{len(missing)} declared columns missing:")
                     st.code("\n".join(missing))
                 else:
-                    st.success("All declared columns exist in the live table.")
+                    st.success("All declared columns exist.")
 
-    st.markdown('<div class="section-title">4. Live ping</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">4. Ping</div>', unsafe_allow_html=True)
     if st.button("🏓 Ping Supabase", key="debug_ping"):
-        with st.spinner("Pinging..."):
-            try:
-                resp = sb.table("matches_raw").select("id").limit(1).execute()
-                st.success(f"Ping OK. Returned {len(resp.data)} rows.")
-                if resp.data:
-                    st.write("Sample row id:", resp.data[0].get("id"))
-            except Exception as e:
-                st.error(f"Ping failed: {e}")
+        try:
+            resp = sb.table("matches_raw").select("id").limit(1).execute()
+            st.success(f"Ping OK. Returned {len(resp.data)} rows.")
+        except Exception as e:
+            st.error(f"Ping failed: {e}")
 
-    st.markdown('<div class="section-title">5. Schema check (SELECT *)</div>',
-                unsafe_allow_html=True)
-    if st.button("🔎 List matches_raw columns", key="debug_cols"):
-        with st.spinner("Querying..."):
-            try:
-                resp = sb.table("matches_raw").select("*").limit(1).execute()
-                if resp.data:
-                    cols = sorted(resp.data[0].keys())
-                    st.success(f"{len(cols)} columns returned by `SELECT *`.")
-                    st.write(cols)
-                else:
-                    st.info("Table is empty. Cannot list columns from a live row.")
-            except Exception as e:
-                st.error(f"Schema check failed: {e}")
-
-    st.markdown('<div class="section-title">6. Row count</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">5. Row count</div>', unsafe_allow_html=True)
     if st.button("🧮 Count rows", key="debug_count"):
-        with st.spinner("Counting..."):
-            try:
-                resp = sb.table("matches_raw").select("id").execute()
-                st.success(f"matches_raw has {len(resp.data)} row(s).")
-            except Exception as e:
-                st.error(f"Count failed: {e}")
+        try:
+            resp = sb.table("matches_raw").select("id").execute()
+            st.success(f"matches_raw has {len(resp.data)} row(s).")
+        except Exception as e:
+            st.error(f"Count failed: {e}")
 
-    st.markdown('<div class="section-title">7. Parity check</div>',
-                unsafe_allow_html=True)
-    st.caption("Compares the app's latest v5.7 decisions to public.formula_replay. "
-               "Excludes rows the app skips at parse-time or empty-prediction time. "
-               "Filter matches the app's guard: NULL, empty string, and 'ok' "
-               "parse_status all count as non-blocking.")
+    st.markdown('<div class="section-title">6. Parity check</div>', unsafe_allow_html=True)
+    st.caption("Compares the app's v5.7 decisions to public.formula_replay. "
+               "Empty result = parity passes.")
     st.code("""
-SELECT
-    a.id,
-    a.v5_decision_path   AS app_path,
-    a.v5_bet             AS app_call,
-    r.formula_path       AS replay_path,
-    r.formula_call       AS replay_call,
-    a.v5_skip_reason     AS app_segment,
-    r.formula_segment    AS replay_segment
+SELECT a.id, a.v5_decision_path AS app_path, a.v5_bet AS app_call,
+       r.formula_path AS replay_path, r.formula_call AS replay_call
 FROM public.matches_raw a
 JOIN public.formula_replay r ON r.id = a.id
 WHERE a.actual_home_goals IS NOT NULL
@@ -471,26 +384,14 @@ WHERE a.actual_home_goals IS NOT NULL
   AND a.decision_version = 'v5.7-formula'
   AND (a.parse_status IS NULL OR a.parse_status = '' OR a.parse_status = 'ok')
   AND COALESCE(a.home_total, 0) > 0
-  AND (
-      a.v5_decision_path IS DISTINCT FROM r.formula_path
-      OR a.v5_bet IS DISTINCT FROM r.formula_call
-  );
-    """.strip(), language="sql")
-    st.caption("Empty result = parity passes.")
-
-    st.markdown('<div class="section-title">8. Migration helper</div>',
-                unsafe_allow_html=True)
-    st.caption("Back up the current table before any schema changes.")
-    st.code("""
-CREATE TABLE matches_raw_backup_v57 AS
-    SELECT * FROM matches_raw;
-
-SELECT count(*) FROM matches_raw_backup_v57;
+  AND (a.v5_decision_path IS DISTINCT FROM r.formula_path
+       OR a.v5_bet IS DISTINCT FROM r.formula_call);
     """.strip(), language="sql")
 
-    st.markdown('<div class="section-title">9. Test insert</div>', unsafe_allow_html=True)
-    if st.button("🧪 Insert test row", key="debug_insert"):
-        with st.spinner("Inserting..."):
+    st.markdown('<div class="section-title">7. Test insert / cleanup</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🧪 Insert test row", key="debug_insert"):
             try:
                 payload = {
                     "match_date": "2099-12-31",
@@ -499,12 +400,11 @@ SELECT count(*) FROM matches_raw_backup_v57;
                     "league_name": "DEBUG",
                 }
                 resp = sb.table("matches_raw").insert(payload).execute()
-                st.success(f"Insert succeeded. id = {resp.data[0].get('id') if resp.data else 'unknown'}")
+                st.success(f"Inserted. id = {resp.data[0].get('id') if resp.data else 'unknown'}")
             except Exception as e:
                 st.error(f"Insert failed: {e}")
-
-    if st.button("🧹 Delete test rows", key="debug_cleanup"):
-        with st.spinner("Deleting..."):
+    with c2:
+        if st.button("🧹 Delete test rows", key="debug_cleanup"):
             try:
                 sb.table("matches_raw").delete().eq("home_team", "__DEBUG__ Home").execute()
                 sb.table("matches_raw").delete().eq("away_team", "__DEBUG__ Away").execute()
@@ -562,7 +462,6 @@ CLUSTER_POS_GAP_MAX = 3
 
 STANDARD_POS_GAP_MIN = 5
 
-# ---- v5.7 stakes ----
 STAKE_TIER1 = 1.5
 STAKE_TIER2 = 0.75
 STAKE_NONE = 0.0
@@ -702,7 +601,7 @@ _NAME_GOALS = re.compile(
 class SportsgamblerParser:
     def __init__(self, html: str):
         if not _has_bs4():
-            raise RuntimeError("beautifulsoup4 required. pip install beautifulsoup4")
+            raise RuntimeError("beautifulsoup4 required.")
         from bs4 import BeautifulSoup
         self.soup = BeautifulSoup(html, "html.parser")
         self.home_team = None
@@ -751,8 +650,7 @@ class SportsgamblerParser:
         a_last = a_words[-1] if a_words else ""
         b_last = b_words[-1] if b_words else ""
         if a_last and b_last and a_last == b_last:
-            return True
-        a_tokens = {w for w in a_words if len(w) > 3}
+            return True        a_tokens = {w for w in a_words if len(w) > 3}
         b_tokens = {w for w in b_words if len(w) > 3}
         shared = a_tokens & b_tokens
         if len(shared) >= 2:
@@ -1567,7 +1465,7 @@ class SportsgamblerParser:
 
 
 # ============================================================================
-# FACTOR LAYER (unchanged)
+# FACTOR LAYER
 # ============================================================================
 def smooth_rate(wins, draws, games):
     if games is None or games <= 0:
@@ -2042,11 +1940,6 @@ def check_standard(row, pred):
 # ============================================================================
 # THE FORMULA — TIER1 + TIER2 only
 # ============================================================================
-# Each entry: (name, required_tags).
-# Priority within tier: alphabetical by name (matches replay view).
-# Direction rule inspects required tags only.
-# TIER3 removed entirely. f1_f5_conflict+team_disagreement_1 removed.
-
 FORMULA_TIER1 = [
     ("gap_30_plus+home_leader",
      frozenset({"gap_30_plus", "home_leader"})),
@@ -2095,7 +1988,6 @@ FORMULA_TIER2 = [
 
 
 def _formula_direction(required, leader):
-    """Inspect required tags only. Fall back to leader, default DC X2."""
     has_away = "away_leader" in required
     has_home = "home_leader" in required
     if has_away and not has_home:
@@ -2106,8 +1998,6 @@ def _formula_direction(required, leader):
 
 
 def _formula_fired(tags, leader):
-    """Return (tier, name, call) for the highest-priority firing segment.
-    TIER1 short-circuits TIER2. Within a tier, iterate in order (alphabetical)."""
     tagset = set(tags or [])
     for name, required in FORMULA_TIER1:
         if required <= tagset:
@@ -2122,17 +2012,6 @@ def _formula_fired(tags, leader):
 # DECISION LAYER
 # ============================================================================
 def decide_v5(row, pred):
-    """
-    v5.7 decision layer.
-    Returns 5-tuple: (decision, call, path, detail, stake).
-
-    Guards:
-      - parse_status is truthy and != "ok" -> SKIP parse_status_not_ok
-      - home_total is None or == 0         -> SKIP home_total_empty
-        (empty predictions have home_total = 0)
-
-    Otherwise: evaluate the formula. First firing segment wins.
-    """
     parse_status = row.get("parse_status")
     if parse_status and parse_status != "ok":
         return "SKIP", None, "SKIP", "parse_status_not_ok", STAKE_NONE
@@ -2142,7 +2021,7 @@ def decide_v5(row, pred):
         return "SKIP", None, "SKIP", "home_total_empty", STAKE_NONE
 
     tags = pred.get("tags") or []
-    leader = pred.get("f1_leader")  # may be None; formula defaults to DC X2
+    leader = pred.get("f1_leader")
 
     fired = _formula_fired(tags, leader)
     if not fired:
@@ -2155,7 +2034,7 @@ def decide_v5(row, pred):
 
 
 # ============================================================================
-# TAGS COMPUTATION (unchanged)
+# TAGS COMPUTATION
 # ============================================================================
 def compute_tags(row, pred, tier, decision, skip_reason):
     tags = []
@@ -2339,8 +2218,7 @@ def save_prediction(sb, match_id, result):
             reload_schema_cache()
             return False, (
                 f"Live schema rejected column '{bad_col}'. "
-                f"Run the migration SQL in the Debug tab, then click "
-                f"'Reload schema cache'. Original error: {msg}"
+                f"Run migration SQL, then Reload schema cache. Error: {msg}"
             )
         return False, msg
 
@@ -2356,7 +2234,7 @@ def load_all(sb, timeout_seconds=15):
             resp = fut.result(timeout=timeout_seconds)
             return resp.data or []
         except concurrent.futures.TimeoutError:
-            st.warning(f"Supabase query exceeded {timeout_seconds}s. Showing empty results.")
+            st.warning(f"Supabase query exceeded {timeout_seconds}s.")
             return []
         except Exception as e:
             st.error(f"Load failed: {e}")
@@ -2373,10 +2251,7 @@ def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, counterfactual_cal
     else:
         actual = "Draw"
 
-    payload = {
-        "actual_home_goals": hg,
-        "actual_away_goals": ag,
-    }
+    payload = {"actual_home_goals": hg, "actual_away_goals": ag}
 
     real_columns = _get_table_columns(sb, "matches_raw") or set()
 
@@ -2454,40 +2329,52 @@ def render_path_badge(path):
     return f'<span class="path-badge {cls}">{path}</span>'
 
 
+def _fire_summary(pred):
+    tags = set(pred.get("tags") or [])
+    leader = pred.get("f1_leader")
+    fired = []
+    for name, required in FORMULA_TIER1:
+        if required <= tags:
+            fired.append({"tier": 1, "name": name,
+                          "call": _formula_direction(required, leader)})
+    for name, required in FORMULA_TIER2:
+        if required <= tags:
+            fired.append({"tier": 2, "name": name,
+                          "call": _formula_direction(required, leader)})
+    return fired
+
+
 def render_verdict_v5(result):
     decision = result.get("v5_decision")
     path = result.get("v5_decision_path")
     bet = result.get("v5_bet")
     stake = result.get("v5_stake", 0) or 0
-    skip = result.get("v5_skip_reason")
-    tags = result.get("tags", [])
+    segment = result.get("v5_skip_reason")
+    f1_gap = result.get("f1_gap") or 0
+    leader = result.get("f1_leader") or "—"
+    total_gap = result.get("total_gap") or 0
 
     if decision == "BET":
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ v5.7 Formula {render_path_badge(path)}</div>
-            <div class="verdict-pick">{bet}</div>
+            <div class="verdict-label">⭐ SPORTCREED PREDICTION &nbsp; {render_path_badge(path)}</div>
+            <div class="verdict-pick">{bet} &nbsp;<span style="font-size:1.1rem; opacity:0.7; font-weight:600;">· {stake}u</span></div>
             <div class="verdict-detail">
-                Stake <strong>{stake}u</strong>
-                &nbsp;·&nbsp; Segment <code>{skip or '—'}</code>
-                &nbsp;·&nbsp; F1 Gap <strong>{(result.get('f1_gap') or 0):.1f}</strong>
-                &nbsp;·&nbsp; Leader {result['f1_leader']}
-                &nbsp;·&nbsp; Total Gap <strong>{result['total_gap']:.1f}</strong>
-                &nbsp;·&nbsp; VP {(result.get('venue_power') or 0):.2f}
+                Fires on <code style="background:#022c22; color:#6ee7b7; padding:2px 6px; border-radius:4px;">{segment or '—'}</code>
+                &nbsp;·&nbsp; F1 gap <strong>{f1_gap:.1f}</strong>
+                &nbsp;·&nbsp; Leader <strong>{leader}</strong>
+                &nbsp;·&nbsp; Total gap <strong>{total_gap:.1f}</strong>
             </div>
-            <div style="margin-top:.75rem;">{render_tags(tags)}</div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">v5.7 Formula {render_path_badge(path)}</div>
-            <div class="verdict-noedge">NO BET — {skip}</div>
+            <div class="verdict-label-grey">SPORTCREED PREDICTION &nbsp; {render_path_badge(path)}</div>
+            <div class="verdict-noedge">NO BET — {segment}</div>
             <div class="verdict-detail-grey">
-                F1 Gap {(result.get('f1_gap') or 0):.1f} · Leader {result['f1_leader']}
-                · Total Gap {result['total_gap']:.1f}
+                F1 gap {f1_gap:.1f} · Leader {leader} · Total gap {total_gap:.1f}
             </div>
-            <div style="margin-top:.75rem;">{render_tags(tags)}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -2495,12 +2382,10 @@ def render_verdict_v5(result):
 def render_ou_verdict(result):
     call = result.get("call_ou", "")
     expected = result.get("expected_total", 0)
-    reason = result.get("no_bet_reason_ou")
-    reason_str = f" ({reason})" if reason else ""
     if call == "No Bet":
-        st.info(f"🟡 O/U 2.5: **NO BET** — expected {expected:.2f}{reason_str}")
+        st.info(f"🟡 O/U 2.5 · **NO BET** · expected {expected:.2f}")
     else:
-        st.success(f"🟢 O/U 2.5: **{call}** — expected {expected:.2f}")
+        st.success(f"🟢 O/U 2.5 · **{call}** · expected {expected:.2f}")
 
 
 def render_factor_row(name, home_val, away_val, weight_label=""):
@@ -2529,28 +2414,32 @@ def render_trigger(name, on):
     """, unsafe_allow_html=True)
 
 
-def render_core_breakdown(row, pred):
-    tags = pred.get("tags") or []
-    tagset = set(tags)
-    leader = pred.get("f1_leader")
+def render_firing_segments(pred):
+    fired = _fire_summary(pred)
+    if not fired:
+        st.info("No segment fired. SKIP.")
+        return
 
-    st.markdown('<div class="section-title">TIER1 segments</div>',
-                unsafe_allow_html=True)
-    for name, required in FORMULA_TIER1:
-        on = required <= tagset
-        call = _formula_direction(required, leader) if on else "—"
-        render_trigger(f"{name} · {call}", on)
+    winner = fired[0]
+    others = fired[1:]
 
-    st.markdown('<div class="section-title">TIER2 segments</div>',
-                unsafe_allow_html=True)
-    for name, required in FORMULA_TIER2:
-        on = required <= tagset
-        call = _formula_direction(required, leader) if on else "—"
-        render_trigger(f"{name} · {call}", on)
+    st.markdown(f"""
+    <div style="background:#064e3b; border-left:4px solid #10b981; border-radius:10px;
+                padding:0.85rem 1.1rem; margin-bottom:0.6rem;">
+        <div style="font-size:0.68rem; font-weight:700; letter-spacing:1.5px;
+                    color:#6ee7b7; text-transform:uppercase; margin-bottom:0.2rem;">
+            ⭐ WINNER · TIER{winner['tier']}
+        </div>
+        <div style="color:#fff; font-weight:700; font-size:0.95rem;">
+            {winner['name']} → {winner['call']}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-
-def render_combo_breakdown(pred):
-    return
+    if others:
+        with st.expander(f"Also fired ({len(others)})", expanded=False):
+            for f in others:
+                render_trigger(f"TIER{f['tier']} · {f['name']} → {f['call']}", True)
 
 
 # ============================================================================
@@ -2598,17 +2487,14 @@ def compute_tag_performance(rows):
 # UI
 # ============================================================================
 def main():
-    st.title("⚽ v5.7 Formula")
-    st.caption("TIER1 + TIER2 only. Direction from segment's own required tags. "
-               "TIER3 removed. Parity with public.formula_replay is the acceptance test.")
+    st.title("⚽ Sportcreed")
 
-    with st.expander("🔍 Quick diagnostics (open if the app is not working)", expanded=False):
+    with st.expander("🔍 Diagnostics", expanded=False):
         render_diagnostic_banner()
 
     sb, diag = get_supabase()
     if sb is None:
         st.error(f"Supabase client could not be created: {diag.get('error')}")
-        st.info("Open the Debug tab below to see exactly what is wrong.")
         render_debug_tab(None)
         return
 
@@ -2622,11 +2508,11 @@ def main():
     ])
 
     with tabs[0]:
-        st.subheader("Paste Sportsgambler HTML")
-        st.caption("Parse → v5.7 formula → save with full decision trace.")
-        text = st.text_area("HTML", height=260, key="html_input", label_visibility="collapsed")
+        text = st.text_area("Paste Sportsgambler HTML",
+                            height=200, key="html_input",
+                            label_visibility="collapsed")
 
-        if st.button("⚽ Parse, Predict & Save (v5.7)", type="primary"):
+        if st.button("⚽ Parse, Predict & Save", type="primary"):
             if not text or len(text.strip()) < 200:
                 st.error("Paste a full Sportsgambler preview page.")
             else:
@@ -2639,7 +2525,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v5.7 formula..."):
+                with st.spinner("Running formula..."):
                     result = predict_v5_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2661,74 +2547,62 @@ def main():
                         &nbsp;·&nbsp; {parsed.get('match_date') or '—'}
                         &nbsp;·&nbsp; {parsed.get('kickoff_local') or ''}
                         &nbsp;·&nbsp; {parsed.get('venue') or '—'}
-                        &nbsp;·&nbsp; status: {parsed.get('parse_status') or '—'}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
+
                 if ok and save_ok:
-                    st.success(f"✅ Saved. Match ID: `{row.get('id')}`")
+                    st.success("✅ Saved.")
                 elif ok and not save_ok:
-                    st.warning(f"⚠️ Row saved but prediction update failed: {save_msg}")
+                    st.warning(f"⚠️ Saved but prediction failed: {save_msg}")
                 else:
                     st.error(f"❌ Save failed: {save_msg}")
 
-                c1, c2 = st.columns([2, 1])
-                with c1:
-                    render_verdict_v5(result)
-                with c2:
-                    render_ou_verdict(result)
+                render_verdict_v5(result)
+                render_firing_segments(result)
+                render_ou_verdict(result)
 
-                st.markdown('<div class="section-title">Tags</div>', unsafe_allow_html=True)
-                st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
+                with st.expander("Factor breakdown", expanded=False):
+                    render_factor_row("F1 Table Power", result["f1_home"], result["f1_away"], "(18)")
+                    render_factor_row("F2 Current Form", result["f2_home"], result["f2_away"], "(25)")
+                    render_factor_row("F3 Venue Form", result["f3_home"], result["f3_away"], "(15)")
+                    render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(20)")
+                    render_factor_row("F5 Squad Power", result["f5_home"], result["f5_away"], "(10)")
+                    render_factor_row("F6 H2H", result["f6_home"], result["f6_away"], "(11)")
 
-                render_core_breakdown(parsed, result)
+                with st.expander("Tags", expanded=False):
+                    st.markdown(render_tags(result.get("tags", [])), unsafe_allow_html=True)
 
-                st.markdown('<div class="section-title">Factor Breakdown</div>', unsafe_allow_html=True)
-                render_factor_row("F1 Table Power", result["f1_home"], result["f1_away"], "(18 max)")
-                render_factor_row("F2 Current Form", result["f2_home"], result["f2_away"], "(25 max)")
-                render_factor_row("F3 Venue Form", result["f3_home"], result["f3_away"], "(15 max)")
-                render_factor_row("F4 Availability", result["f4_home"], result["f4_away"], "(20 max)")
-                render_factor_row("F5 Squad Power", result["f5_home"], result["f5_away"], "(10 max)")
-                render_factor_row("F6 H2H", result["f6_home"], result["f6_away"], "(11 max)")
-
-                st.info("👉 Enter the final score in the Pending tab after the match.")
+                st.caption("Enter the final score in the Pending tab after the match.")
 
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
-        with st.spinner("Loading pending matches..."):
+        with st.spinner("Loading..."):
             rows = load_all(sb)
         pending = [r for r in rows if r.get("actual_home_goals") is None]
         if not pending:
             st.success("No pending matches.")
         else:
-            st.write(f"**{len(pending)} pending matches**")
             for r in pending:
                 match_id = r["id"]
                 path = r.get("v5_decision_path") or "—"
                 call = r.get("v5_bet") or "—"
                 stake = r.get("v5_stake") or 0
-                f1_gap = r.get("f1_gap") or 0
-                tags = r.get("tags") or []
-                if isinstance(tags, str):
-                    try:
-                        tags = json.loads(tags)
-                    except Exception:
-                        tags = []
+                segment = r.get("v5_skip_reason") or "—"
                 header = (f"{r.get('match_date','')} · "
                           f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                          f"{path} · {call} ({stake}u) · F1 gap {f1_gap}")
+                          f"{path} · {call}")
                 with st.expander(header):
-                    st.markdown(render_tags(tags), unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Path", path)
                     c2.metric("Bet", call)
                     c3.metric("Stake", f"{stake}u")
                     c4.metric("F1 Leader", r.get("f1_leader", "—"))
-                    st.markdown("**Enter actual score:**")
+                    st.caption(f"Segment: `{segment}`")
                     col1, col2, col3 = st.columns([1, 1, 2])
-                    hg = col1.number_input("Home goals", 0, 15, 0, key=f"hg_{match_id}")
-                    ag = col2.number_input("Away goals", 0, 15, 0, key=f"ag_{match_id}")
-                    if col3.button("📝 Save Result", key=f"save_{match_id}"):
+                    hg = col1.number_input("Home", 0, 15, 0, key=f"hg_{match_id}")
+                    ag = col2.number_input("Away", 0, 15, 0, key=f"ag_{match_id}")
+                    if col3.button("📝 Save", key=f"save_{match_id}"):
                         ok, msg = update_audit(
                             sb, match_id, hg, ag,
                             r.get("call_1x2") or "",
@@ -2736,21 +2610,20 @@ def main():
                             counterfactual_call=r.get("counterfactual_call"),
                         )
                         if ok:
-                            st.success("Result recorded.")
+                            st.success("Recorded.")
                             st.rerun()
                         else:
                             st.error(msg)
 
     with tabs[2]:
         st.subheader("📊 Performance")
-        with st.spinner("Loading performance data..."):
+        with st.spinner("Loading..."):
             rows = load_all(sb)
 
         versions = sorted({r.get("decision_version") for r in rows if r.get("decision_version")})
         if versions:
             selected_versions = st.multiselect(
                 "Decision versions", versions, default=versions,
-                help="Filter rows by the decision logic version that produced them.",
             )
             rows = [r for r in rows if r.get("decision_version") in selected_versions]
 
@@ -2761,8 +2634,6 @@ def main():
         if not settled:
             st.info("No settled matches yet.")
         else:
-            st.markdown('<div class="section-title">By Decision Path</div>',
-                        unsafe_allow_html=True)
             path_rows = []
             for path in ["TIER1", "TIER2"]:
                 subset = [r for r in settled if r.get("v5_decision_path") == path]
@@ -2773,112 +2644,92 @@ def main():
                 path_rows.append({"Path": path, "Bets": n, "Hits": hits, "Rate": rate})
             st.dataframe(pd.DataFrame(path_rows), use_container_width=True, hide_index=True)
 
-            st.markdown('<div class="section-title">All Placed Bets</div>',
-                        unsafe_allow_html=True)
             placed = [r for r in settled if r.get("v5_decision") == "BET"]
             if placed:
                 df = pd.DataFrame([{
                     "Date": r.get("match_date"),
                     "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
-                    "Version": r.get("decision_version"),
                     "Path": r.get("v5_decision_path"),
                     "Bet": r.get("v5_bet"),
                     "Stake": r.get("v5_stake"),
                     "Segment": r.get("v5_skip_reason"),
-                    "F1 gap": r.get("f1_gap"),
-                    "Leader": r.get("f1_leader"),
                     "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
-                    "DC hit": ("✅" if r.get("dc_hit") is True
-                               else "❌" if r.get("dc_hit") is False else "—"),
+                    "Hit": ("✅" if r.get("dc_hit") is True
+                            else "❌" if r.get("dc_hit") is False else "—"),
                 } for r in placed])
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tabs[3]:
         st.subheader("🏷️ Tag Performance")
-        with st.spinner("Loading tag data..."):
+        with st.spinner("Loading..."):
             rows = load_all(sb)
         settled = [r for r in rows if r.get("dc_hit") is not None]
         if not settled:
             st.info("No settled bets with dc_hit recorded yet.")
         else:
-            st.caption(f"n = {len(settled)} settled bets with dc_hit recorded.")
             singles, pairs = compute_tag_performance(settled)
-            st.markdown('<div class="section-title">Single Tags</div>', unsafe_allow_html=True)
+            st.markdown("**Single tags**")
             if singles:
                 st.dataframe(pd.DataFrame(singles), use_container_width=True, hide_index=True)
-            st.markdown('<div class="section-title">Tag Pairs</div>', unsafe_allow_html=True)
+            st.markdown("**Tag pairs**")
             if pairs:
                 st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        st.subheader("v5.7 Formula — Spec")
+        st.subheader("The Formula")
         st.markdown("""
-### The formula
+### TIER1 — priority 1, short-circuits TIER2
 
-Two tiers. Nothing else.
+| Segment | Direction |
+|---|---|
+| `gap_30_plus + home_leader` | DC 1X |
+| `home_leader + standard_candidate` | DC 1X |
+| `standard_candidate + team_agreement_0` | DC 1X |
 
-**TIER1 (3 segments, alphabetical priority):**
+### TIER2 — priority 2
 
-- `gap_30_plus + home_leader`
-- `home_leader + standard_candidate`
-- `standard_candidate + team_agreement_0`
+| Segment | Direction |
+|---|---|
+| `away_leader + team_disagreement_2plus` | DC X2 |
+| `away_leader + tier_core_a` | DC X2 |
+| `away_leader + venue_power_neg` | DC X2 |
+| `f1_cap + team_disagreement_2plus` | DC 1X |
+| `f1_cap + tier_core_a` | DC 1X |
+| `f1_f5_conflict + venue_incomplete` | f1_leader |
+| `f1_f5_override + home_leader` | DC 1X |
+| `gap_10_19 + standard_candidate` | DC 1X |
+| `gap_10_19 + venue_incomplete` | f1_leader |
+| `gap_30_plus + tier_core_a` | DC 1X |
+| `gap_30_plus + venue_power_neg` | f1_leader |
+| `home_leader + venue_power_pos` | DC 1X |
+| `team_agreement_0 + tier_core_a` | DC 1X |
+| `team_agreement_0 + venue_power_neg` | f1_leader |
+| `team_disagreement_2plus + tier_f1_gap_high` | f1_leader |
+| `tier_core_a + venue_incomplete` | f1_leader |
+| `tier_core_a + venue_power_neg` | f1_leader |
 
-**TIER2 (17 segments, alphabetical priority):**
-
-- `away_leader + team_disagreement_2plus`
-- `away_leader + tier_core_a`
-- `away_leader + venue_power_neg`
-- `f1_cap + team_disagreement_2plus`
-- `f1_cap + tier_core_a`
-- `f1_f5_conflict + venue_incomplete`
-- `f1_f5_override + home_leader`
-- `gap_10_19 + standard_candidate`
-- `gap_10_19 + venue_incomplete`
-- `gap_30_plus + tier_core_a`
-- `gap_30_plus + venue_power_neg`
-- `home_leader + venue_power_pos`
-- `team_agreement_0 + tier_core_a`
-- `team_agreement_0 + venue_power_neg`
-- `team_disagreement_2plus + tier_f1_gap_high`
-- `tier_core_a + venue_incomplete`
-- `tier_core_a + venue_power_neg`
-
-### Direction rule
-
-Inspect the winning segment's **required tags**:
-
-- Contains `away_leader` (not `home_leader`) → **DC X2**
-- Contains `home_leader` (not `away_leader`) → **DC 1X**
-- Otherwise (neither, or both) → **DC 1X** if `f1_leader == "home"`, else **DC X2**
-
-When `f1_leader` is null, the fallback is **DC X2**.
-
-### Priority
-
-1. TIER1 first. If any TIER1 segment fires, take it (alphabetical order within tier).
-2. Otherwise TIER2. First firing segment (alphabetical order) wins.
-3. Otherwise SKIP.
+Direction is derived from the segment's own required tags, not the match's tags.
+When neither leader tag is required, direction follows `f1_leader`, defaulting to **DC X2** if null.
 
 ### Stakes
 
-- TIER1: **1.5u**
-- TIER2: **0.75u**
+- TIER1 → **1.5u**
+- TIER2 → **0.75u**
 
 ### Removed
 
-- **TIER3** — 33.3% on 9 bets in the replay. Noise.
-- **`f1_f5_conflict + team_disagreement_1`** — the sole TIER2 loss in the replay. Fires on matches with `f1_gap` as low as 5; no directional signal.
+- **TIER3** (33.3% on 9 bets)
+- **`f1_f5_conflict + team_disagreement_1`** (sole TIER2 loss)
 
-### Historical performance (in-sample, replay view)
+### In-sample replay
 
-| Tier | Bets | Wins | Losses | Rate |
-|---|---|---|---|---|
-| TIER1 | 37 | 37 | 0 | 100.0% |
-| TIER2 | 24 | 24 | 0 | 100.0% |
-| **Total** | **61** | **61** | **0** | **100.0%** |
+| Tier | Bets | Wins | Rate |
+|---|---|---|---|
+| TIER1 | 37 | 37 | 100.0% |
+| TIER2 | 24 | 24 | 100.0% |
+| **Total** | **61** | **61** | **100.0%** |
 
-**This is in-sample.** Every segment was derived from these same settled rows.
-Out-of-sample performance is unknown. Watch the next 60 new settled bets.
+In-sample. Watch the next 60 new settled bets.
         """)
 
     with tabs[5]:
