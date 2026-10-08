@@ -650,7 +650,8 @@ class SportsgamblerParser:
         a_last = a_words[-1] if a_words else ""
         b_last = b_words[-1] if b_words else ""
         if a_last and b_last and a_last == b_last:
-            return True        a_tokens = {w for w in a_words if len(w) > 3}
+            return True        
+        a_tokens = {w for w in a_words if len(w) > 3}
         b_tokens = {w for w in b_words if len(w) > 3}
         shared = a_tokens & b_tokens
         if len(shared) >= 2:
