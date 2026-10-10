@@ -1,35 +1,29 @@
 """
-Sportcreed — v6.0.
+Sportcreed — v7.
 
-TIER1 (FULL 1.5u):
-  RULE_A: standard_candidate + team_agreement_0
-          → DC (follow f1_leader, default X2)
-  RULE_B: f1_f5_override + home_leader
-          → DC 1X (forced)
+Decision logic:
+  Tier 1 fires first (seven clauses, first match wins).
+  Tier 2 fires if Tier 1 did not.
+  Tier 3 fires if Tier 1 and Tier 2 did not.
+  Otherwise SKIP.
 
-TIER2 (STANDARD 0.75u) — old TIER1 remainder:
-  OLD_TIER1: gap_30_plus + home_leader
-  OLD_TIER1: home_leader + standard_candidate
+Row gates (applied before any tier check):
+  parse_status == 'ok' (case-insensitive)
+  Exactly one of {home_leader, away_leader} present in tags (XOR)
 
-TIER3 (REDUCED 0.5u) — old TIER2 minus the RULE_B promotion:
-  OLD_TIER2: 16 retained segments (see FORMULA_TIER3)
+Direction: home_leader → DC 1X, away_leader → DC X2.
 
-SKIP: everything else.
+Counterfactual: equals the bet direction on BET rows; equals the
+direction derived from the leader on SKIP/no_segment_fired rows;
+NULL on all other SKIPs.
 
-Direction: derived from the segment's own required tags.
-  away_leader only  → DC X2
-  home_leader only  → DC 1X
-  otherwise         → DC 1X if f1_leader == "home", else DC X2
-  explicit override → used for RULE_B (DC 1X)
-
-Priority: TIER1 → TIER2 → TIER3, alphabetical within tier.
-
-Persistence: writes v5_* (compat) and v6_* columns on every save.
-Reads v6_* for display.
+Persistence: nine v7_* columns on matches_raw, written at parse time
+and updated at settlement time.
 """
 
 import concurrent.futures
 import json
+import math
 import re
 import sys
 import unicodedata
@@ -100,53 +94,133 @@ st.markdown("""
 
 
 # ============================================================================
-# V6 MAPPINGS — the single source of truth for stored v6 values
+# CONSTANTS
+# ============================================================================
+ALPHA = 2
+PRIOR_FORM = 0.4
+PRIOR_H2H = 1.0 / 3.0
+
+FORTRESS_HOME_WIN_PCT_MIN = 50.0
+FORTRESS_AWAY_WIN_PCT_MAX = 25.0
+FORTRESS_F0_HOME_MIN = 15.0
+
+AWAY_FORTRESS_AWAY_WIN_PCT_MIN = 50.0
+AWAY_FORTRESS_HOME_WIN_PCT_MAX = 25.0
+AWAY_FORTRESS_F0_AWAY_MIN = 15.0
+
+CLUSTER_TOTAL_GAP_MAX = 10.0
+CLUSTER_DRAW_RISK_MIN = 0.30
+CLUSTER_POS_GAP_MAX = 3
+
+STANDARD_POS_GAP_MIN = 5
+
+F1_CAP_THRESHOLD = 16.0
+
+DECISION_VERSION = "v7-formula"
+
+
+# ============================================================================
+# v7 DECISION RULE
 # ============================================================================
 
-V6_STAKE_CLASS_TO_UNITS = {
-    "FULL":     1.5,
-    "STANDARD": 0.75,
-    "REDUCED":  0.5,
-    "NONE":     0.0,
+TIER_TO_STAKE = {
+    "TIER1": ("FULL",     1.5),
+    "TIER2": ("STANDARD", 0.75),
+    "TIER3": ("REDUCED",  0.5),
+    "SKIP":  ("NONE",     0.0),
 }
 
-V6_TIER_TO_PATH = {
-    "NEW_TIER1": "TIER1",
-    "NEW_TIER2": "TIER2",
-    "NEW_TIER3": "TIER3",
-    "SKIP":      "SKIP",
-}
+TIER1_CLAUSES = (
+    ("away_leader+gap_30_plus+standard_candidate",
+     frozenset({"away_leader", "gap_30_plus", "standard_candidate"})),
+    ("away_leader+standard_candidate+team_agreement_0",
+     frozenset({"away_leader", "standard_candidate", "team_agreement_0"})),
+    ("f1_cap+home_leader+team_disagreement_1",
+     frozenset({"f1_cap", "home_leader", "team_disagreement_1"})),
+    ("f1_cap+venue_incomplete+venue_power_neg",
+     frozenset({"f1_cap", "venue_incomplete", "venue_power_neg"})),
+    ("gap_20_29+standard_candidate+team_agreement_0",
+     frozenset({"gap_20_29", "standard_candidate", "team_agreement_0"})),
+    ("home_leader+venue_power_pos",
+     frozenset({"home_leader", "venue_power_pos"})),
+    ("team_agreement_0+venue_incomplete+venue_power_neg",
+     frozenset({"team_agreement_0", "venue_incomplete", "venue_power_neg"})),
+)
 
-V6_PATH_TO_TIER = {
-    "TIER1": "NEW_TIER1",
-    "TIER2": "NEW_TIER2",
-    "TIER3": "NEW_TIER3",
-    "SKIP":  "SKIP",
-}
+TIER2_SEGMENT = "standard_candidate+team_agreement_0"
+TIER2_REQUIRED = frozenset({"standard_candidate", "team_agreement_0"})
 
-V6_PATH_TO_STAKE_CLASS = {
-    "TIER1": "FULL",
-    "TIER2": "STANDARD",
-    "TIER3": "REDUCED",
-    "SKIP":  "NONE",
-}
+TIER3_SIGNALS = ("team_disagreement_1", "team_disagreement_2plus",
+                 "away_collapse", "doubted_starter")
 
-V6_RESULT_HIT   = "HIT_RECORDED"
-V6_RESULT_MISS  = "MISS_RECORDED"
-V6_RESULT_HYP   = "HIT_HYPOTHETICAL_DC_1X"
-V6_RESULT_NONE  = "NO_RECORDED_BET"
 
-V6_PARSE_OK       = "PARSE_OK"
-V6_PARSE_NA       = "NOT_APPLICABLE"
-V6_PARSE_PENDING  = "POLICY_PENDING_PARSE_REVIEW"
+def _single_leader(tags):
+    """Return 'home', 'away', or None. Enforces the XOR gate."""
+    has_home = "home_leader" in tags
+    has_away = "away_leader" in tags
+    if has_home == has_away:
+        return None
+    return "home" if has_home else "away"
 
-V6_ASSIGN_RULE_A    = "RULE_A"
-V6_ASSIGN_RULE_B    = "RULE_B"
-V6_ASSIGN_OLD_T1    = "OLD_TIER1"
-V6_ASSIGN_OLD_T2    = "OLD_TIER2"
-V6_ASSIGN_NO_BET    = "NO_BET"
 
-V6_FORMULA_VERSION = "v6.0"
+def _direction_for(leader):
+    return "DC 1X" if leader == "home" else "DC X2"
+
+
+def decide_v7(tags, parse_status):
+    """Pure v7 decision. Returns dict with nine v7_* fields."""
+    tagset = set(tags or [])
+
+    def _skip(reason, policy, counterfactual=None):
+        return {
+            "v7_tier":                "SKIP",
+            "v7_segment":             reason,
+            "v7_direction":           None,
+            "v7_stake_class":         "NONE",
+            "v7_stake":               0.0,
+            "v7_decision_action":     "NO BET",
+            "v7_parse_policy_status": policy,
+            "v7_result_basis":        "NO_RECORDED_BET",
+            "v7_counterfactual_call": counterfactual,
+        }
+
+    def _bet(tier, segment, direction):
+        stake_class, stake = TIER_TO_STAKE[tier]
+        return {
+            "v7_tier":                tier,
+            "v7_segment":             segment,
+            "v7_direction":           direction,
+            "v7_stake_class":         stake_class,
+            "v7_stake":               stake,
+            "v7_decision_action":     "BET",
+            "v7_parse_policy_status": "PARSE_OK",
+            "v7_result_basis":        "RECORDED_PENDING",
+            "v7_counterfactual_call": direction,
+        }
+
+    if not isinstance(parse_status, str) or parse_status.lower() != "ok":
+        return _skip("parse_status_not_ok", "POLICY_PENDING_PARSE_REVIEW")
+
+    leader = _single_leader(tagset)
+    if leader is None:
+        return _skip("not_exactly_one_leader", "NOT_APPLICABLE")
+
+    direction = _direction_for(leader)
+
+    for segment, required in TIER1_CLAUSES:
+        if required <= tagset:
+            return _bet("TIER1", segment, direction)
+
+    if TIER2_REQUIRED <= tagset:
+        return _bet("TIER2", TIER2_SEGMENT, direction)
+
+    fired = [s for s in TIER3_SIGNALS if s in tagset]
+    if fired and not ("away_leader" in tagset
+                      and "team_disagreement_2plus" in tagset):
+        return _bet("TIER3", "tier3:" + " | ".join(fired), direction)
+
+    return _skip("no_segment_fired", "NOT_APPLICABLE",
+                 counterfactual=direction)
 
 
 # ============================================================================
@@ -398,24 +472,24 @@ def render_debug_tab(sb):
         except Exception as e:
             st.error(f"Count failed: {e}")
 
-    st.markdown('<div class="section-title">6. v6 stored state</div>',
+    st.markdown('<div class="section-title">6. v7 stored state</div>',
                 unsafe_allow_html=True)
-    st.caption("Row counts by v6_tier, v6_action, v6_stake_class — reads what's actually in the DB.")
-    if st.button("📊 Show v6 counts", key="debug_v6_counts"):
+    st.caption("Row counts by v7_tier, v7_segment.")
+    if st.button("📊 Show v7 counts", key="debug_v7_counts"):
         try:
             resp = (sb.table("matches_raw")
-                    .select("v6_tier, v6_action, v6_stake_class")
-                    .eq("v6_formula_version", V6_FORMULA_VERSION)
+                    .select("v7_tier, v7_segment, v7_result_basis")
+                    .not_.is_("v7_tier", "null")
                     .execute())
             rows = resp.data or []
             if not rows:
-                st.info("No v6.0 rows found.")
+                st.info("No v7 rows found.")
             else:
                 from collections import Counter
-                c = Counter((r.get("v6_tier"), r.get("v6_action"), r.get("v6_stake_class"))
+                c = Counter((r.get("v7_tier"), r.get("v7_result_basis"))
                             for r in rows)
                 df = pd.DataFrame(
-                    [{"v6_tier": k[0], "v6_action": k[1], "v6_stake_class": k[2], "n": v}
+                    [{"v7_tier": k[0], "v7_result_basis": k[1], "n": v}
                      for k, v in sorted(c.items(), key=lambda x: -x[1])]
                 )
                 st.dataframe(df, use_container_width=True, hide_index=True)
@@ -473,138 +547,6 @@ def _has_bs4():
         return True
     except ImportError:
         return False
-
-
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-ALPHA = 2
-PRIOR_FORM = 0.4
-PRIOR_H2H = 1.0 / 3.0
-
-FORTRESS_HOME_WIN_PCT_MIN = 50.0
-FORTRESS_AWAY_WIN_PCT_MAX = 25.0
-FORTRESS_F0_HOME_MIN = 15.0
-
-AWAY_FORTRESS_AWAY_WIN_PCT_MIN = 50.0
-AWAY_FORTRESS_HOME_WIN_PCT_MAX = 25.0
-AWAY_FORTRESS_F0_AWAY_MIN = 15.0
-
-CLUSTER_TOTAL_GAP_MAX = 10.0
-CLUSTER_DRAW_RISK_MIN = 0.30
-CLUSTER_POS_GAP_MAX = 3
-
-STANDARD_POS_GAP_MIN = 5
-
-F1_CAP_THRESHOLD = 16.0
-
-DECISION_VERSION = "v6.0-formula"
-
-
-KEYSTATS_PRIORITY_FIELDS = {
-    "home_last10_w", "home_last10_d", "home_last10_l",
-    "away_last10_w", "away_last10_d", "away_last10_l",
-    "home_last10_avg_scored", "home_last10_avg_conceded",
-    "away_last10_avg_scored", "away_last10_avg_conceded",
-    "home_last10_over25", "home_last10_under25",
-    "away_last10_over25", "away_last10_under25",
-    "home_last10_btts_yes", "home_last10_btts_no",
-    "away_last10_btts_yes", "away_last10_btts_no",
-    "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
-    "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
-    "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
-    "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
-    "home_last10_possession", "away_last10_possession",
-    "home_home_last10_possession", "away_away_last10_possession",
-    "home_last10_corners_for", "home_last10_corners_against",
-    "away_last10_corners_for", "away_last10_corners_against",
-    "home_home_last10_corners_for", "home_home_last10_corners_against",
-    "away_away_last10_corners_for", "away_away_last10_corners_against",
-    "home_top_scorer", "home_top_scorer_goals",
-    "away_top_scorer", "away_top_scorer_goals",
-    "home_top_assister", "home_top_assister_assists",
-    "away_top_assister", "away_top_assister_assists",
-    "home_top_scorer_source", "away_top_scorer_source",
-    "home_top_assister_source", "away_top_assister_source",
-}
-
-
-MATCHES_RAW_COLUMNS = {
-    "id", "created_at", "settled_at",
-    "match_date", "kickoff_utc", "kickoff_local",
-    "league_name", "tier", "group_name", "season",
-    "home_team", "away_team", "venue", "stage", "round", "parse_status",
-    "home_pos", "home_played", "home_points", "home_gd", "home_gf", "home_ga",
-    "away_pos", "away_played", "away_points", "away_gd", "away_gf", "away_ga",
-    "home_home_points", "home_home_played", "home_home_win_pct",
-    "home_away_points", "home_away_played",
-    "away_home_points", "away_home_played",
-    "away_away_points", "away_away_played", "away_away_win_pct",
-    "home_last5", "away_last5",
-    "home_last5_count", "away_last5_count",
-    "home_last10_w", "home_last10_d", "home_last10_l",
-    "home_last10_avg_scored", "home_last10_avg_conceded",
-    "home_last10_possession", "home_last10_corners_for", "home_last10_corners_against",
-    "home_last10_win_pct", "home_last10_over25", "home_last10_under25",
-    "home_last10_btts_yes", "home_last10_btts_no",
-    "away_last10_w", "away_last10_d", "away_last10_l",
-    "away_last10_avg_scored", "away_last10_avg_conceded",
-    "away_last10_possession", "away_last10_corners_for", "away_last10_corners_against",
-    "away_last10_win_pct", "away_last10_over25", "away_last10_under25",
-    "away_last10_btts_yes", "away_last10_btts_no",
-    "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
-    "home_home_last10_corners_for", "home_home_last10_corners_against",
-    "home_home_last10_possession",
-    "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
-    "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
-    "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
-    "away_away_last10_corners_for", "away_away_last10_corners_against",
-    "away_away_last10_possession",
-    "home_top_scorer", "home_top_scorer_goals",
-    "home_top_assister", "home_top_assister_assists",
-    "away_top_scorer", "away_top_scorer_goals",
-    "away_top_assister", "away_top_assister_assists",
-    "home_top_scorer_source", "away_top_scorer_source",
-    "home_top_assister_source", "away_top_assister_source",
-    "home_injuries", "away_injuries", "home_xi", "away_xi",
-    "home_formation", "away_formation",
-    "h2h", "h2h_home_wins", "h2h_draws", "h2h_away_wins",
-    "odds",
-    "f1_home", "f1_away", "f1_gap", "f1_leader",
-    "f2_home", "f2_away",
-    "f3_home", "f3_away",
-    "f4_home", "f4_away",
-    "f5_home", "f5_away", "f5_gap", "f5_leader", "f5_leader_raw",
-    "f6_home", "f6_away",
-    "home_total", "away_total", "raw_gap", "total_gap",
-    "disagreements", "shrink_factor",
-    "f1_f5_conflict", "f1_f5_override", "f1_vs_f2f3_conflict",
-    "away_collapse", "doubted_starter",
-    "call_1x2", "call_ou", "call_btts", "expected_total",
-    "no_bet_reason_1x2", "no_bet_reason_ou",
-    "venue_ppg_gap", "venue_ppg_gap_home", "venue_ppg_gap_away",
-    "venue_power",
-    "f0_home", "f0_away", "f0_gap",
-    "draw_risk",
-    "tags",
-    "decision_version",
-    "v5_decision_path", "v5_decision", "v5_bet", "v5_stake",
-    "v5_combo_pair_count", "v5_combo_pairs_fired", "v5_core_fired",
-    "v5_skip_reason",
-    "counterfactual_call", "counterfactual_odds", "counterfactual_won",
-    "actual_home_goals", "actual_away_goals",
-    "actual_possession_home", "actual_xg_home", "actual_xg_away",
-    "actual_corners_home", "actual_corners_away", "actual_total_goals",
-    "dc_hit", "is_correct_1x2", "is_correct_ou", "is_correct_btts",
-    # v6.0 columns
-    "v6_formula_version",
-    "v6_tier",
-    "v6_assignment_reason",
-    "v6_action",
-    "v6_stake_class",
-    "v6_parse_policy_status",
-    "v6_result_basis",
-}
 
 
 # ============================================================================
@@ -1877,7 +1819,7 @@ def predict_v5(row):
         "f1_vs_f2f3_conflict": f1_vs_f2f3_conflict,
         "away_collapse": away_collapse,
         "doubted_starter": doubted_starter,
-        "call_1x2": "see_v6",
+        "call_1x2": "see_v7",
         "call_ou": call_ou,
         "expected_total": round(expected, 2),
         "draw_risk": round(draw_risk, 3),
@@ -1905,23 +1847,8 @@ def _safe_float(v):
         return None
 
 
-def _has_tag(tags, name):
-    return name in (tags or [])
-
-
 def _is_f1_cap(pred):
     return (pred.get("f1_gap") or 0) >= F1_CAP_THRESHOLD
-
-
-def _gap_bucket(pred):
-    g = pred.get("total_gap") or 0
-    if g >= 30:
-        return "gap_30_plus"
-    if g >= 20:
-        return "gap_20_29"
-    if g >= 10:
-        return "gap_10_19"
-    return "gap_under_10"
 
 
 def check_fortress(row, pred):
@@ -1976,186 +1903,8 @@ def check_standard(row, pred):
     return True
 
 
-# ============================================================================
-# THE FORMULA — v6.0
-# ============================================================================
-# Each entry: (name, required_tags, direction_override_or_None, assignment_reason)
-# direction_override: if set, the call is forced.
-# assignment_reason: the string written to v6_assignment_reason when this fires.
-
-FORMULA_TIER1 = [
-    ("standard_candidate+team_agreement_0",
-     frozenset({"standard_candidate", "team_agreement_0"}),
-     None, V6_ASSIGN_RULE_A),
-    ("f1_f5_override+home_leader",
-     frozenset({"f1_f5_override", "home_leader"}),
-     "DC 1X", V6_ASSIGN_RULE_B),
-]
-
-FORMULA_TIER2 = [
-    ("gap_30_plus+home_leader",
-     frozenset({"gap_30_plus", "home_leader"}),
-     None, V6_ASSIGN_OLD_T1),
-    ("home_leader+standard_candidate",
-     frozenset({"home_leader", "standard_candidate"}),
-     None, V6_ASSIGN_OLD_T1),
-]
-
-FORMULA_TIER3 = [
-    ("away_leader+team_disagreement_2plus",
-     frozenset({"away_leader", "team_disagreement_2plus"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("away_leader+tier_core_a",
-     frozenset({"away_leader", "tier_core_a"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("away_leader+venue_power_neg",
-     frozenset({"away_leader", "venue_power_neg"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("f1_cap+team_disagreement_2plus",
-     frozenset({"f1_cap", "team_disagreement_2plus"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("f1_cap+tier_core_a",
-     frozenset({"f1_cap", "tier_core_a"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("f1_f5_conflict+venue_incomplete",
-     frozenset({"f1_f5_conflict", "venue_incomplete"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("gap_10_19+standard_candidate",
-     frozenset({"gap_10_19", "standard_candidate"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("gap_10_19+venue_incomplete",
-     frozenset({"gap_10_19", "venue_incomplete"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("gap_30_plus+tier_core_a",
-     frozenset({"gap_30_plus", "tier_core_a"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("gap_30_plus+venue_power_neg",
-     frozenset({"gap_30_plus", "venue_power_neg"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("home_leader+venue_power_pos",
-     frozenset({"home_leader", "venue_power_pos"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("team_agreement_0+tier_core_a",
-     frozenset({"team_agreement_0", "tier_core_a"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("team_agreement_0+venue_power_neg",
-     frozenset({"team_agreement_0", "venue_power_neg"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("team_disagreement_2plus+tier_f1_gap_high",
-     frozenset({"team_disagreement_2plus", "tier_f1_gap_high"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("tier_core_a+venue_incomplete",
-     frozenset({"tier_core_a", "venue_incomplete"}),
-     None, V6_ASSIGN_OLD_T2),
-    ("tier_core_a+venue_power_neg",
-     frozenset({"tier_core_a", "venue_power_neg"}),
-     None, V6_ASSIGN_OLD_T2),
-]
-
-
-def _formula_direction(required, leader):
-    has_away = "away_leader" in required
-    has_home = "home_leader" in required
-    if has_away and not has_home:
-        return "DC X2"
-    if has_home and not has_away:
-        return "DC 1X"
-    return "DC 1X" if leader == "home" else "DC X2"
-
-
-def _resolve_call(required, override, leader):
-    if override:
-        return override
-    return _formula_direction(required, leader)
-
-
-def _formula_fired(tags, leader):
-    """Return (tier, name, call, reason) for the highest-priority firing segment.
-    TIER1 → TIER2 → TIER3 short-circuit."""
-    tagset = set(tags or [])
-    for name, required, override, reason in FORMULA_TIER1:
-        if required <= tagset:
-            return 1, name, _resolve_call(required, override, leader), reason
-    for name, required, override, reason in FORMULA_TIER2:
-        if required <= tagset:
-            return 2, name, _resolve_call(required, override, leader), reason
-    for name, required, override, reason in FORMULA_TIER3:
-        if required <= tagset:
-            return 3, name, _resolve_call(required, override, leader), reason
-    return None
-
-
-# ============================================================================
-# DECISION LAYER — v6.0
-# ============================================================================
-def decide_v6(row, pred, parse_status):
-    """Return a dict with v6 fields (tier, action, stake_class, etc.)."""
-    empty_result = {
-        "v6_formula_version": V6_FORMULA_VERSION,
-        "v6_tier": "SKIP",
-        "v6_assignment_reason": V6_ASSIGN_NO_BET,
-        "v6_action": "NO BET",
-        "v6_stake_class": "NONE",
-        "v6_parse_policy_status": V6_PARSE_NA,
-        "v6_result_basis": V6_RESULT_NONE,
-        # legacy v5 fields (compat)
-        "v5_decision_path": "SKIP",
-        "v5_decision": "SKIP",
-        "v5_bet": None,
-        "v5_stake": 0.0,
-        "v5_skip_reason": "no_segment_fired",
-        "decision_version": DECISION_VERSION,
-    }
-
-    # parse gate
-    if parse_status and parse_status != "ok":
-        out = dict(empty_result)
-        out["v5_skip_reason"] = "parse_status_not_ok"
-        out["v6_parse_policy_status"] = V6_PARSE_PENDING
-        return out
-
-    # empty prediction gate
-    home_total = pred.get("home_total")
-    if home_total is None or home_total == 0:
-        out = dict(empty_result)
-        out["v5_skip_reason"] = "home_total_empty"
-        return out
-
-    tags = pred.get("tags") or []
-    leader = pred.get("f1_leader")
-
-    fired = _formula_fired(tags, leader)
-    if not fired:
-        return empty_result
-
-    tier, name, call, reason = fired
-    path = f"TIER{tier}"
-    tier_label = V6_PATH_TO_TIER[path]
-    stake_class = V6_PATH_TO_STAKE_CLASS[path]
-    stake_value = V6_STAKE_CLASS_TO_UNITS[stake_class]
-
-    return {
-        "v6_formula_version": V6_FORMULA_VERSION,
-        "v6_tier": tier_label,
-        "v6_assignment_reason": reason,
-        "v6_action": "BET",
-        "v6_stake_class": stake_class,
-        "v6_parse_policy_status": V6_PARSE_NA,
-        "v6_result_basis": V6_RESULT_NONE,  # becomes HIT/MISS on settle
-        # legacy
-        "v5_decision_path": path,
-        "v5_decision": "BET",
-        "v5_bet": call,
-        "v5_stake": stake_value,
-        "v5_skip_reason": name,
-        "decision_version": DECISION_VERSION,
-    }
-
-
-# ============================================================================
-# TAGS COMPUTATION
-# ============================================================================
 def compute_tags(row, pred, tier, decision, skip_reason):
+    """Build the tag set the v7 rule consumes."""
     tags = []
     gap = pred.get("total_gap") or 0
 
@@ -2181,9 +1930,6 @@ def compute_tags(row, pred, tier, decision, skip_reason):
         tags.append("team_disagreement_1")
     else:
         tags.append("team_agreement_0")
-
-    if tier:
-        tags.append(f"tier_{tier.lower().replace(' ', '_')}")
 
     if pred.get("f1_f5_conflict"):
         tags.append("f1_f5_conflict")
@@ -2220,51 +1966,116 @@ def compute_tags(row, pred, tier, decision, skip_reason):
     if hp is None or hp < 4 or ap is None or ap < 4:
         tags.append("venue_incomplete")
 
-    if decision == "SKIP" and skip_reason:
-        tags.append(f"skip_{skip_reason.split('_')[0]}")
-
     return tags
 
 
 # ============================================================================
 # FULL PREDICTION
 # ============================================================================
-def predict_v6_full(row):
+def predict_v7_full(row):
+    """
+    Parse-time pipeline. Computes features, computes tags, applies the
+    v7 rule, and merges the nine v7_* decision fields onto the result.
+    """
     base = predict_v5(row)
 
-    tags = compute_tags(row, base, None, None, None)
-    base["tags"] = tags
+    base["tags"] = compute_tags(row, base, None, None, None)
 
-    parse_status = row.get("parse_status")
-    decision_fields = decide_v6(row, base, parse_status)
+    decision = decide_v7(base["tags"], row.get("parse_status"))
+    base.update(decision)
 
-    # Recompute tags with the decision context
-    final_tags = compute_tags(
-        row,
-        base,
-        decision_fields.get("v6_tier"),
-        decision_fields.get("v5_decision"),
-        decision_fields.get("v5_skip_reason"),
-    )
-    base["tags"] = final_tags
-
-    # Merge v6/v5 decision fields into the record
-    base.update(decision_fields)
-
-    # Counterfactual (unchanged)
-    leader = base.get("f1_leader")
+    # Counterfactual odds — reference only, not used by the rule.
+    leader = _single_leader(set(base["tags"]))
     if leader == "home":
         base["counterfactual_call"] = "DC 1X"
-    else:
+    elif leader == "away":
         base["counterfactual_call"] = "DC X2"
+    else:
+        base["counterfactual_call"] = None
 
     odds = row.get("odds") or {}
     if base["counterfactual_call"] == "DC 1X":
         base["counterfactual_odds"] = odds.get("dc_1x")
-    else:
+    elif base["counterfactual_call"] == "DC X2":
         base["counterfactual_odds"] = odds.get("dc_x2")
+    else:
+        base["counterfactual_odds"] = None
 
     return base
+
+
+# ============================================================================
+# SETTLEMENT
+# ============================================================================
+def settle_v7(sb, match_id, home_goals, away_goals):
+    """
+    Called after the match. Reads the stored v7 decision, computes the
+    outcome, and writes v7_dc_hit, v7_counterfactual_won,
+    v7_result_basis, v7_settled_at, plus the actual score columns.
+
+    Returns (ok, message).
+    """
+    if sb is None:
+        return False, "no client"
+
+    try:
+        resp = (sb.table("matches_raw")
+                .select("v7_tier, v7_direction, v7_decision_action, "
+                        "v7_counterfactual_call, v7_result_basis")
+                .eq("id", match_id)
+                .limit(1)
+                .execute())
+    except Exception as e:
+        return False, f"read failed: {e}"
+
+    if not resp.data:
+        return False, f"no row with id={match_id}"
+
+    r = resp.data[0]
+    direction = r.get("v7_direction")
+    action = r.get("v7_decision_action")
+    cf_call = r.get("v7_counterfactual_call")
+    result_bs = r.get("v7_result_basis")
+
+    if r.get("v7_tier") is None:
+        return False, "row has no v7 decision"
+    if result_bs not in ("RECORDED_PENDING", "NO_RECORDED_BET"):
+        return False, f"row is not settleable (result_basis={result_bs!r})"
+
+    actual = ("Home" if home_goals > away_goals
+              else "Away" if away_goals < home_goals
+              else "Draw")
+
+    dc_hit = None
+    if action == "BET":
+        if direction == "DC 1X":
+            dc_hit = actual in ("Home", "Draw")
+        elif direction == "DC X2":
+            dc_hit = actual in ("Away", "Draw")
+
+    cf_won = None
+    if cf_call == "DC 1X":
+        cf_won = actual in ("Home", "Draw")
+    elif cf_call == "DC X2":
+        cf_won = actual in ("Away", "Draw")
+
+    new_basis = ("HIT_RECORDED" if dc_hit else "MISS_RECORDED") \
+        if action == "BET" else "NO_RECORDED_BET"
+
+    payload = {
+        "actual_home_goals":     home_goals,
+        "actual_away_goals":     away_goals,
+        "v7_dc_hit":             dc_hit,
+        "v7_counterfactual_won": cf_won,
+        "v7_result_basis":       new_basis,
+        "v7_settled_at":         datetime.utcnow().isoformat(),
+    }
+
+    try:
+        sb.table("matches_raw").update(payload).eq("id", match_id).execute()
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
 
 
 # ============================================================================
@@ -2362,72 +2173,6 @@ def load_all(sb, timeout_seconds=15):
             return []
 
 
-def update_audit(sb, match_id, hg, ag, call_1x2, bet_v5=None, counterfactual_call=None,
-                 v6_bet=None):
-    """Set actual scores, dc_hit, and v6_result_basis."""
-    if sb is None:
-        return False, "no client"
-
-    actual = "Home" if hg > ag else ("Away" if hg < ag else "Draw")
-
-    bet = v6_bet or bet_v5
-    payload = {"actual_home_goals": hg, "actual_away_goals": ag}
-
-    real_columns = _get_table_columns(sb, "matches_raw") or set()
-
-    # dc_hit for the recorded bet
-    dc_hit = None
-    if bet == "DC 1X":
-        dc_hit = actual in ("Home", "Draw")
-    elif bet == "DC X2":
-        dc_hit = actual in ("Away", "Draw")
-    if "dc_hit" in real_columns:
-        payload["dc_hit"] = dc_hit
-
-    # v6_result_basis reflects the recorded outcome (or NO_RECORDED_BET)
-    if "v6_result_basis" in real_columns:
-        if bet is None:
-            payload["v6_result_basis"] = V6_RESULT_NONE
-        elif dc_hit is True:
-            payload["v6_result_basis"] = V6_RESULT_HIT
-        elif dc_hit is False:
-            payload["v6_result_basis"] = V6_RESULT_MISS
-        else:
-            payload["v6_result_basis"] = V6_RESULT_NONE
-
-    # counterfactual
-    cf_won = None
-    if counterfactual_call == "DC 1X":
-        cf_won = actual in ("Home", "Draw")
-    elif counterfactual_call == "DC X2":
-        cf_won = actual in ("Away", "Draw")
-    if "counterfactual_won" in real_columns:
-        payload["counterfactual_won"] = cf_won
-
-    # legacy is_correct_1x2
-    is_correct = None
-    if call_1x2 and not call_1x2.startswith("NO BET"):
-        if "Straight Win Home" in call_1x2:
-            is_correct = (actual == "Home")
-        elif "Straight Win Away" in call_1x2:
-            is_correct = (actual == "Away")
-        elif "Double Chance 1X" in call_1x2:
-            is_correct = actual in ("Home", "Draw")
-        elif "Double Chance X2" in call_1x2:
-            is_correct = actual in ("Away", "Draw")
-    if "is_correct_1x2" in real_columns:
-        payload["is_correct_1x2"] = is_correct
-
-    if "settled_at" in real_columns:
-        payload["settled_at"] = datetime.utcnow().isoformat()
-
-    try:
-        sb.table("matches_raw").update(payload).eq("id", match_id).execute()
-        return True, "ok"
-    except Exception as e:
-        return False, str(e)
-
-
 # ============================================================================
 # DISPLAY HELPERS
 # ============================================================================
@@ -2454,40 +2199,23 @@ def render_tags(tags):
     return "".join(render_tag(t) for t in (tags or []))
 
 
-def render_path_badge(path):
+def render_path_badge(tier):
     cls = {
-        "NEW_TIER1": "path-tier1",
-        "NEW_TIER2": "path-tier2",
-        "NEW_TIER3": "path-tier3",
-        "SKIP": "path-skip",
-    }.get(path, "path-skip")
-    return f'<span class="path-badge {cls}">{path}</span>'
+        "TIER1": "path-tier1",
+        "TIER2": "path-tier2",
+        "TIER3": "path-tier3",
+        "SKIP":  "path-skip",
+    }.get(tier, "path-skip")
+    return f'<span class="path-badge {cls}">{tier}</span>'
 
 
-def _fire_summary(pred):
-    tags = set(pred.get("tags") or [])
-    leader = pred.get("f1_leader")
-    fired = []
-    for tier_list, tier_num in ((FORMULA_TIER1, 1), (FORMULA_TIER2, 2), (FORMULA_TIER3, 3)):
-        for name, required, override, reason in tier_list:
-            if required <= tags:
-                fired.append({
-                    "tier": tier_num,
-                    "name": name,
-                    "call": _resolve_call(required, override, leader),
-                    "reason": reason,
-                })
-    return fired
-
-
-def render_verdict_v6(result):
-    """Reads v6 fields, renders the verdict card."""
-    action = result.get("v6_action")
-    tier = result.get("v6_tier")
-    bet = result.get("v5_bet")
-    stake_class = result.get("v6_stake_class")
-    stake = V6_STAKE_CLASS_TO_UNITS.get(stake_class, 0.0)
-    segment = result.get("v5_skip_reason")
+def render_verdict_v7(result):
+    tier = result.get("v7_tier") or "SKIP"
+    action = result.get("v7_decision_action")
+    direction = result.get("v7_direction")
+    stake_class = result.get("v7_stake_class") or "NONE"
+    stake = result.get("v7_stake") or 0.0
+    segment = result.get("v7_segment") or "—"
     f1_gap = result.get("f1_gap") or 0
     leader = result.get("f1_leader") or "—"
     total_gap = result.get("total_gap") or 0
@@ -2496,9 +2224,9 @@ def render_verdict_v6(result):
         st.markdown(f"""
         <div class="verdict-bet">
             <div class="verdict-label">⭐ SPORTCREED PREDICTION &nbsp; {render_path_badge(tier)}</div>
-            <div class="verdict-pick">{bet} &nbsp;<span style="font-size:1.1rem; opacity:0.7; font-weight:600;">· {stake}u ({stake_class})</span></div>
+            <div class="verdict-pick">{direction} &nbsp;<span style="font-size:1.1rem; opacity:0.7; font-weight:600;">· {stake}u ({stake_class})</span></div>
             <div class="verdict-detail">
-                Fires on <code style="background:#022c22; color:#6ee7b7; padding:2px 6px; border-radius:4px;">{segment or '—'}</code>
+                <code style="background:#022c22; color:#6ee7b7; padding:2px 6px; border-radius:4px;">{segment}</code>
                 &nbsp;·&nbsp; F1 gap <strong>{f1_gap:.1f}</strong>
                 &nbsp;·&nbsp; Leader <strong>{leader}</strong>
                 &nbsp;·&nbsp; Total gap <strong>{total_gap:.1f}</strong>
@@ -2508,7 +2236,7 @@ def render_verdict_v6(result):
     else:
         st.markdown(f"""
         <div class="verdict-nobet">
-            <div class="verdict-label-grey">SPORTCREED PREDICTION &nbsp; {render_path_badge(tier or 'SKIP')}</div>
+            <div class="verdict-label-grey">SPORTCREED PREDICTION &nbsp; {render_path_badge(tier)}</div>
             <div class="verdict-noedge">NO BET — {segment}</div>
             <div class="verdict-detail-grey">
                 F1 gap {f1_gap:.1f} · Leader {leader} · Total gap {total_gap:.1f}
@@ -2541,93 +2269,6 @@ def render_factor_row(name, home_val, away_val, weight_label=""):
     """, unsafe_allow_html=True)
 
 
-def render_trigger(name, on):
-    cls = "trigger-on" if on else "trigger-off"
-    icon = "✅" if on else "○"
-    st.markdown(f"""
-    <div class="trigger-row {cls}">
-        <span>{icon} {name}</span>
-        <span>{'TRIGGERED' if on else 'no'}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def render_firing_segments(pred):
-    fired = _fire_summary(pred)
-    if not fired:
-        st.info("No segment fired. SKIP.")
-        return
-
-    winner = fired[0]
-    others = fired[1:]
-
-    tier_label = {
-        1: "NEW_TIER1",
-        2: "NEW_TIER2",
-        3: "NEW_TIER3",
-    }[winner["tier"]]
-
-    st.markdown(f"""
-    <div style="background:#064e3b; border-left:4px solid #10b981; border-radius:10px;
-                padding:0.85rem 1.1rem; margin-bottom:0.6rem;">
-        <div style="font-size:0.68rem; font-weight:700; letter-spacing:1.5px;
-                    color:#6ee7b7; text-transform:uppercase; margin-bottom:0.2rem;">
-            ⭐ WINNER · {tier_label}
-        </div>
-        <div style="color:#fff; font-weight:700; font-size:0.95rem;">
-            {winner['name']} → {winner['call']}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if others:
-        with st.expander(f"Also fired ({len(others)})", expanded=False):
-            for f in others:
-                tl = {1: "NEW_TIER1", 2: "NEW_TIER2", 3: "NEW_TIER3"}[f["tier"]]
-                render_trigger(f"{tl} · {f['name']} → {f['call']}", True)
-
-
-# ============================================================================
-# TAG PERFORMANCE
-# ============================================================================
-def compute_tag_performance(rows):
-    from collections import defaultdict
-    singles = defaultdict(lambda: {"n": 0, "hits": 0})
-    pairs = defaultdict(lambda: {"n": 0, "hits": 0})
-    for r in rows:
-        dc_hit = r.get("dc_hit")
-        if dc_hit is None:
-            continue
-        tags = r.get("tags") or []
-        if isinstance(tags, str):
-            try:
-                tags = json.loads(tags)
-            except Exception:
-                tags = []
-        if not tags:
-            continue
-        for t in tags:
-            singles[t]["n"] += 1
-            if dc_hit:
-                singles[t]["hits"] += 1
-        for i in range(len(tags)):
-            for j in range(i + 1, len(tags)):
-                key = " + ".join(sorted([tags[i], tags[j]]))
-                pairs[key]["n"] += 1
-                if dc_hit:
-                    pairs[key]["hits"] += 1
-
-    def to_df(d):
-        out = []
-        for k, v in sorted(d.items(), key=lambda x: -x[1]["n"]):
-            n = v["n"]
-            h = v["hits"]
-            rate = (h / n * 100) if n else 0
-            out.append({"segment": k, "n": n, "hits": h, "rate": f"{rate:.1f}%"})
-        return out
-    return to_df(singles), to_df(pairs)
-
-
 # ============================================================================
 # UI
 # ============================================================================
@@ -2647,7 +2288,6 @@ def main():
         "📥 Parse & Save",
         "⏳ Pending",
         "📊 Performance",
-        "🏷️ Tag Performance",
         "📋 Spec",
         "🛠 Debug",
     ])
@@ -2670,8 +2310,8 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v6.0..."):
-                    result = predict_v6_full(parsed)
+                with st.spinner("Running v7..."):
+                    result = predict_v7_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
                     save_ok = False
@@ -2703,8 +2343,7 @@ def main():
                 else:
                     st.error(f"❌ Save failed: {save_msg}")
 
-                render_verdict_v6(result)
-                render_firing_segments(result)
+                render_verdict_v7(result)
                 render_ou_verdict(result)
 
                 with st.expander("Factor breakdown", expanded=False):
@@ -2726,25 +2365,25 @@ def main():
             rows = load_all(sb)
         pending = [r for r in rows
                    if r.get("actual_home_goals") is None
-                   and r.get("v6_formula_version") == V6_FORMULA_VERSION]
+                   and r.get("v7_tier") is not None]
         if not pending:
-            st.success("No pending v6.0 matches.")
+            st.success("No pending v7 matches.")
         else:
             for r in pending:
                 match_id = r["id"]
-                tier = r.get("v6_tier") or "SKIP"
-                action = r.get("v6_action") or "NO BET"
-                bet = r.get("v5_bet") or "—"
-                stake_class = r.get("v6_stake_class") or "NONE"
-                stake = V6_STAKE_CLASS_TO_UNITS.get(stake_class, 0.0)
-                segment = r.get("v5_skip_reason") or "—"
+                tier = r.get("v7_tier") or "SKIP"
+                action = r.get("v7_decision_action") or "NO BET"
+                direction = r.get("v7_direction") or "—"
+                stake_class = r.get("v7_stake_class") or "NONE"
+                stake = r.get("v7_stake") or 0.0
+                segment = r.get("v7_segment") or "—"
                 header = (f"{r.get('match_date','')} · "
                           f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                          f"{tier} · {bet}")
+                          f"{tier} · {direction}")
                 with st.expander(header):
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Tier", tier)
-                    c2.metric("Bet", bet)
+                    c2.metric("Direction", direction)
                     c3.metric("Stake", f"{stake}u")
                     c4.metric("Action", action)
                     st.caption(f"Segment: `{segment}`")
@@ -2752,13 +2391,7 @@ def main():
                     hg = col1.number_input("Home", 0, 15, 0, key=f"hg_{match_id}")
                     ag = col2.number_input("Away", 0, 15, 0, key=f"ag_{match_id}")
                     if col3.button("📝 Save", key=f"save_{match_id}"):
-                        ok, msg = update_audit(
-                            sb, match_id, hg, ag,
-                            r.get("call_1x2") or "",
-                            bet_v5=r.get("v5_bet"),
-                            counterfactual_call=r.get("counterfactual_call"),
-                            v6_bet=r.get("v5_bet"),
-                        )
+                        ok, msg = settle_v7(sb, match_id, hg, ag)
                         if ok:
                             st.success("Recorded.")
                             st.rerun()
@@ -2770,157 +2403,109 @@ def main():
         with st.spinner("Loading..."):
             rows = load_all(sb)
 
-        versions = sorted({r.get("v6_formula_version") for r in rows if r.get("v6_formula_version")})
-        if versions:
-            selected = st.multiselect("Formula versions", versions, default=versions)
-            rows = [r for r in rows if r.get("v6_formula_version") in selected]
+        v7_rows = [r for r in rows if r.get("v7_tier") is not None]
+        settled = [r for r in v7_rows if r.get("v7_result_basis") in
+                   ("HIT_RECORDED", "MISS_RECORDED")]
 
-        settled = [r for r in rows
-                   if r.get("actual_home_goals") is not None
-                   and r.get("actual_away_goals") is not None]
-
-        if not settled:
-            st.info("No settled matches yet.")
+        if not v7_rows:
+            st.info("No v7 classified matches yet.")
         else:
-            # By v6_tier
-            path_rows = []
-            for tier in ["NEW_TIER1", "NEW_TIER2", "NEW_TIER3", "SKIP"]:
-                subset = [r for r in settled if r.get("v6_tier") == tier]
-                scored = [r for r in subset if r.get("dc_hit") is not None]
-                hits = sum(1 for r in scored if r.get("dc_hit") is True)
-                n = len(scored)
+            # Tier summary
+            summary = []
+            for tier in ("TIER1", "TIER2", "TIER3", "SKIP"):
+                subset = [r for r in v7_rows if r.get("v7_tier") == tier]
+                placed = [r for r in subset
+                          if r.get("v7_decision_action") == "BET"]
+                settled_bets = [r for r in placed
+                                if r.get("v7_result_basis") in
+                                ("HIT_RECORDED", "MISS_RECORDED")]
+                hits = sum(1 for r in settled_bets
+                           if r.get("v7_result_basis") == "HIT_RECORDED")
+                n = len(settled_bets)
                 rate = f"{(hits/n*100):.1f}%" if n else "—"
-                path_rows.append({"Tier": tier, "Settled": n, "Hits": hits, "Rate": rate})
-            st.dataframe(pd.DataFrame(path_rows), use_container_width=True, hide_index=True)
+                summary.append({
+                    "Tier": tier,
+                    "Classified": len(subset),
+                    "Bets placed": len(placed),
+                    "Settled": n,
+                    "Hits": hits,
+                    "Hit rate": rate,
+                })
+            st.dataframe(pd.DataFrame(summary),
+                         use_container_width=True, hide_index=True)
 
-            # By assignment reason
-            reason_rows = []
-            for reason in [V6_ASSIGN_RULE_A, V6_ASSIGN_RULE_B,
-                           V6_ASSIGN_OLD_T1, V6_ASSIGN_OLD_T2,
-                           V6_ASSIGN_NO_BET]:
-                subset = [r for r in settled if r.get("v6_assignment_reason") == reason]
-                scored = [r for r in subset if r.get("dc_hit") is not None]
-                hits = sum(1 for r in scored if r.get("dc_hit") is True)
-                n = len(scored)
-                rate = f"{(hits/n*100):.1f}%" if n else "—"
-                reason_rows.append({"Reason": reason, "Settled": n, "Hits": hits, "Rate": rate})
-            st.markdown('<div class="section-title">By assignment reason</div>',
-                        unsafe_allow_html=True)
-            st.dataframe(pd.DataFrame(reason_rows), use_container_width=True, hide_index=True)
-
-            # All placed bets
-            placed = [r for r in settled if r.get("v6_action") == "BET"]
-            if placed:
-                st.markdown('<div class="section-title">All placed bets</div>',
+            # Settled rows table
+            if settled:
+                st.markdown('<div class="section-title">Settled bets</div>',
                             unsafe_allow_html=True)
                 df = pd.DataFrame([{
                     "Date": r.get("match_date"),
                     "Match": f"{r.get('home_team')} vs {r.get('away_team')}",
-                    "Version": r.get("v6_formula_version"),
-                    "Tier": r.get("v6_tier"),
-                    "Bet": r.get("v5_bet"),
-                    "Stake": V6_STAKE_CLASS_TO_UNITS.get(r.get("v6_stake_class"), 0.0),
-                    "Reason": r.get("v6_assignment_reason"),
-                    "Segment": r.get("v5_skip_reason"),
-                    "Actual": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
-                    "Hit": ("✅" if r.get("dc_hit") is True
-                            else "❌" if r.get("dc_hit") is False else "—"),
-                } for r in placed])
+                    "Tier": r.get("v7_tier"),
+                    "Segment": r.get("v7_segment"),
+                    "Direction": r.get("v7_direction"),
+                    "Score": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
+                    "Result": ("✅" if r.get("v7_result_basis") == "HIT_RECORDED"
+                               else "❌"),
+                } for r in settled])
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tabs[3]:
-        st.subheader("🏷️ Tag Performance")
-        with st.spinner("Loading..."):
-            rows = load_all(sb)
-        settled = [r for r in rows if r.get("dc_hit") is not None]
-        if not settled:
-            st.info("No settled bets with dc_hit recorded yet.")
-        else:
-            singles, pairs = compute_tag_performance(settled)
-            st.markdown("**Single tags**")
-            if singles:
-                st.dataframe(pd.DataFrame(singles), use_container_width=True, hide_index=True)
-            st.markdown("**Tag pairs**")
-            if pairs:
-                st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
-
-    with tabs[4]:
-        st.subheader("Sportcreed v6.0 — The Formula")
+        st.subheader("Sportcreed v7 — The Formula")
         st.markdown("""
-### NEW TIER1 — full stake (1.5u)
+### Row gates (applied before any tier check)
 
-| Rule | Segment | Direction |
-|---|---|---|
-| RULE_A | `standard_candidate + team_agreement_0` | follow `f1_leader`, default DC X2 |
-| RULE_B | `f1_f5_override + home_leader` | DC 1X (forced) |
+1. `parse_status == 'ok'` (case-insensitive)
+2. Exactly one of `home_leader`, `away_leader` in tags (XOR)
 
-### NEW TIER2 — standard stake (0.75u)
+### TIER1 — full stake (1.5u)
 
-| Reason | Segment | Direction |
-|---|---|---|
-| OLD_TIER1 | `gap_30_plus + home_leader` | DC 1X |
-| OLD_TIER1 | `home_leader + standard_candidate` | DC 1X |
+Seven clauses, first match wins:
 
-### NEW TIER3 — reduced stake (0.5u)
+1. `away_leader+gap_30_plus+standard_candidate`
+2. `away_leader+standard_candidate+team_agreement_0`
+3. `f1_cap+home_leader+team_disagreement_1`
+4. `f1_cap+venue_incomplete+venue_power_neg`
+5. `gap_20_29+standard_candidate+team_agreement_0`
+6. `home_leader+venue_power_pos`
+7. `team_agreement_0+venue_incomplete+venue_power_neg`
 
-| Reason | Segment | Direction |
-|---|---|---|
-| OLD_TIER2 | `away_leader + team_disagreement_2plus` | DC X2 |
-| OLD_TIER2 | `away_leader + tier_core_a` | DC X2 |
-| OLD_TIER2 | `away_leader + venue_power_neg` | DC X2 |
-| OLD_TIER2 | `f1_cap + team_disagreement_2plus` | DC 1X |
-| OLD_TIER2 | `f1_cap + tier_core_a` | DC 1X |
-| OLD_TIER2 | `f1_f5_conflict + venue_incomplete` | follow `f1_leader` |
-| OLD_TIER2 | `gap_10_19 + standard_candidate` | DC 1X |
-| OLD_TIER2 | `gap_10_19 + venue_incomplete` | follow `f1_leader` |
-| OLD_TIER2 | `gap_30_plus + tier_core_a` | DC 1X |
-| OLD_TIER2 | `gap_30_plus + venue_power_neg` | follow `f1_leader` |
-| OLD_TIER2 | `home_leader + venue_power_pos` | DC 1X |
-| OLD_TIER2 | `team_agreement_0 + tier_core_a` | DC 1X |
-| OLD_TIER2 | `team_agreement_0 + venue_power_neg` | follow `f1_leader` |
-| OLD_TIER2 | `team_disagreement_2plus + tier_f1_gap_high` | follow `f1_leader` |
-| OLD_TIER2 | `tier_core_a + venue_incomplete` | follow `f1_leader` |
-| OLD_TIER2 | `tier_core_a + venue_power_neg` | follow `f1_leader` |
+### TIER2 — standard stake (0.75u)
 
-### Direction rule
+`standard_candidate + team_agreement_0`
 
-Derived from the segment's own required tags:
-- `away_leader` only → **DC X2**
-- `home_leader` only → **DC 1X**
-- Neither or both → **DC 1X** if `f1_leader == "home"`, else **DC X2**
+### TIER3 — reduced stake (0.5u)
 
-### Priority
+Any of:
+- `team_disagreement_1`
+- `team_disagreement_2plus`
+- `away_collapse`
+- `doubted_starter`
 
-TIER1 → TIER2 → TIER3, alphabetical within tier.
+**Except** when the row has both `away_leader` and `team_disagreement_2plus`.
 
-### Stakes
+### Direction
 
-- NEW_TIER1 → **FULL** (1.5u)
-- NEW_TIER2 → **STANDARD** (0.75u)
-- NEW_TIER3 → **REDUCED** (0.5u)
-- SKIP → **NONE** (0.0u)
+- `home_leader` → **DC 1X**
+- `away_leader` → **DC X2**
 
-### Persistence
+### Counterfactual
 
-Every save writes both:
-- `v6_*` columns — the authoritative v6.0 assignment
-- `v5_*` columns — legacy compatibility (same decision, old labels)
+- BET rows: equals direction.
+- SKIP / `no_segment_fired`: equals the direction from the single leader.
+- All other SKIPs: NULL.
 
-On settle, `v6_result_basis` is set to `HIT_RECORDED` or `MISS_RECORDED`.
-Parsing or empty-prediction gates set `v6_parse_policy_status = POLICY_PENDING_PARSE_REVIEW`.
+### Settlement
 
-### Backtest (as reported)
-
-| Tier | Record | Rate |
-|---|---|---|
-| NEW_TIER1 | 31/31 | 100% |
-| NEW_TIER2 | 39/41 | 95.1% |
-| NEW_TIER3 | 48/60 | 80.0% |
-
-Out-of-sample validation is the next milestone.
+After the match, enter the score in the Pending tab. The app writes:
+- `actual_home_goals`, `actual_away_goals`
+- `v7_dc_hit` (for BET rows)
+- `v7_counterfactual_won`
+- `v7_result_basis` → `HIT_RECORDED` / `MISS_RECORDED`
+- `v7_settled_at`
         """)
 
-    with tabs[5]:
+    with tabs[4]:
         render_debug_tab(sb)
 
 
