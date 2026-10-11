@@ -13,16 +13,16 @@ Row gates (applied before any tier check):
 
 Direction: home_leader → DC 1X, away_leader → DC X2.
 
-v7.1 filter (applied after direction, before the tier ladder):
-  When direction is DC X2 AND the market prices away as underdog
-  AND f1_gap < 16 → SKIP with segment 'away_underdog_low_f1'.
-  Measured on 46 picks: f1_gap == 16 hit 84%, f1_gap < 16 hit 52.4%.
-  Confirmed direction holds across a chronological split.
-  Filter bypasses when odds or f1_gap are missing.
+v7.1 filter:
+  When direction is DC X2 AND the market prices the away side as
+  underdog AND f1_gap < 16, the decision becomes SKIP with segment
+  'away_underdog_low_f1'. The filter only fires when both odds and
+  f1_gap are supplied.
 
 Counterfactual: equals the bet direction on BET rows; equals the
 direction derived from the leader on SKIP/no_segment_fired rows;
-NULL on all other SKIPs.
+NULL on all other SKIPs. On away_underdog_low_f1 rows, the
+counterfactual still carries the direction the pick would have had.
 
 Persistence: nine v7_* columns on matches_raw, written at parse time
 and updated at settlement time.
@@ -230,7 +230,6 @@ def decide_v7(tags, parse_status, odds=None, f1_gap=None):
     direction = _direction_for(leader)
 
     # v7.1 filter — away-side underdog with low F1 gap.
-    # Only fires when both odds and f1_gap are supplied.
     if direction == "DC X2" and odds is not None and f1_gap is not None:
         home_odds = odds.get("home")
         away_odds = odds.get("away")
@@ -591,6 +590,117 @@ def _has_bs4():
 # ============================================================================
 # PARSER
 # ============================================================================
+
+KEYSTATS_PRIORITY_FIELDS = {
+    "home_last10_w", "home_last10_d", "home_last10_l",
+    "away_last10_w", "away_last10_d", "away_last10_l",
+    "home_last10_avg_scored", "home_last10_avg_conceded",
+    "away_last10_avg_scored", "away_last10_avg_conceded",
+    "home_last10_over25", "home_last10_under25",
+    "away_last10_over25", "away_last10_under25",
+    "home_last10_btts_yes", "home_last10_btts_no",
+    "away_last10_btts_yes", "away_last10_btts_no",
+    "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
+    "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
+    "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
+    "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
+    "home_last10_possession", "away_last10_possession",
+    "home_home_last10_possession", "away_away_last10_possession",
+    "home_last10_corners_for", "home_last10_corners_against",
+    "away_last10_corners_for", "away_last10_corners_against",
+    "home_home_last10_corners_for", "home_home_last10_corners_against",
+    "away_away_last10_corners_for", "away_away_last10_corners_against",
+    "home_top_scorer", "home_top_scorer_goals",
+    "away_top_scorer", "away_top_scorer_goals",
+    "home_top_assister", "home_top_assister_assists",
+    "away_top_assister", "away_top_assister_assists",
+    "home_top_scorer_source", "away_top_scorer_source",
+    "home_top_assister_source", "away_top_assister_source",
+}
+
+
+MATCHES_RAW_COLUMNS = {
+    "id", "created_at", "settled_at",
+    "match_date", "kickoff_utc", "kickoff_local",
+    "league_name", "tier", "group_name", "season",
+    "home_team", "away_team", "venue", "stage", "round", "parse_status",
+    "home_pos", "home_played", "home_points", "home_gd", "home_gf", "home_ga",
+    "away_pos", "away_played", "away_points", "away_gd", "away_gf", "away_ga",
+    "home_home_points", "home_home_played", "home_home_win_pct",
+    "home_away_points", "home_away_played",
+    "away_home_points", "away_home_played",
+    "away_away_points", "away_away_played", "away_away_win_pct",
+    "home_last5", "away_last5",
+    "home_last5_count", "away_last5_count",
+    "home_last10_w", "home_last10_d", "home_last10_l",
+    "home_last10_avg_scored", "home_last10_avg_conceded",
+    "home_last10_possession", "home_last10_corners_for", "home_last10_corners_against",
+    "home_last10_win_pct", "home_last10_over25", "home_last10_under25",
+    "home_last10_btts_yes", "home_last10_btts_no",
+    "away_last10_w", "away_last10_d", "away_last10_l",
+    "away_last10_avg_scored", "away_last10_avg_conceded",
+    "away_last10_possession", "away_last10_corners_for", "away_last10_corners_against",
+    "away_last10_win_pct", "away_last10_over25", "away_last10_under25",
+    "away_last10_btts_yes", "away_last10_btts_no",
+    "home_home_last10_avg_scored", "home_home_last10_avg_conceded",
+    "home_home_last10_corners_for", "home_home_last10_corners_against",
+    "home_home_last10_possession",
+    "home_away_last10_avg_scored", "home_away_last10_avg_conceded",
+    "away_home_last10_avg_scored", "away_home_last10_avg_conceded",
+    "away_away_last10_avg_scored", "away_away_last10_avg_conceded",
+    "away_away_last10_corners_for", "away_away_last10_corners_against",
+    "away_away_last10_possession",
+    "home_top_scorer", "home_top_scorer_goals",
+    "home_top_assister", "home_top_assister_assists",
+    "away_top_scorer", "away_top_scorer_goals",
+    "away_top_assister", "away_top_assister_assists",
+    "home_top_scorer_source", "away_top_scorer_source",
+    "home_top_assister_source", "away_top_assister_source",
+    "home_injuries", "away_injuries", "home_xi", "away_xi",
+    "home_formation", "away_formation",
+    "h2h", "h2h_home_wins", "h2h_draws", "h2h_away_wins",
+    "odds",
+    "f1_home", "f1_away", "f1_gap", "f1_leader",
+    "f2_home", "f2_away",
+    "f3_home", "f3_away",
+    "f4_home", "f4_away",
+    "f5_home", "f5_away", "f5_gap", "f5_leader", "f5_leader_raw",
+    "f6_home", "f6_away",
+    "home_total", "away_total", "raw_gap", "total_gap",
+    "disagreements", "shrink_factor",
+    "f1_f5_conflict", "f1_f5_override", "f1_vs_f2f3_conflict",
+    "away_collapse", "doubted_starter",
+    "call_1x2", "call_ou", "call_btts", "expected_total",
+    "no_bet_reason_1x2", "no_bet_reason_ou",
+    "venue_ppg_gap", "venue_ppg_gap_home", "venue_ppg_gap_away",
+    "venue_power",
+    "f0_home", "f0_away", "f0_gap",
+    "draw_risk",
+    "tags",
+    "decision_version",
+    "v5_decision_path", "v5_decision", "v5_bet", "v5_stake",
+    "v5_combo_pair_count", "v5_combo_pairs_fired", "v5_core_fired",
+    "v5_skip_reason",
+    "counterfactual_call", "counterfactual_odds", "counterfactual_won",
+    "actual_home_goals", "actual_away_goals",
+    "actual_possession_home", "actual_xg_home", "actual_xg_away",
+    "actual_corners_home", "actual_corners_away", "actual_total_goals",
+    "dc_hit", "is_correct_1x2", "is_correct_ou", "is_correct_btts",
+    # v7 columns
+    "v7_tier",
+    "v7_segment",
+    "v7_direction",
+    "v7_stake_class",
+    "v7_stake",
+    "v7_decision_action",
+    "v7_parse_policy_status",
+    "v7_result_basis",
+    "v7_counterfactual_call",
+    "v7_dc_hit",
+    "v7_counterfactual_won",
+    "v7_settled_at",
+}
+
 
 _PREVIEW_TOP_SCORER_PATTERNS = [
     re.compile(
@@ -2014,8 +2124,7 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 def predict_v7_full(row):
     """
     Parse-time pipeline. Computes features, computes tags, applies the
-    v7 rule (including the v7.1 away-underdog-low-f1 filter), and
-    merges the nine v7_* decision fields onto the result.
+    v7 rule, and merges the nine v7_* decision fields onto the result.
     """
     base = predict_v5(row)
 
@@ -2416,7 +2525,6 @@ def main():
                 tier = r.get("v7_tier") or "SKIP"
                 action = r.get("v7_decision_action") or "NO BET"
                 direction = r.get("v7_direction") or "—"
-                stake_class = r.get("v7_stake_class") or "NONE"
                 stake = r.get("v7_stake") or 0.0
                 segment = r.get("v7_segment") or "—"
                 header = (f"{r.get('match_date','')} · "
@@ -2498,15 +2606,19 @@ def main():
 1. `parse_status == 'ok'` (case-insensitive)
 2. Exactly one of `home_leader`, `away_leader` in tags (XOR)
 
-### v7.1 filter — away-side underdog with low F1 gap
+### v7.1 filter — away-side underdog protection
 
-When direction is `DC X2`, the market prices away as underdog, and
-`f1_gap < 16` → SKIP with segment `away_underdog_low_f1`.
+Before the tier ladder, when the model picks DC X2 and the market
+prices the away side as underdog:
 
-Measured on 46 picks: `f1_gap == 16` hit 84%, `f1_gap < 16` hit 52.4%.
-Direction confirmed across a chronological split.
+- If `f1_gap == 16` (the F1 cap, maximum confidence): keep the bet.
+- If `f1_gap < 16`: **SKIP** with segment `away_underdog_low_f1`.
 
-Filter bypasses when odds or f1_gap are missing.
+Measured on 46 away-underdog picks:
+- `f1_gap == 16`: 21/25 (84.0%)
+- `f1_gap < 16`: 11/21 (52.4%)
+
+Chronological split confirmed the direction in both halves.
 
 ### TIER1 — full stake (1.5u)
 
@@ -2526,8 +2638,10 @@ Seven clauses, first match wins:
 
 ### TIER3 — reduced stake (0.5u)
 
-Any of `team_disagreement_1`, `team_disagreement_2plus`, `away_collapse`,
-`doubted_starter` — except when the row has both `away_leader` and
+Any of: `team_disagreement_1`, `team_disagreement_2plus`,
+`away_collapse`, `doubted_starter`.
+
+**Except** when the row has both `away_leader` and
 `team_disagreement_2plus`.
 
 ### Direction
@@ -2535,17 +2649,14 @@ Any of `team_disagreement_1`, `team_disagreement_2plus`, `away_collapse`,
 - `home_leader` → **DC 1X**
 - `away_leader` → **DC X2**
 
-### Counterfactual
-
-- BET rows: equals direction.
-- SKIP / `no_segment_fired`: equals the direction from the single leader.
-- All other SKIPs: NULL.
-
 ### Settlement
 
-After the match, enter the score in the Pending tab. The app writes
-`actual_home_goals`, `actual_away_goals`, `v7_dc_hit`,
-`v7_counterfactual_won`, `v7_result_basis`, `v7_settled_at`.
+After the match, enter the score in the Pending tab. The app writes:
+- `actual_home_goals`, `actual_away_goals`
+- `v7_dc_hit` (for BET rows)
+- `v7_counterfactual_won`
+- `v7_result_basis` → `HIT_RECORDED` / `MISS_RECORDED`
+- `v7_settled_at`
         """)
 
     with tabs[4]:
