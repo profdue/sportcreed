@@ -13,6 +13,13 @@ Row gates (applied before any tier check):
 
 Direction: home_leader → DC 1X, away_leader → DC X2.
 
+v7.1 filter (applied after direction, before the tier ladder):
+  When direction is DC X2 AND the market prices away as underdog
+  AND f1_gap < 16 → SKIP with segment 'away_underdog_low_f1'.
+  Measured on 46 picks: f1_gap == 16 hit 84%, f1_gap < 16 hit 52.4%.
+  Confirmed direction holds across a chronological split.
+  Filter bypasses when odds or f1_gap are missing.
+
 Counterfactual: equals the bet direction on BET rows; equals the
 direction derived from the leader on SKIP/no_segment_fired rows;
 NULL on all other SKIPs.
@@ -167,8 +174,21 @@ def _direction_for(leader):
     return "DC 1X" if leader == "home" else "DC X2"
 
 
-def decide_v7(tags, parse_status):
-    """Pure v7 decision. Returns dict with nine v7_* fields."""
+def decide_v7(tags, parse_status, odds=None, f1_gap=None):
+    """
+    Pure v7 decision. Returns dict with nine v7_* fields.
+
+    v7.1 filter: away-side underdog picks where f1_gap < 16 are
+    downgraded to SKIP.
+
+    Measured on 46 away-underdog picks:
+      f1_gap == 16 (capped): 21/25 (84.0%)
+      f1_gap <  16         : 11/21 (52.4%)
+    Chronological split confirmed the direction holds in both halves.
+
+    When odds or f1_gap are not supplied, the filter does not fire —
+    the decision falls through to the tier ladder as before.
+    """
     tagset = set(tags or [])
 
     def _skip(reason, policy, counterfactual=None):
@@ -198,22 +218,41 @@ def decide_v7(tags, parse_status):
             "v7_counterfactual_call": direction,
         }
 
+    # Gate 1 — parse
     if not isinstance(parse_status, str) or parse_status.lower() != "ok":
         return _skip("parse_status_not_ok", "POLICY_PENDING_PARSE_REVIEW")
 
+    # Gate 2 — XOR leader derived from tags
     leader = _single_leader(tagset)
     if leader is None:
         return _skip("not_exactly_one_leader", "NOT_APPLICABLE")
 
     direction = _direction_for(leader)
 
+    # v7.1 filter — away-side underdog with low F1 gap.
+    # Only fires when both odds and f1_gap are supplied.
+    if direction == "DC X2" and odds is not None and f1_gap is not None:
+        home_odds = odds.get("home")
+        away_odds = odds.get("away")
+        away_is_underdog = (
+            home_odds is not None
+            and away_odds is not None
+            and home_odds < away_odds
+        )
+        if away_is_underdog and f1_gap < 16.0:
+            return _skip("away_underdog_low_f1", "NOT_APPLICABLE",
+                         counterfactual=direction)
+
+    # Tier 1 — seven clauses, first match wins
     for segment, required in TIER1_CLAUSES:
         if required <= tagset:
             return _bet("TIER1", segment, direction)
 
+    # Tier 2
     if TIER2_REQUIRED <= tagset:
         return _bet("TIER2", TIER2_SEGMENT, direction)
 
+    # Tier 3 — predicate, records all fired signals
     fired = [s for s in TIER3_SIGNALS if s in tagset]
     if fired and not ("away_leader" in tagset
                       and "team_disagreement_2plus" in tagset):
@@ -1975,13 +2014,16 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 def predict_v7_full(row):
     """
     Parse-time pipeline. Computes features, computes tags, applies the
-    v7 rule, and merges the nine v7_* decision fields onto the result.
+    v7 rule (including the v7.1 away-underdog-low-f1 filter), and
+    merges the nine v7_* decision fields onto the result.
     """
     base = predict_v5(row)
 
     base["tags"] = compute_tags(row, base, None, None, None)
 
-    decision = decide_v7(base["tags"], row.get("parse_status"))
+    decision = decide_v7(base["tags"], row.get("parse_status"),
+                         odds=row.get("odds"),
+                         f1_gap=base.get("f1_gap"))
     base.update(decision)
 
     # Counterfactual odds — reference only, not used by the rule.
@@ -2410,7 +2452,6 @@ def main():
         if not v7_rows:
             st.info("No v7 classified matches yet.")
         else:
-            # Tier summary
             summary = []
             for tier in ("TIER1", "TIER2", "TIER3", "SKIP"):
                 subset = [r for r in v7_rows if r.get("v7_tier") == tier]
@@ -2434,7 +2475,6 @@ def main():
             st.dataframe(pd.DataFrame(summary),
                          use_container_width=True, hide_index=True)
 
-            # Settled rows table
             if settled:
                 st.markdown('<div class="section-title">Settled bets</div>',
                             unsafe_allow_html=True)
@@ -2458,6 +2498,16 @@ def main():
 1. `parse_status == 'ok'` (case-insensitive)
 2. Exactly one of `home_leader`, `away_leader` in tags (XOR)
 
+### v7.1 filter — away-side underdog with low F1 gap
+
+When direction is `DC X2`, the market prices away as underdog, and
+`f1_gap < 16` → SKIP with segment `away_underdog_low_f1`.
+
+Measured on 46 picks: `f1_gap == 16` hit 84%, `f1_gap < 16` hit 52.4%.
+Direction confirmed across a chronological split.
+
+Filter bypasses when odds or f1_gap are missing.
+
 ### TIER1 — full stake (1.5u)
 
 Seven clauses, first match wins:
@@ -2476,13 +2526,9 @@ Seven clauses, first match wins:
 
 ### TIER3 — reduced stake (0.5u)
 
-Any of:
-- `team_disagreement_1`
-- `team_disagreement_2plus`
-- `away_collapse`
-- `doubted_starter`
-
-**Except** when the row has both `away_leader` and `team_disagreement_2plus`.
+Any of `team_disagreement_1`, `team_disagreement_2plus`, `away_collapse`,
+`doubted_starter` — except when the row has both `away_leader` and
+`team_disagreement_2plus`.
 
 ### Direction
 
@@ -2497,12 +2543,9 @@ Any of:
 
 ### Settlement
 
-After the match, enter the score in the Pending tab. The app writes:
-- `actual_home_goals`, `actual_away_goals`
-- `v7_dc_hit` (for BET rows)
-- `v7_counterfactual_won`
-- `v7_result_basis` → `HIT_RECORDED` / `MISS_RECORDED`
-- `v7_settled_at`
+After the match, enter the score in the Pending tab. The app writes
+`actual_home_goals`, `actual_away_goals`, `v7_dc_hit`,
+`v7_counterfactual_won`, `v7_result_basis`, `v7_settled_at`.
         """)
 
     with tabs[4]:
