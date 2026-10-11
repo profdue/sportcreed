@@ -1,5 +1,5 @@
 """
-Sportcreed — v7.
+Sportcreed — v7.0 (frozen 2026-10-11).
 
 Decision logic:
   Tier 1 fires first (seven clauses, first match wins).
@@ -11,21 +11,14 @@ Row gates (applied before any tier check):
   parse_status == 'ok' (case-insensitive)
   Exactly one of {home_leader, away_leader} present in tags (XOR)
 
-Direction: home_leader → DC 1X, away_leader → DC X2.
-
-v7.1 filter:
-  When direction is DC X2 AND the market prices the away side as
-  underdog AND f1_gap < 16, the decision becomes SKIP with segment
-  'away_underdog_low_f1'. The filter only fires when both odds and
-  f1_gap are supplied.
+Direction: home_leader -> DC 1X, away_leader -> DC X2.
 
 Counterfactual: equals the bet direction on BET rows; equals the
 direction derived from the leader on SKIP/no_segment_fired rows;
-NULL on all other SKIPs. On away_underdog_low_f1 rows, the
-counterfactual still carries the direction the pick would have had.
+NULL on parse-fail and no-leader rows.
 
-Persistence: nine v7_* columns on matches_raw, written at parse time
-and updated at settlement time.
+Persistence: nine v7_* columns plus rule_version on matches_raw,
+written at parse time and updated at settlement time.
 """
 
 import concurrent.futures
@@ -125,6 +118,10 @@ F1_CAP_THRESHOLD = 16.0
 
 DECISION_VERSION = "v7-formula"
 
+# Frozen rule version identifier. Bump this string if any rule
+# definition changes, and insert a matching row into model_logic_rules.
+RULE_VERSION = "v7.0-2026-10-11"
+
 
 # ============================================================================
 # v7 DECISION RULE
@@ -174,20 +171,16 @@ def _direction_for(leader):
     return "DC 1X" if leader == "home" else "DC X2"
 
 
-def decide_v7(tags, parse_status, odds=None, f1_gap=None):
+def decide_v7(tags, parse_status):
     """
-    Pure v7 decision. Returns dict with nine v7_* fields.
+    Pure v7.0 decision. Returns dict with nine v7_* fields.
 
-    v7.1 filter: away-side underdog picks where f1_gap < 16 are
-    downgraded to SKIP.
+    Seven Tier 1 clauses, first match wins.
+    Tier 2, then Tier 3 predicate.
+    No filters, no market conditions, no overrides.
 
-    Measured on 46 away-underdog picks:
-      f1_gap == 16 (capped): 21/25 (84.0%)
-      f1_gap <  16         : 11/21 (52.4%)
-    Chronological split confirmed the direction holds in both halves.
-
-    When odds or f1_gap are not supplied, the filter does not fire —
-    the decision falls through to the tier ladder as before.
+    Counterfactual call is written on every row where a direction
+    can be derived — including SKIP rows from no_segment_fired.
     """
     tagset = set(tags or [])
 
@@ -229,19 +222,6 @@ def decide_v7(tags, parse_status, odds=None, f1_gap=None):
 
     direction = _direction_for(leader)
 
-    # v7.1 filter — away-side underdog with low F1 gap.
-    if direction == "DC X2" and odds is not None and f1_gap is not None:
-        home_odds = odds.get("home")
-        away_odds = odds.get("away")
-        away_is_underdog = (
-            home_odds is not None
-            and away_odds is not None
-            and home_odds < away_odds
-        )
-        if away_is_underdog and f1_gap < 16.0:
-            return _skip("away_underdog_low_f1", "NOT_APPLICABLE",
-                         counterfactual=direction)
-
     # Tier 1 — seven clauses, first match wins
     for segment, required in TIER1_CLAUSES:
         if required <= tagset:
@@ -257,6 +237,7 @@ def decide_v7(tags, parse_status, odds=None, f1_gap=None):
                       and "team_disagreement_2plus" in tagset):
         return _bet("TIER3", "tier3:" + " | ".join(fired), direction)
 
+    # SKIP with counterfactual derived from the leader.
     return _skip("no_segment_fired", "NOT_APPLICABLE",
                  counterfactual=direction)
 
@@ -512,11 +493,11 @@ def render_debug_tab(sb):
 
     st.markdown('<div class="section-title">6. v7 stored state</div>',
                 unsafe_allow_html=True)
-    st.caption("Row counts by v7_tier, v7_segment.")
+    st.caption("Row counts by rule_version, v7_tier, v7_result_basis.")
     if st.button("📊 Show v7 counts", key="debug_v7_counts"):
         try:
             resp = (sb.table("matches_raw")
-                    .select("v7_tier, v7_segment, v7_result_basis")
+                    .select("rule_version, v7_tier, v7_result_basis")
                     .not_.is_("v7_tier", "null")
                     .execute())
             rows = resp.data or []
@@ -524,10 +505,13 @@ def render_debug_tab(sb):
                 st.info("No v7 rows found.")
             else:
                 from collections import Counter
-                c = Counter((r.get("v7_tier"), r.get("v7_result_basis"))
+                c = Counter((r.get("rule_version"),
+                             r.get("v7_tier"),
+                             r.get("v7_result_basis"))
                             for r in rows)
                 df = pd.DataFrame(
-                    [{"v7_tier": k[0], "v7_result_basis": k[1], "n": v}
+                    [{"rule_version": k[0], "v7_tier": k[1],
+                      "v7_result_basis": k[2], "n": v}
                      for k, v in sorted(c.items(), key=lambda x: -x[1])]
                 )
                 st.dataframe(df, use_container_width=True, hide_index=True)
@@ -699,6 +683,8 @@ MATCHES_RAW_COLUMNS = {
     "v7_dc_hit",
     "v7_counterfactual_won",
     "v7_settled_at",
+    # frozen rule version
+    "rule_version",
 }
 
 
@@ -2124,16 +2110,18 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 def predict_v7_full(row):
     """
     Parse-time pipeline. Computes features, computes tags, applies the
-    v7 rule, and merges the nine v7_* decision fields onto the result.
+    v7.0 rule, and merges the nine v7_* decision fields plus rule_version
+    onto the result.
     """
     base = predict_v5(row)
 
     base["tags"] = compute_tags(row, base, None, None, None)
 
-    decision = decide_v7(base["tags"], row.get("parse_status"),
-                         odds=row.get("odds"),
-                         f1_gap=base.get("f1_gap"))
+    decision = decide_v7(base["tags"], row.get("parse_status"))
     base.update(decision)
+
+    # Stamp the frozen rule version on every classification.
+    base["rule_version"] = RULE_VERSION
 
     # Counterfactual odds — reference only, not used by the rule.
     leader = _single_leader(set(base["tags"]))
@@ -2161,10 +2149,12 @@ def predict_v7_full(row):
 def settle_v7(sb, match_id, home_goals, away_goals):
     """
     Called after the match. Reads the stored v7 decision, computes the
-    outcome, and writes v7_dc_hit, v7_counterfactual_won,
-    v7_result_basis, v7_settled_at, plus the actual score columns.
+    outcome, and writes actual score columns plus v7_dc_hit,
+    v7_counterfactual_won, v7_result_basis, v7_settled_at.
 
-    Returns (ok, message).
+    v7_counterfactual_won is written for both BET and SKIP rows, so the
+    outcome of the rule's counterfactual call is recorded even when no
+    bet was placed.
     """
     if sb is None:
         return False, "no client"
@@ -2183,12 +2173,13 @@ def settle_v7(sb, match_id, home_goals, away_goals):
         return False, f"no row with id={match_id}"
 
     r = resp.data[0]
-    direction = r.get("v7_direction")
-    action = r.get("v7_decision_action")
-    cf_call = r.get("v7_counterfactual_call")
-    result_bs = r.get("v7_result_basis")
+    tier       = r.get("v7_tier")
+    direction  = r.get("v7_direction")
+    action     = r.get("v7_decision_action")
+    cf_call    = r.get("v7_counterfactual_call")
+    result_bs  = r.get("v7_result_basis")
 
-    if r.get("v7_tier") is None:
+    if tier is None:
         return False, "row has no v7 decision"
     if result_bs not in ("RECORDED_PENDING", "NO_RECORDED_BET"):
         return False, f"row is not settleable (result_basis={result_bs!r})"
@@ -2197,6 +2188,7 @@ def settle_v7(sb, match_id, home_goals, away_goals):
               else "Away" if away_goals < home_goals
               else "Draw")
 
+    # BET outcome
     dc_hit = None
     if action == "BET":
         if direction == "DC 1X":
@@ -2204,6 +2196,7 @@ def settle_v7(sb, match_id, home_goals, away_goals):
         elif direction == "DC X2":
             dc_hit = actual in ("Away", "Draw")
 
+    # Counterfactual outcome computed for both BET and SKIP rows.
     cf_won = None
     if cf_call == "DC 1X":
         cf_won = actual in ("Home", "Draw")
@@ -2461,7 +2454,7 @@ def main():
                 if not parsed.get("home_team") or not parsed.get("away_team"):
                     st.error("Could not extract team names.")
                     return
-                with st.spinner("Running v7..."):
+                with st.spinner("Running v7.0..."):
                     result = predict_v7_full(parsed)
                 with st.spinner("Saving..."):
                     ok, row = upsert_match(sb, parsed)
@@ -2599,26 +2592,12 @@ def main():
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tabs[3]:
-        st.subheader("Sportcreed v7 — The Formula")
+        st.subheader("Sportcreed v7.0 — The Formula (frozen 2026-10-11)")
         st.markdown("""
 ### Row gates (applied before any tier check)
 
 1. `parse_status == 'ok'` (case-insensitive)
 2. Exactly one of `home_leader`, `away_leader` in tags (XOR)
-
-### v7.1 filter — away-side underdog protection
-
-Before the tier ladder, when the model picks DC X2 and the market
-prices the away side as underdog:
-
-- If `f1_gap == 16` (the F1 cap, maximum confidence): keep the bet.
-- If `f1_gap < 16`: **SKIP** with segment `away_underdog_low_f1`.
-
-Measured on 46 away-underdog picks:
-- `f1_gap == 16`: 21/25 (84.0%)
-- `f1_gap < 16`: 11/21 (52.4%)
-
-Chronological split confirmed the direction in both halves.
 
 ### TIER1 — full stake (1.5u)
 
@@ -2653,10 +2632,17 @@ Any of: `team_disagreement_1`, `team_disagreement_2plus`,
 
 After the match, enter the score in the Pending tab. The app writes:
 - `actual_home_goals`, `actual_away_goals`
-- `v7_dc_hit` (for BET rows)
-- `v7_counterfactual_won`
-- `v7_result_basis` → `HIT_RECORDED` / `MISS_RECORDED`
+- `v7_dc_hit` (BET rows only)
+- `v7_counterfactual_won` (both BET and SKIP rows)
+- `v7_result_basis` → `HIT_RECORDED` / `MISS_RECORDED` for BETs,
+  `NO_RECORDED_BET` for SKIPs
 - `v7_settled_at`
+
+### Rule version
+
+Every classification is stamped with `rule_version = 'v7.0-2026-10-11'`.
+The rule definitions for this version are stored in `model_logic_rules`.
+Any future rule change must bump the version and insert a new row.
         """)
 
     with tabs[4]:
