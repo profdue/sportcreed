@@ -17,8 +17,14 @@ Counterfactual: equals the bet direction on BET rows; equals the
 direction derived from the leader on SKIP/no_segment_fired rows;
 NULL on parse-fail and no-leader rows.
 
-Persistence: nine v7_* columns plus rule_version on matches_raw,
-written at parse time and updated at settlement time.
+Whitelist: informational flag computed on every classification.
+  True when the row is a TIER1 bet in one of the four clean segments,
+  with total_gap > 20 and (disagreements == 0 or the
+  f1_cap+home_leader+team_disagreement_1 clause at == 1).
+  Does NOT affect the decision. Used for prospective validation.
+
+Persistence: nine v7_* columns plus rule_version and whitelist_pass
+on matches_raw, written at parse time and updated at settlement time.
 """
 
 import concurrent.futures
@@ -121,6 +127,15 @@ DECISION_VERSION = "v7-formula"
 # Frozen rule version identifier. Bump this string if any rule
 # definition changes, and insert a matching row into model_logic_rules.
 RULE_VERSION = "v7.0-2026-10-11"
+
+# The four TIER1 segments that constitute the whitelist. Informational
+# only — does not affect the decision.
+WHITELIST_SEGMENTS = (
+    "away_leader+gap_30_plus+standard_candidate",
+    "gap_20_29+standard_candidate+team_agreement_0",
+    "home_leader+venue_power_pos",
+    "f1_cap+home_leader+team_disagreement_1",
+)
 
 
 # ============================================================================
@@ -240,6 +255,36 @@ def decide_v7(tags, parse_status):
     # SKIP with counterfactual derived from the leader.
     return _skip("no_segment_fired", "NOT_APPLICABLE",
                  counterfactual=direction)
+
+
+def _whitelist_pass(base):
+    """
+    Whitelist filter — informational only, not used by decide_v7.
+
+    True when the row is a TIER1 bet in one of the four clean
+    segments, with total_gap > 20 and (disagreements == 0 or the
+    f1_cap+home_leader+team_disagreement_1 clause at == 1).
+
+    This mirrors the SQL backfill exactly.
+    """
+    if base.get("v7_tier") != "TIER1":
+        return False
+    seg = base.get("v7_segment")
+    if seg not in WHITELIST_SEGMENTS:
+        return False
+    if (base.get("total_gap") or 0) <= 20:
+        return False
+    direction = base.get("v7_direction")
+    if not (direction == "DC 1X"
+            or (seg == "away_leader+gap_30_plus+standard_candidate"
+                and direction == "DC X2")):
+        return False
+    d = base.get("disagreements") or 0
+    if d == 0:
+        return True
+    if seg == "f1_cap+home_leader+team_disagreement_1" and d == 1:
+        return True
+    return False
 
 
 # ============================================================================
@@ -493,11 +538,11 @@ def render_debug_tab(sb):
 
     st.markdown('<div class="section-title">6. v7 stored state</div>',
                 unsafe_allow_html=True)
-    st.caption("Row counts by rule_version, v7_tier, v7_result_basis.")
+    st.caption("Row counts by rule_version, v7_tier, whitelist_pass.")
     if st.button("📊 Show v7 counts", key="debug_v7_counts"):
         try:
             resp = (sb.table("matches_raw")
-                    .select("rule_version, v7_tier, v7_result_basis")
+                    .select("rule_version, v7_tier, whitelist_pass, v7_result_basis")
                     .not_.is_("v7_tier", "null")
                     .execute())
             rows = resp.data or []
@@ -507,11 +552,12 @@ def render_debug_tab(sb):
                 from collections import Counter
                 c = Counter((r.get("rule_version"),
                              r.get("v7_tier"),
+                             r.get("whitelist_pass"),
                              r.get("v7_result_basis"))
                             for r in rows)
                 df = pd.DataFrame(
                     [{"rule_version": k[0], "v7_tier": k[1],
-                      "v7_result_basis": k[2], "n": v}
+                      "whitelist_pass": k[2], "v7_result_basis": k[3], "n": v}
                      for k, v in sorted(c.items(), key=lambda x: -x[1])]
                 )
                 st.dataframe(df, use_container_width=True, hide_index=True)
@@ -685,6 +731,8 @@ MATCHES_RAW_COLUMNS = {
     "v7_settled_at",
     # frozen rule version
     "rule_version",
+    # informational whitelist flag
+    "whitelist_pass",
 }
 
 
@@ -2110,8 +2158,8 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 def predict_v7_full(row):
     """
     Parse-time pipeline. Computes features, computes tags, applies the
-    v7.0 rule, and merges the nine v7_* decision fields plus rule_version
-    onto the result.
+    v7.0 rule, merges the nine v7_* decision fields plus rule_version,
+    and computes the informational whitelist flag.
     """
     base = predict_v5(row)
 
@@ -2122,6 +2170,9 @@ def predict_v7_full(row):
 
     # Stamp the frozen rule version on every classification.
     base["rule_version"] = RULE_VERSION
+
+    # Whitelist flag — informational only, not used by the decision.
+    base["whitelist_pass"] = _whitelist_pass(base)
 
     # Counterfactual odds — reference only, not used by the rule.
     leader = _single_leader(set(base["tags"]))
@@ -2363,11 +2414,18 @@ def render_verdict_v7(result):
     f1_gap = result.get("f1_gap") or 0
     leader = result.get("f1_leader") or "—"
     total_gap = result.get("total_gap") or 0
+    whitelist_pass = result.get("whitelist_pass")
+
+    wl_badge = ""
+    if whitelist_pass:
+        wl_badge = (' &nbsp;<span style="background:#065f46; color:#6ee7b7; '
+                    'padding:2px 6px; border-radius:4px; font-size:0.7rem; '
+                    'font-weight:700;">WHITELIST</span>')
 
     if action == "BET":
         st.markdown(f"""
         <div class="verdict-bet">
-            <div class="verdict-label">⭐ SPORTCREED PREDICTION &nbsp; {render_path_badge(tier)}</div>
+            <div class="verdict-label">⭐ SPORTCREED PREDICTION &nbsp; {render_path_badge(tier)}{wl_badge}</div>
             <div class="verdict-pick">{direction} &nbsp;<span style="font-size:1.1rem; opacity:0.7; font-weight:600;">· {stake}u ({stake_class})</span></div>
             <div class="verdict-detail">
                 <code style="background:#022c22; color:#6ee7b7; padding:2px 6px; border-radius:4px;">{segment}</code>
@@ -2520,15 +2578,17 @@ def main():
                 direction = r.get("v7_direction") or "—"
                 stake = r.get("v7_stake") or 0.0
                 segment = r.get("v7_segment") or "—"
+                whitelist_pass = r.get("whitelist_pass")
+                wl = " ⭐" if whitelist_pass else ""
                 header = (f"{r.get('match_date','')} · "
                           f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                          f"{tier} · {direction}")
+                          f"{tier} · {direction}{wl}")
                 with st.expander(header):
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Tier", tier)
                     c2.metric("Direction", direction)
                     c3.metric("Stake", f"{stake}u")
-                    c4.metric("Action", action)
+                    c4.metric("Whitelist", "✅" if whitelist_pass else "—")
                     st.caption(f"Segment: `{segment}`")
                     col1, col2, col3 = st.columns([1, 1, 2])
                     hg = col1.number_input("Home", 0, 15, 0, key=f"hg_{match_id}")
@@ -2576,6 +2636,25 @@ def main():
             st.dataframe(pd.DataFrame(summary),
                          use_container_width=True, hide_index=True)
 
+            # Whitelist performance
+            wl_rows = [r for r in v7_rows if r.get("whitelist_pass") is True]
+            wl_settled = [r for r in wl_rows
+                          if r.get("v7_result_basis") in
+                          ("HIT_RECORDED", "MISS_RECORDED")]
+            if wl_rows:
+                st.markdown('<div class="section-title">Whitelist</div>',
+                            unsafe_allow_html=True)
+                wl_hits = sum(1 for r in wl_settled
+                              if r.get("v7_result_basis") == "HIT_RECORDED")
+                n = len(wl_settled)
+                rate = f"{(wl_hits/n*100):.1f}%" if n else "—"
+                st.dataframe(pd.DataFrame([{
+                    "Flagged": len(wl_rows),
+                    "Settled": n,
+                    "Hits": wl_hits,
+                    "Hit rate": rate,
+                }]), use_container_width=True, hide_index=True)
+
             if settled:
                 st.markdown('<div class="section-title">Settled bets</div>',
                             unsafe_allow_html=True)
@@ -2586,6 +2665,7 @@ def main():
                     "Segment": r.get("v7_segment"),
                     "Direction": r.get("v7_direction"),
                     "Score": f"{r.get('actual_home_goals')}-{r.get('actual_away_goals')}",
+                    "Whitelist": ("⭐" if r.get("whitelist_pass") else "—"),
                     "Result": ("✅" if r.get("v7_result_basis") == "HIT_RECORDED"
                                else "❌"),
                 } for r in settled])
@@ -2627,6 +2707,22 @@ Any of: `team_disagreement_1`, `team_disagreement_2plus`,
 
 - `home_leader` → **DC 1X**
 - `away_leader` → **DC X2**
+
+### Whitelist (informational)
+
+The `whitelist_pass` flag is true when the row is a TIER1 bet in
+one of these four segments:
+
+1. `away_leader+gap_30_plus+standard_candidate`
+2. `gap_20_29+standard_candidate+team_agreement_0`
+3. `home_leader+venue_power_pos`
+4. `f1_cap+home_leader+team_disagreement_1`
+
+with `total_gap > 20` and (`disagreements == 0` or the fourth
+segment at `disagreements == 1`).
+
+This flag does not affect the decision. It is used for
+prospective validation only.
 
 ### Settlement
 
