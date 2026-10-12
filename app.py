@@ -2213,12 +2213,11 @@ def settle_v7(sb, match_id, home_goals, away_goals):
     and misclassifying every away win as a draw. The classification is now
     an explicit three-way if/elif/else.
 
-    GUARD (2026-10-12): before writing, the function refuses to settle a
-    BET whose direction is contradicted by the score. A DC 1X bet cannot
-    be a hit on an away win, and a DC X2 bet cannot be a hit on a home
-    win. If that contradiction is detected, the write is aborted and an
-    error is returned so the caller can surface it. This catches any
-    future bug of the same class at write time.
+    A settlement guard that refused to write contradicted BETs was
+    briefly added and then removed (2026-10-12). A loss is a valid
+    outcome, not an error condition. The score is always written; the
+    outcome is always computed; the label is always derived from the
+    outcome. The classifier fix alone handles the original bug.
     """
     if sb is None:
         return False, "no client"
@@ -2262,21 +2261,7 @@ def settle_v7(sb, match_id, home_goals, away_goals):
         actual = "Draw"
     # --- END FIX ----------------------------------------------------------
 
-    # --- GUARD: refuse to settle a BET contradicted by the score ----------
-    if action == "BET":
-        if direction == "DC 1X" and actual == "Away":
-            return False, (
-                f"settlement guard: DC 1X cannot hit on an away win "
-                f"({home_goals}-{away_goals}). Refusing to write."
-            )
-        if direction == "DC X2" and actual == "Home":
-            return False, (
-                f"settlement guard: DC X2 cannot hit on a home win "
-                f"({home_goals}-{away_goals}). Refusing to write."
-            )
-    # --- END GUARD --------------------------------------------------------
-
-    # BET outcome
+    # BET outcome — a loss is a valid outcome, not an error.
     dc_hit = None
     if action == "BET":
         if direction == "DC 1X":
@@ -2293,6 +2278,11 @@ def settle_v7(sb, match_id, home_goals, away_goals):
 
     new_basis = ("HIT_RECORDED" if dc_hit else "MISS_RECORDED") \
         if action == "BET" else "NO_RECORDED_BET"
+
+    # Non-blocking log when a loss is recorded.
+    if dc_hit is False:
+        print(f"[settle] loss recorded: {match_id} "
+              f"{direction} {home_goals}-{away_goals}")
 
     payload = {
         "actual_home_goals":     home_goals,
