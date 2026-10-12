@@ -1387,8 +1387,7 @@ class SportsgamblerParser:
         return (best_name, best_goals) if best_goals >= 0 else (None, None)
 
     def _extract_top_from_keystats(self, side, kind):
-        target = self.home_team if side == "home" else self.away_team
-        if not target:
+        target = self.home_team if side == "home" else self.away_team        if not target:
             return None, None
         for item in self.soup.select(".keystat-item"):
             title_sub = item.select_one(".stats-title-sub")
@@ -2770,6 +2769,10 @@ After the match, enter the score in the Pending tab. The app writes:
 - `v7_result_basis` → `HIT_RECORDED` / `MISS_RECORDED` for BETs,
   `NO_RECORDED_BET` for SKIPs
 - `v7_settled_at`
+
+A settlement guard refuses to write a BET whose direction is
+contradicted by the score (DC 1X cannot hit on an away win;
+DC X2 cannot hit on a home win).
 
 ### Rule version
 
