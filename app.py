@@ -2206,6 +2206,19 @@ def settle_v7(sb, match_id, home_goals, away_goals):
     v7_counterfactual_won is written for both BET and SKIP rows, so the
     outcome of the rule's counterfactual call is recorded even when no
     bet was placed.
+
+    FIX (2026-10-12): the original ``actual`` expression duplicated the
+    home-win condition (``away_goals < home_goals`` is logically identical
+    to ``home_goals > away_goals``), making the "Away" branch unreachable
+    and misclassifying every away win as a draw. The classification is now
+    an explicit three-way if/elif/else.
+
+    GUARD (2026-10-12): before writing, the function refuses to settle a
+    BET whose direction is contradicted by the score. A DC 1X bet cannot
+    be a hit on an away win, and a DC X2 bet cannot be a hit on a home
+    win. If that contradiction is detected, the write is aborted and an
+    error is returned so the caller can surface it. This catches any
+    future bug of the same class at write time.
     """
     if sb is None:
         return False, "no client"
@@ -2235,9 +2248,33 @@ def settle_v7(sb, match_id, home_goals, away_goals):
     if result_bs not in ("RECORDED_PENDING", "NO_RECORDED_BET"):
         return False, f"row is not settleable (result_basis={result_bs!r})"
 
-    actual = ("Home" if home_goals > away_goals
-              else "Away" if away_goals < home_goals
-              else "Draw")
+    # --- FIX: explicit three-way classification ---------------------------
+    # The original code was:
+    #     actual = ("Home" if home_goals > away_goals
+    #               else "Away" if away_goals < home_goals
+    #               else "Draw")
+    # The second condition duplicated the first, so "Away" was unreachable.
+    if home_goals > away_goals:
+        actual = "Home"
+    elif away_goals > home_goals:
+        actual = "Away"
+    else:
+        actual = "Draw"
+    # --- END FIX ----------------------------------------------------------
+
+    # --- GUARD: refuse to settle a BET contradicted by the score ----------
+    if action == "BET":
+        if direction == "DC 1X" and actual == "Away":
+            return False, (
+                f"settlement guard: DC 1X cannot hit on an away win "
+                f"({home_goals}-{away_goals}). Refusing to write."
+            )
+        if direction == "DC X2" and actual == "Home":
+            return False, (
+                f"settlement guard: DC X2 cannot hit on a home win "
+                f"({home_goals}-{away_goals}). Refusing to write."
+            )
+    # --- END GUARD --------------------------------------------------------
 
     # BET outcome
     dc_hit = None
