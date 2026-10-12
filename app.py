@@ -1387,7 +1387,8 @@ class SportsgamblerParser:
         return (best_name, best_goals) if best_goals >= 0 else (None, None)
 
     def _extract_top_from_keystats(self, side, kind):
-        target = self.home_team if side == "home" else self.away_team        if not target:
+        target = self.home_team if side == "home" else self.away_team
+        if not target:
             return None, None
         for item in self.soup.select(".keystat-item"):
             title_sub = item.select_one(".stats-title-sub")
