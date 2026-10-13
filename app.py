@@ -1,30 +1,33 @@
 """
-Sportcreed — v7.0 (frozen 2026-10-11).
+Sportcreed — v7.0 (frozen 2026-10-11) + ROBUST_POS_v1 (parallel).
 
 Decision logic:
-  Tier 1 fires first (seven clauses, first match wins).
-  Tier 2 fires if Tier 1 did not.
-  Tier 3 fires if Tier 1 and Tier 2 did not.
-  Otherwise SKIP.
+  v7 runs on every parse (unchanged, frozen).
+  ROBUST_POS_v1 runs in parallel on every parse, writing 0-2 extra rows
+  on fixtures where disagreements==0 and pos_diff>=5.
 
-Row gates (applied before any tier check):
+Row gates (v7, applied before any tier check):
   parse_status == 'ok' (case-insensitive)
   Exactly one of {home_leader, away_leader} present in tags (XOR)
 
-Direction: home_leader -> DC 1X, away_leader -> DC X2.
+Row gates (ROBUST_POS_v1, applied inside decide_robust_pos):
+  disagreements == 0
+  away_pos, home_pos present
+  f1_leader in {home, away}
+  pos_diff = away_pos - home_pos >= threshold (5 or 10)
 
-Counterfactual: equals the bet direction on BET rows; equals the
-direction derived from the leader on SKIP/no_segment_fired rows;
-NULL on parse-fail and no-leader rows.
+Direction (both rules): home_leader -> DC 1X, away_leader -> DC X2.
 
-Whitelist: informational flag computed on every classification.
-  True when the row is a TIER1 bet in one of the four clean segments,
-  with total_gap > 20 and (disagreements == 0 or the
-  f1_cap+home_leader+team_disagreement_1 clause at == 1).
-  Does NOT affect the decision. Used for prospective validation.
+ROBUST_POS_v1 clock:
+  predicted_at is written by the tool at decide() time, before network.
+  assert_pending enforces predicted_at IS NOT NULL AND < kickoff_utc.
+  Rows without predicted_at are pre-guard and never counted.
+  Retrospective: NOT AVAILABLE (created_at is ingestion, not prediction).
 
-Persistence: nine v7_* columns plus rule_version and whitelist_pass
-on matches_raw, written at parse time and updated at settlement time.
+Persistence: all on matches_raw. No new tables.
+  v7 rows: rule_version='v7.0-2026-10-11', threshold IS NULL.
+  ROBUST rows: rule_version='ROBUST_POS{n}_v1', threshold IN (5, 10).
+  Unique index: (match_date, home_team, away_team, COALESCE(threshold,0)).
 """
 
 import concurrent.futures
@@ -33,7 +36,7 @@ import math
 import re
 import sys
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -136,6 +139,75 @@ WHITELIST_SEGMENTS = (
     "home_leader+venue_power_pos",
     "f1_cap+home_leader+team_disagreement_1",
 )
+
+# ---------------------------------------------------------------------------
+# ROBUST_POS_v1 — parallel rule, separate clock from v7
+# ---------------------------------------------------------------------------
+ROBUST_THRESHOLDS = (5, 10)
+ROBUST_RULE_PREFIX = "ROBUST_POS"
+
+
+# ============================================================================
+# ROBUST_POS_v1 HELPERS
+# ============================================================================
+
+def assert_pending(df):
+    """
+    Guard for the live path. Raises if the frame contains:
+      - a settled row
+      - a NULL predicted_at
+      - a predicted_at at or after kickoff_utc
+    """
+    if df is None or df.empty:
+        return True
+    if 'actual_home_goals' not in df.columns:
+        raise ValueError("assert_pending: missing actual_home_goals")
+    if df['actual_home_goals'].notna().any():
+        n = int(df['actual_home_goals'].notna().sum())
+        raise ValueError(f"assert_pending: {n} settled row(s)")
+    if 'predicted_at' not in df.columns:
+        raise ValueError("assert_pending: missing predicted_at")
+    if df['predicted_at'].isna().any():
+        n = int(df['predicted_at'].isna().sum())
+        raise ValueError(f"assert_pending: {n} row(s) with NULL predicted_at")
+    p = pd.to_datetime(df['predicted_at'], utc=True, errors='coerce')
+    k = pd.to_datetime(df['kickoff_utc'], utc=True, errors='coerce')
+    bad = p.isna() | k.isna() | (p >= k)
+    if bad.any():
+        raise ValueError(f"assert_pending: {int(bad.sum())} row(s) predicted_at >= kickoff_utc")
+    return True
+
+
+def _robust_dc_hit(row):
+    """Leader-aware DC hit. Independent of v7_dc_hit."""
+    leader = row.get('f1_leader')
+    hg = row.get('actual_home_goals')
+    ag = row.get('actual_away_goals')
+    if pd.isna(hg) or pd.isna(ag):
+        return None
+    if leader == 'home':
+        return bool(hg >= ag)
+    if leader == 'away':
+        return bool(ag >= hg)
+    return None
+
+
+def wilson_lower(p, n, z=1.96):
+    if n == 0:
+        return 0.0
+    denom = 1 + z*z/n
+    centre = (p + z*z/(2*n)) / denom
+    delta = z * math.sqrt(p*(1-p)/n + z*z/(4*n*n)) / denom
+    return max(0.0, centre - delta)
+
+
+def wilson_upper(p, n, z=1.96):
+    if n == 0:
+        return 1.0
+    denom = 1 + z*z/n
+    centre = (p + z*z/(2*n)) / denom
+    delta = z * math.sqrt(p*(1-p)/n + z*z/(4*n*n)) / denom
+    return min(1.0, centre + delta)
 
 
 # ============================================================================
@@ -255,6 +327,51 @@ def decide_v7(tags, parse_status):
     # SKIP with counterfactual derived from the leader.
     return _skip("no_segment_fired", "NOT_APPLICABLE",
                  counterfactual=direction)
+
+
+def decide_robust_pos(row, captured_at=None):
+    """
+    ROBUST_POS_v1. Pure function. Reads only:
+      away_pos, home_pos, disagreements, f1_leader
+    Returns a list of 0, 1, or 2 candidate dicts — one per
+    threshold arm the row qualifies for.
+
+    predicted_at is captured ONCE per call and reused for both
+    arms, so the two rows on the same fixture carry the same
+    timestamp. The caller must not rebuild the payload on retry;
+    reuse the returned dict.
+    """
+    if captured_at is None:
+        captured_at = datetime.now(timezone.utc)
+
+    away_pos = row.get('away_pos')
+    home_pos = row.get('home_pos')
+    disagreements = row.get('disagreements')
+    f1_leader = row.get('f1_leader')
+
+    if disagreements is None or int(disagreements) != 0:
+        return []
+    if away_pos is None or home_pos is None:
+        return []
+    if f1_leader not in ('home', 'away'):
+        return []
+
+    pos_diff = int(away_pos) - int(home_pos)
+    prediction = 'DC 1X' if f1_leader == 'home' else 'DC X2'
+
+    out = []
+    for thr in ROBUST_THRESHOLDS:
+        if pos_diff >= thr:
+            out.append({
+                'rule_version': f'{ROBUST_RULE_PREFIX}{thr}_v1',
+                'threshold':    thr,
+                'pos_diff':     pos_diff,
+                'prediction':   prediction,
+                'f1_leader':    f1_leader,
+                'disagreements': 0,
+                'predicted_at': captured_at.isoformat(),
+            })
+    return out
 
 
 def _whitelist_pass(base):
@@ -564,6 +681,42 @@ def render_debug_tab(sb):
         except Exception as e:
             st.error(f"Query failed: {e}")
 
+    st.markdown('<div class="section-title">6b. ROBUST_POS_v1 stored state</div>',
+                unsafe_allow_html=True)
+    st.caption("Row counts by rule_version for ROBUST rows.")
+    if st.button("📊 Show ROBUST counts", key="debug_robust_counts"):
+        try:
+            resp = (sb.table("matches_raw")
+                    .select("rule_version, threshold, prediction, "
+                            "pos_diff, predicted_at, actual_home_goals")
+                    .like("rule_version", f"{ROBUST_RULE_PREFIX}%")
+                    .execute())
+            rows = resp.data or []
+            if not rows:
+                st.info("No ROBUST rows found.")
+            else:
+                from collections import Counter
+                c = Counter((r.get("rule_version"),
+                             r.get("threshold"),
+                             r.get("prediction"))
+                            for r in rows)
+                df = pd.DataFrame(
+                    [{"rule_version": k[0], "threshold": k[1],
+                      "prediction": k[2], "n": v}
+                     for k, v in sorted(c.items(), key=lambda x: -x[1])]
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                n_pre = sum(1 for r in rows if r.get("predicted_at") is None)
+                n_settled = sum(1 for r in rows
+                                if r.get("actual_home_goals") is not None)
+                st.caption(
+                    f"Total {len(rows)} ROBUST rows. "
+                    f"{n_pre} with NULL predicted_at (pre-guard, never counted). "
+                    f"{n_settled} settled."
+                )
+        except Exception as e:
+            st.error(f"Query failed: {e}")
+
     st.markdown('<div class="section-title">7. Test insert / cleanup</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
@@ -650,7 +803,7 @@ KEYSTATS_PRIORITY_FIELDS = {
 
 
 MATCHES_RAW_COLUMNS = {
-    "id", "created_at", "settled_at",
+    "id", "created_at", "predicted_at", "settled_at",
     "match_date", "kickoff_utc", "kickoff_local",
     "league_name", "tier", "group_name", "season",
     "home_team", "away_team", "venue", "stage", "round", "parse_status",
@@ -733,6 +886,10 @@ MATCHES_RAW_COLUMNS = {
     "rule_version",
     # informational whitelist flag
     "whitelist_pass",
+    # ROBUST_POS_v1 columns
+    "threshold",
+    "prediction",
+    "pos_diff",
 }
 
 
@@ -2300,6 +2457,60 @@ def settle_v7(sb, match_id, home_goals, away_goals):
         return False, str(e)
 
 
+def settle_robust(sb, match_id, home_goals, away_goals):
+    """
+    Settle a ROBUST_POS_v1 row. Mirrors settle_v7 semantics but does
+    not touch v7_* columns. Idempotent on already-settled rows.
+    """
+    if sb is None:
+        return False, "no client"
+    try:
+        resp = (sb.table("matches_raw")
+                .select("rule_version, prediction, predicted_at, actual_home_goals")
+                .eq("id", match_id)
+                .limit(1)
+                .execute())
+    except Exception as e:
+        return False, f"read failed: {e}"
+    if not resp.data:
+        return False, f"no row with id={match_id}"
+
+    r = resp.data[0]
+    rv = r.get("rule_version") or ""
+    if not rv.startswith(ROBUST_RULE_PREFIX):
+        return False, f"row is not ROBUST ({rv!r})"
+    if r.get("predicted_at") is None:
+        return False, "row has NULL predicted_at — not settleable"
+    if r.get("actual_home_goals") is not None:
+        return False, "row already settled"
+
+    if home_goals > away_goals:
+        actual = "Home"
+    elif away_goals > home_goals:
+        actual = "Away"
+    else:
+        actual = "Draw"
+
+    pred = r.get("prediction")
+    hit = None
+    if pred == "DC 1X":
+        hit = actual in ("Home", "Draw")
+    elif pred == "DC X2":
+        hit = actual in ("Away", "Draw")
+
+    payload = {
+        "actual_home_goals": home_goals,
+        "actual_away_goals": away_goals,
+        "settled_at": datetime.now(timezone.utc).isoformat(),
+        "is_correct_1x2": hit,
+    }
+    try:
+        sb.table("matches_raw").update(payload).eq("id", match_id).execute()
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
 # ============================================================================
 # DB HELPERS
 # ============================================================================
@@ -2341,8 +2552,10 @@ def upsert_match(sb, record):
         for f in ["home_xi", "away_xi"]:
             if f in clean and clean[f] is None:
                 clean[f] = []
+        # Rule-aware conflict key: v7 rows have threshold=NULL (COALESCE->0),
+        # ROBUST rows carry 5 or 10. Two arms on one fixture are distinct.
         resp = sb.table("matches_raw").upsert(
-            clean, on_conflict="match_date,home_team,away_team"
+            clean, on_conflict="match_date,home_team,away_team,threshold"
         ).execute()
         return True, (resp.data[0] if resp.data else None)
     except Exception as e:
@@ -2393,6 +2606,75 @@ def load_all(sb, timeout_seconds=15):
         except Exception as e:
             st.error(f"Load failed: {e}")
             return []
+
+
+def load_view(sb, view_name, timeout_seconds=15):
+    if sb is None:
+        return pd.DataFrame()
+    def _fetch():
+        return sb.table(view_name).select("*").execute()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_fetch)
+            resp = fut.result(timeout=timeout_seconds)
+        rows = resp.data or []
+        return pd.DataFrame(rows)
+    except Exception as e:
+        print(f"[load_view:{view_name}] {e}", file=sys.stderr)
+        return pd.DataFrame()
+
+
+def compute_rule_stats(df_settled):
+    """
+    Dynamic stats. No hardcoded counts. Called with rows from
+    v_prospective_settled only.
+    """
+    if df_settled is None or df_settled.empty:
+        return {}
+
+    required = {'predicted_at', 'kickoff_utc', 'actual_home_goals',
+                'actual_away_goals', 'f1_leader', 'disagreements',
+                'away_pos', 'home_pos', 'threshold', 'rule_version'}
+    missing = required - set(df_settled.columns)
+    if missing:
+        raise ValueError(f"compute_rule_stats: missing {sorted(missing)}")
+
+    if df_settled['actual_home_goals'].isna().any():
+        raise ValueError("compute_rule_stats: unsettled row in settled frame")
+    if df_settled['predicted_at'].isna().any():
+        raise ValueError("compute_rule_stats: NULL predicted_at")
+    p = pd.to_datetime(df_settled['predicted_at'], utc=True, errors='coerce')
+    k = pd.to_datetime(df_settled['kickoff_utc'], utc=True, errors='coerce')
+    if (p.isna() | k.isna() | (p >= k)).any():
+        raise ValueError("compute_rule_stats: predicted_at >= kickoff_utc")
+
+    df = df_settled.copy()
+    df = df[df['rule_version'].astype(str).str.startswith(ROBUST_RULE_PREFIX)]
+    if df.empty:
+        return {}
+
+    df['pos_diff'] = df['away_pos'] - df['home_pos']
+    df['dc_hit'] = df.apply(_robust_dc_hit, axis=1)
+    df = df[df['dc_hit'].notna()].copy()
+
+    out = {}
+    for thr in ROBUST_THRESHOLDS:
+        arm = df[(df['disagreements'] == 0) & (df['pos_diff'] >= thr)]
+        n = len(arm)
+        hits = int(arm['dc_hit'].sum()) if n else 0
+        rate = hits / n if n else 0.0
+        out[f'POS{thr}'] = {
+            'n':     n,
+            'hits':  hits,
+            'rate':  rate,
+            'lower': wilson_lower(rate, n),
+            'upper': wilson_upper(rate, n),
+        }
+        for direction in ('home', 'away'):
+            d = arm[arm['f1_leader'] == direction]
+            out[f'POS{thr}'][f'{direction}_n'] = len(d)
+            out[f'POS{thr}'][f'{direction}_hits'] = int(d['dc_hit'].sum()) if len(d) else 0
+    return out
 
 
 # ============================================================================
@@ -2552,6 +2834,42 @@ def main():
                     else:
                         save_msg = row if isinstance(row, str) else "unknown error"
 
+                # ---- ROBUST_POS_v1 parallel write --------------------------------
+                robust_cands = decide_robust_pos(parsed)
+                robust_saved = []
+                robust_errors = []
+                for cand in robust_cands:
+                    payload = {
+                        "match_date":  parsed.get("match_date"),
+                        "kickoff_utc": parsed.get("kickoff_utc"),
+                        "league_name": parsed.get("league_name") or "Unknown",
+                        "home_team":   parsed.get("home_team"),
+                        "away_team":   parsed.get("away_team"),
+                        "venue":       parsed.get("venue"),
+                        "parse_status": parsed.get("parse_status"),
+                        "home_pos":    parsed.get("home_pos"),
+                        "away_pos":    parsed.get("away_pos"),
+                        "home_points": parsed.get("home_points"),
+                        "away_points": parsed.get("away_points"),
+                        "home_played": parsed.get("home_played"),
+                        "away_played": parsed.get("away_played"),
+                        "home_gd":     parsed.get("home_gd"),
+                        "away_gd":     parsed.get("away_gd"),
+                        "disagreements": cand["disagreements"],
+                        "f1_leader":   cand["f1_leader"],
+                        "rule_version": cand["rule_version"],
+                        "threshold":   cand["threshold"],
+                        "pos_diff":    cand["pos_diff"],
+                        "prediction":  cand["prediction"],
+                        "predicted_at": cand["predicted_at"],
+                        "created_at":  datetime.now(timezone.utc).isoformat(),
+                    }
+                    ok_r, info_r = upsert_match(sb, payload)
+                    if ok_r:
+                        robust_saved.append(cand["rule_version"])
+                    else:
+                        robust_errors.append(f"{cand['rule_version']}: {info_r}")
+
                 st.markdown("---")
                 st.markdown(f"""
                 <div class="team-header">
@@ -2575,6 +2893,19 @@ def main():
                 render_verdict_v7(result)
                 render_ou_verdict(result)
 
+                if robust_cands:
+                    st.markdown("### ROBUST_POS_v1 candidates")
+                    for c in robust_cands:
+                        st.write(
+                            f"- **{c['rule_version']}** · pos_diff={c['pos_diff']} · "
+                            f"leader={c['f1_leader']} · pick=**{c['prediction']}** · "
+                            f"logged {c['predicted_at'][:19]}Z"
+                        )
+                    if robust_errors:
+                        st.warning("ROBUST save issues: " + " | ".join(robust_errors))
+                else:
+                    st.caption("ROBUST_POS_v1: no candidate (disagreements != 0, or pos_diff < 5).")
+
                 with st.expander("Factor breakdown", expanded=False):
                     render_factor_row("F1 Table Power", result["f1_home"], result["f1_away"], "(18)")
                     render_factor_row("F2 Current Form", result["f2_home"], result["f2_away"], "(25)")
@@ -2590,8 +2921,47 @@ def main():
 
     with tabs[1]:
         st.subheader("⏳ Pending Matches")
-        with st.spinner("Loading..."):
-            rows = load_all(sb)
+
+        rows = load_all(sb)
+
+        # --- ROBUST_POS_v1 pending ---------------------------------------
+        st.markdown("### ROBUST_POS_v1 candidates")
+        robust_pending = [
+            r for r in rows
+            if r.get("actual_home_goals") is None
+            and (r.get("rule_version") or "").startswith(ROBUST_RULE_PREFIX)
+        ]
+        if not robust_pending:
+            st.caption("No pending ROBUST candidates.")
+        else:
+            for r in robust_pending:
+                mid = r["id"]
+                rv = r.get("rule_version")
+                pdiff = r.get("pos_diff")
+                pred = r.get("prediction")
+                logged = (r.get("predicted_at") or "")[:19]
+                header = (f"{r.get('match_date','')} · "
+                          f"{r.get('home_team','')} vs {r.get('away_team','')} · "
+                          f"{rv} · {pred} · pos_diff={pdiff}")
+                with st.expander(header):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Rule", rv)
+                    c2.metric("Pick", pred or "—")
+                    c3.metric("pos_diff", pdiff if pdiff is not None else "—")
+                    st.caption(f"Logged {logged}Z · league {r.get('league_name','—')}")
+                    hg_col, ag_col, btn_col = st.columns([1, 1, 2])
+                    hg = hg_col.number_input("Home", 0, 15, 0, key=f"rhg_{mid}")
+                    ag = ag_col.number_input("Away", 0, 15, 0, key=f"rag_{mid}")
+                    if btn_col.button("📝 Save", key=f"rsave_{mid}"):
+                        ok_r, msg_r = settle_robust(sb, mid, hg, ag)
+                        if ok_r:
+                            st.success("Recorded.")
+                            st.rerun()
+                        else:
+                            st.error(msg_r)
+
+        # --- v7 pending ---------------------------------------------------
+        st.markdown("### v7 pending")
         pending = [r for r in rows
                    if r.get("actual_home_goals") is None
                    and r.get("v7_tier") is not None]
@@ -2630,6 +3000,49 @@ def main():
 
     with tabs[2]:
         st.subheader("📊 Performance")
+
+        # --- ROBUST_POS_v1 prospective ------------------------------------
+        st.markdown("### ROBUST_POS_v1 — prospective")
+        settled_df = load_view(sb, "v_prospective_settled")
+        if settled_df.empty:
+            st.info(
+                "No settled ROBUST rows yet. The clock starts at the first "
+                "row with predicted_at populated and actual_home_goals non-NULL. "
+                "Rows without predicted_at are pre-guard and never counted."
+            )
+        else:
+            try:
+                stats = compute_rule_stats(settled_df)
+            except ValueError as e:
+                st.error(f"ROBUST stats guard failed: {e}")
+                stats = {}
+
+            if stats:
+                rows_out = []
+                for arm in ("POS5", "POS10"):
+                    if arm not in stats:
+                        continue
+                    s = stats[arm]
+                    rows_out.append({
+                        "Arm": arm,
+                        "n": s["n"],
+                        "hits": s["hits"],
+                        "rate": f"{s['rate']*100:.1f}%" if s["n"] else "—",
+                        "lower": f"{s['lower']*100:.1f}%" if s["n"] else "—",
+                        "upper": f"{s['upper']*100:.1f}%" if s["n"] else "—",
+                        "home n": s.get("home_n", 0),
+                        "away n": s.get("away_n", 0),
+                    })
+                st.dataframe(pd.DataFrame(rows_out),
+                             use_container_width=True, hide_index=True)
+                st.caption(
+                    "Counts grow with matches_raw. No hardcoded rates. "
+                    "Evaluation at 200+ settled per arm per the contract."
+                )
+
+        st.markdown("---")
+        st.markdown("### v7 — historical")
+
         with st.spinner("Loading..."):
             rows = load_all(sb)
 
@@ -2663,7 +3076,6 @@ def main():
             st.dataframe(pd.DataFrame(summary),
                          use_container_width=True, hide_index=True)
 
-            # Whitelist performance
             wl_rows = [r for r in v7_rows if r.get("whitelist_pass") is True]
             wl_settled = [r for r in wl_rows
                           if r.get("v7_result_basis") in
@@ -2770,6 +3182,33 @@ DC X2 cannot hit on a home win).
 Every classification is stamped with `rule_version = 'v7.0-2026-10-11'`.
 The rule definitions for this version are stored in `model_logic_rules`.
 Any future rule change must bump the version and insert a new row.
+
+---
+
+## ROBUST_POS_v1 — parallel rule (prospective only)
+
+**Status:** running in parallel with v7. Separate clock, separate rows.
+
+**Rule:**
+- `disagreements == 0`
+- `pos_diff = away_pos - home_pos >= threshold`
+- direction from `f1_leader`: `home -> DC 1X`, `away -> DC X2`
+- `predicted_at` written by the tool at decision time, before network
+- `predicted_at < kickoff_utc` enforced by `assert_pending`
+
+**Arms:** threshold = 5 and threshold = 10, logged in parallel on every
+qualifying fixture. Both rows carry the same `predicted_at`.
+
+**Retrospective:** NOT AVAILABLE. `created_at` on this table is an
+ingestion timestamp, not a prediction timestamp. Every earlier
+percentage computed from it is retracted.
+
+**Clock:** starts at the first settled row with `predicted_at`
+populated. Rows with `predicted_at IS NULL` are excluded permanently.
+Evaluation at 200+ settled per arm.
+
+**Reference:** the full contract lives in `ROBUST_POS_v1_CONTRACT.txt`,
+committed to the repo.
         """)
 
     with tabs[4]:
