@@ -3,12 +3,12 @@ Underking — manual input prediction tool.
 
 You enter the match data by hand.
 The app applies the rule and writes one row to Supabase.
+After the match, you enter the final score to settle the row.
 
 No parser. No scrapers. No factor layer. No tag engine.
-Just: input → rule → save → display.
+Just: input → rule → save → display → settle.
 """
 
-import sys
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -22,26 +22,20 @@ st.set_page_config(
 
 
 # ============================================================================
-# RULE — the only logic that survived the strip
+# RULE
 # ============================================================================
-# Replace this function body with whatever rule you want Underking to apply.
-# Input: a dict of the fields you typed in.
-# Output: a dict with pick, direction, stake, and reason.
-#
-# The rest of the app doesn't care what the rule does. It just stores the
-# return value alongside your inputs.
 
 def decide(row):
     """
-    Placeholder rule. Swap this out for the real one.
+    Replace this function body with whatever rule you want.
 
-    Expected return shape:
+    Returns:
       {
         "pick":        "bet" | "pass",
         "direction":   "DC 1X" | "DC X2" | None,
         "stake_class": "FULL" | "STANDARD" | "REDUCED" | "NONE",
         "stake":       float,
-        "segment":     str,   # short label describing why
+        "segment":     str,
       }
     """
     home_ppg = row["home_points"] / max(row["home_played"], 1)
@@ -87,7 +81,7 @@ def save_row(sb, payload):
         return False, str(e)
 
 
-def load_rows(sb, limit=100):
+def load_rows(sb, limit=200):
     try:
         resp = (
             sb.table("underking_log")
@@ -100,6 +94,101 @@ def load_rows(sb, limit=100):
     except Exception as e:
         st.error(f"Load failed: {e}")
         return []
+
+
+def load_pending(sb, limit=500):
+    """Rows that have a pick but no score yet."""
+    try:
+        resp = (
+            sb.table("underking_log")
+            .select("*")
+            .is_("home_score", "null")
+            .order("match_date", desc=False)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        st.error(f"Load pending failed: {e}")
+        return []
+
+
+def load_settled(sb, limit=200):
+    """Rows that have a score recorded."""
+    try:
+        resp = (
+            sb.table("underking_log")
+            .select("*")
+            .not_.is_("home_score", "null")
+            .order("match_date", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        st.error(f"Load settled failed: {e}")
+        return []
+
+
+def settle_row(sb, row_id, home_score, away_score):
+    """
+    Write the final score to an existing row.
+
+    Only touches: home_score, away_score, result, hit.
+    Never touches pre-match fields (points, odds, pick, etc.).
+
+    If pick == 'pass', hit is left NULL — no bet was placed,
+    so there is nothing to hit or miss.
+    """
+    # Three-way result
+    if home_score > away_score:
+        result = "home"
+    elif away_score > home_score:
+        result = "away"
+    else:
+        result = "draw"
+
+    # Read the row first to compute `hit` correctly
+    try:
+        resp = (
+            sb.table("underking_log")
+            .select("pick, direction")
+            .eq("id", row_id)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return False, f"no row with id={row_id}"
+        existing = resp.data[0]
+    except Exception as e:
+        return False, f"read failed: {e}"
+
+    pick = existing.get("pick")
+    direction = existing.get("direction")
+
+    # `hit` is only meaningful if a bet was placed
+    if pick == "bet":
+        if direction == "DC 1X":
+            hit = result in ("home", "draw")
+        elif direction == "DC X2":
+            hit = result in ("away", "draw")
+        else:
+            hit = None
+    else:
+        hit = None   # pass rows are neither hit nor miss
+
+    payload = {
+        "home_score": home_score,
+        "away_score": away_score,
+        "result":     result,
+        "hit":        hit,
+    }
+
+    try:
+        sb.table("underking_log").update(payload).eq("id", row_id).execute()
+        return True, payload
+    except Exception as e:
+        return False, str(e)
 
 
 # ============================================================================
@@ -115,7 +204,9 @@ def main():
         st.error(f"Supabase client failed: {err}")
         return
 
-    tab_input, tab_log = st.tabs(["🎯 Predict", "📜 Log"])
+    tab_input, tab_settle, tab_log = st.tabs(
+        ["🎯 Predict", "📝 Settle", "📜 Log"]
+    )
 
     # ------------------------------------------------------------------
     # PREDICT
@@ -184,7 +275,6 @@ def main():
                     "created_at":   datetime.now(timezone.utc).isoformat(),
                 }
 
-                # Display
                 if pick["pick"] == "bet":
                     st.success(
                         f"**{pick['direction']}** · {pick['stake']}u "
@@ -193,7 +283,6 @@ def main():
                 else:
                     st.info(f"**PASS** · `{pick['segment']}`")
 
-                # Save
                 ok, result = save_row(sb, payload)
                 if ok:
                     st.caption(f"Logged row id = {result.get('id')}")
@@ -201,28 +290,90 @@ def main():
                     st.error(f"Save failed: {result}")
 
     # ------------------------------------------------------------------
+    # SETTLE
+    # ------------------------------------------------------------------
+    with tab_settle:
+        st.subheader("Enter final scores")
+        st.caption(
+            "Only home_score, away_score, result, and hit are written. "
+            "Pre-match data is never touched."
+        )
+
+        pending = load_pending(sb)
+
+        if not pending:
+            st.success("No pending matches.")
+        else:
+            for r in pending:
+                row_id = r["id"]
+                tier_label = r.get("pick", "?").upper()
+                direction = r.get("direction") or "—"
+                header = (
+                    f"#{row_id} · {r.get('match_date','')} · "
+                    f"{r.get('home_team','')} vs {r.get('away_team','')} · "
+                    f"{tier_label} · {direction}"
+                )
+                with st.expander(header):
+                    c1, c2 = st.columns(2)
+                    c1.metric("Pick", tier_label)
+                    c2.metric("Direction", direction)
+
+                    st.caption(
+                        f"Segment: `{r.get('segment') or '—'}`  ·  "
+                        f"Stake: {r.get('stake', 0)}u"
+                    )
+
+                    hg = c1.number_input(
+                        "Home score", 0, 20, 0, key=f"hg_{row_id}"
+                    )
+                    ag = c2.number_input(
+                        "Away score", 0, 20, 0, key=f"ag_{row_id}"
+                    )
+
+                    if st.button("📝 Save result", key=f"settle_{row_id}"):
+                        ok, info = settle_row(sb, row_id, hg, ag)
+                        if ok:
+                            st.success(
+                                f"Saved: {hg}-{ag} · result={info['result']} · "
+                                f"hit={info['hit']}"
+                            )
+                            st.rerun()
+                        else:
+                            st.error(info)
+
+    # ------------------------------------------------------------------
     # LOG
     # ------------------------------------------------------------------
     with tab_log:
-        st.subheader("Recent predictions")
-        rows = load_rows(sb, limit=200)
+        st.subheader("All predictions")
+
+        rows = load_rows(sb, limit=500)
         if not rows:
             st.info("Nothing logged yet.")
         else:
             df = pd.DataFrame(rows)
+
             keep = [
-                "created_at", "match_date", "league",
+                "id", "created_at", "match_date", "league",
                 "home_team", "away_team",
                 "home_odds", "draw_odds", "away_odds",
                 "pick", "direction", "stake", "segment",
+                "home_score", "away_score", "result", "hit",
             ]
             cols = [c for c in keep if c in df.columns]
             st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
-        st.caption(
-            "Enter the final score directly in Supabase to settle, or add a "
-            "settlement form later."
-        )
+            settled = [r for r in rows if r.get("home_score") is not None]
+            bets = [r for r in settled if r.get("pick") == "bet"]
+            hits = [r for r in bets if r.get("hit") is True]
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Settled rows", len(settled))
+            c2.metric("Bets placed", len(bets))
+            c3.metric(
+                "Hit rate",
+                f"{len(hits) / len(bets) * 100:.1f}%" if bets else "—",
+            )
 
 
 main()
