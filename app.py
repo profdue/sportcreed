@@ -281,7 +281,9 @@ def build_acca(candidates_df,
                max_legs=5):
     """
     Accumulated DCs from a candidate frame. Distinct leagues enforced
-    unconditionally. Returns list of acca dicts, best first.
+    unconditionally. NULL league names treated as a single sentinel so
+    they cannot co-occur in one acca. Returns list of acca dicts,
+    best first, no overlapping legs across returned accas.
     """
     if candidates_df is None or candidates_df.empty:
         return []
@@ -314,7 +316,7 @@ def build_acca(candidates_df,
             if idx in used_legs:
                 continue
             row = df.iloc[idx]
-            league = row['league_name']
+            league = row.get('league_name') or "__unknown__"
             if league in used_leagues:
                 continue
 
@@ -2879,6 +2881,17 @@ def render_acca_tab(sb):
         )
         return
 
+    # Derive display pick from f1_leader when the row's own
+    # `prediction` column is NULL (v7 rows).
+    priced["prediction"] = priced.apply(
+        lambda r: r.get("prediction") or (
+            "DC 1X" if r.get("f1_leader") == "home"
+            else "DC X2" if r.get("f1_leader") == "away"
+            else None
+        ),
+        axis=1,
+    )
+
     before_pos = len(priced)
     priced = priced.dropna(subset=["home_pos", "away_pos"]).copy()
     dropped_pos = before_pos - len(priced)
@@ -3384,6 +3397,9 @@ Two acca targets:
 Legs without a valid DC price (`odds.dc_1x` for home leaders,
 `odds.dc_x2` for away leaders) are excluded — no price, no combined odds.
 Rows without a known leader are excluded for the same reason.
+
+Display shows the pick (`DC 1X` / `DC X2`) derived from `f1_leader` when
+the row does not carry a `prediction` column value.
 
 Accas are recomputed on every load, not persisted.
         """)
