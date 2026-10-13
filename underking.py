@@ -24,39 +24,94 @@ st.set_page_config(
 # ============================================================================
 # RULE
 # ============================================================================
+# Bet the table leader only when the market favours the other team.
+#
+# "Table leader" = the team with higher points-per-game.
+# "Market favourite" = the team with the shorter 1X2 price (home vs away).
+#
+# The rule passes on:
+#   - missing inputs
+#   - zero games played
+#   - invalid odds (<= 1.0)
+#   - equal PPG (no leader)
+#   - PPG gap below PPG_GAP_MIN
+#   - equal team odds (no market favourite)
+#   - table leader == market favourite (no disagreement)
+#
+# The rule fires when:
+#   - table leader != market favourite
+#
+# Direction:
+#   home_leader -> DC 1X
+#   away_leader -> DC X2
+
+PPG_GAP_MIN = 0.0   # set > 0 to require a minimum quality gap
+
+
+def _pass(segment):
+    return {
+        "pick":        "pass",
+        "direction":   None,
+        "stake_class": "NONE",
+        "stake":       0.0,
+        "segment":     segment,
+    }
+
+
+def _bet(direction):
+    return {
+        "pick":        "bet",
+        "direction":   direction,
+        "stake_class": "STANDARD",
+        "stake":       1.0,
+        "segment":     "table_leader_is_market_underdog",
+    }
+
 
 def decide(row):
-    """
-    Replace this function body with whatever rule you want.
+    """Apply the rule. Return pick/direction/stake_class/stake/segment."""
 
-    Returns:
-      {
-        "pick":        "bet" | "pass",
-        "direction":   "DC 1X" | "DC X2" | None,
-        "stake_class": "FULL" | "STANDARD" | "REDUCED" | "NONE",
-        "stake":       float,
-        "segment":     str,
-      }
-    """
-    home_ppg = row["home_points"] / max(row["home_played"], 1)
-    away_ppg = row["away_points"] / max(row["away_played"], 1)
+    # --- validate inputs ---
+    required = [
+        "home_points", "home_played",
+        "away_points", "away_played",
+        "home_odds", "draw_odds", "away_odds",
+    ]
+    for k in required:
+        if row.get(k) is None:
+            return _pass(f"missing_{k}")
 
-    table_leader = "home" if home_ppg > away_ppg else "away"
-    market_fav = "home" if row["home_odds"] < row["away_odds"] else "away"
+    if row["home_played"] <= 0 or row["away_played"] <= 0:
+        return _pass("no_games_played")
 
-    if table_leader == market_fav:
-        return {
-            "pick": "pass", "direction": None,
-            "stake_class": "NONE", "stake": 0.0,
-            "segment": "market_and_table_agree",
-        }
+    if row["home_odds"] <= 1.0 or row["away_odds"] <= 1.0:
+        return _pass("invalid_odds")
+
+    # --- table leader ---
+    home_ppg = row["home_points"] / row["home_played"]
+    away_ppg = row["away_points"] / row["away_played"]
+    gap = home_ppg - away_ppg
+
+    if abs(gap) < 1e-9:
+        return _pass("no_table_leader")
+
+    if abs(gap) < PPG_GAP_MIN:
+        return _pass("ppg_gap_too_small")
+
+    table_leader = "home" if gap > 0 else "away"
+
+    # --- market side (shorter-priced team, home vs away) ---
+    if abs(row["home_odds"] - row["away_odds"]) < 0.01:
+        return _pass("no_market_favourite")
+
+    market_team = "home" if row["home_odds"] < row["away_odds"] else "away"
+
+    # --- signal ---
+    if table_leader == market_team:
+        return _pass("market_and_table_agree")
 
     direction = "DC 1X" if table_leader == "home" else "DC X2"
-    return {
-        "pick": "bet", "direction": direction,
-        "stake_class": "STANDARD", "stake": 1.0,
-        "segment": "table_leader_is_market_underdog",
-    }
+    return _bet(direction)
 
 
 # ============================================================================
@@ -81,7 +136,7 @@ def save_row(sb, payload):
         return False, str(e)
 
 
-def load_rows(sb, limit=200):
+def load_rows(sb, limit=500):
     try:
         resp = (
             sb.table("underking_log")
@@ -97,7 +152,7 @@ def load_rows(sb, limit=200):
 
 
 def load_pending(sb, limit=500):
-    """Rows that have a pick but no score yet."""
+    """Rows that have no score yet."""
     try:
         resp = (
             sb.table("underking_log")
@@ -113,34 +168,13 @@ def load_pending(sb, limit=500):
         return []
 
 
-def load_settled(sb, limit=200):
-    """Rows that have a score recorded."""
-    try:
-        resp = (
-            sb.table("underking_log")
-            .select("*")
-            .not_.is_("home_score", "null")
-            .order("match_date", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return resp.data or []
-    except Exception as e:
-        st.error(f"Load settled failed: {e}")
-        return []
-
-
 def settle_row(sb, row_id, home_score, away_score):
     """
     Write the final score to an existing row.
 
     Only touches: home_score, away_score, result, hit.
-    Never touches pre-match fields (points, odds, pick, etc.).
-
-    If pick == 'pass', hit is left NULL — no bet was placed,
-    so there is nothing to hit or miss.
+    Never touches pre-match fields.
     """
-    # Three-way result
     if home_score > away_score:
         result = "home"
     elif away_score > home_score:
@@ -148,7 +182,6 @@ def settle_row(sb, row_id, home_score, away_score):
     else:
         result = "draw"
 
-    # Read the row first to compute `hit` correctly
     try:
         resp = (
             sb.table("underking_log")
@@ -166,7 +199,6 @@ def settle_row(sb, row_id, home_score, away_score):
     pick = existing.get("pick")
     direction = existing.get("direction")
 
-    # `hit` is only meaningful if a bet was placed
     if pick == "bet":
         if direction == "DC 1X":
             hit = result in ("home", "draw")
@@ -244,8 +276,6 @@ def main():
         if st.button("⚙️ Generate & Save", type="primary"):
             if not home_team or not away_team:
                 st.error("Home and away team are required.")
-            elif home_played == 0 or away_played == 0:
-                st.error("Played counts must be > 0.")
             else:
                 row = {
                     "match_date":   str(match_date),
@@ -306,16 +336,16 @@ def main():
         else:
             for r in pending:
                 row_id = r["id"]
-                tier_label = r.get("pick", "?").upper()
+                pick = r.get("pick", "?")
                 direction = r.get("direction") or "—"
                 header = (
                     f"#{row_id} · {r.get('match_date','')} · "
                     f"{r.get('home_team','')} vs {r.get('away_team','')} · "
-                    f"{tier_label} · {direction}"
+                    f"{pick.upper()} · {direction}"
                 )
                 with st.expander(header):
                     c1, c2 = st.columns(2)
-                    c1.metric("Pick", tier_label)
+                    c1.metric("Pick", pick.upper())
                     c2.metric("Direction", direction)
 
                     st.caption(
