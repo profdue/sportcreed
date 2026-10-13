@@ -5,8 +5,9 @@ Decision logic:
   v7 runs on every parse (unchanged, frozen).
   ROBUST_POS_v1 runs in parallel on every parse, writing 0-2 extra rows
   on fixtures where disagreements==0 and pos_diff>=5.
-  Acca builder reads pending ROBUST rows, attaches real DC prices from
-  the odds JSON, and proposes 2-odds and 5-odds accumulators.
+  Acca builder reads the unplayed pool (actual_home_goals IS NULL AND
+  actual_away_goals IS NULL), attaches real DC prices from the odds JSON,
+  and proposes 2-odds and 5-odds accumulators.
 
 Row gates (v7, applied before any tier check):
   parse_status == 'ok' (case-insensitive)
@@ -20,21 +21,12 @@ Row gates (ROBUST_POS_v1, applied inside decide_robust_pos):
 
 Direction (both rules): home_leader -> DC 1X, away_leader -> DC X2.
 
-ROBUST_POS_v1 clock:
-  predicted_at is written by the tool at decide() time, before network.
-  assert_pending enforces predicted_at IS NOT NULL AND < kickoff_utc.
-  Rows without predicted_at are pre-guard and never counted.
-  Retrospective: NOT AVAILABLE (created_at is ingestion, not prediction).
-
 Persistence: all on matches_raw. No new tables.
   v7 rows: rule_version='v7.0-2026-10-11', threshold = 0.
   ROBUST rows: rule_version='ROBUST_POS{n}_v1', threshold IN (5, 10).
   Unique index: (match_date, home_team, away_team, threshold).
 
-Accas:
-  Recomputed on every load. Not persisted. When a leg settles, its row
-  stops being pending, and the acca it belonged to disappears from the
-  display. The prospective clock counts singles only.
+Accas: pool = unplayed. Recomputed on every load. Not persisted.
 """
 
 import concurrent.futures
@@ -148,12 +140,8 @@ F1_CAP_THRESHOLD = 16.0
 
 DECISION_VERSION = "v7-formula"
 
-# Frozen rule version identifier. Bump this string if any rule
-# definition changes, and insert a matching row into model_logic_rules.
 RULE_VERSION = "v7.0-2026-10-11"
 
-# The four TIER1 segments that constitute the whitelist. Informational
-# only — does not affect the decision.
 WHITELIST_SEGMENTS = (
     "away_leader+gap_30_plus+standard_candidate",
     "gap_20_29+standard_candidate+team_agreement_0",
@@ -162,7 +150,7 @@ WHITELIST_SEGMENTS = (
 )
 
 # ---------------------------------------------------------------------------
-# ROBUST_POS_v1 — parallel rule, separate clock from v7
+# ROBUST_POS_v1
 # ---------------------------------------------------------------------------
 ROBUST_THRESHOLDS = (5, 10)
 ROBUST_RULE_PREFIX = "ROBUST_POS"
@@ -183,16 +171,6 @@ ACCA_5_MAX_LEGS = 5
 ACCA_LEG_PRICE_MIN = 1.15
 ACCA_LEG_PRICE_MAX = 1.80
 
-# 2+ Odds Acca pool preference.
-#   "count" -> use live_10 if it has >= ACCA_2_MIN_LEGS candidates,
-#              else fall back to live_5. (Current behaviour.)
-#   "build" -> try live_10, then live_5, use whichever produces a
-#              valid acca. Falls back even if live_10 has enough
-#              legs but no band-matching combination.
-#   "both"  -> build from live_10 and, if that yields nothing, from
-#              live_5, then display both if both exist.
-ACCA_2_POOL_MODE = "count"
-
 
 # ============================================================================
 # ROBUST_POS_v1 HELPERS
@@ -200,10 +178,7 @@ ACCA_2_POOL_MODE = "count"
 
 def assert_pending(df):
     """
-    Guard for the live path. Raises if the frame contains:
-      - a settled row
-      - a NULL predicted_at
-      - a predicted_at at or after kickoff_utc
+    Guard for the live path. Raises if the frame contains a settled row.
     """
     if df is None or df.empty:
         return True
@@ -212,16 +187,6 @@ def assert_pending(df):
     if df['actual_home_goals'].notna().any():
         n = int(df['actual_home_goals'].notna().sum())
         raise ValueError(f"assert_pending: {n} settled row(s)")
-    if 'predicted_at' not in df.columns:
-        raise ValueError("assert_pending: missing predicted_at")
-    if df['predicted_at'].isna().any():
-        n = int(df['predicted_at'].isna().sum())
-        raise ValueError(f"assert_pending: {n} row(s) with NULL predicted_at")
-    p = pd.to_datetime(df['predicted_at'], utc=True, errors='coerce')
-    k = pd.to_datetime(df['kickoff_utc'], utc=True, errors='coerce')
-    bad = p.isna() | k.isna() | (p >= k)
-    if bad.any():
-        raise ValueError(f"assert_pending: {int(bad.sum())} row(s) predicted_at >= kickoff_utc")
     return True
 
 
@@ -258,7 +223,7 @@ def wilson_upper(p, n, z=1.96):
 
 
 # ---------------------------------------------------------------------------
-# ROBUST_POS_v1 — acca builder
+# Acca builder
 # ---------------------------------------------------------------------------
 
 def attach_dc_odds(df):
@@ -266,7 +231,7 @@ def attach_dc_odds(df):
     Reads odds.dc_1x (for f1_leader == 'home') or odds.dc_x2
     (for f1_leader == 'away') from the odds JSON column and attaches
     as dc_odds. Rows without the required price are dropped, not
-    defaulted. A missing price means the row cannot be an acca leg.
+    defaulted. Accepts odds as dict or as JSON-encoded string.
     """
     if df is None or df.empty:
         return df
@@ -277,6 +242,11 @@ def attach_dc_odds(df):
 
     def _pick(row):
         odds = row.get('odds')
+        if isinstance(odds, str):
+            try:
+                odds = json.loads(odds)
+            except (ValueError, TypeError):
+                return None
         if not isinstance(odds, dict):
             return None
         leader = row.get('f1_leader')
@@ -310,13 +280,8 @@ def build_acca(candidates_df,
                min_legs=2,
                max_legs=5):
     """
-    Accumulated DCs from a candidate frame.
-
-    candidates_df must have:
-      pos_diff, league_name, home_team, away_team,
-      prediction, dc_odds, predicted_at
-
-    Returns a list of acca dicts, best first, no overlapping legs.
+    Accumulated DCs from a candidate frame. Distinct leagues enforced
+    unconditionally. Returns list of acca dicts, best first.
     """
     if candidates_df is None or candidates_df.empty:
         return []
@@ -418,7 +383,6 @@ TIER3_SIGNALS = ("team_disagreement_1", "team_disagreement_2plus",
 
 
 def _single_leader(tags):
-    """Return 'home', 'away', or None. Enforces the XOR gate."""
     has_home = "home_leader" in tags
     has_away = "away_leader" in tags
     if has_home == has_away:
@@ -431,7 +395,6 @@ def _direction_for(leader):
 
 
 def decide_v7(tags, parse_status):
-    """Pure v7.0 decision. Returns dict with nine v7_* fields."""
     tagset = set(tags or [])
 
     def _skip(reason, policy, counterfactual=None):
@@ -848,12 +811,10 @@ def render_debug_tab(sb):
                      for k, v in sorted(c.items(), key=lambda x: -x[1])]
                 )
                 st.dataframe(df, use_container_width=True, hide_index=True)
-                n_pre = sum(1 for r in rows if r.get("predicted_at") is None)
                 n_settled = sum(1 for r in rows
                                 if r.get("actual_home_goals") is not None)
                 st.caption(
                     f"Total {len(rows)} ROBUST rows. "
-                    f"{n_pre} with NULL predicted_at (pre-guard, never counted). "
                     f"{n_settled} settled."
                 )
         except Exception as e:
@@ -2382,7 +2343,6 @@ def check_standard(row, pred):
 
 
 def compute_tags(row, pred, tier, decision, skip_reason):
-    """Build the tag set the v7 rule consumes."""
     tags = []
     gap = pred.get("total_gap") or 0
 
@@ -2451,11 +2411,6 @@ def compute_tags(row, pred, tier, decision, skip_reason):
 # FULL PREDICTION
 # ============================================================================
 def predict_v7_full(row):
-    """
-    Parse-time pipeline. Computes features, computes tags, applies the
-    v7.0 rule, merges the nine v7_* decision fields plus rule_version,
-    and computes the informational whitelist flag.
-    """
     base = predict_v5(row)
 
     base["tags"] = compute_tags(row, base, None, None, None)
@@ -2490,10 +2445,6 @@ def predict_v7_full(row):
 # SETTLEMENT
 # ============================================================================
 def settle_v7(sb, match_id, home_goals, away_goals):
-    """
-    Settle a v7 row. Writes actual score, v7_dc_hit,
-    v7_counterfactual_won, v7_result_basis, v7_settled_at.
-    """
     if sb is None:
         return False, "no client"
 
@@ -2566,14 +2517,11 @@ def settle_v7(sb, match_id, home_goals, away_goals):
 
 
 def settle_robust(sb, match_id, home_goals, away_goals):
-    """
-    Settle a ROBUST_POS_v1 row. Does not touch v7_* columns.
-    """
     if sb is None:
         return False, "no client"
     try:
         resp = (sb.table("matches_raw")
-                .select("rule_version, prediction, predicted_at, actual_home_goals")
+                .select("rule_version, prediction, actual_home_goals")
                 .eq("id", match_id)
                 .limit(1)
                 .execute())
@@ -2586,8 +2534,6 @@ def settle_robust(sb, match_id, home_goals, away_goals):
     rv = r.get("rule_version") or ""
     if not rv.startswith(ROBUST_RULE_PREFIX):
         return False, f"row is not ROBUST ({rv!r})"
-    if r.get("predicted_at") is None:
-        return False, "row has NULL predicted_at — not settleable"
     if r.get("actual_home_goals") is not None:
         return False, "row already settled"
 
@@ -2713,45 +2659,18 @@ def load_all(sb, timeout_seconds=15):
             return []
 
 
-def load_view(sb, view_name, timeout_seconds=15):
-    if sb is None:
-        return pd.DataFrame()
-    def _fetch():
-        return sb.table(view_name).select("*").execute()
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_fetch)
-            resp = fut.result(timeout=timeout_seconds)
-        rows = resp.data or []
-        return pd.DataFrame(rows)
-    except Exception as e:
-        print(f"[load_view:{view_name}] {e}", file=sys.stderr)
-        return pd.DataFrame()
-
-
 def compute_rule_stats(df_settled):
-    """
-    Dynamic stats for ROBUST arms. Called with rows from
-    v_prospective_settled only.
-    """
     if df_settled is None or df_settled.empty:
         return {}
 
-    required = {'predicted_at', 'kickoff_utc', 'actual_home_goals',
-                'actual_away_goals', 'f1_leader', 'disagreements',
-                'away_pos', 'home_pos', 'threshold', 'rule_version'}
+    required = {'actual_home_goals', 'actual_away_goals', 'f1_leader',
+                'disagreements', 'away_pos', 'home_pos', 'rule_version'}
     missing = required - set(df_settled.columns)
     if missing:
         raise ValueError(f"compute_rule_stats: missing {sorted(missing)}")
 
     if df_settled['actual_home_goals'].isna().any():
         raise ValueError("compute_rule_stats: unsettled row in settled frame")
-    if df_settled['predicted_at'].isna().any():
-        raise ValueError("compute_rule_stats: NULL predicted_at")
-    p = pd.to_datetime(df_settled['predicted_at'], utc=True, errors='coerce')
-    k = pd.to_datetime(df_settled['kickoff_utc'], utc=True, errors='coerce')
-    if (p.isna() | k.isna() | (p >= k)).any():
-        raise ValueError("compute_rule_stats: predicted_at >= kickoff_utc")
 
     df = df_settled.copy()
     df = df[df['rule_version'].astype(str).str.startswith(ROBUST_RULE_PREFIX)]
@@ -2887,7 +2806,7 @@ def render_factor_row(name, home_val, away_val, weight_label=""):
 
 def render_acca_card(acca, title):
     """Renders a single acca as a card with legs. Each leg shows pick,
-    price, pos_diff, kickoff time, and prediction time (predicted_at)."""
+    price, pos_diff, and kickoff time."""
     legs = acca["legs"]
     st.markdown(
         f'<div class="acca-card">'
@@ -2898,7 +2817,6 @@ def render_acca_card(acca, title):
         unsafe_allow_html=True,
     )
     for r in legs:
-        logged = str(r.get("predicted_at") or "")[:16]
         kickoff = str(r.get("kickoff_utc") or "")[:16]
         st.markdown(
             f'<div class="leg-row">'
@@ -2915,175 +2833,127 @@ def render_acca_card(acca, title):
 
 
 def render_acca_tab(sb):
-    # Accas are recomputed on every load. When a leg settles, it stops
-    # being pending, and the acca it belonged to disappears from the
-    # display. No acca is persisted. No acca outcome is recorded. This
-    # is intentional — accas are a display over singles, not a record,
-    # and the prospective clock counts singles only.
-    st.subheader("🎯 Accas")
+    st.subheader("🎯 Accas — from unplayed pool")
     st.caption(
-        "Structural accumulators from pending ROBUST_POS_v1 candidates. "
-        "Distinct leagues, real DC prices from the odds column, no fallback. "
-        "Display only — the prospective clock counts singles."
+        "Pool = unplayed = actual_home_goals IS NULL AND actual_away_goals IS NULL. "
+        "Order = match_date ASC, home_team ASC. Distinct leagues. "
+        "2-leg target [1.90, 2.20]; 5-leg target [5.00, 6.50]."
     )
 
     try:
-        pending_view = load_view(sb, "v_pending_agreement")
+        all_rows = load_all(sb)
     except Exception as e:
-        st.error(f"v_pending_agreement load failed: {e}")
+        st.error(f"load failed: {e}")
         return
 
-    if pending_view.empty:
-        st.info("No pending rows with disagreements=0.")
+    unplayed = [
+        r for r in all_rows
+        if r.get('actual_home_goals') is None
+        and r.get('actual_away_goals') is None
+    ]
+
+    if not unplayed:
+        st.info("No unplayed matches.")
         return
 
-    if "rule_version" not in pending_view.columns:
-        st.warning("Pending view missing rule_version column.")
-        return
+    df = pd.DataFrame(unplayed)
 
-    robust = pending_view[
-        pending_view["rule_version"].astype(str).str.startswith(ROBUST_RULE_PREFIX)
-    ].copy()
+    sort_cols = [c for c in ('match_date', 'home_team') if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=[True] * len(sort_cols))
+    df = df.reset_index(drop=True)
 
-    if robust.empty:
-        st.info(
-            "No pending ROBUST rows. Accas require at least 2 legs from "
-            "distinct leagues with DC odds in [1.15, 1.80]."
+    before_price = len(df)
+    priced = attach_dc_odds(df)
+    dropped_no_price = before_price - len(priced)
+    if dropped_no_price:
+        st.caption(
+            f"{dropped_no_price} unplayed row(s) without a DC price or a "
+            f"known leader excluded — no price, no combined odds."
         )
-        return
 
-    try:
-        assert_pending(robust)
-    except ValueError as e:
-        st.error(f"Pending guard failed: {e}")
-        return
-
-    robust["pos_diff"] = robust["away_pos"] - robust["home_pos"]
-
-    priced = attach_dc_odds(robust)
     if priced.empty:
         st.warning(
-            f"{len(robust)} pending ROBUST row(s) exist, but none carry a "
-            "Double Chance price (odds.dc_1x / odds.dc_x2). Accas need real "
-            "prices. No fallback is used."
+            f"{before_price} unplayed row(s), 0 with a valid DC price. "
+            "Acca legs need odds.dc_1x or odds.dc_x2."
         )
         return
 
-    live_5  = priced[priced["pos_diff"] >= 5].copy()
-    live_10 = priced[priced["pos_diff"] >= 10].copy()
+    before_pos = len(priced)
+    priced = priced.dropna(subset=["home_pos", "away_pos"]).copy()
+    dropped_pos = before_pos - len(priced)
+    if dropped_pos:
+        st.caption(f"{dropped_pos} row(s) without positions excluded.")
 
-    st.markdown(
-        f"**Pool:** {len(priced)} priced candidates · "
-        f"live_5={len(live_5)} · live_10={len(live_10)} · "
-        f"pool mode `{ACCA_2_POOL_MODE}`"
+    priced["pos_diff"] = priced["away_pos"] - priced["home_pos"]
+
+    before_band = len(priced)
+    priced = priced[
+        priced["dc_odds"].between(ACCA_LEG_PRICE_MIN, ACCA_LEG_PRICE_MAX)
+    ].copy()
+    dropped_band = before_band - len(priced)
+    if dropped_band:
+        st.caption(
+            f"{dropped_band} row(s) with a DC price outside "
+            f"[{ACCA_LEG_PRICE_MIN}, {ACCA_LEG_PRICE_MAX}] excluded from leg pool."
+        )
+
+    if priced.empty:
+        st.info("No legs remain in the price band. Nothing to build.")
+        return
+
+    st.markdown(f"**Leg pool:** {len(priced)} priced, in-band unplayed row(s).")
+
+    acca_2 = build_acca(
+        priced,
+        target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
+        min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
+    )
+    acca_5 = build_acca(
+        priced,
+        target_min=ACCA_5_MIN, target_max=ACCA_5_MAX,
+        min_legs=ACCA_5_MIN_LEGS, max_legs=ACCA_5_MAX_LEGS,
     )
 
-    # ---------------- 2+ odds acca ----------------
-    st.markdown("---")
-    st.markdown(
-        f"### 2+ Odds Acca · target {ACCA_2_MIN:.2f}–{ACCA_2_MAX:.2f} · "
-        f"{ACCA_2_MIN_LEGS}–{ACCA_2_MAX_LEGS} legs"
-    )
+    if not acca_2 and not acca_5:
+        st.info(
+            f"No combination in target bands from {len(priced)} priced unplayed leg(s). "
+            "Pool shown below."
+        )
+        st.dataframe(
+            priced[[
+                c for c in (
+                    "match_date", "home_team", "away_team",
+                    "league_name", "prediction", "dc_odds", "pos_diff",
+                ) if c in priced.columns
+            ]],
+            use_container_width=True, hide_index=True,
+        )
+        return
 
-    if ACCA_2_POOL_MODE == "count":
-        acca_2_pool = live_10 if len(live_10) >= ACCA_2_MIN_LEGS else live_5
-        acca_2_list = build_acca(
-            acca_2_pool,
-            target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
-            min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
-        )
-        pool_note = (f"Pool used: {len(acca_2_pool)} "
-                     f"(live_10={len(live_10)}, live_5={len(live_5)}).")
-    elif ACCA_2_POOL_MODE == "build":
-        acca_2_list = build_acca(
-            live_10,
-            target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
-            min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
-        )
-        if acca_2_list:
-            pool_note = f"Pool used: live_10 ({len(live_10)})."
-        else:
-            acca_2_list = build_acca(
-                live_5,
-                target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
-                min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
-            )
-            pool_note = (f"live_10 produced nothing; fell back to live_5 "
-                         f"({len(live_5)}).")
-        acca_2_pool = live_10 if acca_2_list else live_5
-    elif ACCA_2_POOL_MODE == "both":
-        acca_2_list = build_acca(
-            live_10,
-            target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
-            min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
-        )
-        if not acca_2_list:
-            acca_2_list = build_acca(
-                live_5,
-                target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
-                min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
-            )
-            pool_note = (f"live_10 produced nothing; displaying live_5 "
-                         f"({len(live_5)}).")
-        else:
-            pool_note = f"Pool used: live_10 ({len(live_10)})."
-        acca_2_pool = live_10 if acca_2_list else live_5
+    st.markdown("### 2-leg acca · target 1.90–2.20")
+    if acca_2:
+        for i, a in enumerate(acca_2, 1):
+            render_acca_card(a, f"2-leg #{i}")
     else:
-        st.error(f"Unknown ACCA_2_POOL_MODE: {ACCA_2_POOL_MODE!r}")
-        acca_2_list = []
-        acca_2_pool = live_10
-        pool_note = ""
-
-    if not acca_2_list:
-        st.markdown(
-            f'<div class="acca-card-empty">'
-            f'No 2+ odds acca in band. {pool_note} '
-            f'Need at least {ACCA_2_MIN_LEGS} priced candidates from '
-            f'distinct leagues whose combined DC price lands in '
-            f'[{ACCA_2_MIN:.2f}, {ACCA_2_MAX:.2f}].'
-            f'</div>',
-            unsafe_allow_html=True,
+        st.caption(
+            f"No 2-leg combination in [1.90, 2.20] from {len(priced)} legs."
         )
+
+    st.markdown("### 5-leg acca · target 5.00–6.50")
+    if acca_5:
+        for i, a in enumerate(acca_5, 1):
+            render_acca_card(a, f"5-leg #{i}")
     else:
-        for i, acca in enumerate(acca_2_list, 1):
-            render_acca_card(acca, f"Recommended 2+ Odds Acca #{i}")
-
-    # ---------------- 5+ odds acca ----------------
-    st.markdown("---")
-    st.markdown(
-        f"### 5+ Odds Acca · target {ACCA_5_MIN:.2f}–{ACCA_5_MAX:.2f} · "
-        f"{ACCA_5_MIN_LEGS}–{ACCA_5_MAX_LEGS} legs"
-    )
-
-    acca_5_list = build_acca(
-        live_5,
-        target_min=ACCA_5_MIN,
-        target_max=ACCA_5_MAX,
-        min_legs=ACCA_5_MIN_LEGS,
-        max_legs=ACCA_5_MAX_LEGS,
-    )
-    if not acca_5_list:
-        st.markdown(
-            f'<div class="acca-card-empty">'
-            f'No 5+ odds acca in band. Pool used: {len(live_5)}. '
-            f'{ACCA_5_MIN_LEGS}–{ACCA_5_MAX_LEGS} legs averaging '
-            f'{ACCA_5_MIN/ACCA_5_MAX_LEGS:.2f}–{ACCA_5_MAX/ACCA_5_MIN_LEGS:.2f} '
-            f'are required to land in '
-            f'[{ACCA_5_MIN:.2f}, {ACCA_5_MAX:.2f}].'
-            f'</div>',
-            unsafe_allow_html=True,
+        st.caption(
+            f"No 5-leg combination in [5.00, 6.50] from {len(priced)} legs. "
+            "Expected when DC prices cluster at 1.04–1.15."
         )
-    else:
-        for i, acca in enumerate(acca_5_list, 1):
-            render_acca_card(acca, f"Recommended 5+ Odds Acca #{i}")
 
     st.markdown("---")
     st.caption(
-        "5-leg accas multiply per-leg uncertainty. They are a display, "
-        "not evidence. The prospective clock counts singles only. "
-        "Each leg shows its kickoff time (ko) and its prediction time "
-        "(from predicted_at). Legs without a valid DC price were "
-        "excluded, not defaulted."
+        "Legs without a valid DC price were excluded, not defaulted. "
+        "Pool = unplayed. Distinct leagues enforced by build_acca."
     )
 
 
@@ -3132,7 +3002,6 @@ def main():
                 with st.spinner("Running v7.0..."):
                     result = predict_v7_full(parsed)
                 with st.spinner("Saving..."):
-                    # v7 write: stamp threshold=0 so the natural key is complete.
                     v7_payload = dict(parsed)
                     v7_payload["threshold"] = 0
                     ok, row = upsert_match(sb, v7_payload)
@@ -3145,7 +3014,6 @@ def main():
                     else:
                         save_msg = row if isinstance(row, str) else "unknown error"
 
-                # ROBUST_POS_v1 parallel write
                 robust_cands = decide_robust_pos(parsed)
                 robust_saved = []
                 robust_errors = []
@@ -3210,8 +3078,7 @@ def main():
                     for c in robust_cands:
                         st.write(
                             f"- **{c['rule_version']}** · pos_diff={c['pos_diff']} · "
-                            f"leader={c['f1_leader']} · pick=**{c['prediction']}** · "
-                            f"logged {c['predicted_at'][:19]}Z"
+                            f"leader={c['f1_leader']} · pick=**{c['prediction']}**"
                         )
                     if robust_errors:
                         st.warning("ROBUST save issues: " + " | ".join(robust_errors))
@@ -3250,7 +3117,6 @@ def main():
                 rv = r.get("rule_version")
                 pdiff = r.get("pos_diff")
                 pred = r.get("prediction")
-                logged = (r.get("predicted_at") or "")[:19]
                 header = (f"{r.get('match_date','')} · "
                           f"{r.get('home_team','')} vs {r.get('away_team','')} · "
                           f"{rv} · {pred} · pos_diff={pdiff}")
@@ -3259,7 +3125,7 @@ def main():
                     c1.metric("Rule", rv)
                     c2.metric("Pick", pred or "—")
                     c3.metric("pos_diff", pdiff if pdiff is not None else "—")
-                    st.caption(f"Logged {logged}Z · league {r.get('league_name','—')}")
+                    st.caption(f"League {r.get('league_name','—')}")
                     hg_col, ag_col, btn_col = st.columns([1, 1, 2])
                     hg = hg_col.number_input("Home", 0, 15, 0, key=f"rhg_{mid}")
                     ag = ag_col.number_input("Away", 0, 15, 0, key=f"rag_{mid}")
@@ -3314,19 +3180,24 @@ def main():
     with tabs[3]:
         st.subheader("📊 Performance")
 
-        st.markdown("### ROBUST_POS_v1 — prospective")
-        settled_df = load_view(sb, "v_prospective_settled")
-        if settled_df.empty:
-            st.info(
-                "No settled ROBUST rows yet. The clock starts at the first "
-                "row with predicted_at populated and actual_home_goals non-NULL. "
-                "Rows without predicted_at are pre-guard and never counted."
-            )
+        st.markdown("### ROBUST_POS_v1 — settled")
+        with st.spinner("Loading..."):
+            all_rows_perf = load_all(sb)
+
+        settled_robust_rows = [
+            r for r in all_rows_perf
+            if r.get("actual_home_goals") is not None
+            and (r.get("rule_version") or "").startswith(ROBUST_RULE_PREFIX)
+        ]
+
+        if not settled_robust_rows:
+            st.info("No settled ROBUST rows yet.")
         else:
+            settled_df = pd.DataFrame(settled_robust_rows)
             try:
                 stats = compute_rule_stats(settled_df)
             except ValueError as e:
-                st.error(f"ROBUST stats guard failed: {e}")
+                st.error(f"ROBUST stats failed: {e}")
                 stats = {}
 
             if stats:
@@ -3347,18 +3218,12 @@ def main():
                     })
                 st.dataframe(pd.DataFrame(rows_out),
                              use_container_width=True, hide_index=True)
-                st.caption(
-                    "Counts grow with matches_raw. No hardcoded rates. "
-                    "Evaluation at 200+ settled per arm per the contract."
-                )
+                st.caption("Settled ROBUST rows only. No timing filter.")
 
         st.markdown("---")
         st.markdown("### v7 — historical")
 
-        with st.spinner("Loading..."):
-            rows = load_all(sb)
-
-        v7_rows = [r for r in rows if r.get("v7_tier") is not None]
+        v7_rows = [r for r in all_rows_perf if r.get("v7_tier") is not None]
         settled = [r for r in v7_rows if r.get("v7_result_basis") in
                    ("HIT_RECORDED", "MISS_RECORDED")]
 
@@ -3492,54 +3357,35 @@ Every v7 classification is stamped with
 
 ---
 
-## ROBUST_POS_v1 — parallel rule (prospective only)
-
-**Status:** running in parallel with v7. Separate clock, separate rows.
+## ROBUST_POS_v1 — parallel rule
 
 **Rule:**
 - `disagreements == 0`
 - `pos_diff = away_pos - home_pos >= threshold`
 - direction from `f1_leader`: `home -> DC 1X`, `away -> DC X2`
-- `predicted_at` written by the tool at decision time, before network
-- `predicted_at < kickoff_utc` enforced by `assert_pending`
 
 **Arms:** threshold = 5 and threshold = 10, logged in parallel on every
 qualifying fixture. Both rows carry the same `predicted_at`.
 
-**Retrospective:** NOT AVAILABLE. `created_at` is an ingestion timestamp,
-not a prediction timestamp.
-
-**Clock:** starts at the first settled row with `predicted_at`
-populated. Evaluation at 200+ settled per arm.
-
 ---
 
-## Accas — display only
+## Accas — from unplayed pool
 
-Two accas are proposed from pending ROBUST candidates:
+Pool = unplayed = `actual_home_goals IS NULL AND actual_away_goals IS NULL`.
 
-- **2+ Odds Acca** · target 1.90–2.20 · 2–3 legs
-- **5+ Odds Acca** · target 5.00–6.50 · 4–5 legs
+Order = `match_date ASC, home_team ASC`. Distinct leagues enforced by
+`build_acca`. Per-leg DC price in `[1.15, 1.80]`. No fallback price.
 
-Both require distinct leagues, real DC prices (`odds.dc_1x` or
-`odds.dc_x2`), and per-leg price in [1.15, 1.80]. No fallback price is
-invented. Legs without a real DC price are excluded, not defaulted.
+Two acca targets:
 
-2+ Odds pool preference is controlled by `ACCA_2_POOL_MODE`:
+- 2-leg · target 1.90–2.20
+- 5-leg · target 5.00–6.50
 
-- `"count"` (current) — use `live_10` if it has ≥ `ACCA_2_MIN_LEGS`
-  candidates, else fall back to `live_5`.
-- `"build"` — try `live_10`, then `live_5`, use whichever produces a
-  valid acca.
-- `"both"` — same as `"build"` but the caption reports which pool
-  produced the result.
+Legs without a valid DC price (`odds.dc_1x` for home leaders,
+`odds.dc_x2` for away leaders) are excluded — no price, no combined odds.
+Rows without a known leader are excluded for the same reason.
 
-Accas are recomputed on every load. When a leg settles, its row stops
-being pending and the acca disappears from the display. No acca is
-persisted, no acca outcome is recorded.
-
-5-leg accas multiply per-leg uncertainty. They are a display, not
-evidence. The prospective clock counts singles only.
+Accas are recomputed on every load, not persisted.
         """)
 
     with tabs[5]:
