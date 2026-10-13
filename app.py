@@ -30,6 +30,11 @@ Persistence: all on matches_raw. No new tables.
   v7 rows: rule_version='v7.0-2026-10-11', threshold = 0.
   ROBUST rows: rule_version='ROBUST_POS{n}_v1', threshold IN (5, 10).
   Unique index: (match_date, home_team, away_team, threshold).
+
+Accas:
+  Recomputed on every load. Not persisted. When a leg settles, its row
+  stops being pending, and the acca it belonged to disappears from the
+  display. The prospective clock counts singles only.
 """
 
 import concurrent.futures
@@ -177,6 +182,16 @@ ACCA_5_MAX_LEGS = 5
 
 ACCA_LEG_PRICE_MIN = 1.15
 ACCA_LEG_PRICE_MAX = 1.80
+
+# 2+ Odds Acca pool preference.
+#   "count" -> use live_10 if it has >= ACCA_2_MIN_LEGS candidates,
+#              else fall back to live_5. (Current behaviour.)
+#   "build" -> try live_10, then live_5, use whichever produces a
+#              valid acca. Falls back even if live_10 has enough
+#              legs but no band-matching combination.
+#   "both"  -> build from live_10 and, if that yields nothing, from
+#              live_5, then display both if both exist.
+ACCA_2_POOL_MODE = "count"
 
 
 # ============================================================================
@@ -2871,7 +2886,8 @@ def render_factor_row(name, home_val, away_val, weight_label=""):
 
 
 def render_acca_card(acca, title):
-    """Renders a single acca as a card with legs."""
+    """Renders a single acca as a card with legs. Each leg shows pick,
+    price, pos_diff, kickoff time, and prediction time (predicted_at)."""
     legs = acca["legs"]
     st.markdown(
         f'<div class="acca-card">'
@@ -2883,19 +2899,27 @@ def render_acca_card(acca, title):
     )
     for r in legs:
         logged = str(r.get("predicted_at") or "")[:16]
+        kickoff = str(r.get("kickoff_utc") or "")[:16]
         st.markdown(
             f'<div class="leg-row">'
             f'<span>{r["home_team"]} vs {r["away_team"]} '
             f'<span style="color:#64748b;">· {r["league_name"]}</span></span>'
             f'<span><span class="leg-pick">{r["prediction"]}</span> '
             f'@ <span class="leg-odds">{float(r["dc_odds"]):.2f}</span> '
-            f'· pdiff={int(r["pos_diff"])} · <span style="color:#64748b;">{logged}</span></span>'
+            f'· pdiff={int(r["pos_diff"])} '
+            f'· ko <span style="color:#64748b;">{kickoff}</span>'
+            f'</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
 
 
 def render_acca_tab(sb):
+    # Accas are recomputed on every load. When a leg settles, it stops
+    # being pending, and the acca it belonged to disappears from the
+    # display. No acca is persisted. No acca outcome is recorded. This
+    # is intentional — accas are a display over singles, not a record,
+    # and the prospective clock counts singles only.
     st.subheader("🎯 Accas")
     st.caption(
         "Structural accumulators from pending ROBUST_POS_v1 candidates. "
@@ -2950,7 +2974,8 @@ def render_acca_tab(sb):
 
     st.markdown(
         f"**Pool:** {len(priced)} priced candidates · "
-        f"live_5={len(live_5)} · live_10={len(live_10)}"
+        f"live_5={len(live_5)} · live_10={len(live_10)} · "
+        f"pool mode `{ACCA_2_POOL_MODE}`"
     )
 
     # ---------------- 2+ odds acca ----------------
@@ -2960,20 +2985,59 @@ def render_acca_tab(sb):
         f"{ACCA_2_MIN_LEGS}–{ACCA_2_MAX_LEGS} legs"
     )
 
-    acca_2_pool = live_10 if len(live_10) >= ACCA_2_MIN_LEGS else live_5
-    acca_2_list = build_acca(
-        acca_2_pool,
-        target_min=ACCA_2_MIN,
-        target_max=ACCA_2_MAX,
-        min_legs=ACCA_2_MIN_LEGS,
-        max_legs=ACCA_2_MAX_LEGS,
-    )
+    if ACCA_2_POOL_MODE == "count":
+        acca_2_pool = live_10 if len(live_10) >= ACCA_2_MIN_LEGS else live_5
+        acca_2_list = build_acca(
+            acca_2_pool,
+            target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
+            min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
+        )
+        pool_note = (f"Pool used: {len(acca_2_pool)} "
+                     f"(live_10={len(live_10)}, live_5={len(live_5)}).")
+    elif ACCA_2_POOL_MODE == "build":
+        acca_2_list = build_acca(
+            live_10,
+            target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
+            min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
+        )
+        if acca_2_list:
+            pool_note = f"Pool used: live_10 ({len(live_10)})."
+        else:
+            acca_2_list = build_acca(
+                live_5,
+                target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
+                min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
+            )
+            pool_note = (f"live_10 produced nothing; fell back to live_5 "
+                         f"({len(live_5)}).")
+        acca_2_pool = live_10 if acca_2_list else live_5
+    elif ACCA_2_POOL_MODE == "both":
+        acca_2_list = build_acca(
+            live_10,
+            target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
+            min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
+        )
+        if not acca_2_list:
+            acca_2_list = build_acca(
+                live_5,
+                target_min=ACCA_2_MIN, target_max=ACCA_2_MAX,
+                min_legs=ACCA_2_MIN_LEGS, max_legs=ACCA_2_MAX_LEGS,
+            )
+            pool_note = (f"live_10 produced nothing; displaying live_5 "
+                         f"({len(live_5)}).")
+        else:
+            pool_note = f"Pool used: live_10 ({len(live_10)})."
+        acca_2_pool = live_10 if acca_2_list else live_5
+    else:
+        st.error(f"Unknown ACCA_2_POOL_MODE: {ACCA_2_POOL_MODE!r}")
+        acca_2_list = []
+        acca_2_pool = live_10
+        pool_note = ""
+
     if not acca_2_list:
         st.markdown(
             f'<div class="acca-card-empty">'
-            f'No 2+ odds acca in band. '
-            f'Pool used: {len(acca_2_pool)} '
-            f'(live_10={len(live_10)}, live_5={len(live_5)}). '
+            f'No 2+ odds acca in band. {pool_note} '
             f'Need at least {ACCA_2_MIN_LEGS} priced candidates from '
             f'distinct leagues whose combined DC price lands in '
             f'[{ACCA_2_MIN:.2f}, {ACCA_2_MAX:.2f}].'
@@ -3017,8 +3081,9 @@ def render_acca_tab(sb):
     st.caption(
         "5-leg accas multiply per-leg uncertainty. They are a display, "
         "not evidence. The prospective clock counts singles only. "
-        "Every leg shows its prediction time (from predicted_at); legs "
-        "without a valid DC price were excluded, not defaulted."
+        "Each leg shows its kickoff time (ko) and its prediction time "
+        "(from predicted_at). Legs without a valid DC price were "
+        "excluded, not defaulted."
     )
 
 
@@ -3453,12 +3518,25 @@ populated. Evaluation at 200+ settled per arm.
 
 Two accas are proposed from pending ROBUST candidates:
 
-- **2+ Odds Acca** · target 1.90–2.20 · 2–3 legs · prefers live_10 pool
-- **5+ Odds Acca** · target 5.00–6.50 · 4–5 legs · uses live_5 pool
+- **2+ Odds Acca** · target 1.90–2.20 · 2–3 legs
+- **5+ Odds Acca** · target 5.00–6.50 · 4–5 legs
 
 Both require distinct leagues, real DC prices (`odds.dc_1x` or
 `odds.dc_x2`), and per-leg price in [1.15, 1.80]. No fallback price is
 invented. Legs without a real DC price are excluded, not defaulted.
+
+2+ Odds pool preference is controlled by `ACCA_2_POOL_MODE`:
+
+- `"count"` (current) — use `live_10` if it has ≥ `ACCA_2_MIN_LEGS`
+  candidates, else fall back to `live_5`.
+- `"build"` — try `live_10`, then `live_5`, use whichever produces a
+  valid acca.
+- `"both"` — same as `"build"` but the caption reports which pool
+  produced the result.
+
+Accas are recomputed on every load. When a leg settles, its row stops
+being pending and the acca disappears from the display. No acca is
+persisted, no acca outcome is recorded.
 
 5-leg accas multiply per-leg uncertainty. They are a display, not
 evidence. The prospective clock counts singles only.
