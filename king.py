@@ -171,7 +171,12 @@ def db_delete(match_id: int):
 _TEAM_PREFIXES = (
     "club ", "atlético ", "atletico ", "deportivo ", "real ",
     "fc ", "cf ", "cd ", "ca ", "ac ", "as ", "sv ", "sc ",
-    "athletic ", "sporting ", "racing ", "olympique ",
+    "athletic ", "sporting ", "racing ", "olympique ", "stade ",
+)
+
+_TEAM_SUFFIXES = (
+    " sco", " fc", " cf", " sc", " ac", " cd", " sv", " as",
+    " 29", " 04", " 05", " 1899", " 1900",
 )
 
 
@@ -180,7 +185,9 @@ def _search_term(full_name: str) -> str:
     Return a short search term for a team name.
     'Atlético San Luis' → 'San Luis'
     'Club Santos Laguna' → 'Santos Laguna'
-    'New England Revolution' → 'New England'
+    'Stade Brestois 29' → 'Brestois'
+    'Angers SCO' → 'Angers'
+    'FC Famalicão' → 'Famalicão'
     """
     if not full_name:
         return ""
@@ -189,6 +196,11 @@ def _search_term(full_name: str) -> str:
     for prefix in _TEAM_PREFIXES:
         if low.startswith(prefix):
             name = name[len(prefix):]
+            break
+    low = name.lower()
+    for suffix in _TEAM_SUFFIXES:
+        if low.endswith(suffix):
+            name = name[: -len(suffix)]
             break
     parts = name.split()
     if len(parts) >= 2:
@@ -395,7 +407,6 @@ def extract_facts(html: str) -> dict:
                 f["away_table_pts"]    = _int_any(cells[10])
                 standings_found = True
 
-    # Fallback: leage-table (8 cells)
     if not standings_found:
         for table in soup.find_all("table", class_="leage-table"):
             for row in table.find_all("tr"):
@@ -431,47 +442,95 @@ def extract_facts(html: str) -> dict:
         first = term.split()[0]
         if first != term:
             out.append(first)
+        clean = re.sub(r"\s+\d+$", "", term).strip()
+        clean = re.sub(r"\s+(SCO|FC|CF|SC|AC|CD|SV|AS)$", "",
+                       clean, flags=re.IGNORECASE).strip()
+        if clean and clean not in out:
+            out.append(clean)
+        if clean and " " in clean:
+            first2 = clean.split()[0]
+            if first2 not in out:
+                out.append(first2)
         return out
 
-    # --- last-10 form -----------------------------------------------
-    def _parse_form(term):
-        if not term:
+    # --- section-scoped extraction ---------------------------------
+    def _section_for(label_pattern):
+        m = re.search(label_pattern, body, re.IGNORECASE)
+        if not m:
+            return ""
+        start = m.end()
+        tail = body[start:start + 800]
+        for cut in ["Last 10 League Games", "Players to Watch",
+                    "Home Stats", "Away Stats", "Head to Head",
+                    "Team Stats", "Confirmed Lineup"]:
+            idx = tail.find(cut)
+            if idx > 0:
+                tail = tail[:idx]
+                break
+        return tail
+
+    def _parse_form_in_section(section):
+        if not section:
             return None
-
         patterns = [
-            # "X have 4 wins, 2 draws and 4 losses"
-            (r"{t}\s+have\s+(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?",
-             ("w", "d", "l")),
-            # "X have 4 wins, 4 losses and 2 draws"
-            (r"{t}\s+have\s+(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+and\s+(\d+)\s+draws?",
-             ("w", "l", "d")),
-            # "X have 3 wins, 4 defeats and 3 draws"
-            (r"{t}\s+have\s+(\d+)\s+wins?,?\s+(\d+)\s+defeats?,?\s+and\s+(\d+)\s+draws?",
-             ("w", "l", "d")),
-            # "X have won 3, lost 6 and drawn 1"
-            (r"{t}\s+have\s+won\s+(\d+),?\s+lost\s+(\d+)\s+and\s+drawn\s+(\d+)",
-             ("w", "l", "d")),
-            # "X have won 3, drawn 6 and lost 1"
-            (r"{t}\s+have\s+won\s+(\d+),?\s+drawn\s+(\d+)\s+and\s+lost\s+(\d+)",
-             ("w", "d", "l")),
-            # "X have 4 wins, 3 draws and 3 losses" (form summary sentences)
-            (r"{t}\s+(?:have|with)\s+(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?",
-             ("w", "d", "l")),
+            (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?", ("w", "d", "l")),
+            (r"(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+and\s+(\d+)\s+draws?", ("w", "l", "d")),
+            (r"(\d+)\s+wins?,?\s+(\d+)\s+defeats?,?\s+and\s+(\d+)\s+draws?", ("w", "l", "d")),
+            (r"have\s+won\s+(\d+),?\s+lost\s+(\d+)\s+and\s+drawn\s+(\d+)", ("w", "l", "d")),
+            (r"have\s+won\s+(\d+),?\s+drawn\s+(\d+)\s+and\s+lost\s+(\d+)", ("w", "d", "l")),
         ]
-
-        for cand in _candidates(term):
-            for tmpl, mapping in patterns:
-                pat = tmpl.replace("{t}", re.escape(cand))
-                m = re.search(pat, body, re.IGNORECASE)
-                if not m:
-                    continue
-                vals = {}
-                for i, key in enumerate(mapping):
-                    vals[key] = int(m.group(i + 1))
-                return vals["w"], vals["d"], vals["l"]
+        for tmpl, mapping in patterns:
+            m = re.search(tmpl, section, re.IGNORECASE)
+            if not m:
+                continue
+            vals = {}
+            for i, key in enumerate(mapping):
+                vals[key] = int(m.group(i + 1))
+            return vals["w"], vals["d"], vals["l"]
         return None
 
-    home_form = _parse_form(home_term)
+    def _parse_venue_in_section(section, prefix):
+        if not section:
+            return None
+        patterns = [
+            (r"(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+draws", ("w", "l", "d")),
+            (r"(\d+)\s+(?:losses|defeats),?\s+(\d+)\s+victor(?:y|ies)\s+and\s+(\d+)\s+draws", ("l", "w", "d")),
+            (r"(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+draws\s+and\s+(\d+)\s+(?:losses|defeats)", ("w", "d", "l")),
+            (r"(\d+)\s+(?:losses|defeats),?\s+(\d+)\s+draws\s+and\s+(\d+)\s+victor(?:y|ies)", ("l", "d", "w")),
+            (r"(\d+)\s+draws,?\s+(\d+)\s+victor(?:y|ies)\s+and\s+(\d+)\s+(?:losses|defeats)", ("d", "w", "l")),
+            (r"(\d+)\s+draws,?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+victor(?:y|ies)", ("d", "l", "w")),
+        ]
+        for tmpl, mapping in patterns:
+            m = re.search(tmpl, section, re.IGNORECASE)
+            if not m:
+                continue
+            vals = {"w": 0, "d": 0, "l": 0}
+            for i, key in enumerate(mapping):
+                vals[key] = int(m.group(i + 1))
+            pts = vals["w"] * 3 + vals["d"]
+            f[f"{prefix}_pts"]    = pts
+            f[f"{prefix}_ppg"]    = round(pts / 10, 2)
+            f[f"{prefix}_wins"]   = vals["w"]
+            f[f"{prefix}_losses"] = vals["l"]
+            f[f"{prefix}_draws"]  = vals["d"]
+            return True
+        return None
+
+    # --- home form -------------------------------------------------
+    home_section = ""
+    for cand in _candidates(home_term):
+        home_section = _section_for(
+            rf"{re.escape(cand)}\s*[–\-]\s*Last 10 League Games")
+        if home_section:
+            break
+    if not home_section:
+        for cand in _candidates(home_term):
+            home_section = _section_for(
+                rf"{re.escape(cand)}[^.]*?have\s+\d+\s+wins?")
+            if home_section:
+                break
+
+    home_form = _parse_form_in_section(home_section)
     if home_form:
         f["home_form_wins"], f["home_form_draws"], f["home_form_losses"] = home_form
         f["home_form_pts"] = f["home_form_wins"] * 3 + f["home_form_draws"]
@@ -479,7 +538,21 @@ def extract_facts(html: str) -> dict:
     else:
         f["_parse_warnings"].append(f"home form not found for {f.get('home_team')}")
 
-    away_form = _parse_form(away_term)
+    # --- away form -------------------------------------------------
+    away_section = ""
+    for cand in _candidates(away_term):
+        away_section = _section_for(
+            rf"{re.escape(cand)}\s*[–\-]\s*Last 10 League Games")
+        if away_section:
+            break
+    if not away_section:
+        for cand in _candidates(away_term):
+            away_section = _section_for(
+                rf"{re.escape(cand)}[^.]*?have\s+\d+\s+wins?")
+            if away_section:
+                break
+
+    away_form = _parse_form_in_section(away_section)
     if away_form:
         f["away_form_wins"], f["away_form_draws"], f["away_form_losses"] = away_form
         f["away_form_pts"] = f["away_form_wins"] * 3 + f["away_form_draws"]
@@ -487,154 +560,77 @@ def extract_facts(html: str) -> dict:
     else:
         f["_parse_warnings"].append(f"away form not found for {f.get('away_team')}")
 
-    # --- H2H --------------------------------------------------------
+    # --- venue form (from the arena section) ----------------------
+    arena_section = ""
+    venue_name = f.get("venue") or ""
+    if venue_name:
+        arena_section = _section_for(
+            rf"{re.escape(venue_name)}[^.]*?(?:Stats:?|have|with)")
+    if not arena_section:
+        # Fallback: look for "<team> have collected/recorded X victories..."
+        for cand in _candidates(home_term):
+            arena_section = _section_for(
+                rf"{re.escape(cand)}\s+have\s+(?:collected|recorded|secured|won)")
+            if arena_section:
+                break
+    if not arena_section:
+        arena_section = body  # last resort
+
+    if not _parse_venue_in_section(arena_section, "home_home"):
+        f["_parse_warnings"].append("home venue form not found")
+    if not _parse_venue_in_section(arena_section, "away_away"):
+        f["_parse_warnings"].append("away venue form not found")
+
+    # --- H2H from the H2H table -----------------------------------
+    h2h_section = soup.find("div", id="head-to-head")
     h2h_found = False
-    m = re.search(
-        r"past\s+(\d+)\s+H2H[^.]*?([\w]+)\s+triumphs?\s+for\s+([\w\s]+?),?\s+([\w]+)\s+for\s+([\w\s]+?)\s+and\s+([\w]+)\s+draws?",
-        body, re.IGNORECASE)
-    if m:
-        f["h2h_total"] = _int_any(m.group(1))
-        home_w = _word_to_int(m.group(2))
-        home_name = m.group(3).strip()
-        away_w = _word_to_int(m.group(4))
-        f["h2h_draws"] = _word_to_int(m.group(6))
-        if _team_match(f.get("home_team", ""), home_name):
-            f["h2h_home_wins"] = home_w
-            f["h2h_away_wins"] = away_w
-        else:
-            f["h2h_home_wins"] = away_w
-            f["h2h_away_wins"] = home_w
-        h2h_found = True
-
-    if not h2h_found:
-        m = re.search(
-            r"([\w]+)\s+wins?\s+for\s+([\w\s]+?),?\s+([\w]+)\s+triumphs?\s+for\s+([\w\s]+?)\s+and\s+(?:a\s+)?([\w]+)\s+draws?",
-            body, re.IGNORECASE)
-        if m:
-            hw = _word_to_int(m.group(1))
-            hn = m.group(2).strip()
-            aw = _word_to_int(m.group(3))
-            f["h2h_draws"] = _word_to_int(m.group(5))
-            f["h2h_total"] = hw + aw + f["h2h_draws"]
-            if _team_match(f.get("home_team", ""), hn):
-                f["h2h_home_wins"] = hw
-                f["h2h_away_wins"] = aw
+    if h2h_section:
+        h2h_rows = h2h_section.find_all("li", class_="team-stat-list-item")
+        home_wins = away_wins = draws = 0
+        for row in h2h_rows:
+            text = row.get_text(" ", strip=True)
+            # The text looks like:
+            # "Championship: 04/01 2026 Millwall 2 Swansea 1"
+            # The last two integers are the scores.
+            nums = re.findall(r"\b(\d+)\b", text)
+            if len(nums) < 2:
+                continue
+            # Last two ints are the scores
+            try:
+                hs = int(nums[-2])
+                aws = int(nums[-1])
+            except ValueError:
+                continue
+            # Decide which side is home/away based on team name order in text
+            # Simpler heuristic: the team that appears FIRST in the row text is home
+            home_first = _team_match(f.get("home_team", ""), text.split()[0] if text.split() else "")
+            # Actually use score comparison and best-effort assignment
+            if hs > aws:
+                # Winner could be home or away depending on row order;
+                # look at which team name appears first
+                idx_home = text.lower().find((home_term or "").lower())
+                idx_away = text.lower().find((away_term or "").lower())
+                if idx_home != -1 and (idx_away == -1 or idx_home < idx_away):
+                    home_wins += 1
+                else:
+                    away_wins += 1
+            elif aws > hs:
+                idx_home = text.lower().find((home_term or "").lower())
+                idx_away = text.lower().find((away_term or "").lower())
+                if idx_home != -1 and (idx_away == -1 or idx_home < idx_away):
+                    away_wins += 1
+                else:
+                    home_wins += 1
             else:
-                f["h2h_home_wins"] = aw
-                f["h2h_away_wins"] = hw
-            h2h_found = True
-
-    if not h2h_found:
-        m = re.search(
-            r"(\d+)\s+wins?\s+for\s+([\w\s]+?),?\s+(\d+)\s+(?:for|wins?\s+for)\s+([\w\s]+?),?\s+(?:and\s+)?(?:a\s+)?(\d+)\s+draws?",
-            body, re.IGNORECASE)
-        if m:
-            f["h2h_home_wins"] = int(m.group(1))
-            f["h2h_away_wins"] = int(m.group(3))
-            f["h2h_draws"]     = int(m.group(5))
-            f["h2h_total"]     = f["h2h_home_wins"] + f["h2h_away_wins"] + f["h2h_draws"]
-            h2h_found = True
+                draws += 1
+        f["h2h_home_wins"] = home_wins
+        f["h2h_away_wins"] = away_wins
+        f["h2h_draws"] = draws
+        f["h2h_total"] = home_wins + away_wins + draws
+        h2h_found = (f["h2h_total"] > 0)
 
     if not h2h_found:
         f["_parse_warnings"].append("H2H not found")
-
-    # --- venue-only PPG --------------------------------------------
-    def _parse_venue(term, prefix):
-        if not term:
-            return False
-
-        win_words  = r"(?:wins?|victor(?:y|ies)|won)"
-        loss_words = r"(?:losses?|defeats?|lost)"
-        draw_words = r"(?:draws?|drawn)"
-
-        # Try multiple orderings of (wins, losses, draws)
-        patterns = [
-            # wins, losses, draws
-            (rf"{win_words},?\s+([\w]+)\s+{loss_words}\s+and\s+([\w]+)\s+{draw_words}", "w_l_d"),
-            # losses, wins, draws
-            (rf"{loss_words},?\s+([\w]+)\s+{win_words}\s+and\s+([\w]+)\s+{draw_words}", "l_w_d"),
-            # wins, draws, losses
-            (rf"{win_words},?\s+([\w]+)\s+{draw_words}\s+and\s+([\w]+)\s+{loss_words}", "w_d_l"),
-            # losses, draws, wins
-            (rf"{loss_words},?\s+([\w]+)\s+{draw_words}\s+and\s+([\w]+)\s+{win_words}", "l_d_w"),
-            # draws, wins, losses
-            (rf"{draw_words},?\s+([\w]+)\s+{win_words}\s+and\s+([\w]+)\s+{loss_words}", "d_w_l"),
-            # draws, losses, wins
-            (rf"{draw_words},?\s+([\w]+)\s+{loss_words}\s+and\s+([\w]+)\s+{win_words}", "d_l_w"),
-        ]
-
-        for cand in _candidates(term):
-            # Venue sentences often start with the term followed by
-            # "have collected", "have recorded", "have secured", etc.
-            for verb in ["have collected", "have recorded", "have secured",
-                         "have", "recorded", "collected", "secured"]:
-                # Try a full form: "Cand have collected X wins, Y losses and Z draws"
-                # The first number belongs to the first category in the pattern.
-                for pat_body, order in patterns:
-                    regex = (rf"{re.escape(cand)}\s+{re.escape(verb)}\s+"
-                             rf"([\w]+)\s+{pat_body}")
-                    m = re.search(regex, body, re.IGNORECASE)
-                    if not m:
-                        # Also try without the verb (just candidate followed by number)
-                        regex2 = rf"{re.escape(cand)}[^.]*?([\w]+)\s+{pat_body}"
-                        m = re.search(regex2, body, re.IGNORECASE)
-                        if not m:
-                            continue
-
-                    # Reconstruct the three values. Patterns only capture 2 groups
-                    # (the second and third), the first is implicit in the label
-                    # The first captured group in `pat_body` is the first number
-                    # after the leading category word.
-                    n1 = _word_to_int(m.group(1))
-                    n2 = _word_to_int(m.group(2))
-                    n3 = _word_to_int(m.group(3)) if m.lastindex and m.lastindex >= 3 else None
-
-                    # Fallback: if only 2 groups, we may have missed the third.
-                    # Try to grab all three numbers in the matched span.
-                    span = m.group(0)
-                    nums = re.findall(r"[\w]+", span)
-                    # Extract the numeric words in order
-                    words = []
-                    for w in nums:
-                        v = _word_to_int(w)
-                        if v > 0 and w.lower() not in ("have", "collected", "recorded",
-                                                        "secured", "and", "wins", "win",
-                                                        "losses", "loss", "defeats",
-                                                        "defeat", "draws", "draw",
-                                                        "victories", "victory", "won"):
-                            words.append(v)
-
-                    if len(words) < 3:
-                        continue
-
-                    w_, l_, d_ = 0, 0, 0
-                    # Based on order label, assign
-                    if order == "w_l_d":
-                        w_, l_, d_ = words[0], words[1], words[2]
-                    elif order == "l_w_d":
-                        l_, w_, d_ = words[0], words[1], words[2]
-                    elif order == "w_d_l":
-                        w_, d_, l_ = words[0], words[1], words[2]
-                    elif order == "l_d_w":
-                        l_, d_, w_ = words[0], words[1], words[2]
-                    elif order == "d_w_l":
-                        d_, w_, l_ = words[0], words[1], words[2]
-                    elif order == "d_l_w":
-                        d_, l_, w_ = words[0], words[1], words[2]
-
-                    pts = w_ * 3 + d_
-                    f[f"{prefix}_pts"]    = pts
-                    f[f"{prefix}_ppg"]    = round(pts / 10, 2)
-                    f[f"{prefix}_wins"]   = w_
-                    f[f"{prefix}_losses"] = l_
-                    f[f"{prefix}_draws"]  = d_
-                    return True
-        return False
-
-    if not _parse_venue(home_term, "home_home"):
-        f["_parse_warnings"].append("home venue form not found")
-    if not _parse_venue(away_term, "away_away"):
-        f["_parse_warnings"].append("away venue form not found")
 
     # --- defaults so the logic can run -----------------------------
     for k in [
