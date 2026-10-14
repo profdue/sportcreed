@@ -210,6 +210,26 @@ def _search_term(full_name: str) -> str:
     return name
 
 
+def _candidates(term):
+    """Return candidate search terms for a team name (full, first word, cleaned)."""
+    if not term:
+        return []
+    out = [term]
+    first = term.split()[0]
+    if first != term:
+        out.append(first)
+    clean = re.sub(r"\s+\d+$", "", term).strip()
+    clean = re.sub(r"\s+(SCO|FC|CF|SC|AC|CD|SV|AS)$", "",
+                   clean, flags=re.IGNORECASE).strip()
+    if clean and clean not in out:
+        out.append(clean)
+    if clean and " " in clean:
+        first2 = clean.split()[0]
+        if first2 not in out:
+            out.append(first2)
+    return out
+
+
 def _team_match(full_name, cell_text):
     if not full_name or not cell_text:
         return False
@@ -434,103 +454,48 @@ def extract_facts(html: str) -> dict:
     if not standings_found:
         f["_parse_warnings"].append("standings table: no matching team rows found")
 
-    # --- helper: candidate search terms ----------------------------
-    def _candidates(term):
-        if not term:
-            return []
-        out = [term]
-        first = term.split()[0]
-        if first != term:
-            out.append(first)
-        clean = re.sub(r"\s+\d+$", "", term).strip()
-        clean = re.sub(r"\s+(SCO|FC|CF|SC|AC|CD|SV|AS)$", "",
-                       clean, flags=re.IGNORECASE).strip()
-        if clean and clean not in out:
-            out.append(clean)
-        if clean and " " in clean:
-            first2 = clean.split()[0]
-            if first2 not in out:
-                out.append(first2)
-        return out
+    # --- split body into sentences ----------------------------------
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
 
-    # --- section-scoped extraction ---------------------------------
-    def _section_for(label_pattern):
-        m = re.search(label_pattern, body, re.IGNORECASE)
-        if not m:
-            return ""
-        start = m.end()
-        tail = body[start:start + 800]
-        for cut in ["Last 10 League Games", "Players to Watch",
-                    "Home Stats", "Away Stats", "Head to Head",
-                    "Team Stats", "Confirmed Lineup"]:
-            idx = tail.find(cut)
-            if idx > 0:
-                tail = tail[:idx]
-                break
-        return tail
+    def _team_sentences(term):
+        """Return all sentences that begin with the team name (any candidate)."""
+        result = []
+        seen = set()
+        for cand in _candidates(term):
+            cand_low = cand.lower()
+            for s in sentences:
+                if id(s) in seen:
+                    continue
+                s_low = s.lower()
+                if s_low.startswith(cand_low) or cand_low in s_low[:40]:
+                    result.append(s)
+                    seen.add(id(s))
+        return result
 
-    def _parse_form_in_section(section):
-        if not section:
-            return None
+    # --- form parsing ----------------------------------------------
+    def _parse_form_from_sentences(sents):
+        """Look for a sentence with the form pattern (team's last 10)."""
         patterns = [
             (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?", ("w", "d", "l")),
             (r"(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+and\s+(\d+)\s+draws?", ("w", "l", "d")),
             (r"(\d+)\s+wins?,?\s+(\d+)\s+defeats?,?\s+and\s+(\d+)\s+draws?", ("w", "l", "d")),
-            (r"have\s+won\s+(\d+),?\s+lost\s+(\d+)\s+and\s+drawn\s+(\d+)", ("w", "l", "d")),
-            (r"have\s+won\s+(\d+),?\s+drawn\s+(\d+)\s+and\s+lost\s+(\d+)", ("w", "d", "l")),
+            (r"won\s+(\d+),?\s+lost\s+(\d+)\s+and\s+drawn\s+(\d+)", ("w", "l", "d")),
+            (r"won\s+(\d+),?\s+drawn\s+(\d+)\s+and\s+lost\s+(\d+)", ("w", "d", "l")),
+            (r"(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+(\d+)\s+draws?", ("w", "l", "d")),
         ]
-        for tmpl, mapping in patterns:
-            m = re.search(tmpl, section, re.IGNORECASE)
-            if not m:
-                continue
-            vals = {}
-            for i, key in enumerate(mapping):
-                vals[key] = int(m.group(i + 1))
-            return vals["w"], vals["d"], vals["l"]
+        for s in sents:
+            for tmpl, mapping in patterns:
+                m = re.search(tmpl, s, re.IGNORECASE)
+                if not m:
+                    continue
+                vals = {}
+                for i, key in enumerate(mapping):
+                    vals[key] = int(m.group(i + 1))
+                return vals["w"], vals["d"], vals["l"]
         return None
 
-    def _parse_venue_in_section(section, prefix):
-        if not section:
-            return None
-        patterns = [
-            (r"(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+draws", ("w", "l", "d")),
-            (r"(\d+)\s+(?:losses|defeats),?\s+(\d+)\s+victor(?:y|ies)\s+and\s+(\d+)\s+draws", ("l", "w", "d")),
-            (r"(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+draws\s+and\s+(\d+)\s+(?:losses|defeats)", ("w", "d", "l")),
-            (r"(\d+)\s+(?:losses|defeats),?\s+(\d+)\s+draws\s+and\s+(\d+)\s+victor(?:y|ies)", ("l", "d", "w")),
-            (r"(\d+)\s+draws,?\s+(\d+)\s+victor(?:y|ies)\s+and\s+(\d+)\s+(?:losses|defeats)", ("d", "w", "l")),
-            (r"(\d+)\s+draws,?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+victor(?:y|ies)", ("d", "l", "w")),
-        ]
-        for tmpl, mapping in patterns:
-            m = re.search(tmpl, section, re.IGNORECASE)
-            if not m:
-                continue
-            vals = {"w": 0, "d": 0, "l": 0}
-            for i, key in enumerate(mapping):
-                vals[key] = int(m.group(i + 1))
-            pts = vals["w"] * 3 + vals["d"]
-            f[f"{prefix}_pts"]    = pts
-            f[f"{prefix}_ppg"]    = round(pts / 10, 2)
-            f[f"{prefix}_wins"]   = vals["w"]
-            f[f"{prefix}_losses"] = vals["l"]
-            f[f"{prefix}_draws"]  = vals["d"]
-            return True
-        return None
-
-    # --- home form -------------------------------------------------
-    home_section = ""
-    for cand in _candidates(home_term):
-        home_section = _section_for(
-            rf"{re.escape(cand)}\s*[–\-]\s*Last 10 League Games")
-        if home_section:
-            break
-    if not home_section:
-        for cand in _candidates(home_term):
-            home_section = _section_for(
-                rf"{re.escape(cand)}[^.]*?have\s+\d+\s+wins?")
-            if home_section:
-                break
-
-    home_form = _parse_form_in_section(home_section)
+    home_sents = _team_sentences(home_term)
+    home_form = _parse_form_from_sentences(home_sents)
     if home_form:
         f["home_form_wins"], f["home_form_draws"], f["home_form_losses"] = home_form
         f["home_form_pts"] = f["home_form_wins"] * 3 + f["home_form_draws"]
@@ -538,21 +503,8 @@ def extract_facts(html: str) -> dict:
     else:
         f["_parse_warnings"].append(f"home form not found for {f.get('home_team')}")
 
-    # --- away form -------------------------------------------------
-    away_section = ""
-    for cand in _candidates(away_term):
-        away_section = _section_for(
-            rf"{re.escape(cand)}\s*[–\-]\s*Last 10 League Games")
-        if away_section:
-            break
-    if not away_section:
-        for cand in _candidates(away_term):
-            away_section = _section_for(
-                rf"{re.escape(cand)}[^.]*?have\s+\d+\s+wins?")
-            if away_section:
-                break
-
-    away_form = _parse_form_in_section(away_section)
+    away_sents = _team_sentences(away_term)
+    away_form = _parse_form_from_sentences(away_sents)
     if away_form:
         f["away_form_wins"], f["away_form_draws"], f["away_form_losses"] = away_form
         f["away_form_pts"] = f["away_form_wins"] * 3 + f["away_form_draws"]
@@ -560,25 +512,74 @@ def extract_facts(html: str) -> dict:
     else:
         f["_parse_warnings"].append(f"away form not found for {f.get('away_team')}")
 
-    # --- venue form (from the arena section) ----------------------
-    arena_section = ""
-    venue_name = f.get("venue") or ""
-    if venue_name:
-        arena_section = _section_for(
-            rf"{re.escape(venue_name)}[^.]*?(?:Stats:?|have|with)")
-    if not arena_section:
-        # Fallback: look for "<team> have collected/recorded X victories..."
-        for cand in _candidates(home_term):
-            arena_section = _section_for(
-                rf"{re.escape(cand)}\s+have\s+(?:collected|recorded|secured|won)")
-            if arena_section:
-                break
-    if not arena_section:
-        arena_section = body  # last resort
+    # --- venue form (from same team-sentence lists) -----------------
+    def _parse_venue_from_sentences(sents):
+        """Look for a sentence with venue stats (wins/losses/draws in any order)."""
+        win_words  = r"(?:wins?|victor(?:y|ies)|won)"
+        loss_words = r"(?:losses?|defeats?|lost)"
+        draw_words = r"(?:draws?|drawn)"
 
-    if not _parse_venue_in_section(arena_section, "home_home"):
+        patterns = [
+            (rf"(\d+)\s+{win_words},?\s+(\d+)\s+{loss_words}\s+and\s+(\d+)\s+{draw_words}", ("w", "l", "d")),
+            (rf"(\d+)\s+{loss_words},?\s+(\d+)\s+{win_words}\s+and\s+(\d+)\s+{draw_words}", ("l", "w", "d")),
+            (rf"(\d+)\s+{win_words},?\s+(\d+)\s+{draw_words}\s+and\s+(\d+)\s+{loss_words}", ("w", "d", "l")),
+            (rf"(\d+)\s+{loss_words},?\s+(\d+)\s+{draw_words}\s+and\s+(\d+)\s+{win_words}", ("l", "d", "w")),
+            (rf"(\d+)\s+{draw_words},?\s+(\d+)\s+{win_words}\s+and\s+(\d+)\s+{loss_words}", ("d", "w", "l")),
+            (rf"(\d+)\s+{draw_words},?\s+(\d+)\s+{loss_words}\s+and\s+(\d+)\s+{win_words}", ("d", "l", "w")),
+        ]
+        for s in sents:
+            for tmpl, mapping in patterns:
+                m = re.search(tmpl, s, re.IGNORECASE)
+                if not m:
+                    continue
+                vals = {"w": 0, "d": 0, "l": 0}
+                for i, key in enumerate(mapping):
+                    vals[key] = int(m.group(i + 1))
+                return vals["w"], vals["d"], vals["l"]
+        return None
+
+    # Home venue: look in home team sentences for a venue-style sentence
+    # (venue sentences use "in the last 10 home games" or similar wording,
+    # but our form parser also matches them, so we look for a DIFFERENT
+    # sentence from the one we used for form).
+    def _venue_sentence(sents):
+        """Find a sentence that mentions home/away split."""
+        out = []
+        for s in sents:
+            s_low = s.lower()
+            if ("in the last 10 home" in s_low or
+                "in the last 10 away" in s_low or
+                "in the previous 10 home" in s_low or
+                "in the previous 10 away" in s_low or
+                "in the past 10 home" in s_low or
+                "in the past 10 away" in s_low):
+                out.append(s)
+        return out
+
+    home_venue_sents = _venue_sentence(home_sents)
+    home_venue = _parse_venue_from_sentences(home_venue_sents) if home_venue_sents else None
+    if home_venue:
+        w, d, l = home_venue
+        pts = w * 3 + d
+        f["home_home_pts"]    = pts
+        f["home_home_ppg"]    = round(pts / 10, 2)
+        f["home_home_wins"]   = w
+        f["home_home_draws"]  = d
+        f["home_home_losses"] = l
+    else:
         f["_parse_warnings"].append("home venue form not found")
-    if not _parse_venue_in_section(arena_section, "away_away"):
+
+    away_venue_sents = _venue_sentence(away_sents)
+    away_venue = _parse_venue_from_sentences(away_venue_sents) if away_venue_sents else None
+    if away_venue:
+        w, d, l = away_venue
+        pts = w * 3 + d
+        f["away_away_pts"]    = pts
+        f["away_away_ppg"]    = round(pts / 10, 2)
+        f["away_away_wins"]   = w
+        f["away_away_draws"]  = d
+        f["away_away_losses"] = l
+    else:
         f["_parse_warnings"].append("away venue form not found")
 
     # --- H2H from the H2H table -----------------------------------
@@ -589,35 +590,25 @@ def extract_facts(html: str) -> dict:
         home_wins = away_wins = draws = 0
         for row in h2h_rows:
             text = row.get_text(" ", strip=True)
-            # The text looks like:
-            # "Championship: 04/01 2026 Millwall 2 Swansea 1"
-            # The last two integers are the scores.
             nums = re.findall(r"\b(\d+)\b", text)
             if len(nums) < 2:
                 continue
-            # Last two ints are the scores
             try:
                 hs = int(nums[-2])
                 aws = int(nums[-1])
             except ValueError:
                 continue
-            # Decide which side is home/away based on team name order in text
-            # Simpler heuristic: the team that appears FIRST in the row text is home
-            home_first = _team_match(f.get("home_team", ""), text.split()[0] if text.split() else "")
-            # Actually use score comparison and best-effort assignment
+            idx_home = text.lower().find((home_term or "").lower())
+            idx_away = text.lower().find((away_term or "").lower())
+            home_listed_first = (idx_home != -1 and
+                                 (idx_away == -1 or idx_home < idx_away))
             if hs > aws:
-                # Winner could be home or away depending on row order;
-                # look at which team name appears first
-                idx_home = text.lower().find((home_term or "").lower())
-                idx_away = text.lower().find((away_term or "").lower())
-                if idx_home != -1 and (idx_away == -1 or idx_home < idx_away):
+                if home_listed_first:
                     home_wins += 1
                 else:
                     away_wins += 1
             elif aws > hs:
-                idx_home = text.lower().find((home_term or "").lower())
-                idx_away = text.lower().find((away_term or "").lower())
-                if idx_home != -1 and (idx_away == -1 or idx_home < idx_away):
+                if home_listed_first:
                     away_wins += 1
                 else:
                     home_wins += 1
