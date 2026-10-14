@@ -1306,7 +1306,6 @@ with tab_perf:
         st.markdown("### All settled matches")
         for m in settled:
             render_settled_card(m)
-DOES THIS OUTPUT MATCH THE FILE
 
 
 
