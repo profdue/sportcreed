@@ -604,6 +604,8 @@ def _parse_standings(soup, f):
             break
 
 
+
+
 # --- Regex pieces - EXTENDED ---
 _WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
 _LOSS_WORDS = r"(?:losses?|defeats?|lost)"
@@ -655,6 +657,7 @@ def _venue_sentence(sents):
 
 
 def _parse_venue_from_sentences(sents):
+    # handles both 3-number and venue sentences
     patterns = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
@@ -718,43 +721,13 @@ def _parse_venue(soup, home_sents, away_sents, f):
             f["away_away_ppg"] = round(pts / total, 2)
 
 
-def _slice_after_team_then_stop_at_other_team(s, team, other_team):
+def _parse_form_from_sentences(sents, required_first_word=None):
     """
-    Return the substring of `s` that starts at `team` and stops
-    before `other_team` (if `other_team` appears after `team`).
-
-    This prevents cross-team contamination when the whole page text
-    is one giant sentence with both teams mentioned.
-    """
-    s_low = s.lower()
-    team_low = (team or "").lower()
-    other_low = (other_team or "").lower()
-
-    if not team_low:
-        return s
-
-    idx_team = s_low.find(team_low)
-    if idx_team == -1:
-        return ""
-
-    # Where does the other team appear after the current team?
-    if other_low:
-        idx_other = s_low.find(other_low, idx_team + len(team_low))
-        if idx_other != -1:
-            return s[idx_team:idx_other]
-
-    return s[idx_team:]
-
-
-def _parse_form_from_sentences(sents, required_first_word=None, other_team=None):
-    """
-    Parse overall form (W/D/L) from prose.
-
-    - Team name can appear anywhere in the sentence.
-    - W/D/L pattern must appear AFTER the team name.
-    - Search area stops before the other team name (if it appears later),
-      preventing cross-team contamination.
-    - Handles both 3-number and 2-number (draw inferred) forms.
+    FIXED: 
+    - Team name can be anywhere, not just first 80 chars
+    - Handles 2-number forms like '3 wins and 7 losses' -> infers draws
+    - Normalizes synonyms before matching
+    - Requires W/D/L pattern to appear AFTER team name if team specified
     """
     venue_sents = set(_venue_sentence(sents))
     filtered = [s for s in sents if s not in venue_sents]
@@ -763,20 +736,24 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     cleaned = []
     for s in filtered:
         if "G W D L" in s and "View Full Table" in s:
+            # keep only after last "View Full Table"
             parts = s.split("View Full Table")
             s = parts[-1]
         if "W-D-L" in s and "G GF GA" in s:
+            # this is st-table header line, skip unless it also has team form sentence
             if "Home Stats" in s or "Away Stats" in s:
+                # keep only the stats part? skip for form
                 continue
         if len(s) < 20:
             continue
         cleaned.append(s)
     filtered = cleaned
 
+    # patterns: 3-number and 2-number
     patterns_3 = [
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
@@ -794,19 +771,17 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
 
     for s in filtered:
         s_low = s.lower()
+        # team filter: team must be in sentence
         if required_first_word:
             req_low = required_first_word.lower()
             if req_low not in s_low:
                 continue
-            # Slice from team name to before the other team name
-            search_area = _slice_after_team_then_stop_at_other_team(
-                s, required_first_word, other_team
-            )
+            team_idx = s_low.find(req_low)
+            # search only after team name to avoid cross-team contamination
+            search_area = s[team_idx:]
         else:
             search_area = s
-
-        if not search_area:
-            continue
+            team_idx = 0
 
         # try 3-number first
         for tmpl, mapping in patterns_3:
@@ -832,9 +807,11 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
             total = vals["w"] + vals["l"]
             if total < 2 or total > 10:
                 continue
+            # infer draws as remainder to 10
             vals["d"] = 10 - total if total <= 10 else 0
             if vals["d"] < 0:
                 vals["d"] = 0
+            # final total check
             if sum(vals.values()) < 5 or sum(vals.values()) > 15:
                 continue
             return vals["w"], vals["d"], vals["l"]
@@ -847,6 +824,7 @@ def _team_sentences(aliases, sentences):
         return []
     result = []
     seen = set()
+    # pre-sort aliases by length descending to match longer first
     sorted_aliases = sorted(aliases, key=len, reverse=True)
     for alias in sorted_aliases:
         if not alias:
@@ -858,7 +836,9 @@ def _team_sentences(aliases, sentences):
             if sid in seen:
                 continue
             if pattern.search(s):
+                # filter out pure table rows that are not sentences
                 if "G W D L" in s and len(s) < 200:
+                    # skip unless it contains form language
                     if "wins" not in s.lower() and "won" not in s.lower() and "victor" not in s.lower():
                         continue
                 result.append(s)
@@ -870,11 +850,7 @@ def _parse_form(home_sents, away_sents, f):
     home_short = f.get("home_team_short") or f.get("home_team", "")
     away_short = f.get("away_team_short") or f.get("away_team", "")
 
-    home_form = _parse_form_from_sentences(
-        home_sents,
-        required_first_word=home_short,
-        other_team=away_short,
-    )
+    home_form = _parse_form_from_sentences(home_sents, required_first_word=home_short)
     if home_form:
         w, d, l = home_form
         total = w + d + l or 1
@@ -883,11 +859,7 @@ def _parse_form(home_sents, away_sents, f):
         f["home_form_pts"] = pts
         f["home_form_ppg"] = round(pts / total, 2)
 
-    away_form = _parse_form_from_sentences(
-        away_sents,
-        required_first_word=away_short,
-        other_team=home_short,
-    )
+    away_form = _parse_form_from_sentences(away_sents, required_first_word=away_short)
     if away_form:
         w, d, l = away_form
         total = w + d + l or 1
@@ -901,7 +873,7 @@ def _parse_h2h(soup, home_term, away_term, f):
     rows = []
     section = soup.find("div", id="head-to-head")
     if section:
-        rows = section.find_all("li", class="team-stat-list-item")
+        rows = section.find_all("li", class_="team-stat-list-item")
     if not rows:
         for h in soup.find_all(["h3", "h4", "div"], string=re.compile("head to head", re.I)):
             parent = h.find_parent()
@@ -940,9 +912,9 @@ def _parse_h2h(soup, home_term, away_term, f):
 def extract_facts(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     f = {"_parse_warnings": []}
-
     # CLEAN body for sentence splitting - FIX for table pollution
     raw_text = soup.get_text(" ", strip=True)
+    # Insert sentence breaks for common pollution points
     clean_text = raw_text.replace("View Full Table", ". ")
     clean_text = re.sub(r"\s+", " ", clean_text)
     body = clean_text
@@ -1334,3 +1306,7 @@ with tab_perf:
         st.markdown("### All settled matches")
         for m in settled:
             render_settled_card(m)
+DOES THIS OUTPUT MATCH THE FILE
+
+
+
