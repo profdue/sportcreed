@@ -6,9 +6,18 @@ Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
 
 One file. Two clauses. Three tabs.
+
+Parsing strategy: layered funnel.
+  1. Structured data (tables, data attributes, JSON-LD)
+  2. Semi-structured (labeled divs with fixed classes)
+  3. Prose (regex on sentences)
+  4. Give up and warn
+
+Every field failure is logged. Missing data never votes silently.
 """
 
 import re
+import json
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
@@ -172,12 +181,20 @@ _TEAM_PREFIXES = (
     "club ", "atlético ", "atletico ", "deportivo ", "real ",
     "fc ", "cf ", "cd ", "ca ", "ac ", "as ", "sv ", "sc ",
     "athletic ", "sporting ", "racing ", "olympique ", "stade ",
+    "stade ", "rc ", "rcd ", "ud ", "sd ", "ss ", "ssc ", "ss ",
 )
 
 _TEAM_SUFFIXES = (
     " sco", " fc", " cf", " sc", " ac", " cd", " sv", " as",
-    " 29", " 04", " 05", " 1899", " 1900",
+    " 29", " 04", " 05", " 1899", " 1900", " calcio", " futbol",
 )
+
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12,
+    "single": 1, "a": 1, "an": 1,
+}
 
 
 def _search_term(full_name: str) -> str:
@@ -188,6 +205,8 @@ def _search_term(full_name: str) -> str:
     'Stade Brestois 29' → 'Brestois'
     'Angers SCO' → 'Angers'
     'FC Famalicão' → 'Famalicão'
+    'Torino FC' → 'Torino'
+    'Udinese Calcio' → 'Udinese'
     """
     if not full_name:
         return ""
@@ -219,7 +238,7 @@ def _candidates(term):
     if first != term:
         out.append(first)
     clean = re.sub(r"\s+\d+$", "", term).strip()
-    clean = re.sub(r"\s+(SCO|FC|CF|SC|AC|CD|SV|AS)$", "",
+    clean = re.sub(r"\s+(SCO|FC|CF|SC|AC|CD|SV|AS|SS|UD|SD)$", "",
                    clean, flags=re.IGNORECASE).strip()
     if clean and clean not in out:
         out.append(clean)
@@ -227,6 +246,11 @@ def _candidates(term):
         first2 = clean.split()[0]
         if first2 not in out:
             out.append(first2)
+    # Last word too — useful when team is "Stade Brestois"
+    if " " in clean:
+        last = clean.split()[-1]
+        if last not in out and len(last) > 2:
+            out.append(last)
     return out
 
 
@@ -245,15 +269,12 @@ def _team_match(full_name, cell_text):
 
 
 def _word_to_int(s):
-    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-             "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-             "single": 1, "a": 1, "an": 1}
     if isinstance(s, (int, float)):
         return int(s)
     s = str(s).strip().lower()
-    if s.isdigit():
+    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
         return int(s)
-    return words.get(s, 0)
+    return _NUMBER_WORDS.get(s, 0)
 
 
 def _int_any(text):
@@ -265,22 +286,90 @@ def _int_any(text):
     return _word_to_int(text)
 
 
+def _num(s):
+    """Parse a number that may be a digit or a word. Returns None if unparseable."""
+    if s is None:
+        return None
+    s = str(s).strip().lower()
+    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+        return int(s)
+    return _NUMBER_WORDS.get(s)
+
+
+def _team_aliases(soup, team_full, team_short):
+    """
+    Return all plausible names for a team, mined from the document.
+    Combines full name, short name, prefix/suffix-stripped variants,
+    first word, and last word.
+    """
+    aliases = set()
+    if team_full:
+        aliases.add(team_full.strip())
+        t = _search_term(team_full)
+        if t:
+            aliases.add(t)
+    if team_short:
+        aliases.add(team_short.strip())
+        t = _search_term(team_short)
+        if t:
+            aliases.add(t)
+
+    # Strip prefixes / suffixes
+    for name in list(aliases):
+        low = name.lower()
+        for prefix in _TEAM_PREFIXES:
+            if low.startswith(prefix):
+                aliases.add(name[len(prefix):].strip())
+        for suffix in _TEAM_SUFFIXES:
+            if low.endswith(suffix):
+                aliases.add(name[: -len(suffix)].strip())
+
+    # First and last word
+    for name in list(aliases):
+        parts = name.split()
+        if len(parts) > 1:
+            aliases.add(parts[0])
+            aliases.add(parts[-1])
+
+    # Keep only useful aliases
+    cleaned = set()
+    for a in aliases:
+        a = a.strip()
+        if a and len(a) > 2 and a.lower() not in {"the", "and", "for"}:
+            cleaned.add(a)
+    return list(cleaned)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # THE LOGIC — TWO CLAUSES
 # ═══════════════════════════════════════════════════════════════════
 
-def compute_signals(f: dict) -> dict:
-    table = "home" if (f.get("home_table_pts", 0), f.get("home_table_gd", 0)) > \
-                      (f.get("away_table_pts", 0), f.get("away_table_gd", 0)) else "away"
-    form  = "home" if f.get("home_form_ppg", 0) > f.get("away_form_ppg", 0) else "away"
-    venue = "home" if f.get("home_home_ppg", 0) > f.get("away_away_ppg", 0) else "away"
+def _cmp_or_nothing(a, b):
+    """Return 'home' / 'away' / 'nothing' based on comparison, safe with None."""
+    if a is None or b is None or a == b:
+        return "nothing"
+    return "home" if a > b else "away"
 
-    if f.get("h2h_home_wins", 0) > f.get("h2h_away_wins", 0):
-        h2h = "home"
-    elif f.get("h2h_away_wins", 0) > f.get("h2h_home_wins", 0):
-        h2h = "away"
+
+def compute_signals(f: dict) -> dict:
+    # --- Table: compare (points, GD) tuples ---
+    hp = f.get("home_table_pts")
+    ap = f.get("away_table_pts")
+    hg = f.get("home_table_gd") or 0
+    ag = f.get("away_table_gd") or 0
+    if hp is None or ap is None:
+        table = "nothing"
+    elif (hp, hg) > (ap, ag):
+        table = "home"
+    elif (ap, ag) > (hp, hg):
+        table = "away"
     else:
-        h2h = "nothing"
+        table = "nothing"
+
+    # --- Form, Venue, H2H: safe comparisons ---
+    form  = _cmp_or_nothing(f.get("home_form_ppg"),  f.get("away_form_ppg"))
+    venue = _cmp_or_nothing(f.get("home_home_ppg"),  f.get("away_away_ppg"))
+    h2h   = _cmp_or_nothing(f.get("h2h_home_wins"),  f.get("h2h_away_wins"))
 
     return {"table": table, "form": form, "venue": venue, "h2h": h2h}
 
@@ -291,6 +380,7 @@ def decide(signals: dict) -> dict:
     nothing = sum(1 for v in signals.values() if v == "nothing")
     table_leader = signals["table"]
 
+    # Full agreement: 4-0
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         return {
@@ -299,15 +389,37 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    if (home == 3 and away == 1) or (away == 3 and home == 1):
-        dissent = next((k for k, v in signals.items()
-                        if v != table_leader and v != "nothing"), None)
+    # 3-1 (with no "nothing"): half stake, follow table leader
+    if home == 3 and away == 1:
+        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        return {
+            "direction": table_leader, "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+        }
+    if away == 3 and home == 1:
+        dissent = next((k for k, v in signals.items() if v == "home"), None)
         return {
             "direction": table_leader, "stake": "half", "qualifying": 1,
             "dissent_signal": dissent, "split": f"{home}-{away}",
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
+    # 3-0 with one "nothing": treat as full
+    if home == 3 and away == 0 and nothing == 1:
+        return {
+            "direction": "home", "stake": "full", "qualifying": 1,
+            "dissent_signal": "nothing", "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+        }
+    if away == 3 and home == 0 and nothing == 1:
+        return {
+            "direction": "away", "stake": "full", "qualifying": 1,
+            "dissent_signal": "nothing", "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+        }
+
+    # 2-2: skip
     if home == 2 and away == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -315,6 +427,7 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
+    # Too few informative signals
     if (home + away) < 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -322,6 +435,7 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
+    # Default: skip
     split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
     return {
         "direction": "skip", "stake": "none", "qualifying": 0,
@@ -355,25 +469,70 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HTML EXTRACTION
+# HTML EXTRACTION — LAYERED
 # ═══════════════════════════════════════════════════════════════════
 
-def extract_facts(html: str) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
-    f = {"_parse_warnings": []}
-    body = soup.get_text(" ", strip=True)
-
-    # --- identity ---------------------------------------------------
-    f["match_date"] = f["kickoff_time"] = None
-    f["league"] = f["country"] = f["venue"] = None
-    f["home_team"] = f["away_team"] = None
+def _extract_identity(soup, f):
+    """Extract teams, league, date, venue, kickoff from any available source."""
 
     t_top = soup.find("div", class_="t_top")
+
+    # --- Teams ---
     if t_top:
-        teams = t_top.find_all("div", class_="t_name")
-        if len(teams) >= 2:
-            f["home_team"] = teams[0].get_text(strip=True)
-            f["away_team"] = teams[1].get_text(strip=True)
+        names = t_top.find_all("div", class_="t_name")
+        if len(names) >= 2:
+            f["home_team"] = names[0].get_text(strip=True)
+            f["away_team"] = names[1].get_text(strip=True)
+
+    # Source B: <title>
+    title = soup.find("title")
+    if not f.get("home_team") and title:
+        m = re.search(r"(.+?)\s+vs\s+(.+?)\s+Prediction", title.get_text())
+        if m:
+            f["home_team"] = m.group(1).strip()
+            f["away_team"] = m.group(2).strip()
+
+    # Source C: <h1>
+    if not f.get("home_team"):
+        h1 = soup.find("h1")
+        if h1:
+            m = re.search(r"(.+?)\s+vs\s+(.+?)\s+Prediction", h1.get_text())
+            if m:
+                f["home_team"] = m.group(1).strip()
+                f["away_team"] = m.group(2).strip()
+
+    # Source D: og:title
+    if not f.get("home_team"):
+        og = soup.find("meta", property="og:title")
+        if og and og.get("content"):
+            m = re.search(r"(.+?)\s+vs\s+(.+?)\s+Prediction", og["content"])
+            if m:
+                f["home_team"] = m.group(1).strip()
+                f["away_team"] = m.group(2).strip()
+
+    # Source E: canonical URL
+    if not f.get("home_team"):
+        link = soup.find("link", rel="canonical")
+        if link and link.get("href"):
+            m = re.search(r"/([^/]+)-vs-([^/]+)-prediction", link["href"])
+            if m:
+                f["home_team"] = m.group(1).replace("-", " ").title()
+                f["away_team"] = m.group(2).replace("-", " ").title()
+
+    # --- Short names (from title, for prose matching) ---
+    if title:
+        m = re.search(r"(.+?)\s+vs\s+(.+?)\s+Prediction", title.get_text())
+        if m:
+            f["home_team_short"] = m.group(1).strip()
+            f["away_team_short"] = m.group(2).strip()
+
+    if not f.get("home_team_short"):
+        f["home_team_short"] = _search_term(f.get("home_team", ""))
+    if not f.get("away_team_short"):
+        f["away_team_short"] = _search_term(f.get("away_team", ""))
+
+    # --- League ---
+    if t_top:
         info = t_top.find("div", class_="t_info")
         if info:
             links = info.find_all("a", class_="t_info_link")
@@ -382,9 +541,25 @@ def extract_facts(html: str) -> dict:
                 if " - " in league_txt:
                     _, league_txt = league_txt.split(" - ", 1)
                 f["league"] = league_txt
-            venue = info.find("span", class_="t_venue")
-            if venue:
-                f["venue"] = venue.get_text(strip=True)
+
+    if not f.get("league"):
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                for node in data.get("@graph", [data]):
+                    event = node.get("mainEntity", {})
+                    if isinstance(event, dict) and "superEvent" in event:
+                        f["league"] = event["superEvent"].get("name")
+                        break
+                if f.get("league"):
+                    break
+            except Exception:
+                continue
+
+    # --- Date / time ---
+    if t_top:
+        info = t_top.find("div", class_="t_info")
+        if info:
             date = info.find("span", class_="t_date")
             if date:
                 txt = date.get_text(" ", strip=True)
@@ -394,242 +569,390 @@ def extract_facts(html: str) -> dict:
                 m = re.search(r"(\d{1,2}:\d{2})", txt)
                 if m:
                     f["kickoff_time"] = m.group(1)
-    else:
-        f["_parse_warnings"].append("t_top block not found")
 
-    home_term = _search_term(f.get("home_team", ""))
-    away_term = _search_term(f.get("away_team", ""))
+    if not f.get("match_date"):
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                for node in data.get("@graph", [data]):
+                    event = node.get("mainEntity", {})
+                    if isinstance(event, dict) and "startDate" in event:
+                        f["match_date"] = event["startDate"][:10]
+                        break
+                if f.get("match_date"):
+                    break
+            except Exception:
+                continue
 
-    # --- standings table (overall) ----------------------------------
-    # Standard SportsGambler standings row has 11 cells:
-    #   pos | team | G | W | D | L | GF | GA | GD | "GF:GA" | P
-    standings_found = False
-    for table in soup.find_all("table", class_="clt-table"):
+    # --- Venue ---
+    if t_top:
+        info = t_top.find("div", class_="t_info")
+        if info:
+            venue = info.find("span", class_="t_venue")
+            if venue:
+                f["venue"] = venue.get_text(strip=True)
+
+    if not f.get("venue"):
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                for node in data.get("@graph", [data]):
+                    event = node.get("mainEntity", {})
+                    if isinstance(event, dict):
+                        loc = event.get("location", {})
+                        if isinstance(loc, dict) and "name" in loc:
+                            f["venue"] = loc["name"]
+                            break
+                if f.get("venue"):
+                    break
+            except Exception:
+                continue
+
+
+def _parse_standings(soup, f):
+    """Extract table position, points, GD for both teams from any standings table."""
+    home_team = f.get("home_team", "")
+    away_team = f.get("away_team", "")
+
+    candidates = (
+        soup.find_all("table", class_="clt-table") +
+        soup.find_all("table", class_="leage-table") +
+        soup.find_all("table", class_="league-table") +
+        soup.find_all("table", class_="standings-table")
+    )
+
+    seen = set()
+    for table in candidates:
         for row in table.find_all("tr"):
             cells = [c.get_text(strip=True) for c in row.find_all("td")]
-            if len(cells) < 11:
+            if len(cells) < 4:
                 continue
-            team_cell = cells[1]
-            if _team_match(f.get("home_team", ""), team_cell):
-                f["home_table_pos"]    = _int_any(cells[0])
-                f["home_table_played"] = _int_any(cells[2])
-                f["home_table_gf"]     = _int_any(cells[6])
-                f["home_table_ga"]     = _int_any(cells[7])
-                f["home_table_gd"]     = _int_any(cells[8])
-                f["home_table_pts"]    = _int_any(cells[10])
-                standings_found = True
-            elif _team_match(f.get("away_team", ""), team_cell):
-                f["away_table_pos"]    = _int_any(cells[0])
-                f["away_table_played"] = _int_any(cells[2])
-                f["away_table_gf"]     = _int_any(cells[6])
-                f["away_table_ga"]     = _int_any(cells[7])
-                f["away_table_gd"]     = _int_any(cells[8])
-                f["away_table_pts"]    = _int_any(cells[10])
-                standings_found = True
 
-    if not standings_found:
-        for table in soup.find_all("table", class_="leage-table"):
-            for row in table.find_all("tr"):
-                cells = [c.get_text(strip=True) for c in row.find_all("td")]
-                if len(cells) < 8:
-                    continue
-                team_cell = cells[1]
-                if _team_match(f.get("home_team", ""), team_cell):
-                    f["home_table_pos"]    = f.get("home_table_pos")    or _int_any(cells[0])
-                    f["home_table_played"] = f.get("home_table_played") or _int_any(cells[2])
-                    f["home_table_gf"]     = f.get("home_table_gf")     or _int_any(cells[4])
-                    f["home_table_ga"]     = f.get("home_table_ga")     or _int_any(cells[5])
-                    f["home_table_gd"]     = f.get("home_table_gd")     or _int_any(cells[6])
-                    f["home_table_pts"]    = f.get("home_table_pts")    or _int_any(cells[7])
-                    standings_found = True
-                elif _team_match(f.get("away_team", ""), team_cell):
-                    f["away_table_pos"]    = f.get("away_table_pos")    or _int_any(cells[0])
-                    f["away_table_played"] = f.get("away_table_played") or _int_any(cells[2])
-                    f["away_table_gf"]     = f.get("away_table_gf")     or _int_any(cells[4])
-                    f["away_table_ga"]     = f.get("away_table_ga")     or _int_any(cells[5])
-                    f["away_table_gd"]     = f.get("away_table_gd")     or _int_any(cells[6])
-                    f["away_table_pts"]    = f.get("away_table_pts")    or _int_any(cells[7])
-                    standings_found = True
+            team_cell = cells[1] if len(cells) > 1 else ""
 
-    if not standings_found:
-        f["_parse_warnings"].append("standings table: no matching team rows found")
+            target = None
+            if _team_match(home_team, team_cell):
+                target = "home"
+            elif _team_match(away_team, team_cell):
+                target = "away"
+            if not target or target in seen:
+                continue
+            seen.add(target)
 
-    # --- split body into sentences ----------------------------------
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+            nums = [_int_any(c) for c in cells if _int_any(c) is not None]
 
-    def _team_sentences(term):
-        """Return all sentences that begin with the team name (any candidate)."""
-        result = []
-        seen = set()
-        for cand in _candidates(term):
-            cand_low = cand.lower()
-            for s in sentences:
-                if id(s) in seen:
-                    continue
-                s_low = s.lower()
-                if s_low.startswith(cand_low) or cand_low in s_low[:40]:
-                    result.append(s)
-                    seen.add(id(s))
-        return result
+            pos = nums[0] if nums else None
+            pts = nums[-1] if nums else None
 
-    # --- form parsing ----------------------------------------------
-    def _parse_form_from_sentences(sents):
-        """Look for a sentence with the form pattern (team's last 10)."""
-        patterns = [
-            (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?", ("w", "d", "l")),
-            (r"(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+and\s+(\d+)\s+draws?", ("w", "l", "d")),
-            (r"(\d+)\s+wins?,?\s+(\d+)\s+defeats?,?\s+and\s+(\d+)\s+draws?", ("w", "l", "d")),
-            (r"won\s+(\d+),?\s+lost\s+(\d+)\s+and\s+drawn\s+(\d+)", ("w", "l", "d")),
-            (r"won\s+(\d+),?\s+drawn\s+(\d+)\s+and\s+lost\s+(\d+)", ("w", "d", "l")),
-            (r"(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+(\d+)\s+draws?", ("w", "l", "d")),
-        ]
-        for s in sents:
-            for tmpl, mapping in patterns:
-                m = re.search(tmpl, s, re.IGNORECASE)
-                if not m:
-                    continue
-                vals = {}
-                for i, key in enumerate(mapping):
-                    vals[key] = int(m.group(i + 1))
-                return vals["w"], vals["d"], vals["l"]
-        return None
+            # GD from "GF:GA" cell, else from signed int
+            gd = None
+            for c in cells:
+                if ":" in c:
+                    try:
+                        a, b = c.split(":")
+                        gd = int(a) - int(b)
+                        break
+                    except Exception:
+                        pass
+            if gd is None:
+                for c in reversed(cells[:-1]):
+                    s = c.strip()
+                    if (s.startswith("-") or s.startswith("+")) and s[1:].isdigit():
+                        gd = int(s)
+                        break
 
-    home_sents = _team_sentences(home_term)
+            f[f"{target}_table_pos"] = pos
+            f[f"{target}_table_pts"] = pts
+            f[f"{target}_table_gd"]  = gd
+
+            if len(cells) >= 11:
+                f[f"{target}_table_played"] = _int_any(cells[2])
+                f[f"{target}_table_gf"]     = _int_any(cells[6])
+                f[f"{target}_table_ga"]     = _int_any(cells[7])
+
+        if len(seen) == 2:
+            break
+
+
+def _venue_sentence(sents):
+    keywords = [
+        "in the last 10 home", "in the last 10 away",
+        "in the past 10 home", "in the past 10 away",
+        "in the previous 10 home", "in the previous 10 away",
+        "in their last 10 home", "in their last 10 away",
+        "in their past 10 home", "in their past 10 away",
+        "last 10 home matches", "last 10 away matches",
+    ]
+    return [s for s in sents if any(k in s.lower() for k in keywords)]
+
+
+_WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
+_LOSS_WORDS = r"(?:losses?|defeats?|lost)"
+_DRAW_WORDS = r"(?:draws?|drawn)"
+_NUM_PAT    = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+
+
+def _parse_venue_from_sentences(sents):
+    """Look for a sentence with venue stats (wins/losses/draws in any order)."""
+    patterns = [
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
+    ]
+    for s in sents:
+        for tmpl, mapping in patterns:
+            m = re.search(tmpl, s, re.IGNORECASE)
+            if not m:
+                continue
+            vals = {"w": 0, "d": 0, "l": 0}
+            for i, key in enumerate(mapping):
+                vals[key] = _num(m.group(i + 1)) or 0
+            return vals["w"], vals["d"], vals["l"]
+    return None
+
+
+def _parse_venue(soup, home_sents, away_sents, f):
+    """Structured st-table first; prose fallback."""
+
+    st = soup.find("table", class_="st-table")
+    if st:
+        home_wdl = away_wdl = None
+        for row in st.find_all("tr"):
+            cells = [c.get_text(strip=True) for c in row.find_all("td")]
+            if len(cells) < 3:
+                continue
+            label = " ".join(cells[:2]).lower()
+            m = re.match(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", cells[2])
+            if not m:
+                continue
+            w, d, l = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if "home stats" in label:
+                home_wdl = (w, d, l)
+            elif "away stats" in label:
+                away_wdl = (w, d, l)
+
+        if home_wdl:
+            w, d, l = home_wdl
+            total = w + d + l or 1
+            pts = w * 3 + d
+            f["home_home_wins"], f["home_home_draws"], f["home_home_losses"] = w, d, l
+            f["home_home_pts"] = pts
+            f["home_home_ppg"] = round(pts / total, 2)
+
+        if away_wdl:
+            w, d, l = away_wdl
+            total = w + d + l or 1
+            pts = w * 3 + d
+            f["away_away_wins"], f["away_away_draws"], f["away_away_losses"] = w, d, l
+            f["away_away_pts"] = pts
+            f["away_away_ppg"] = round(pts / total, 2)
+
+    # Prose fallback
+    if "home_home_ppg" not in f and home_sents:
+        result = _parse_venue_from_sentences(_venue_sentence(home_sents))
+        if result:
+            w, d, l = result
+            total = w + d + l or 1
+            pts = w * 3 + d
+            f["home_home_wins"], f["home_home_draws"], f["home_home_losses"] = w, d, l
+            f["home_home_pts"] = pts
+            f["home_home_ppg"] = round(pts / total, 2)
+
+    if "away_away_ppg" not in f and away_sents:
+        result = _parse_venue_from_sentences(_venue_sentence(away_sents))
+        if result:
+            w, d, l = result
+            total = w + d + l or 1
+            pts = w * 3 + d
+            f["away_away_wins"], f["away_away_draws"], f["away_away_losses"] = w, d, l
+            f["away_away_pts"] = pts
+            f["away_away_ppg"] = round(pts / total, 2)
+
+
+def _parse_form_from_sentences(sents):
+    """Look for a sentence with the form pattern (team's last 10)."""
+    patterns = [
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
+        (rf"won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
+        (rf"won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
+    ]
+    for s in sents:
+        for tmpl, mapping in patterns:
+            m = re.search(tmpl, s, re.IGNORECASE)
+            if not m:
+                continue
+            vals = {"w": 0, "d": 0, "l": 0}
+            for i, key in enumerate(mapping):
+                vals[key] = _num(m.group(i + 1)) or 0
+            return vals["w"], vals["d"], vals["l"]
+    return None
+
+
+def _team_sentences(aliases, sentences):
+    """Return all sentences that contain any alias as a whole word."""
+    if not aliases:
+        return []
+    result = []
+    seen_ids = set()
+    for alias in aliases:
+        if not alias:
+            continue
+        alias_low = alias.lower()
+        pattern = re.compile(r"\b" + re.escape(alias_low) + r"\b")
+        for s in sentences:
+            if id(s) in seen_ids:
+                continue
+            if pattern.search(s.lower()):
+                result.append(s)
+                seen_ids.add(id(s))
+    return result
+
+
+def _parse_form(home_sents, away_sents, f):
     home_form = _parse_form_from_sentences(home_sents)
     if home_form:
-        f["home_form_wins"], f["home_form_draws"], f["home_form_losses"] = home_form
-        f["home_form_pts"] = f["home_form_wins"] * 3 + f["home_form_draws"]
-        f["home_form_ppg"] = round(f["home_form_pts"] / 10, 2)
-    else:
-        f["_parse_warnings"].append(f"home form not found for {f.get('home_team')}")
+        w, d, l = home_form
+        total = w + d + l or 1
+        pts = w * 3 + d
+        f["home_form_wins"], f["home_form_draws"], f["home_form_losses"] = w, d, l
+        f["home_form_pts"] = pts
+        f["home_form_ppg"] = round(pts / total, 2)
 
-    away_sents = _team_sentences(away_term)
     away_form = _parse_form_from_sentences(away_sents)
     if away_form:
-        f["away_form_wins"], f["away_form_draws"], f["away_form_losses"] = away_form
-        f["away_form_pts"] = f["away_form_wins"] * 3 + f["away_form_draws"]
-        f["away_form_ppg"] = round(f["away_form_pts"] / 10, 2)
-    else:
+        w, d, l = away_form
+        total = w + d + l or 1
+        pts = w * 3 + d
+        f["away_form_wins"], f["away_form_draws"], f["away_form_losses"] = w, d, l
+        f["away_form_pts"] = pts
+        f["away_form_ppg"] = round(pts / total, 2)
+
+
+def _parse_h2h(soup, home_term, away_term, f):
+    """Multi-source H2H extraction."""
+    rows = []
+
+    section = soup.find("div", id="head-to-head")
+    if section:
+        rows = section.find_all("li", class_="team-stat-list-item")
+
+    if not rows:
+        for h in soup.find_all(["h3", "h4", "div"], string=re.compile("head to head", re.I)):
+            parent = h.find_parent()
+            if parent:
+                candidate_rows = parent.find_all("li", class_="team-stat-list-item")
+                if candidate_rows:
+                    rows = candidate_rows
+                    break
+
+    if not rows:
+        f["_parse_warnings"].append("H2H: no rows found")
+        return
+
+    home_wins = away_wins = draws = 0
+    for row in rows:
+        text = row.get_text(" ", strip=True)
+        nums = re.findall(r"\b(\d+)\b", text)
+        if len(nums) < 2:
+            continue
+        hs, aws = int(nums[-2]), int(nums[-1])
+
+        idx_home = text.lower().find((home_term or "").lower())
+        idx_away = text.lower().find((away_term or "").lower())
+        home_first = idx_home != -1 and (idx_away == -1 or idx_home < idx_away)
+
+        if hs > aws:
+            if home_first: home_wins += 1
+            else: away_wins += 1
+        elif aws > hs:
+            if home_first: away_wins += 1
+            else: home_wins += 1
+        else:
+            draws += 1
+
+    f["h2h_home_wins"] = home_wins
+    f["h2h_away_wins"] = away_wins
+    f["h2h_draws"] = draws
+    f["h2h_total"] = home_wins + away_wins + draws
+
+
+def extract_facts(html: str) -> dict:
+    soup = BeautifulSoup(html, "html.parser")
+    f = {"_parse_warnings": []}
+    body = soup.get_text(" ", strip=True)
+
+    # --- Identity ---
+    f["match_date"] = f["kickoff_time"] = None
+    f["league"] = f["country"] = f["venue"] = None
+    f["home_team"] = f["away_team"] = None
+    f["home_team_short"] = f["away_team_short"] = None
+
+    _extract_identity(soup, f)
+
+    if not f.get("home_team"):
+        f["_parse_warnings"].append("home_team not found")
+    if not f.get("away_team"):
+        f["_parse_warnings"].append("away_team not found")
+
+    # --- Standings ---
+    _parse_standings(soup, f)
+
+    # --- Sentences for prose parsing ---
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+
+    home_aliases = _team_aliases(soup, f.get("home_team", ""), f.get("home_team_short", ""))
+    away_aliases = _team_aliases(soup, f.get("away_team", ""), f.get("away_team_short", ""))
+
+    home_sents = _team_sentences(home_aliases, sentences)
+    away_sents = _team_sentences(away_aliases, sentences)
+
+    # --- Form ---
+    _parse_form(home_sents, away_sents, f)
+    if "home_form_ppg" not in f:
+        f["_parse_warnings"].append(f"home form not found for {f.get('home_team')}")
+    if "away_form_ppg" not in f:
         f["_parse_warnings"].append(f"away form not found for {f.get('away_team')}")
 
-    # --- venue form (from same team-sentence lists) -----------------
-    def _parse_venue_from_sentences(sents):
-        """Look for a sentence with venue stats (wins/losses/draws in any order)."""
-        win_words  = r"(?:wins?|victor(?:y|ies)|won)"
-        loss_words = r"(?:losses?|defeats?|lost)"
-        draw_words = r"(?:draws?|drawn)"
-
-        patterns = [
-            (rf"(\d+)\s+{win_words},?\s+(\d+)\s+{loss_words}\s+and\s+(\d+)\s+{draw_words}", ("w", "l", "d")),
-            (rf"(\d+)\s+{loss_words},?\s+(\d+)\s+{win_words}\s+and\s+(\d+)\s+{draw_words}", ("l", "w", "d")),
-            (rf"(\d+)\s+{win_words},?\s+(\d+)\s+{draw_words}\s+and\s+(\d+)\s+{loss_words}", ("w", "d", "l")),
-            (rf"(\d+)\s+{loss_words},?\s+(\d+)\s+{draw_words}\s+and\s+(\d+)\s+{win_words}", ("l", "d", "w")),
-            (rf"(\d+)\s+{draw_words},?\s+(\d+)\s+{win_words}\s+and\s+(\d+)\s+{loss_words}", ("d", "w", "l")),
-            (rf"(\d+)\s+{draw_words},?\s+(\d+)\s+{loss_words}\s+and\s+(\d+)\s+{win_words}", ("d", "l", "w")),
-        ]
-        for s in sents:
-            for tmpl, mapping in patterns:
-                m = re.search(tmpl, s, re.IGNORECASE)
-                if not m:
-                    continue
-                vals = {"w": 0, "d": 0, "l": 0}
-                for i, key in enumerate(mapping):
-                    vals[key] = int(m.group(i + 1))
-                return vals["w"], vals["d"], vals["l"]
-        return None
-
-    # Home venue: look in home team sentences for a venue-style sentence
-    # (venue sentences use "in the last 10 home games" or similar wording,
-    # but our form parser also matches them, so we look for a DIFFERENT
-    # sentence from the one we used for form).
-    def _venue_sentence(sents):
-        """Find a sentence that mentions home/away split."""
-        out = []
-        for s in sents:
-            s_low = s.lower()
-            if ("in the last 10 home" in s_low or
-                "in the last 10 away" in s_low or
-                "in the previous 10 home" in s_low or
-                "in the previous 10 away" in s_low or
-                "in the past 10 home" in s_low or
-                "in the past 10 away" in s_low):
-                out.append(s)
-        return out
-
-    home_venue_sents = _venue_sentence(home_sents)
-    home_venue = _parse_venue_from_sentences(home_venue_sents) if home_venue_sents else None
-    if home_venue:
-        w, d, l = home_venue
-        pts = w * 3 + d
-        f["home_home_pts"]    = pts
-        f["home_home_ppg"]    = round(pts / 10, 2)
-        f["home_home_wins"]   = w
-        f["home_home_draws"]  = d
-        f["home_home_losses"] = l
-    else:
+    # --- Venue ---
+    _parse_venue(soup, home_sents, away_sents, f)
+    if "home_home_ppg" not in f:
         f["_parse_warnings"].append("home venue form not found")
-
-    away_venue_sents = _venue_sentence(away_sents)
-    away_venue = _parse_venue_from_sentences(away_venue_sents) if away_venue_sents else None
-    if away_venue:
-        w, d, l = away_venue
-        pts = w * 3 + d
-        f["away_away_pts"]    = pts
-        f["away_away_ppg"]    = round(pts / 10, 2)
-        f["away_away_wins"]   = w
-        f["away_away_draws"]  = d
-        f["away_away_losses"] = l
-    else:
+    if "away_away_ppg" not in f:
         f["_parse_warnings"].append("away venue form not found")
 
-    # --- H2H from the H2H table -----------------------------------
-    h2h_section = soup.find("div", id="head-to-head")
-    h2h_found = False
-    if h2h_section:
-        h2h_rows = h2h_section.find_all("li", class_="team-stat-list-item")
-        home_wins = away_wins = draws = 0
-        for row in h2h_rows:
-            text = row.get_text(" ", strip=True)
-            nums = re.findall(r"\b(\d+)\b", text)
-            if len(nums) < 2:
-                continue
-            try:
-                hs = int(nums[-2])
-                aws = int(nums[-1])
-            except ValueError:
-                continue
-            idx_home = text.lower().find((home_term or "").lower())
-            idx_away = text.lower().find((away_term or "").lower())
-            home_listed_first = (idx_home != -1 and
-                                 (idx_away == -1 or idx_home < idx_away))
-            if hs > aws:
-                if home_listed_first:
-                    home_wins += 1
-                else:
-                    away_wins += 1
-            elif aws > hs:
-                if home_listed_first:
-                    away_wins += 1
-                else:
-                    home_wins += 1
-            else:
-                draws += 1
-        f["h2h_home_wins"] = home_wins
-        f["h2h_away_wins"] = away_wins
-        f["h2h_draws"] = draws
-        f["h2h_total"] = home_wins + away_wins + draws
-        h2h_found = (f["h2h_total"] > 0)
+    # --- H2H ---
+    _parse_h2h(soup,
+               f.get("home_team_short") or f.get("home_team", ""),
+               f.get("away_team_short") or f.get("away_team", ""),
+               f)
 
-    if not h2h_found:
-        f["_parse_warnings"].append("H2H not found")
+    # --- Validation ---
+    required = [
+        "home_table_pts", "away_table_pts",
+        "home_form_ppg",  "away_form_ppg",
+        "home_home_ppg",  "away_away_ppg",
+        "h2h_home_wins",  "h2h_away_wins",
+    ]
+    for key in required:
+        if f.get(key) is None:
+            f["_parse_warnings"].append(f"missing required field: {key}")
 
-    # --- defaults so the logic can run -----------------------------
+    # --- Defaults (do NOT set to 0, leave None so signals can return 'nothing') ---
     for k in [
-        "home_table_pts", "away_table_pts", "home_table_gd", "away_table_gd",
-        "home_form_ppg", "away_form_ppg", "home_home_ppg", "away_away_ppg",
-        "h2h_home_wins", "h2h_away_wins",
+        "home_table_gd", "away_table_gd",
+        "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
     ]:
-        f.setdefault(k, 0)
+        if k not in f:
+            f[k] = None
 
     return f
 
@@ -650,8 +973,8 @@ def render_pending_card(m: dict):
     direction = m.get("direction", "skip")
     stake = m.get("stake", "none")
     split = m.get("agreement_split", "?")
-    league = m.get("league", "")
-    date = m.get("match_date", "")
+    league = m.get("league", "") or ""
+    date = m.get("match_date", "") or ""
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
@@ -689,8 +1012,8 @@ def render_settled_card(m: dict):
     profit = m.get("profit_loss") or 0.0
     stake = m.get("stake", "none")
     split = m.get("agreement_split", "?")
-    league = m.get("league", "")
-    date = m.get("match_date", "")
+    league = m.get("league", "") or ""
+    date = m.get("match_date", "") or ""
 
     if dc_hit == 1:
         cls, badge, verdict = "win", "badge-win", "WIN"
@@ -740,6 +1063,8 @@ def decision_columns(d):
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
+    row.pop("home_team_short", None)
+    row.pop("away_team_short", None)
     row.update(signals_to_columns(signals))
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
@@ -772,7 +1097,7 @@ def build_row(facts, signals, decision):
         "direction", "pick", "stake", "qualifying",
         "source_url", "extracted_at", "notes",
     }
-    return {k: v for k, v in row.items() if k in allowed}
+    return {k: v for k, v in row.items() if k in allowed and v is not None}
 
 
 # ═══════════════════════════════════════════════════════════════════
