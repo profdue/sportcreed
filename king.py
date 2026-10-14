@@ -167,7 +167,6 @@ _NUMBER_WORDS = {
 
 
 def _search_term(full_name: str) -> str:
-    """Return a short search term for a team name."""
     if not full_name:
         return ""
     name = full_name.strip()
@@ -190,7 +189,6 @@ def _search_term(full_name: str) -> str:
 
 
 def _candidates(term):
-    """Return candidate search terms for a team name."""
     if not term:
         return []
     out = [term]
@@ -245,7 +243,6 @@ def _int_any(text):
 
 
 def _num(s):
-    """Parse a number that may be a digit or a word. Returns None if unparseable."""
     if s is None:
         return None
     s = str(s).strip().lower()
@@ -255,7 +252,6 @@ def _num(s):
 
 
 def _team_aliases(soup, team_full, team_short):
-    """All plausible names for a team, mined from the document."""
     aliases = set()
     if team_full:
         aliases.add(team_full.strip())
@@ -296,14 +292,12 @@ def _team_aliases(soup, team_full, team_short):
 # ═══════════════════════════════════════════════════════════════════
 
 def _cmp_or_nothing(a, b):
-    """Return 'home' / 'away' / 'nothing' based on comparison, safe with None."""
     if a is None or b is None or a == b:
         return "nothing"
     return "home" if a > b else "away"
 
 
 def compute_signals(f: dict) -> dict:
-    # Table: compare (points, GD) tuples
     hp = f.get("home_table_pts")
     ap = f.get("away_table_pts")
     hg = f.get("home_table_gd") or 0
@@ -330,7 +324,6 @@ def decide(signals: dict) -> dict:
     nothing = sum(1 for v in signals.values() if v == "nothing")
     table_leader = signals["table"]
 
-    # Full agreement: 4-0
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         return {
@@ -339,7 +332,6 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    # 3-1: half stake, follow table leader
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
@@ -355,7 +347,6 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    # 3-0 with one "nothing": treat as full
     if home == 3 and away == 0 and nothing == 1:
         return {
             "direction": "home", "stake": "full", "qualifying": 1,
@@ -369,7 +360,6 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    # 2-2: skip
     if home == 2 and away == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -377,7 +367,6 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    # Too few informative signals
     if (home + away) < 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -422,8 +411,6 @@ def settle(direction, stake, home_score, away_score):
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_identity(soup, f):
-    """Extract teams, league, date, venue, kickoff from any available source."""
-
     t_top = soup.find("div", class_="t_top")
 
     # --- Teams ---
@@ -464,7 +451,7 @@ def _extract_identity(soup, f):
                 f["home_team"] = m.group(1).replace("-", " ").title()
                 f["away_team"] = m.group(2).replace("-", " ").title()
 
-    # --- Short names (from title, for prose matching) ---
+    # --- Short names ---
     if title:
         m = re.search(r"(.+?)\s+vs\s+(.+?)\s+Prediction", title.get_text())
         if m:
@@ -555,7 +542,6 @@ def _extract_identity(soup, f):
 
 
 def _parse_standings(soup, f):
-    """Extract table position, points, GD for both teams from any standings table."""
     home_team = f.get("home_team", "")
     away_team = f.get("away_team", "")
 
@@ -626,7 +612,6 @@ _NUM_PAT    = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twe
 
 
 def _wdl_from_cell(text):
-    """Parse '5-3-2' style cell into (w, d, l). Returns None if no match."""
     m = re.search(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", text)
     if m:
         return int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -635,10 +620,9 @@ def _wdl_from_cell(text):
 
 def _parse_venue_from_stable(soup):
     """
-    Parse the st-table for home/away W-D-L.
-    Returns (home_wdl, away_wdl) where each is (w, d, l) or None.
-    The W-D-L cell may be at cells[1] or cells[2] depending on colspan structure,
-    so we scan every cell for a '\\d+-\\d+-\\d+' pattern.
+    Parse st-table for home/away W-D-L.
+    The W-D-L cell may be at cells[1] or cells[2] depending on colspan,
+    so scan every cell for '\\d+-\\d+-\\d+'.
     """
     st = soup.find("table", class_="st-table")
     if not st:
@@ -652,7 +636,6 @@ def _parse_venue_from_stable(soup):
 
         label = " ".join(cells).lower()
 
-        # Scan every cell for the W-D-L pattern
         wdl = None
         for c in cells:
             wdl = _wdl_from_cell(c)
@@ -670,7 +653,7 @@ def _parse_venue_from_stable(soup):
 
 
 def _venue_sentence(sents):
-    """Filter to sentences that describe last 10 home/away form."""
+    """Filter sentences that describe last 10 home/away form."""
     keywords = [
         "in the last 10 home", "in the last 10 away",
         "in the past 10 home", "in the past 10 away",
@@ -683,7 +666,6 @@ def _venue_sentence(sents):
 
 
 def _parse_venue_from_sentences(sents):
-    """Parse W/D/L from a venue sentence (prose fallback)."""
     patterns = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
@@ -700,13 +682,14 @@ def _parse_venue_from_sentences(sents):
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
+            total = sum(vals.values())
+            if total < 5 or total > 15:
+                continue
             return vals["w"], vals["d"], vals["l"]
     return None
 
 
 def _parse_venue(soup, home_sents, away_sents, f):
-    """Structured st-table first; prose fallback."""
-
     home_wdl, away_wdl = _parse_venue_from_stable(soup)
 
     if home_wdl:
@@ -751,9 +734,15 @@ def _parse_venue(soup, home_sents, away_sents, f):
             f["away_away_ppg"] = round(pts / total, 2)
 
 
-def _parse_form_from_sentences(sents):
-    """Parse overall form (W/D/L) from prose. Excludes venue sentences."""
-    # Exclude venue sentences so we don't accidentally match them
+def _parse_form_from_sentences(sents, required_first_word=None):
+    """
+    Parse overall form (W/D/L) from prose.
+
+    - Excludes venue sentences so the away-venue stats don't leak into form.
+    - Requires the sentence to contain the team's name in the first 80 chars
+      so cross-team sentences don't match.
+    - Validates total = W+D+L is plausible (5-15, since 'last 10' is the claim).
+    """
     venue_sents = set(_venue_sentence(sents))
     filtered = [s for s in sents if s not in venue_sents]
 
@@ -768,7 +757,16 @@ def _parse_form_from_sentences(sents):
         (rf"won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
         (rf"won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
+
     for s in filtered:
+        # Require team name near the start of the sentence
+        if required_first_word:
+            s_low = s.lower()
+            req_low = required_first_word.lower()
+            head = s_low[:80]
+            if req_low not in head:
+                continue
+
         for tmpl, mapping in patterns:
             m = re.search(tmpl, s, re.IGNORECASE)
             if not m:
@@ -776,15 +774,14 @@ def _parse_form_from_sentences(sents):
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
-            # Sanity check: total should be roughly 10 games
-            if sum(vals.values()) == 0:
+            total = sum(vals.values())
+            if total < 5 or total > 15:
                 continue
             return vals["w"], vals["d"], vals["l"]
     return None
 
 
 def _team_sentences(aliases, sentences):
-    """Return all sentences that contain any alias as a whole word."""
     if not aliases:
         return []
     result = []
@@ -805,8 +802,10 @@ def _team_sentences(aliases, sentences):
 
 def _parse_form(home_sents, away_sents, f):
     """Parse overall form (last 10) from prose."""
+    home_short = f.get("home_team_short") or f.get("home_team", "")
+    away_short = f.get("away_team_short") or f.get("away_team", "")
 
-    home_form = _parse_form_from_sentences(home_sents)
+    home_form = _parse_form_from_sentences(home_sents, required_first_word=home_short)
     if home_form:
         w, d, l = home_form
         total = w + d + l or 1
@@ -815,7 +814,7 @@ def _parse_form(home_sents, away_sents, f):
         f["home_form_pts"] = pts
         f["home_form_ppg"] = round(pts / total, 2)
 
-    away_form = _parse_form_from_sentences(away_sents)
+    away_form = _parse_form_from_sentences(away_sents, required_first_word=away_short)
     if away_form:
         w, d, l = away_form
         total = w + d + l or 1
@@ -826,7 +825,6 @@ def _parse_form(home_sents, away_sents, f):
 
 
 def _parse_h2h(soup, home_term, away_term, f):
-    """Multi-source H2H extraction."""
     rows = []
 
     section = soup.find("div", id="head-to-head")
@@ -894,7 +892,7 @@ def extract_facts(html: str) -> dict:
     # --- Standings ---
     _parse_standings(soup, f)
 
-    # --- Sentences for prose parsing ---
+    # --- Sentences ---
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
 
     home_aliases = _team_aliases(soup, f.get("home_team", ""), f.get("home_team_short", ""))
