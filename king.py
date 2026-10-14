@@ -606,7 +606,7 @@ def _parse_standings(soup, f):
 
 
 
-# --- Regex pieces - EXTENDED ---
+# --- Regex pieces - FIXED FOR ANY MATCH ---
 _WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
 _LOSS_WORDS = r"(?:losses?|defeats?|lost)"
 _DRAW_WORDS = r"(?:draws?|drawn)"
@@ -657,7 +657,6 @@ def _venue_sentence(sents):
 
 
 def _parse_venue_from_sentences(sents):
-    # handles both 3-number and venue sentences
     patterns = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
@@ -687,20 +686,20 @@ def _parse_venue(soup, home_sents, away_sents, f):
         w, d, l = home_wdl
         total = w + d + l or 1
         pts = w * 3 + d
-        f["home_home_wins"]   = w
-        f["home_home_draws"]  = d
+        f["home_home_wins"] = w
+        f["home_home_draws"] = d
         f["home_home_losses"] = l
-        f["home_home_pts"]    = pts
-        f["home_home_ppg"]    = round(pts / total, 2)
+        f["home_home_pts"] = pts
+        f["home_home_ppg"] = round(pts / total, 2)
     if away_wdl:
         w, d, l = away_wdl
         total = w + d + l or 1
         pts = w * 3 + d
-        f["away_away_wins"]   = w
-        f["away_away_draws"]  = d
+        f["away_away_wins"] = w
+        f["away_away_draws"] = d
         f["away_away_losses"] = l
-        f["away_away_pts"]    = pts
-        f["away_away_ppg"]    = round(pts / total, 2)
+        f["away_away_pts"] = pts
+        f["away_away_ppg"] = round(pts / total, 2)
     if "home_home_ppg" not in f and home_sents:
         result = _parse_venue_from_sentences(_venue_sentence(home_sents))
         if result:
@@ -722,34 +721,20 @@ def _parse_venue(soup, home_sents, away_sents, f):
 
 
 def _parse_form_from_sentences(sents, required_first_word=None):
-    """
-    FIXED: 
-    - Team name can be anywhere, not just first 80 chars
-    - Handles 2-number forms like '3 wins and 7 losses' -> infers draws
-    - Normalizes synonyms before matching
-    - Requires W/D/L pattern to appear AFTER team name if team specified
-    """
     venue_sents = set(_venue_sentence(sents))
     filtered = [s for s in sents if s not in venue_sents]
-
-    # Pre-clean: remove table pollution
     cleaned = []
     for s in filtered:
         if "G W D L" in s and "View Full Table" in s:
-            # keep only after last "View Full Table"
             parts = s.split("View Full Table")
             s = parts[-1]
-        if "W-D-L" in s and "G GF GA" in s:
-            # this is st-table header line, skip unless it also has team form sentence
-            if "Home Stats" in s or "Away Stats" in s:
-                # keep only the stats part? skip for form
-                continue
+        if "W-D-L" in s and "G GF GA" in s and "Home Stats" in s:
+            continue
         if len(s) < 20:
             continue
         cleaned.append(s)
     filtered = cleaned
 
-    # patterns: 3-number and 2-number
     patterns_3 = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
@@ -771,19 +756,15 @@ def _parse_form_from_sentences(sents, required_first_word=None):
 
     for s in filtered:
         s_low = s.lower()
-        # team filter: team must be in sentence
         if required_first_word:
             req_low = required_first_word.lower()
             if req_low not in s_low:
                 continue
             team_idx = s_low.find(req_low)
-            # search only after team name to avoid cross-team contamination
             search_area = s[team_idx:]
         else:
             search_area = s
-            team_idx = 0
 
-        # try 3-number first
         for tmpl, mapping in patterns_3:
             m = re.search(tmpl, search_area, re.IGNORECASE)
             if not m:
@@ -796,7 +777,6 @@ def _parse_form_from_sentences(sents, required_first_word=None):
                 continue
             return vals["w"], vals["d"], vals["l"]
 
-        # then 2-number with draw inference
         for tmpl, mapping in patterns_2:
             m = re.search(tmpl, search_area, re.IGNORECASE)
             if not m:
@@ -807,15 +787,12 @@ def _parse_form_from_sentences(sents, required_first_word=None):
             total = vals["w"] + vals["l"]
             if total < 2 or total > 10:
                 continue
-            # infer draws as remainder to 10
             vals["d"] = 10 - total if total <= 10 else 0
             if vals["d"] < 0:
                 vals["d"] = 0
-            # final total check
             if sum(vals.values()) < 5 or sum(vals.values()) > 15:
                 continue
             return vals["w"], vals["d"], vals["l"]
-
     return None
 
 
@@ -824,7 +801,6 @@ def _team_sentences(aliases, sentences):
         return []
     result = []
     seen = set()
-    # pre-sort aliases by length descending to match longer first
     sorted_aliases = sorted(aliases, key=len, reverse=True)
     for alias in sorted_aliases:
         if not alias:
@@ -836,9 +812,7 @@ def _team_sentences(aliases, sentences):
             if sid in seen:
                 continue
             if pattern.search(s):
-                # filter out pure table rows that are not sentences
                 if "G W D L" in s and len(s) < 200:
-                    # skip unless it contains form language
                     if "wins" not in s.lower() and "won" not in s.lower() and "victor" not in s.lower():
                         continue
                 result.append(s)
@@ -896,11 +870,15 @@ def _parse_h2h(soup, home_term, away_term, f):
         idx_away = text.lower().find((away_term or "").lower())
         home_first = idx_home != -1 and (idx_away == -1 or idx_home < idx_away)
         if hs > aws:
-            if home_first: home_wins += 1
-            else: away_wins += 1
+            if home_first:
+                home_wins += 1
+            else:
+                away_wins += 1
         elif aws > hs:
-            if home_first: away_wins += 1
-            else: home_wins += 1
+            if home_first:
+                away_wins += 1
+            else:
+                home_wins += 1
         else:
             draws += 1
     f["h2h_home_wins"] = home_wins
@@ -912,9 +890,7 @@ def _parse_h2h(soup, home_term, away_term, f):
 def extract_facts(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     f = {"_parse_warnings": []}
-    # CLEAN body for sentence splitting - FIX for table pollution
     raw_text = soup.get_text(" ", strip=True)
-    # Insert sentence breaks for common pollution points
     clean_text = raw_text.replace("View Full Table", ". ")
     clean_text = re.sub(r"\s+", " ", clean_text)
     body = clean_text
@@ -965,6 +941,7 @@ def extract_facts(html: str) -> dict:
             f[k] = None
 
     return f
+
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1306,6 +1283,3 @@ with tab_perf:
         st.markdown("### All settled matches")
         for m in settled:
             render_settled_card(m)
-
-
-
