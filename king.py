@@ -619,11 +619,6 @@ def _wdl_from_cell(text):
 
 
 def _parse_venue_from_stable(soup):
-    """
-    Parse st-table for home/away W-D-L.
-    The W-D-L cell may be at cells[1] or cells[2] depending on colspan,
-    so scan every cell for '\\d+-\\d+-\\d+'.
-    """
     st = soup.find("table", class_="st-table")
     if not st:
         return None, None
@@ -653,7 +648,6 @@ def _parse_venue_from_stable(soup):
 
 
 def _venue_sentence(sents):
-    """Filter sentences that describe last 10 home/away form."""
     keywords = [
         "in the last 10 home", "in the last 10 away",
         "in the past 10 home", "in the past 10 away",
@@ -734,37 +728,98 @@ def _parse_venue(soup, home_sents, away_sents, f):
             f["away_away_ppg"] = round(pts / total, 2)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# FORM PARSING — the layer that had the table-pollution bug
+# ═══════════════════════════════════════════════════════════════════
+
+def _clean_polluted_sentence(s: str) -> str:
+    """
+    Strip table fragments that leak into prose.
+
+    SportsGambler pages often have the standings table followed by a
+    paragraph with no punctuation between them, so the whole block
+    becomes one 'sentence' in the extracted body text. This function
+    cuts off the leading table dump and keeps only the prose tail.
+    """
+    if not s:
+        return s
+
+    # "View Full Table" is the standard transition out of the standings table
+    if "View Full Table" in s:
+        s = s.split("View Full Table", 1)[1]
+
+    # If we still see the standings header, cut past it
+    if "G W D L GF GA GD GD P" in s:
+        idx = s.rfind("G W D L GF GA GD GD P")
+        s = s[idx + len("G W D L GF GA GD GD P"):]
+
+    # Anything that still looks like a table row (numbers, short team names)
+    # gets trimmed to the first real prose paragraph we can find.
+    # Heuristic: find the first "<Team> – Last 10 League Games" heading
+    m = re.search(r"(?:Last|Past|Previous)\s+10\s+(?:League|Liga|Serie A|Bundesliga|La Liga|Ligue 1|Primeira Liga)\s+Games", s)
+    if m and m.start() > 0:
+        s = s[m.start():]
+
+    return s.strip()
+
+
 def _parse_form_from_sentences(sents, required_first_word=None):
     """
     Parse overall form (W/D/L) from prose.
 
-    - Excludes venue sentences so the away-venue stats don't leak into form.
-    - Requires the sentence to contain the team's name in the first 80 chars
-      so cross-team sentences don't match.
-    - Validates total = W+D+L is plausible (5-15, since 'last 10' is the claim).
+    Guards:
+      1. Strip table-pollution from each sentence first.
+      2. Exclude venue sentences (handled by the venue parser).
+      3. Require the team name to appear early (first 120 chars).
+      4. Require the W/D/L pattern to appear AFTER the team name.
+      5. Validate total games (5-15).
+      6. Score candidates and pick the best.
     """
-    venue_sents = set(_venue_sentence(sents))
-    filtered = [s for s in sents if s not in venue_sents]
+    # --- Guard 1: de-pollute ---
+    cleaned = [_clean_polluted_sentence(s) for s in sents]
+    cleaned = [s for s in cleaned if s and len(s) > 20]
+
+    # --- Guard 2: exclude venue sentences ---
+    venue_sents = set(_venue_sentence(cleaned))
+    filtered = [s for s in cleaned if s not in venue_sents]
 
     patterns = [
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
+        # Explicit W L D variant (covers "3 victories, 5 defeats and 2 draws")
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        # W D L
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
+        # W L D (no comma before and)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
+        # L W D
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
+        # L D W
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
+        # D W L
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
+        # D L W
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
+        # won X, lost Y and drawn Z
         (rf"won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
         (rf"won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
 
+    req_low = (required_first_word or "").lower()
+    candidates = []
+
     for s in filtered:
-        # Require team name near the start of the sentence
-        if required_first_word:
-            s_low = s.lower()
-            req_low = required_first_word.lower()
-            head = s_low[:80]
+        s_low = s.lower()
+
+        # --- Guard 3: team name must appear early ---
+        if req_low:
+            head = s_low[:120]
             if req_low not in head:
+                continue
+
+        # --- Guard 4: W/D/L pattern must come AFTER the team name ---
+        if req_low:
+            idx_team = s_low.find(req_low)
+            m_win = re.search(rf"{_NUM_PAT}\s+{_WIN_WORDS}", s, re.IGNORECASE)
+            if m_win and idx_team != -1 and m_win.start() < idx_team:
                 continue
 
         for tmpl, mapping in patterns:
@@ -774,11 +829,33 @@ def _parse_form_from_sentences(sents, required_first_word=None):
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
+
             total = sum(vals.values())
+            # --- Guard 5: total games sanity ---
             if total < 5 or total > 15:
                 continue
-            return vals["w"], vals["d"], vals["l"]
-    return None
+
+            # --- Guard 6: score ---
+            score = 0
+            first_token = re.split(r"\s+", s_low.strip(), maxsplit=1)[0]
+            if first_token == req_low:
+                score += 10
+            elif req_low in s_low[:40]:
+                score += 5
+            else:
+                score += 1
+            if total == 10:
+                score += 3
+
+            candidates.append((score, vals["w"], vals["d"], vals["l"], s))
+            break  # one match per sentence
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, w, d, l, _ = candidates[0]
+    return w, d, l
 
 
 def _team_sentences(aliases, sentences):
@@ -801,7 +878,7 @@ def _team_sentences(aliases, sentences):
 
 
 def _parse_form(home_sents, away_sents, f):
-    """Parse overall form (last 10) from prose."""
+    """Parse overall form (last 10) from prose. Store debug info."""
     home_short = f.get("home_team_short") or f.get("home_team", "")
     away_short = f.get("away_team_short") or f.get("away_team", "")
 
@@ -822,6 +899,18 @@ def _parse_form(home_sents, away_sents, f):
         f["away_form_wins"], f["away_form_draws"], f["away_form_losses"] = w, d, l
         f["away_form_pts"] = pts
         f["away_form_ppg"] = round(pts / total, 2)
+
+    # --- Debug: capture what was considered ---
+    f["_debug_home_sents"] = [
+        _clean_polluted_sentence(s)[:300]
+        for s in home_sents
+        if _clean_polluted_sentence(s)
+    ]
+    f["_debug_away_sents"] = [
+        _clean_polluted_sentence(s)[:300]
+        for s in away_sents
+        if _clean_polluted_sentence(s)
+    ]
 
 
 def _parse_h2h(soup, home_term, away_term, f):
@@ -1050,6 +1139,8 @@ def build_row(facts, signals, decision):
     row.pop("_parse_warnings", None)
     row.pop("home_team_short", None)
     row.pop("away_team_short", None)
+    row.pop("_debug_home_sents", None)
+    row.pop("_debug_away_sents", None)
     row.update(signals_to_columns(signals))
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
@@ -1136,6 +1227,16 @@ with tab_new:
         display_facts = {k: v for k, v in facts.items()
                          if v is not None and not k.startswith("_")}
         st.json(display_facts)
+
+        # --- Debug expander ---
+        if facts.get("_debug_home_sents") or facts.get("_debug_away_sents"):
+            with st.expander("🔍 Debug: sentences considered for form", expanded=False):
+                st.markdown("**Home team sentences (after table-pollution cleanup):**")
+                for s in facts.get("_debug_home_sents", []):
+                    st.write(f"- `{s}`")
+                st.markdown("**Away team sentences (after table-pollution cleanup):**")
+                for s in facts.get("_debug_away_sents", []):
+                    st.write(f"- `{s}`")
 
         row = build_row(facts, signals, decision)
         with st.spinner("Saving to Supabase..."):
