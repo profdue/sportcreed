@@ -9,7 +9,6 @@ One file. Two clauses. Three tabs.
 """
 
 import re
-import json
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
@@ -27,7 +26,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- custom CSS: beautiful cards, clean typography ---
 st.markdown("""
 <style>
     .main { background-color: #0e1117; }
@@ -251,12 +249,14 @@ def settle(direction, stake, home_score, away_score):
     if direction == "skip":
         return result, None, 0.0, 0.0
 
-    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
+    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}.get(stake, 0.0)
 
     if direction == "home":
         hit = result in ("home_win", "draw")   # DC 1X
-    else:
+    elif direction == "away":
         hit = result in ("away_win", "draw")   # DC X2
+    else:
+        hit = False
 
     profit = units if hit else -units
     return result, (1 if hit else 0), units, profit
@@ -280,34 +280,25 @@ def _float(text):
     return float(m.group()) if m else None
 
 
-def _ppg(pts, played):
-    if pts is None or not played:
-        return None
-    return round(pts / played, 2)
-
-
 def extract_facts(html: str) -> dict:
     """
     Parse the SportsGambler HTML into the raw facts.
 
-    This is deliberately tolerant: it looks for the same tables and
-    strings the previews always emit. If a section is missing, the
-    field is None and the logic will skip or flag accordingly.
+    Tolerant: if a section is missing, the field stays None and the
+    logic will skip or flag accordingly.
     """
     soup = BeautifulSoup(html, "html.parser")
     f = {}
 
     # --- identity ---------------------------------------------------
-    h1 = soup.find("h1")
-    f["match_date"]  = None
+    f["match_date"]   = None
     f["kickoff_time"] = None
-    f["league"]      = None
-    f["country"]     = None
-    f["venue"]       = None
-    f["home_team"]   = None
-    f["away_team"]   = None
+    f["league"]       = None
+    f["country"]      = None
+    f["venue"]        = None
+    f["home_team"]    = None
+    f["away_team"]    = None
 
-    # t_top block
     t_top = soup.find("div", class_="t_top")
     if t_top:
         teams = t_top.find_all("div", class_="t_name")
@@ -319,9 +310,10 @@ def extract_facts(html: str) -> dict:
         if info:
             links = info.find_all("a", class_="t_info_link")
             if len(links) >= 2:
-                f["league"] = links[1].get_text(strip=True)
-                if " - " in f["league"]:
-                    _, f["league"] = f["league"].split(" - ", 1)
+                league_txt = links[1].get_text(strip=True)
+                if " - " in league_txt:
+                    _, league_txt = league_txt.split(" - ", 1)
+                f["league"] = league_txt
             venue = info.find("span", class_="t_venue")
             if venue:
                 f["venue"] = venue.get_text(strip=True)
@@ -342,35 +334,25 @@ def extract_facts(html: str) -> dict:
             cells = [c.get_text(strip=True) for c in row.find_all("td")]
             if len(cells) < 10:
                 continue
-            # cells: [pos, team, G, W, D, L, GF, GA, GD, P]
             team = cells[1]
             if f["home_team"] and f["home_team"].split()[0] in team:
-                f["home_table_pos"] = _int(cells[0])
+                f["home_table_pos"]    = _int(cells[0])
                 f["home_table_played"] = _int(cells[2])
-                f["home_table_gf"] = _int(cells[6])
-                f["home_table_ga"] = _int(cells[7])
-                f["home_table_gd"] = _int(cells[8])
-                f["home_table_pts"] = _int(cells[9])
+                f["home_table_gf"]     = _int(cells[6])
+                f["home_table_ga"]     = _int(cells[7])
+                f["home_table_gd"]     = _int(cells[8])
+                f["home_table_pts"]    = _int(cells[9])
             elif f["away_team"] and f["away_team"].split()[0] in team:
-                f["away_table_pos"] = _int(cells[0])
+                f["away_table_pos"]    = _int(cells[0])
                 f["away_table_played"] = _int(cells[2])
-                f["away_table_gf"] = _int(cells[6])
-                f["away_table_ga"] = _int(cells[7])
-                f["away_table_gd"] = _int(cells[8])
-                f["away_table_pts"] = _int(cells[9])
+                f["away_table_gf"]     = _int(cells[6])
+                f["away_table_ga"]     = _int(cells[7])
+                f["away_table_gd"]     = _int(cells[8])
+                f["away_table_pts"]    = _int(cells[9])
 
-    # --- last 10 form -----------------------------------------------
-    # The preview text has lines like:
-    #   "Millwall have 4 wins, 4 losses and 2 draws, averaging 1.6 goals..."
     body = soup.get_text(" ", strip=True)
 
-    def _grab_form(prefix_home=True):
-        # Find the sentence that starts with the team name
-        pattern = r"([\w\s]+) have (\d+) wins?, (\d+) losses? and (\d+) draws?"
-        matches = re.findall(pattern, body)
-        return matches
-
-    # Home team form
+    # --- last 10 form -----------------------------------------------
     if f["home_team"]:
         first = f["home_team"].split()[0]
         m = re.search(rf"{first}[^.]*?(\d+)\s+wins?,?\s+(\d+)\s+losses?,?\s+and\s+(\d+)\s+draws?",
@@ -378,11 +360,16 @@ def extract_facts(html: str) -> dict:
         if not m:
             m = re.search(rf"{first}[^.]*?(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?",
                           body, re.IGNORECASE)
-        if m:
-            f["home_form_wins"] = int(m.group(1))
+            if m:
+                f["home_form_wins"]   = int(m.group(1))
+                f["home_form_draws"]  = int(m.group(2))
+                f["home_form_losses"] = int(m.group(3))
+        elif m:
+            f["home_form_wins"]   = int(m.group(1))
             f["home_form_losses"] = int(m.group(2))
-            f["home_form_draws"] = int(m.group(3))
-            f["home_form_pts"] = f["home_form_wins"] * 3 + f["home_form_draws"]
+            f["home_form_draws"]  = int(m.group(3))
+        if "home_form_wins" in f:
+            f["home_form_pts"] = f["home_form_wins"] * 3 + f.get("home_form_draws", 0)
             f["home_form_ppg"] = round(f["home_form_pts"] / 10, 2)
 
     if f["away_team"]:
@@ -392,27 +379,28 @@ def extract_facts(html: str) -> dict:
         if not m:
             m = re.search(rf"{first}[^.]*?(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+losses?",
                           body, re.IGNORECASE)
-        if m:
-            f["away_form_wins"] = int(m.group(1))
+            if m:
+                f["away_form_wins"]   = int(m.group(1))
+                f["away_form_draws"]  = int(m.group(2))
+                f["away_form_losses"] = int(m.group(3))
+        elif m:
+            f["away_form_wins"]   = int(m.group(1))
             f["away_form_losses"] = int(m.group(2))
-            f["away_form_draws"] = int(m.group(3))
-            f["away_form_pts"] = f["away_form_wins"] * 3 + f["away_form_draws"]
+            f["away_form_draws"]  = int(m.group(3))
+        if "away_form_wins" in f:
+            f["away_form_pts"] = f["away_form_wins"] * 3 + f.get("away_form_draws", 0)
             f["away_form_ppg"] = round(f["away_form_pts"] / 10, 2)
 
-    # Per-game numbers from the venue block
-    for label in ["goals", "shots on goal", "attempts", "corners", "possession"]:
-        pass  # extended parsing can live here
-
     # --- H2H --------------------------------------------------------
-    # "The past 10 H2H games have featured five triumphs for Millwall, two for Swansea and three draws."
-    m = re.search(r"past\s+(\d+)\s+H2H[^.]*?(\d+)\s+triumphs?\s+for\s+([\w\s]+?),?\s+(\d+)\s+for\s+([\w\s]+?)\s+and\s+(\d+)\s+draws?",
-                  body, re.IGNORECASE)
+    m = re.search(
+        r"past\s+(\d+)\s+H2H[^.]*?(\d+)\s+triumphs?\s+for\s+([\w\s]+?),?\s+(\d+)\s+for\s+([\w\s]+?)\s+and\s+(\d+)\s+draws?",
+        body, re.IGNORECASE
+    )
     if m:
         f["h2h_total"] = int(m.group(1))
         home_w = int(m.group(2))
         home_name = m.group(3).strip()
         away_w = int(m.group(4))
-        away_name = m.group(5).strip()
         f["h2h_draws"] = int(m.group(6))
         if f["home_team"] and f["home_team"].split()[0] in home_name:
             f["h2h_home_wins"] = home_w
@@ -422,37 +410,42 @@ def extract_facts(html: str) -> dict:
             f["h2h_away_wins"] = home_w
 
     # --- venue-only PPG --------------------------------------------
-    # "Millwall have collected five victories, four losses and one draw in the last 10 home games"
     if f["home_team"]:
         first = f["home_team"].split()[0]
-        m = re.search(rf"{first}[^.]*?(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+draws",
-                      body, re.IGNORECASE)
+        m = re.search(
+            rf"{first}[^.]*?(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+draws",
+            body, re.IGNORECASE
+        )
         if m:
             w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             pts = w * 3 + d
-            f["home_home_pts"] = pts
-            f["home_home_ppg"] = round(pts / 10, 2)
-            f["home_home_wins"] = w
+            f["home_home_pts"]   = pts
+            f["home_home_ppg"]   = round(pts / 10, 2)
+            f["home_home_wins"]  = w
             f["home_home_draws"] = d
             f["home_home_losses"] = l
 
     if f["away_team"]:
         first = f["away_team"].split()[0]
-        m = re.search(rf"{first}[^.]*?(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+draws",
-                      body, re.IGNORECASE)
+        m = re.search(
+            rf"{first}[^.]*?(\d+)\s+victor(?:y|ies),?\s+(\d+)\s+(?:losses|defeats)\s+and\s+(\d+)\s+draws",
+            body, re.IGNORECASE
+        )
         if m:
             w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             pts = w * 3 + d
-            f["away_away_pts"] = pts
-            f["away_away_ppg"] = round(pts / 10, 2)
-            f["away_away_wins"] = w
+            f["away_away_pts"]   = pts
+            f["away_away_ppg"]   = round(pts / 10, 2)
+            f["away_away_wins"]  = w
             f["away_away_draws"] = d
             f["away_away_losses"] = l
 
     # --- defaults so the logic can run -----------------------------
-    for k in ["home_table_pts", "away_table_pts", "home_table_gd", "away_table_gd",
-              "home_form_ppg", "away_form_ppg", "home_home_ppg", "away_away_ppg",
-              "h2h_home_wins", "h2h_away_wins"]:
+    for k in [
+        "home_table_pts", "away_table_pts", "home_table_gd", "away_table_gd",
+        "home_form_ppg", "away_form_ppg", "home_home_ppg", "away_away_ppg",
+        "h2h_home_wins", "h2h_away_wins",
+    ]:
         f.setdefault(k, 0)
 
     return f
@@ -464,7 +457,7 @@ def extract_facts(html: str) -> dict:
 
 def signal_pill(name, value):
     cls = value if value in ("home", "away", "nothing") else "nothing"
-    label = {"home": "H", "away": "A", "nothing": "—"}[value]
+    label = {"home": "H", "away": "A", "nothing": "—"}.get(value, "—")
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
@@ -478,16 +471,13 @@ def render_pending_card(m: dict):
     date = m.get("match_date", "")
 
     if direction == "home":
-        card_cls = "pick-home"
-        badge_cls = "badge-home"
+        card_cls, badge_cls = "pick-home", "badge-home"
         pick_text = f"HOME — {home} (DC 1X)"
     elif direction == "away":
-        card_cls = "pick-away"
-        badge_cls = "badge-away"
+        card_cls, badge_cls = "pick-away", "badge-away"
         pick_text = f"AWAY — {away} (DC X2)"
     else:
-        card_cls = "skip"
-        badge_cls = "badge-skip"
+        card_cls, badge_cls = "skip", "badge-skip"
         pick_text = "SKIP"
 
     pills = "".join([
@@ -538,77 +528,29 @@ def render_settled_card(m: dict):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TABS
+# COLUMN MAPPERS
 # ═══════════════════════════════════════════════════════════════════
-
-tab_new, tab_pending, tab_perf = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance"])
-
-# ─────────────────────────────────────────────────────────────────
-# TAB 1 — NEW MATCH
-# ─────────────────────────────────────────────────────────────────
-with tab_new:
-    st.markdown("### Paste the match HTML")
-    st.caption("Paste the full SportsGambler preview HTML. The app extracts the facts, runs the logic, and shows the pick.")
-
-    html_in = st.text_area("HTML", height=220, label_visibility="collapsed",
-                            placeholder="<html> ... </html>")
-
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        run = st.button("Run the Logic", type="primary", use_container_width=True)
-
-    if run and html_in.strip():
-        with st.spinner("Extracting facts..."):
-            try:
-                facts = extract_facts(html_in)
-                signals = compute_signals(facts)
-                decision = decide(signals)
-            except Exception as e:
-                st.error(f"Extraction failed: {e}")
-                st.stop()
-
-        st.markdown("### The Pick")
-        preview = {
-            **facts,
-            **signals_to_columns(signals),
-            **decision_columns(decision),
-        }
-        render_pending_card(preview)
-
-        st.markdown("### Extracted Facts")
-        st.json({k: v for k, v in facts.items() if v is not None})
-
-        # Save to Supabase
-        row = build_row(facts, signals, decision)
-        with st.spinner("Saving to Supabase..."):
-            try:
-                db_insert(row)
-                st.success("Match saved to pending.")
-            except Exception as e:
-                st.error(f"Supabase insert failed: {e}")
-
 
 def signals_to_columns(signals):
     return {
         "signal_table": signals["table"],
-        "signal_form": signals["form"],
+        "signal_form":  signals["form"],
         "signal_venue": signals["venue"],
-        "signal_h2h": signals["h2h"],
+        "signal_h2h":   signals["h2h"],
     }
 
 
 def decision_columns(d):
     return {
-        "direction": d["direction"],
-        "stake": d["stake"],
-        "qualifying": d["qualifying"],
-        "dissent_signal": d["dissent_signal"],
-        "agreement_split": d["split"],
-        "agreement_home_count": d["home_count"],
-        "agreement_away_count": d["away_count"],
+        "direction":               d["direction"],
+        "stake":                   d["stake"],
+        "qualifying":              d["qualifying"],
+        "dissent_signal":          d["dissent_signal"],
+        "agreement_split":         d["split"],
+        "agreement_home_count":    d["home_count"],
+        "agreement_away_count":    d["away_count"],
         "agreement_nothing_count": d["nothing_count"],
-        "table_leader": d["direction"] if d["direction"] != "skip"
-                        else None,
+        "table_leader":            d["direction"] if d["direction"] != "skip" else None,
     }
 
 
@@ -617,7 +559,7 @@ def build_row(facts, signals, decision):
     row.update(signals_to_columns(signals))
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
-    # Drop keys the DB doesn't know about
+
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
@@ -649,6 +591,59 @@ def build_row(facts, signals, decision):
     return {k: v for k, v in row.items() if k in allowed}
 
 
+# ═══════════════════════════════════════════════════════════════════
+# TABS
+# ═══════════════════════════════════════════════════════════════════
+
+tab_new, tab_pending, tab_perf = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance"])
+
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 1 — NEW MATCH
+# ─────────────────────────────────────────────────────────────────
+with tab_new:
+    st.markdown("### Paste the match HTML")
+    st.caption("Paste the full SportsGambler preview HTML. The app extracts the facts, runs the logic, and shows the pick.")
+
+    html_in = st.text_area(
+        "HTML", height=220, label_visibility="collapsed",
+        placeholder="<html> ... </html>"
+    )
+
+    col_a, col_b = st.columns([1, 3])
+    with col_a:
+        run = st.button("Run the Logic", type="primary", use_container_width=True)
+
+    if run and html_in.strip():
+        with st.spinner("Extracting facts..."):
+            try:
+                facts = extract_facts(html_in)
+                signals = compute_signals(facts)
+                decision = decide(signals)
+            except Exception as e:
+                st.error(f"Extraction failed: {e}")
+                st.stop()
+
+        st.markdown("### The Pick")
+        preview = {
+            **facts,
+            **signals_to_columns(signals),
+            **decision_columns(decision),
+        }
+        render_pending_card(preview)
+
+        st.markdown("### Extracted Facts")
+        st.json({k: v for k, v in facts.items() if v is not None})
+
+        row = build_row(facts, signals, decision)
+        with st.spinner("Saving to Supabase..."):
+            try:
+                db_insert(row)
+                st.success("Match saved to pending.")
+            except Exception as e:
+                st.error(f"Supabase insert failed: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────
 # TAB 2 — PENDING
 # ─────────────────────────────────────────────────────────────────
@@ -670,9 +665,11 @@ with tab_pending:
             with st.expander("Enter result"):
                 c1, c2, c3 = st.columns([1, 1, 2])
                 with c1:
-                    hs = st.number_input("Home", min_value=0, step=1, key=f"h_{m['match_id']}")
+                    hs = st.number_input("Home", min_value=0, step=1,
+                                         key=f"h_{m['match_id']}")
                 with c2:
-                    aws = st.number_input("Away", min_value=0, step=1, key=f"a_{m['match_id']}")
+                    aws = st.number_input("Away", min_value=0, step=1,
+                                          key=f"a_{m['match_id']}")
                 with c3:
                     st.write("")
                     st.write("")
@@ -681,9 +678,12 @@ with tab_pending:
                             m.get("direction"), m.get("stake"),
                             int(hs), int(aws)
                         )
-                        db_settle(m["match_id"], int(hs), int(aws),
-                                  result, dc_hit if dc_hit is not None else 0,
-                                  profit)
+                        db_settle(
+                            m["match_id"], int(hs), int(aws),
+                            result,
+                            dc_hit if dc_hit is not None else 0,
+                            profit
+                        )
                         st.success("Settled.")
                         st.rerun()
 
@@ -740,32 +740,35 @@ with tab_perf:
             st.markdown(f'<div class="metric-box"><div class="metric-value">{skips}</div>'
                         f'<div class="metric-label">Skips</div></div>', unsafe_allow_html=True)
         with c7:
-            full = int((bets["stake"] == "full").sum())
-            half = int((bets["stake"] == "half").sum())
+            full = int((bets["stake"] == "full").sum()) if not bets.empty else 0
+            half = int((bets["stake"] == "half").sum()) if not bets.empty else 0
             st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                         f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
         st.markdown("### By agreement split")
-        by_split = (qualifying
-                    .groupby("agreement_split")
-                    .agg(total=("match_id", "count"),
-                         wins=("dc_hit", lambda s: int((s == 1).sum())),
-                         losses=("dc_hit", lambda s: int((s == 0).sum())),
-                         net=("profit_loss", "sum"))
-                    .reset_index())
-        by_split["hit_rate"] = (by_split["wins"] /
-                                (by_split["wins"] + by_split["losses"]).replace(0, pd.NA) * 100).round(1)
-        st.dataframe(by_split, use_container_width=True, hide_index=True)
+        if not qualifying.empty:
+            by_split = (qualifying
+                        .groupby("agreement_split")
+                        .agg(total=("match_id", "count"),
+                             wins=("dc_hit", lambda s: int((s == 1).sum())),
+                             losses=("dc_hit", lambda s: int((s == 0).sum())),
+                             net=("profit_loss", "sum"))
+                        .reset_index())
+            st.dataframe(by_split, use_container_width=True, hide_index=True)
 
         st.markdown("### By dissent signal")
-        by_dissent = (qualifying[qualifying["dissent_signal"].notna()]
-                      .groupby("dissent_signal")
-                      .agg(total=("match_id", "count"),
-                           wins=("dc_hit", lambda s: int((s == 1).sum())),
-                           losses=("dc_hit", lambda s: int((s == 0).sum())),
-                           net=("profit_loss", "sum"))
-                      .reset_index())
-        st.dataframe(by_dissent, use_container_width=True, hide_index=True)
+        dissent_df = qualifying[qualifying["dissent_signal"].notna()]
+        if not dissent_df.empty:
+            by_dissent = (dissent_df
+                          .groupby("dissent_signal")
+                          .agg(total=("match_id", "count"),
+                               wins=("dc_hit", lambda s: int((s == 1).sum())),
+                               losses=("dc_hit", lambda s: int((s == 0).sum())),
+                               net=("profit_loss", "sum"))
+                          .reset_index())
+            st.dataframe(by_dissent, use_container_width=True, hide_index=True)
+        else:
+            st.info("No dissent-signal data yet.")
 
         st.markdown("### All settled matches")
         for m in settled:
