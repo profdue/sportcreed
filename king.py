@@ -52,68 +52,37 @@ st.markdown("""
     .match-card.skip      { border-left-color: #64748b; opacity: 0.85; }
     .match-card.win       { border-left-color: #10b981; }
     .match-card.loss      { border-left-color: #ef4444; }
-    .match-title {
-        font-size: 1.25rem;
-        font-weight: 700;
-        color: #f1f5f9;
-        margin: 0 0 4px 0;
-    }
-    .match-meta {
-        font-size: 0.82rem;
-        color: #94a3b8;
-        margin-bottom: 14px;
-    }
+    .match-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin: 0 0 4px 0; }
+    .match-meta { font-size: 0.82rem; color: #94a3b8; margin-bottom: 14px; }
     .pick-badge {
-        display: inline-block;
-        padding: 6px 14px;
-        border-radius: 999px;
-        font-weight: 700;
-        font-size: 0.9rem;
-        letter-spacing: 0.02em;
+        display: inline-block; padding: 6px 14px; border-radius: 999px;
+        font-weight: 700; font-size: 0.9rem; letter-spacing: 0.02em;
     }
     .badge-home { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-away { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b55; }
     .badge-skip { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
-    .signal-row {
-        display: flex;
-        gap: 8px;
-        margin-top: 12px;
-        flex-wrap: wrap;
-    }
+    .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
-        font-size: 0.75rem;
-        padding: 4px 10px;
-        border-radius: 8px;
-        background: #0f172a;
-        color: #cbd5e1;
-        border: 1px solid #1e293b;
+        font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
+        background: #0f172a; color: #cbd5e1; border: 1px solid #1e293b;
     }
     .signal-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
     .signal-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
     .signal-pill.nothing { background: #64748b15; color: #94a3b8; border-color: #64748b40; }
     .metric-box {
-        background: #1a1f2e;
-        border-radius: 12px;
-        padding: 16px;
-        text-align: center;
-        border: 1px solid #232a3d;
+        background: #1a1f2e; border-radius: 12px; padding: 16px;
+        text-align: center; border: 1px solid #232a3d;
     }
     .metric-value { font-size: 1.8rem; font-weight: 700; color: #f1f5f9; }
     .metric-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
-        height: 44px;
-        background-color: #1a1f2e;
-        border-radius: 10px;
-        padding: 0 18px;
-        color: #94a3b8;
+        height: 44px; background-color: #1a1f2e; border-radius: 10px;
+        padding: 0 18px; color: #94a3b8;
     }
-    .stTabs [aria-selected="true"] {
-        background-color: #6366f1 !important;
-        color: white !important;
-    }
+    .stTabs [aria-selected="true"] { background-color: #6366f1 !important; color: white !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -181,7 +150,7 @@ _TEAM_PREFIXES = (
     "club ", "atlético ", "atletico ", "deportivo ", "real ",
     "fc ", "cf ", "cd ", "ca ", "ac ", "as ", "sv ", "sc ",
     "athletic ", "sporting ", "racing ", "olympique ", "stade ",
-    "stade ", "rc ", "rcd ", "ud ", "sd ", "ss ", "ssc ", "ss ",
+    "rc ", "rcd ", "ud ", "sd ", "ss ", "ssc ",
 )
 
 _TEAM_SUFFIXES = (
@@ -198,16 +167,7 @@ _NUMBER_WORDS = {
 
 
 def _search_term(full_name: str) -> str:
-    """
-    Return a short search term for a team name.
-    'Atlético San Luis' → 'San Luis'
-    'Club Santos Laguna' → 'Santos Laguna'
-    'Stade Brestois 29' → 'Brestois'
-    'Angers SCO' → 'Angers'
-    'FC Famalicão' → 'Famalicão'
-    'Torino FC' → 'Torino'
-    'Udinese Calcio' → 'Udinese'
-    """
+    """Return a short search term for a team name."""
     if not full_name:
         return ""
     name = full_name.strip()
@@ -230,7 +190,7 @@ def _search_term(full_name: str) -> str:
 
 
 def _candidates(term):
-    """Return candidate search terms for a team name (full, first word, cleaned)."""
+    """Return candidate search terms for a team name."""
     if not term:
         return []
     out = [term]
@@ -246,8 +206,6 @@ def _candidates(term):
         first2 = clean.split()[0]
         if first2 not in out:
             out.append(first2)
-    # Last word too — useful when team is "Stade Brestois"
-    if " " in clean:
         last = clean.split()[-1]
         if last not in out and len(last) > 2:
             out.append(last)
@@ -297,11 +255,7 @@ def _num(s):
 
 
 def _team_aliases(soup, team_full, team_short):
-    """
-    Return all plausible names for a team, mined from the document.
-    Combines full name, short name, prefix/suffix-stripped variants,
-    first word, and last word.
-    """
+    """All plausible names for a team, mined from the document."""
     aliases = set()
     if team_full:
         aliases.add(team_full.strip())
@@ -314,7 +268,6 @@ def _team_aliases(soup, team_full, team_short):
         if t:
             aliases.add(t)
 
-    # Strip prefixes / suffixes
     for name in list(aliases):
         low = name.lower()
         for prefix in _TEAM_PREFIXES:
@@ -324,14 +277,12 @@ def _team_aliases(soup, team_full, team_short):
             if low.endswith(suffix):
                 aliases.add(name[: -len(suffix)].strip())
 
-    # First and last word
     for name in list(aliases):
         parts = name.split()
         if len(parts) > 1:
             aliases.add(parts[0])
             aliases.add(parts[-1])
 
-    # Keep only useful aliases
     cleaned = set()
     for a in aliases:
         a = a.strip()
@@ -352,7 +303,7 @@ def _cmp_or_nothing(a, b):
 
 
 def compute_signals(f: dict) -> dict:
-    # --- Table: compare (points, GD) tuples ---
+    # Table: compare (points, GD) tuples
     hp = f.get("home_table_pts")
     ap = f.get("away_table_pts")
     hg = f.get("home_table_gd") or 0
@@ -366,7 +317,6 @@ def compute_signals(f: dict) -> dict:
     else:
         table = "nothing"
 
-    # --- Form, Venue, H2H: safe comparisons ---
     form  = _cmp_or_nothing(f.get("home_form_ppg"),  f.get("away_form_ppg"))
     venue = _cmp_or_nothing(f.get("home_home_ppg"),  f.get("away_away_ppg"))
     h2h   = _cmp_or_nothing(f.get("h2h_home_wins"),  f.get("h2h_away_wins"))
@@ -389,7 +339,7 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    # 3-1 (with no "nothing"): half stake, follow table leader
+    # 3-1: half stake, follow table leader
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
@@ -435,7 +385,6 @@ def decide(signals: dict) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
         }
 
-    # Default: skip
     split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
     return {
         "direction": "skip", "stake": "none", "qualifying": 0,
@@ -484,7 +433,6 @@ def _extract_identity(soup, f):
             f["home_team"] = names[0].get_text(strip=True)
             f["away_team"] = names[1].get_text(strip=True)
 
-    # Source B: <title>
     title = soup.find("title")
     if not f.get("home_team") and title:
         m = re.search(r"(.+?)\s+vs\s+(.+?)\s+Prediction", title.get_text())
@@ -492,7 +440,6 @@ def _extract_identity(soup, f):
             f["home_team"] = m.group(1).strip()
             f["away_team"] = m.group(2).strip()
 
-    # Source C: <h1>
     if not f.get("home_team"):
         h1 = soup.find("h1")
         if h1:
@@ -501,7 +448,6 @@ def _extract_identity(soup, f):
                 f["home_team"] = m.group(1).strip()
                 f["away_team"] = m.group(2).strip()
 
-    # Source D: og:title
     if not f.get("home_team"):
         og = soup.find("meta", property="og:title")
         if og and og.get("content"):
@@ -510,7 +456,6 @@ def _extract_identity(soup, f):
                 f["home_team"] = m.group(1).strip()
                 f["away_team"] = m.group(2).strip()
 
-    # Source E: canonical URL
     if not f.get("home_team"):
         link = soup.find("link", rel="canonical")
         if link and link.get("href"):
@@ -644,7 +589,6 @@ def _parse_standings(soup, f):
             pos = nums[0] if nums else None
             pts = nums[-1] if nums else None
 
-            # GD from "GF:GA" cell, else from signed int
             gd = None
             for c in cells:
                 if ":" in c:
@@ -674,7 +618,59 @@ def _parse_standings(soup, f):
             break
 
 
+# --- Regex pieces ---
+_WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
+_LOSS_WORDS = r"(?:losses?|defeats?|lost)"
+_DRAW_WORDS = r"(?:draws?|drawn)"
+_NUM_PAT    = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+
+
+def _wdl_from_cell(text):
+    """Parse '5-3-2' style cell into (w, d, l). Returns None if no match."""
+    m = re.search(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", text)
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return None
+
+
+def _parse_venue_from_stable(soup):
+    """
+    Parse the st-table for home/away W-D-L.
+    Returns (home_wdl, away_wdl) where each is (w, d, l) or None.
+    The W-D-L cell may be at cells[1] or cells[2] depending on colspan structure,
+    so we scan every cell for a '\\d+-\\d+-\\d+' pattern.
+    """
+    st = soup.find("table", class_="st-table")
+    if not st:
+        return None, None
+
+    home_wdl = away_wdl = None
+    for row in st.find_all("tr"):
+        cells = [c.get_text(strip=True) for c in row.find_all("td")]
+        if len(cells) < 2:
+            continue
+
+        label = " ".join(cells).lower()
+
+        # Scan every cell for the W-D-L pattern
+        wdl = None
+        for c in cells:
+            wdl = _wdl_from_cell(c)
+            if wdl:
+                break
+        if not wdl:
+            continue
+
+        if "home stats" in label:
+            home_wdl = wdl
+        elif "away stats" in label:
+            away_wdl = wdl
+
+    return home_wdl, away_wdl
+
+
 def _venue_sentence(sents):
+    """Filter to sentences that describe last 10 home/away form."""
     keywords = [
         "in the last 10 home", "in the last 10 away",
         "in the past 10 home", "in the past 10 away",
@@ -686,14 +682,8 @@ def _venue_sentence(sents):
     return [s for s in sents if any(k in s.lower() for k in keywords)]
 
 
-_WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
-_LOSS_WORDS = r"(?:losses?|defeats?|lost)"
-_DRAW_WORDS = r"(?:draws?|drawn)"
-_NUM_PAT    = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
-
-
 def _parse_venue_from_sentences(sents):
-    """Look for a sentence with venue stats (wins/losses/draws in any order)."""
+    """Parse W/D/L from a venue sentence (prose fallback)."""
     patterns = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
@@ -717,38 +707,27 @@ def _parse_venue_from_sentences(sents):
 def _parse_venue(soup, home_sents, away_sents, f):
     """Structured st-table first; prose fallback."""
 
-    st = soup.find("table", class_="st-table")
-    if st:
-        home_wdl = away_wdl = None
-        for row in st.find_all("tr"):
-            cells = [c.get_text(strip=True) for c in row.find_all("td")]
-            if len(cells) < 3:
-                continue
-            label = " ".join(cells[:2]).lower()
-            m = re.match(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", cells[2])
-            if not m:
-                continue
-            w, d, l = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if "home stats" in label:
-                home_wdl = (w, d, l)
-            elif "away stats" in label:
-                away_wdl = (w, d, l)
+    home_wdl, away_wdl = _parse_venue_from_stable(soup)
 
-        if home_wdl:
-            w, d, l = home_wdl
-            total = w + d + l or 1
-            pts = w * 3 + d
-            f["home_home_wins"], f["home_home_draws"], f["home_home_losses"] = w, d, l
-            f["home_home_pts"] = pts
-            f["home_home_ppg"] = round(pts / total, 2)
+    if home_wdl:
+        w, d, l = home_wdl
+        total = w + d + l or 1
+        pts = w * 3 + d
+        f["home_home_wins"]   = w
+        f["home_home_draws"]  = d
+        f["home_home_losses"] = l
+        f["home_home_pts"]    = pts
+        f["home_home_ppg"]    = round(pts / total, 2)
 
-        if away_wdl:
-            w, d, l = away_wdl
-            total = w + d + l or 1
-            pts = w * 3 + d
-            f["away_away_wins"], f["away_away_draws"], f["away_away_losses"] = w, d, l
-            f["away_away_pts"] = pts
-            f["away_away_ppg"] = round(pts / total, 2)
+    if away_wdl:
+        w, d, l = away_wdl
+        total = w + d + l or 1
+        pts = w * 3 + d
+        f["away_away_wins"]   = w
+        f["away_away_draws"]  = d
+        f["away_away_losses"] = l
+        f["away_away_pts"]    = pts
+        f["away_away_ppg"]    = round(pts / total, 2)
 
     # Prose fallback
     if "home_home_ppg" not in f and home_sents:
@@ -773,7 +752,11 @@ def _parse_venue(soup, home_sents, away_sents, f):
 
 
 def _parse_form_from_sentences(sents):
-    """Look for a sentence with the form pattern (team's last 10)."""
+    """Parse overall form (W/D/L) from prose. Excludes venue sentences."""
+    # Exclude venue sentences so we don't accidentally match them
+    venue_sents = set(_venue_sentence(sents))
+    filtered = [s for s in sents if s not in venue_sents]
+
     patterns = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
@@ -785,7 +768,7 @@ def _parse_form_from_sentences(sents):
         (rf"won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
         (rf"won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
-    for s in sents:
+    for s in filtered:
         for tmpl, mapping in patterns:
             m = re.search(tmpl, s, re.IGNORECASE)
             if not m:
@@ -793,6 +776,9 @@ def _parse_form_from_sentences(sents):
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
+            # Sanity check: total should be roughly 10 games
+            if sum(vals.values()) == 0:
+                continue
             return vals["w"], vals["d"], vals["l"]
     return None
 
@@ -818,6 +804,8 @@ def _team_sentences(aliases, sentences):
 
 
 def _parse_form(home_sents, away_sents, f):
+    """Parse overall form (last 10) from prose."""
+
     home_form = _parse_form_from_sentences(home_sents)
     if home_form:
         w, d, l = home_form
@@ -946,7 +934,6 @@ def extract_facts(html: str) -> dict:
         if f.get(key) is None:
             f["_parse_warnings"].append(f"missing required field: {key}")
 
-    # --- Defaults (do NOT set to 0, leave None so signals can return 'nothing') ---
     for k in [
         "home_table_gd", "away_table_gd",
         "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
