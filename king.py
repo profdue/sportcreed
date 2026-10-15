@@ -659,7 +659,7 @@ def _parse_standings(soup, f):
 # ═══════════════════════════════════════════════════════════════════
 
 _WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
-_LOSS_WORDS = r"(?:losses?|defeats?|lost)"
+_LOSS_WORDS = r"(?:loss(?:es)?|defeats?|lost)"
 _DRAW_WORDS = r"(?:draws?|drawn)"
 _NUM_PAT    = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
 
