@@ -93,8 +93,13 @@ st.markdown("""
 
 @st.cache_resource
 def get_supabase() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+    """Read secrets in a shape-agnostic way: nested [supabase] OR flat SUPABASE_URL/KEY."""
+    try:
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+    except (KeyError, TypeError):
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
 
 
@@ -125,13 +130,21 @@ def db_settled():
 
 
 def db_settle(match_id: int, home_score: int, away_score: int,
-              result: str, dc_hit: int, profit_loss: float):
+              result: str, dc_hit, units, profit_loss: float):
+    """
+    Settle a match.
+
+    - dc_hit is None for skips, 1 for wins, 0 for losses.
+    - units is the stake size (0.0 for skip, 0.5 for half, 1.0 for full).
+    - profit_loss is +units on win, -units on loss, 0.0 on skip.
+    """
     sb = get_supabase()
     sb.table("matches").update({
         "home_score": home_score,
         "away_score": away_score,
         "result": result,
-        "dc_hit": dc_hit,
+        "dc_hit": dc_hit,          # None passes through as SQL NULL
+        "stake_units": units,
         "profit_loss": profit_loss,
         "settled_at": datetime.now(timezone.utc).isoformat(),
     }).eq("match_id", match_id).execute()
@@ -313,7 +326,14 @@ def compute_signals(f: dict) -> dict:
 
     form  = _cmp_or_nothing(f.get("home_form_ppg"),  f.get("away_form_ppg"))
     venue = _cmp_or_nothing(f.get("home_home_ppg"),  f.get("away_away_ppg"))
-    h2h   = _cmp_or_nothing(f.get("h2h_home_wins"),  f.get("h2h_away_wins"))
+
+    # H2H: require at least 6 games to count as a signal.
+    # Thin H2H history is not a meaningful signal.
+    h2h_total = f.get("h2h_total") or 0
+    if h2h_total < 6:
+        h2h = "nothing"
+    else:
+        h2h = _cmp_or_nothing(f.get("h2h_home_wins"), f.get("h2h_away_wins"))
 
     return {"table": table, "form": form, "venue": venue, "h2h": h2h}
 
@@ -322,67 +342,72 @@ def decide(signals: dict) -> dict:
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
     nothing = sum(1 for v in signals.values() if v == "nothing")
-    table_leader = signals["table"]
+    table_leader = signals["table"] if signals["table"] != "nothing" else None
 
-    if home == 4 or away == 4:
-        direction = "home" if home == 4 else "away"
+    # Helper: build a decision dict
+    def _mk(direction, stake, qualifying, dissent, split):
         return {
-            "direction": direction, "stake": "full", "qualifying": 1,
-            "dissent_signal": None, "split": f"{home}-{away}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "direction": direction,
+            "stake": stake,
+            "qualifying": qualifying,
+            "dissent_signal": dissent,
+            "split": split,
+            "home_count": home,
+            "away_count": away,
+            "nothing_count": nothing,
+            "table_leader": table_leader,
         }
 
+    # 4-0: full
+    if home == 4:
+        return _mk("home", "full", 1, None, "4-0")
+    if away == 4:
+        return _mk("away", "full", 1, None, "0-4")
+
+    # 3-1: half, follow table leader. If table is missing, use majority.
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
-        return {
-            "direction": table_leader, "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-        }
+        direction = table_leader or "home"
+        return _mk(direction, "half", 1, dissent, "3-1")
     if away == 3 and home == 1:
         dissent = next((k for k, v in signals.items() if v == "home"), None)
-        return {
-            "direction": table_leader, "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-        }
+        direction = table_leader or "away"
+        return _mk(direction, "half", 1, dissent, "1-3")
 
+    # 3-0-1: full ONLY if table is one of the 3 (not the missing one).
+    # If table is the missing signal, we don't know who's better on the table —
+    # downgrade to half.
     if home == 3 and away == 0 and nothing == 1:
-        return {
-            "direction": "home", "stake": "full", "qualifying": 1,
-            "dissent_signal": "nothing", "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-        }
+        missing_signal = next((k for k, v in signals.items() if v == "nothing"), None)
+        if missing_signal == "table":
+            return _mk("home", "half", 1, "table", "3-0-1")
+        return _mk("home", "full", 1, missing_signal, "3-0-1")
     if away == 3 and home == 0 and nothing == 1:
-        return {
-            "direction": "away", "stake": "full", "qualifying": 1,
-            "dissent_signal": "nothing", "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-        }
+        missing_signal = next((k for k, v in signals.items() if v == "nothing"), None)
+        if missing_signal == "table":
+            return _mk("away", "half", 1, "table", "0-3-1")
+        return _mk("away", "full", 1, missing_signal, "0-3-1")
 
+    # 2-2: skip
     if home == 2 and away == 2:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": "2-2",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-        }
+        return _mk("skip", "none", 0, None, "2-2")
 
+    # Too few informative signals
     if (home + away) < 2:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-        }
+        return _mk("skip", "none", 0, None, f"{home}-{away}-{nothing}")
 
     split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
-    return {
-        "direction": "skip", "stake": "none", "qualifying": 0,
-        "dissent_signal": None, "split": split,
-        "home_count": home, "away_count": away, "nothing_count": nothing,
-    }
+    return _mk("skip", "none", 0, None, split)
 
 
 def settle(direction, stake, home_score, away_score):
+    """
+    Returns (result, dc_hit, units, profit_loss).
+
+    - dc_hit: None for skip, 1 for win, 0 for loss.
+    - units: 0.0 / 0.5 / 1.0 depending on stake.
+    - profit_loss: +units on win, -units on loss, 0.0 on skip.
+    """
     if home_score > away_score:
         result = "home_win"
     elif away_score > home_score:
@@ -604,9 +629,7 @@ def _parse_standings(soup, f):
             break
 
 
-
-
-# --- Regex pieces - FIXED FOR ANY MATCH ---
+# --- Regex pieces ---
 _WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
 _LOSS_WORDS = r"(?:losses?|defeats?|lost)"
 _DRAW_WORDS = r"(?:draws?|drawn)"
@@ -686,20 +709,20 @@ def _parse_venue(soup, home_sents, away_sents, f):
         w, d, l = home_wdl
         total = w + d + l or 1
         pts = w * 3 + d
-        f["home_home_wins"] = w
-        f["home_home_draws"] = d
+        f["home_home_wins"]   = w
+        f["home_home_draws"]  = d
         f["home_home_losses"] = l
-        f["home_home_pts"] = pts
-        f["home_home_ppg"] = round(pts / total, 2)
+        f["home_home_pts"]    = pts
+        f["home_home_ppg"]    = round(pts / total, 2)
     if away_wdl:
         w, d, l = away_wdl
         total = w + d + l or 1
         pts = w * 3 + d
-        f["away_away_wins"] = w
-        f["away_away_draws"] = d
+        f["away_away_wins"]   = w
+        f["away_away_draws"]  = d
         f["away_away_losses"] = l
-        f["away_away_pts"] = pts
-        f["away_away_ppg"] = round(pts / total, 2)
+        f["away_away_pts"]    = pts
+        f["away_away_ppg"]    = round(pts / total, 2)
     if "home_home_ppg" not in f and home_sents:
         result = _parse_venue_from_sentences(_venue_sentence(home_sents))
         if result:
@@ -720,16 +743,50 @@ def _parse_venue(soup, home_sents, away_sents, f):
             f["away_away_ppg"] = round(pts / total, 2)
 
 
-def _parse_form_from_sentences(sents, required_first_word=None):
+def _slice_after_team_then_stop_at_other_team(s, team, other_team):
+    """
+    Return the substring of `s` that starts at `team` and stops
+    before `other_team` (if `other_team` appears after `team`).
+    """
+    s_low = s.lower()
+    team_low = (team or "").lower()
+    other_low = (other_team or "").lower()
+
+    if not team_low:
+        return s
+
+    idx_team = s_low.find(team_low)
+    if idx_team == -1:
+        return ""
+
+    if other_low:
+        idx_other = s_low.find(other_low, idx_team + len(team_low))
+        if idx_other != -1:
+            return s[idx_team:idx_other]
+
+    return s[idx_team:]
+
+
+def _parse_form_from_sentences(sents, required_first_word=None, other_team=None):
+    """
+    Parse overall form (W/D/L) from prose.
+
+    - Team name can appear anywhere in the sentence.
+    - W/D/L pattern must appear AFTER the team name.
+    - Search area stops before the other team name (if it appears later).
+    - Handles both 3-number and 2-number (draw inferred) forms.
+    """
     venue_sents = set(_venue_sentence(sents))
     filtered = [s for s in sents if s not in venue_sents]
+
     cleaned = []
     for s in filtered:
         if "G W D L" in s and "View Full Table" in s:
             parts = s.split("View Full Table")
             s = parts[-1]
-        if "W-D-L" in s and "G GF GA" in s and "Home Stats" in s:
-            continue
+        if "W-D-L" in s and "G GF GA" in s:
+            if "Home Stats" in s or "Away Stats" in s:
+                continue
         if len(s) < 20:
             continue
         cleaned.append(s)
@@ -760,10 +817,14 @@ def _parse_form_from_sentences(sents, required_first_word=None):
             req_low = required_first_word.lower()
             if req_low not in s_low:
                 continue
-            team_idx = s_low.find(req_low)
-            search_area = s[team_idx:]
+            search_area = _slice_after_team_then_stop_at_other_team(
+                s, required_first_word, other_team
+            )
         else:
             search_area = s
+
+        if not search_area:
+            continue
 
         for tmpl, mapping in patterns_3:
             m = re.search(tmpl, search_area, re.IGNORECASE)
@@ -793,6 +854,7 @@ def _parse_form_from_sentences(sents, required_first_word=None):
             if sum(vals.values()) < 5 or sum(vals.values()) > 15:
                 continue
             return vals["w"], vals["d"], vals["l"]
+
     return None
 
 
@@ -824,7 +886,11 @@ def _parse_form(home_sents, away_sents, f):
     home_short = f.get("home_team_short") or f.get("home_team", "")
     away_short = f.get("away_team_short") or f.get("away_team", "")
 
-    home_form = _parse_form_from_sentences(home_sents, required_first_word=home_short)
+    home_form = _parse_form_from_sentences(
+        home_sents,
+        required_first_word=home_short,
+        other_team=away_short,
+    )
     if home_form:
         w, d, l = home_form
         total = w + d + l or 1
@@ -833,7 +899,11 @@ def _parse_form(home_sents, away_sents, f):
         f["home_form_pts"] = pts
         f["home_form_ppg"] = round(pts / total, 2)
 
-    away_form = _parse_form_from_sentences(away_sents, required_first_word=away_short)
+    away_form = _parse_form_from_sentences(
+        away_sents,
+        required_first_word=away_short,
+        other_team=home_short,
+    )
     if away_form:
         w, d, l = away_form
         total = w + d + l or 1
@@ -870,15 +940,11 @@ def _parse_h2h(soup, home_term, away_term, f):
         idx_away = text.lower().find((away_term or "").lower())
         home_first = idx_home != -1 and (idx_away == -1 or idx_home < idx_away)
         if hs > aws:
-            if home_first:
-                home_wins += 1
-            else:
-                away_wins += 1
+            if home_first: home_wins += 1
+            else: away_wins += 1
         elif aws > hs:
-            if home_first:
-                away_wins += 1
-            else:
-                home_wins += 1
+            if home_first: away_wins += 1
+            else: home_wins += 1
         else:
             draws += 1
     f["h2h_home_wins"] = home_wins
@@ -890,6 +956,7 @@ def _parse_h2h(soup, home_term, away_term, f):
 def extract_facts(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     f = {"_parse_warnings": []}
+
     raw_text = soup.get_text(" ", strip=True)
     clean_text = raw_text.replace("View Full Table", ". ")
     clean_text = re.sub(r"\s+", " ", clean_text)
@@ -941,7 +1008,6 @@ def extract_facts(html: str) -> dict:
             f[k] = None
 
     return f
-
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1043,7 +1109,8 @@ def decision_columns(d):
         "agreement_home_count":    d["home_count"],
         "agreement_away_count":    d["away_count"],
         "agreement_nothing_count": d["nothing_count"],
-        "table_leader":            d["direction"] if d["direction"] != "skip" else None,
+        "table_leader":            d.get("table_leader"),   # explicit, not synthesized
+        "pick":                    d["direction"],          # store the pick for completeness
     }
 
 
@@ -1182,10 +1249,12 @@ with tab_pending:
                             m.get("direction"), m.get("stake"),
                             int(hs), int(aws)
                         )
+                        # dc_hit is None for skips → stored as SQL NULL
                         db_settle(
                             m["match_id"], int(hs), int(aws),
                             result,
-                            dc_hit if dc_hit is not None else 0,
+                            dc_hit,           # pass None through
+                            units,            # 0.0 / 0.5 / 1.0
                             profit
                         )
                         st.success("Settled.")
@@ -1212,17 +1281,19 @@ with tab_perf:
         st.info("No settled matches yet.")
     else:
         df = pd.DataFrame(settled)
+        # dc_hit: only 1 or 0 for actual bets; NaN for skips
         df["dc_hit"] = pd.to_numeric(df["dc_hit"], errors="coerce")
         df["profit_loss"] = pd.to_numeric(df["profit_loss"], errors="coerce").fillna(0)
         df["qualifying"] = pd.to_numeric(df["qualifying"], errors="coerce").fillna(0)
 
         qualifying = df[df["qualifying"] == 1]
+        # Only count rows where dc_hit is 1 or 0 (not NaN)
         bets = qualifying[qualifying["dc_hit"].notna()]
 
         total = len(bets)
         wins = int((bets["dc_hit"] == 1).sum())
         losses = int((bets["dc_hit"] == 0).sum())
-        net = float(df["profit_loss"].sum())
+        net = float(bets["profit_loss"].sum())   # only count settled bets
         hit_rate = (wins / total * 100) if total else 0.0
 
         c1, c2, c3, c4 = st.columns(4)
