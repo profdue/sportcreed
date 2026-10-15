@@ -251,20 +251,16 @@ def _team_match(full_name, cell_text):
     if not term:
         return False
 
-    # 1. Direct substring
     if term in cell or cell in term:
         return True
 
-    # 2. Word overlap
     if set(term.split()) & set(cell.split()):
         return True
 
-    # 3. Initials
     init = _initials(full_name).lower()
     if init and init == cell.replace(" ", "").replace(".", ""):
         return True
 
-    # 4. First word / last word of the cell
     if " " not in cell and cell in term.split():
         return True
 
@@ -335,7 +331,7 @@ def _team_aliases(soup, team_full, team_short):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — TWO CLAUSES
+# THE LOGIC
 # ═══════════════════════════════════════════════════════════════════
 
 def _cmp_or_nothing(a, b):
@@ -372,6 +368,15 @@ def decide(signals: dict) -> dict:
     table_leader = signals["table"]
     table_leader_value = table_leader if table_leader != "nothing" else None
 
+    # Majority direction (used for direction on 3-1 and 1-3 splits)
+    if home > away:
+        majority = "home"
+    elif away > home:
+        majority = "away"
+    else:
+        majority = None
+
+    # ── 4-0 / 0-4 ──────────────────────────────────────────────
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         return {
@@ -381,11 +386,11 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
+    # ── 3-1 / 1-3: direction = MAJORITY (not table_leader) ─────
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
-            "direction": table_leader if table_leader != "nothing" else "home",
-            "stake": "half", "qualifying": 1,
+            "direction": majority, "stake": "half", "qualifying": 1,
             "dissent_signal": dissent, "split": f"{home}-{away}",
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
@@ -393,13 +398,13 @@ def decide(signals: dict) -> dict:
     if away == 3 and home == 1:
         dissent = next((k for k, v in signals.items() if v == "home"), None)
         return {
-            "direction": table_leader if table_leader != "nothing" else "away",
-            "stake": "half", "qualifying": 1,
+            "direction": majority, "stake": "half", "qualifying": 1,
             "dissent_signal": dissent, "split": f"{home}-{away}",
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
 
+    # ── 3-0-1 / 0-3-1: full stake, majority ────────────────────
     if home == 3 and away == 0 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "nothing"), None)
         return {
@@ -417,6 +422,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
+    # ── 2-2: skip ──────────────────────────────────────────────
     if home == 2 and away == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -425,6 +431,39 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
+    # ── 2-1-1 / 1-2-1: skip ────────────────────────────────────
+    if home == 2 and away == 1 and nothing == 1:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 2 and home == 1 and nothing == 1:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # ── 2-0-2 / 0-2-2: skip ────────────────────────────────────
+    if home == 2 and away == 0 and nothing == 2:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 2 and home == 0 and nothing == 2:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # ── Default: skip ──────────────────────────────────────────
     if (home + away) < 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -566,8 +605,6 @@ def _extract_identity(soup, f):
 # ═══════════════════════════════════════════════════════════════════
 
 def _gd_from_cells(cells):
-    """Extract goal difference from a standings row."""
-    # Prefer the explicit "12:8" cell
     for c in cells:
         if re.match(r"^\d+:\d+$", c.strip()):
             try:
@@ -575,7 +612,6 @@ def _gd_from_cells(cells):
                 return int(a) - int(b)
             except Exception:
                 pass
-    # Then a signed integer
     for c in reversed(cells[:-1]):
         s = c.strip()
         if (s.startswith("-") or s.startswith("+")) and s[1:].isdigit():
@@ -584,12 +620,6 @@ def _gd_from_cells(cells):
 
 
 def _parse_standings(soup, f):
-    """
-    ID-anchored standings extraction.
-
-    Primary: match rows by team ID from logos.
-    Fallback: match rows by name.
-    """
     home_id, away_id = _extract_team_ids_from_t_top(soup)
 
     if not home_id and not away_id:
@@ -612,7 +642,6 @@ def _parse_standings(soup, f):
             if len(cells) < 4:
                 continue
 
-            # --- Determine which side this row belongs to ---
             target = None
 
             # Primary: match by logo ID
@@ -720,7 +749,6 @@ def _apply_venue(f, side, wdl):
 
 
 def _parse_venue(soup, home_sents, away_sents, f):
-    """ID-anchored st-table parse, then label fallback, then prose."""
     home_id, away_id = _extract_team_ids_from_t_top(soup)
 
     st = soup.find("table", class_="st-table")
@@ -732,7 +760,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
             if len(cells) < 2:
                 continue
 
-            # Find the W-D-L cell
             wdl = None
             for c in cells:
                 wdl = _wdl_from_cell(c)
@@ -741,7 +768,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
             if not wdl:
                 continue
 
-            # Primary: match by logo ID
             img = row.find("img")
             row_id = _team_id_from_img(img)
             label = " ".join(cells).lower()
@@ -754,7 +780,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
                     away_wdl = wdl
                     continue
 
-            # Fallback: label-based
             if "home stats" in label and not home_wdl:
                 home_wdl = wdl
             elif "away stats" in label and not away_wdl:
@@ -765,7 +790,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
     if away_wdl:
         _apply_venue(f, "away", away_wdl)
 
-    # Prose fallback
     if "home_home_ppg" not in f and home_sents:
         result = _parse_venue_from_sentences(_venue_sentence(home_sents))
         if result:
@@ -782,15 +806,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
 # ═══════════════════════════════════════════════════════════════════
 
 def _parse_form_from_sentences(sents, required_first_word=None, other_team=None):
-    """
-    Parse overall form from prose.
-
-    - De-pollute table fragments.
-    - Strip venue sentences.
-    - Team name must appear; W/D/L must appear after team name.
-    - Search area stops at other team name (prevents cross-contamination).
-    - 3-number and 2-number (draw inferred) forms both supported.
-    """
     venue_sents = set(_venue_sentence(sents))
     filtered = [s for s in sents if s not in venue_sents]
 
@@ -977,17 +992,14 @@ def extract_facts(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     f = {"_parse_warnings": []}
 
-    # Clean body once for sentence splitting
     raw_text = soup.get_text(" ", strip=True)
     body = re.sub(r"\s+", " ", raw_text.replace("View Full Table", ". "))
 
-    # --- Identity ---
     f["match_date"] = f["kickoff_time"] = None
     f["league"] = f["country"] = f["venue"] = None
     f["home_team"] = f["away_team"] = None
     f["home_team_short"] = f["away_team_short"] = None
 
-    # --- Team IDs (primary anchor) ---
     home_id, away_id = _extract_team_ids_from_t_top(soup)
     f["home_team_id"] = home_id
     f["away_team_id"] = away_id
@@ -1003,10 +1015,8 @@ def extract_facts(html: str) -> dict:
     if not away_id:
         f["_parse_warnings"].append("away team logo ID not found")
 
-    # --- Standings ---
     _parse_standings(soup, f)
 
-    # --- Sentences for prose parsing ---
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
 
     home_aliases = _team_aliases(soup, f.get("home_team", ""), f.get("home_team_short", ""))
@@ -1015,21 +1025,18 @@ def extract_facts(html: str) -> dict:
     home_sents = _team_sentences(home_aliases, sentences)
     away_sents = _team_sentences(away_aliases, sentences)
 
-    # --- Form ---
     _parse_form(home_sents, away_sents, f)
     if "home_form_ppg" not in f:
         f["_parse_warnings"].append("home form not found - will be treated as nothing")
     if "away_form_ppg" not in f:
         f["_parse_warnings"].append("away form not found - will be treated as nothing")
 
-    # --- Venue ---
     _parse_venue(soup, home_sents, away_sents, f)
     if "home_home_ppg" not in f:
         f["_parse_warnings"].append("home venue form not found")
     if "away_away_ppg" not in f:
         f["_parse_warnings"].append("away venue form not found")
 
-    # --- H2H ---
     _parse_h2h(
         soup,
         f.get("home_team_short") or f.get("home_team", ""),
@@ -1037,7 +1044,6 @@ def extract_facts(html: str) -> dict:
         f,
     )
 
-    # --- Defaults so downstream never sees missing keys ---
     for k in [
         "home_table_gd", "away_table_gd",
         "home_table_pts", "away_table_pts",
@@ -1280,7 +1286,7 @@ with tab_pending:
                         db_settle(
                             m["match_id"], int(hs), int(aws),
                             result,
-                            dc_hit,      # pass None through for skips
+                            dc_hit,
                             profit,
                         )
                         st.success("Settled.")
