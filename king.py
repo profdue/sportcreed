@@ -21,6 +21,11 @@ Parsing strategy: layered funnel, ID-anchored.
     - initials
     - first/last word
 
+Form extraction, three sources in priority order:
+  1. Prose sentences ("Team have X wins, Y draws and Z losses")
+  2. keystat-item block ("Full-Time Result" list item)
+  3. (nothing else — if both fail, form stays "nothing")
+
 Every field failure is logged. Missing data never votes silently.
 """
 
@@ -159,10 +164,6 @@ def db_delete(match_id: int):
 # ═══════════════════════════════════════════════════════════════════
 
 def _team_id_from_img(img_tag):
-    """
-    Extract numeric team ID from a SportsGambler logo <img> tag.
-    Example: https://sportsgambler.sirv.com/logos/9866.png?h=90 → "9866"
-    """
     if not img_tag:
         return None
     src = img_tag.get("src") or img_tag.get("data-src") or ""
@@ -171,11 +172,6 @@ def _team_id_from_img(img_tag):
 
 
 def _extract_team_ids_from_t_top(soup):
-    """
-    Return (home_id, away_id) from the top-of-page t_top block.
-    The t_top block has two t_teams columns; the first has the home logo,
-    the last has the away logo.
-    """
     t_top = soup.find("div", class_="t_top")
     if not t_top:
         return None, None
@@ -234,7 +230,6 @@ def _search_term(full_name: str) -> str:
 
 
 def _initials(name: str) -> str:
-    """Return initials, skipping common football prefixes."""
     skip = {"fc", "cf", "ac", "sc", "cd", "ca", "as", "sv", "ss",
             "ud", "sd", "afc", "united", "city"}
     parts = (name or "").lower().split()
@@ -242,28 +237,21 @@ def _initials(name: str) -> str:
 
 
 def _team_match(full_name, cell_text):
-    """Name-only fallback matching with multiple strategies."""
     if not full_name or not cell_text:
         return False
     term = _search_term(full_name).lower()
     cell = cell_text.lower().strip()
-
     if not term:
         return False
-
     if term in cell or cell in term:
         return True
-
     if set(term.split()) & set(cell.split()):
         return True
-
     init = _initials(full_name).lower()
     if init and init == cell.replace(" ", "").replace(".", ""):
         return True
-
     if " " not in cell and cell in term.split():
         return True
-
     return False
 
 
@@ -306,7 +294,6 @@ def _team_aliases(soup, team_full, team_short):
         t = _search_term(team_short)
         if t:
             aliases.add(t)
-
     for name in list(aliases):
         low = name.lower()
         for prefix in _TEAM_PREFIXES:
@@ -315,13 +302,11 @@ def _team_aliases(soup, team_full, team_short):
         for suffix in _TEAM_SUFFIXES:
             if low.endswith(suffix):
                 aliases.add(name[: -len(suffix)].strip())
-
     for name in list(aliases):
         parts = name.split()
         if len(parts) > 1:
             aliases.add(parts[0])
             aliases.add(parts[-1])
-
     cleaned = set()
     for a in aliases:
         a = a.strip()
@@ -368,7 +353,6 @@ def decide(signals: dict) -> dict:
     table_leader = signals["table"]
     table_leader_value = table_leader if table_leader != "nothing" else None
 
-    # Majority direction (used for direction on 3-1 and 1-3 splits)
     if home > away:
         majority = "home"
     elif away > home:
@@ -376,7 +360,7 @@ def decide(signals: dict) -> dict:
     else:
         majority = None
 
-    # ── 4-0 / 0-4 ──────────────────────────────────────────────
+    # 4-0 / 0-4
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         return {
@@ -386,7 +370,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ── 3-1 / 1-3: direction = MAJORITY (not table_leader) ─────
+    # 3-1 / 1-3: majority direction, half stake
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
@@ -404,7 +388,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ── 3-0-1 / 0-3-1: full stake, majority ────────────────────
+    # 3-0-1 / 0-3-1: full stake
     if home == 3 and away == 0 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "nothing"), None)
         return {
@@ -422,7 +406,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ── 2-2: skip ──────────────────────────────────────────────
+    # 2-2: skip
     if home == 2 and away == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -431,7 +415,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ── 2-1-1 / 1-2-1: skip ────────────────────────────────────
+    # 2-1-1 / 1-2-1: skip
     if home == 2 and away == 1 and nothing == 1:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -447,7 +431,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ── 2-0-2 / 0-2-2: skip ────────────────────────────────────
+    # 2-0-2 / 0-2-2: skip
     if home == 2 and away == 0 and nothing == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -463,15 +447,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ── Default: skip ──────────────────────────────────────────
-    if (home + away) < 2:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
+    # Default: skip
     split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
     return {
         "direction": "skip", "stake": "none", "qualifying": 0,
@@ -492,7 +468,7 @@ def settle(direction, stake, home_score, away_score):
     if direction == "skip":
         return result, None, 0.0, 0.0
 
-    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}.get(stake, 0.0)
+    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
 
     if direction == "home":
         hit = result in ("home_win", "draw")
@@ -643,8 +619,6 @@ def _parse_standings(soup, f):
                 continue
 
             target = None
-
-            # Primary: match by logo ID
             img = row.find("img")
             row_id = _team_id_from_img(img)
             if row_id:
@@ -653,7 +627,6 @@ def _parse_standings(soup, f):
                 elif row_id == away_id:
                     target = "away"
 
-            # Fallback: match by name
             if not target:
                 team_cell = cells[1] if len(cells) > 1 else ""
                 if _team_match(home_team, team_cell):
@@ -759,7 +732,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
             cells = [c.get_text(strip=True) for c in row.find_all("td")]
             if len(cells) < 2:
                 continue
-
             wdl = None
             for c in cells:
                 wdl = _wdl_from_cell(c)
@@ -767,11 +739,9 @@ def _parse_venue(soup, home_sents, away_sents, f):
                     break
             if not wdl:
                 continue
-
             img = row.find("img")
             row_id = _team_id_from_img(img)
             label = " ".join(cells).lower()
-
             if row_id:
                 if row_id == home_id:
                     home_wdl = wdl
@@ -779,7 +749,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
                 elif row_id == away_id:
                     away_wdl = wdl
                     continue
-
             if "home stats" in label and not home_wdl:
                 home_wdl = wdl
             elif "away stats" in label and not away_wdl:
@@ -802,7 +771,7 @@ def _parse_venue(soup, home_sents, away_sents, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FORM — PROSE PARSING
+# FORM — PROSE + KEYSTAT FALLBACK
 # ═══════════════════════════════════════════════════════════════════
 
 def _parse_form_from_sentences(sents, required_first_word=None, other_team=None):
@@ -888,6 +857,129 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     return None
 
 
+# --- keystat-item fallback ---
+
+# Match "4 wins, 2 defeats and 4 draws" and variants
+_KEYSTAT_PATTERNS = [
+    (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
+    (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
+    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
+    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
+    (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
+    (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
+]
+
+
+def _parse_form_from_keystat(soup):
+    """
+    Fallback: read overall form from the keystat-item block.
+
+    Structure:
+        <div class="keystat-item">                     <!-- home team -->
+            <div class="stats-title-sub"><strong>Full-Time Result</strong></div>
+            <ul class="stats-list" id="ftr-hometeam">
+                <li>4 wins, 2 defeats and 4 draws in the previous 10 matches</li>
+                <li>5 wins, 2 defeats and 3 draws in the previous 10 home matches</li>
+            </ul>
+        </div>
+        <div class="keystat-item awaystats">           <!-- away team -->
+            ...
+        </div>
+
+    Returns (home_wdl, away_wdl). Each is (w, d, l) or None.
+    Only the FIRST <li> is used (overall form). The second is venue form.
+    """
+    home_wdl = away_wdl = None
+
+    for item in soup.find_all("div", class_="keystat-item"):
+        classes = item.get("class", [])
+        is_away = "awaystats" in classes
+
+        # Find the "Full-Time Result" block title
+        title = item.find("div", class_="stats-title-sub")
+        if not title or "Full-Time Result" not in title.get_text():
+            continue
+
+        ul = item.find("ul", class_="stats-list")
+        if not ul:
+            continue
+
+        first_li = ul.find("li")
+        if not first_li:
+            continue
+
+        text = first_li.get_text(" ", strip=True)
+
+        wdl = None
+        for tmpl, mapping in _KEYSTAT_PATTERNS:
+            m = re.search(tmpl, text, re.IGNORECASE)
+            if not m:
+                continue
+            vals = {"w": 0, "d": 0, "l": 0}
+            for i, key in enumerate(mapping):
+                vals[key] = int(m.group(i + 1))
+            total = sum(vals.values())
+            if total < 5 or total > 15:
+                continue
+            wdl = (vals["w"], vals["d"], vals["l"])
+            break
+
+        if not wdl:
+            continue
+
+        if is_away:
+            away_wdl = wdl
+        else:
+            home_wdl = wdl
+
+    return home_wdl, away_wdl
+
+
+# --- form dispatch ---
+
+def _apply_form(f, side, wdl, source="prose"):
+    w, d, l = wdl
+    total = w + d + l or 1
+    pts = w * 3 + d
+    prefix = "home_form" if side == "home" else "away_form"
+    f[f"{prefix}_wins"] = w
+    f[f"{prefix}_draws"] = d
+    f[f"{prefix}_losses"] = l
+    f[f"{prefix}_pts"] = pts
+    f[f"{prefix}_ppg"] = round(pts / total, 2)
+    f[f"{prefix}_source"] = source
+
+
+def _parse_form(soup, home_sents, away_sents, f):
+    home_short = f.get("home_team_short") or f.get("home_team", "")
+    away_short = f.get("away_team_short") or f.get("away_team", "")
+
+    # --- Primary: prose ---
+    home_form = _parse_form_from_sentences(
+        home_sents, required_first_word=home_short, other_team=away_short
+    )
+    if home_form:
+        _apply_form(f, "home", home_form, source="prose")
+
+    away_form = _parse_form_from_sentences(
+        away_sents, required_first_word=away_short, other_team=home_short
+    )
+    if away_form:
+        _apply_form(f, "away", away_form, source="prose")
+
+    # --- Fallback: keystat-item block ---
+    need_home = "home_form_ppg" not in f
+    need_away = "away_form_ppg" not in f
+    if need_home or need_away:
+        ks_home, ks_away = _parse_form_from_keystat(soup)
+        if need_home and ks_home:
+            _apply_form(f, "home", ks_home, source="keystat")
+            f["_parse_warnings"].append("home form sourced from keystat block")
+        if need_away and ks_away:
+            _apply_form(f, "away", ks_away, source="keystat")
+            f["_parse_warnings"].append("away form sourced from keystat block")
+
+
 def _team_sentences(aliases, sentences):
     if not aliases:
         return []
@@ -909,33 +1001,6 @@ def _team_sentences(aliases, sentences):
                 result.append(s)
                 seen.add(sid)
     return result
-
-
-def _parse_form(home_sents, away_sents, f):
-    home_short = f.get("home_team_short") or f.get("home_team", "")
-    away_short = f.get("away_team_short") or f.get("away_team", "")
-
-    home_form = _parse_form_from_sentences(
-        home_sents, required_first_word=home_short, other_team=away_short
-    )
-    if home_form:
-        w, d, l = home_form
-        total = w + d + l or 1
-        pts = w * 3 + d
-        f["home_form_wins"], f["home_form_draws"], f["home_form_losses"] = w, d, l
-        f["home_form_pts"] = pts
-        f["home_form_ppg"] = round(pts / total, 2)
-
-    away_form = _parse_form_from_sentences(
-        away_sents, required_first_word=away_short, other_team=home_short
-    )
-    if away_form:
-        w, d, l = away_form
-        total = w + d + l or 1
-        pts = w * 3 + d
-        f["away_form_wins"], f["away_form_draws"], f["away_form_losses"] = w, d, l
-        f["away_form_pts"] = pts
-        f["away_form_ppg"] = round(pts / total, 2)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1025,7 +1090,7 @@ def extract_facts(html: str) -> dict:
     home_sents = _team_sentences(home_aliases, sentences)
     away_sents = _team_sentences(away_aliases, sentences)
 
-    _parse_form(home_sents, away_sents, f)
+    _parse_form(soup, home_sents, away_sents, f)
     if "home_form_ppg" not in f:
         f["_parse_warnings"].append("home form not found - will be treated as nothing")
     if "away_form_ppg" not in f:
@@ -1164,6 +1229,8 @@ def build_row(facts, signals, decision):
     row.pop("away_team_short", None)
     row.pop("home_team_id", None)
     row.pop("away_team_id", None)
+    row.pop("home_form_source", None)
+    row.pop("away_form_source", None)
     row.update(signals_to_columns(signals))
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
