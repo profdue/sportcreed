@@ -159,6 +159,31 @@ def db_accumulator_matches():
     return res.data or []
 
 
+def db_find_existing(row: dict):
+    """
+    Look for an already-stored match that matches the natural key:
+        (match_date, kickoff_time, home_team, away_team, league)
+
+    Returns the existing row dict, or None.
+    """
+    sb = get_supabase()
+
+    q = sb.table("matches").select("*")
+
+    # Only add filters for fields that are actually present and non-null,
+    # so we don't accidentally match a NULL against a real value.
+    for field in ("match_date", "kickoff_time", "league",
+                  "home_team", "away_team"):
+        val = row.get(field)
+        if val is None:
+            q = q.is_(field, "null")
+        else:
+            q = q.eq(field, val)
+
+    res = q.limit(1).execute()
+    return res.data[0] if res.data else None
+
+
 def db_settle(match_id: int, home_score: int, away_score: int,
               result: str, dc_hit, profit_loss: float):
     sb = get_supabase()
@@ -810,11 +835,11 @@ def _apply_venue(f, side, wdl):
 def _parse_venue(soup, home_sents, away_sents, f):
     home_id, away_id = _extract_team_ids_from_t_top(soup)
 
-    st = soup.find("table", class_="st-table")
+    st_table = soup.find("table", class_="st-table")
     home_wdl = away_wdl = None
 
-    if st:
-        for row in st.find_all("tr"):
+    if st_table:
+        for row in st_table.find_all("tr"):
             cells = [c.get_text(strip=True) for c in row.find_all("td")]
             if len(cells) < 2:
                 continue
@@ -1468,12 +1493,35 @@ with tab_new:
         st.json(display_facts)
 
         row = build_row(facts, signals, decision)
-        with st.spinner("Saving to Supabase..."):
+
+        with st.spinner("Checking for an existing match..."):
             try:
-                db_insert(row)
-                st.success("Match saved to pending.")
+                existing = db_find_existing(row)
             except Exception as e:
-                st.error(f"Supabase insert failed: {e}")
+                existing = None
+                st.warning(f"Could not check for duplicates: {e}")
+
+        if existing:
+            st.info(
+                f"ℹ️ This match is already stored (match_id **{existing['match_id']}**, "
+                f"saved {existing.get('extracted_at', 'earlier')}). "
+                f"Prediction was regenerated above but **not** re-saved."
+            )
+            stored_acc = existing.get("accumulator")
+            new_acc = row.get("accumulator")
+            if stored_acc != new_acc:
+                st.warning(
+                    f"⚠️ Accumulator flag differs — "
+                    f"stored: `{stored_acc}`, recomputed: `{new_acc}`. "
+                    f"Check the frozen rule version if this surprises you."
+                )
+        else:
+            with st.spinner("Saving to Supabase..."):
+                try:
+                    db_insert(row)
+                    st.success("Match saved to pending.")
+                except Exception as e:
+                    st.error(f"Supabase insert failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────
