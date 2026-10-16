@@ -4,8 +4,9 @@ king.py — The Logic.
 
 Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
+See accumulator-eligible matches.
 
-One file. Two clauses. Three tabs.
+One file. Two clauses. Four tabs.
 
 Parsing strategy: layered funnel, ID-anchored.
 
@@ -33,6 +34,7 @@ import re
 import json
 import streamlit as st
 import pandas as pd
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
@@ -65,6 +67,7 @@ st.markdown("""
     .match-card.skip      { border-left-color: #64748b; opacity: 0.85; }
     .match-card.win       { border-left-color: #10b981; }
     .match-card.loss      { border-left-color: #ef4444; }
+    .match-card.acc       { border-left-color: #a855f7; }
     .match-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin: 0 0 4px 0; }
     .match-meta { font-size: 0.82rem; color: #94a3b8; margin-bottom: 14px; }
     .pick-badge {
@@ -76,6 +79,7 @@ st.markdown("""
     .badge-skip { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
+    .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
@@ -136,6 +140,20 @@ def db_settled():
     res = (sb.table("matches")
              .select("*")
              .not_.is_("home_score", "null")
+             .order("match_date", desc=True)
+             .execute())
+    return res.data or []
+
+
+def db_accumulator_matches():
+    """
+    All matches (pending or settled) whose frozen accumulator flag is TRUE.
+    These are the matches eligible under the abs(score) >= 15 rule.
+    """
+    sb = get_supabase()
+    res = (sb.table("matches")
+             .select("*")
+             .eq("accumulator", True)
              .order("match_date", desc=True)
              .execute())
     return res.data or []
@@ -479,6 +497,74 @@ def settle(direction, stake, home_score, away_score):
 
     profit = units if hit else -units
     return result, (1 if hit else 0), units, profit
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ACCUMULATOR — frozen rule, mirrors the SQL backfill
+# ═══════════════════════════════════════════════════════════════════
+
+def _is_missing(value):
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _zero_filled_difference(home_value, away_value):
+    if _is_missing(home_value) or _is_missing(away_value):
+        return Decimal("0")
+    try:
+        return Decimal(str(home_value)) - Decimal(str(away_value))
+    except Exception:
+        return Decimal("0")
+
+
+def calc_accumulator_score(facts):
+    """
+    Compute the frozen accumulator score from raw facts.
+
+    score = pts_diff*1 + form_diff*5 + venue_diff*3 + h2h_diff*1
+    Missing inputs on either side of a difference -> that component is 0.
+    Result is rounded to 1 decimal using ROUND_HALF_UP (matches SQL).
+    """
+    raw = (
+        _zero_filled_difference(facts.get("home_table_pts"), facts.get("away_table_pts"))
+        + Decimal("5") * _zero_filled_difference(
+            facts.get("home_form_ppg"), facts.get("away_form_ppg")
+        )
+        + Decimal("3") * _zero_filled_difference(
+            facts.get("home_home_ppg"), facts.get("away_away_ppg")
+        )
+        + _zero_filled_difference(
+            facts.get("h2h_home_wins"), facts.get("h2h_away_wins")
+        )
+    )
+    return raw.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+
+def compute_accumulator(facts, decision):
+    """
+    Return TRUE / FALSE / NULL matching the SQL backfill:
+
+        qualifying != 1                       -> NULL
+        qualifying = 1, direction null/skip   -> FALSE
+        qualifying = 1, direction valid       -> TRUE if abs(score) >= 15, else FALSE
+    """
+    qualifying = decision.get("qualifying")
+
+    # Non-qualifying rows: leave unevaluated
+    if _is_missing(qualifying) or int(qualifying) != 1:
+        return None
+
+    # Qualifying rows: always evaluated
+    direction = decision.get("direction")
+    direction_is_valid = (not _is_missing(direction)) and direction != "skip"
+
+    score = calc_accumulator_score(facts)
+    eligible = direction_is_valid and abs(score) >= Decimal("15.0")
+    return bool(eligible)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1137,6 +1223,7 @@ def render_pending_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
+    is_acc = bool(m.get("accumulator"))
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
@@ -1147,6 +1234,11 @@ def render_pending_card(m: dict):
     else:
         card_cls, badge_cls = "skip", "badge-skip"
         pick_text = "SKIP"
+
+    acc_badge = (
+        '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
+        if is_acc else ""
+    )
 
     pills = "".join([
         signal_pill("Table", m.get("signal_table", "nothing")),
@@ -1159,7 +1251,7 @@ def render_pending_card(m: dict):
     <div class="match-card {card_cls}">
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge_cls}">{pick_text}</span>
+        <span class="pick-badge {badge_cls}">{pick_text}</span>{acc_badge}
         <div class="signal-row">{pills}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1176,6 +1268,7 @@ def render_settled_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
+    is_acc = bool(m.get("accumulator"))
 
     if dc_hit == 1:
         cls, badge, verdict = "win", "badge-win", "WIN"
@@ -1185,12 +1278,61 @@ def render_settled_card(m: dict):
         cls, badge, verdict = "skip", "badge-skip", "NO BET"
 
     pl = f"{profit:+.2f}u" if dc_hit is not None else "—"
+    acc_badge = (
+        '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
+        if is_acc else ""
+    )
 
     st.markdown(f"""
     <div class="match-card {cls}">
         <div class="match-title">{home} {hs}–{aws} {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge}">{verdict} · {pl}</span>
+        <span class="pick-badge {badge}">{verdict} · {pl}</span>{acc_badge}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_accumulator_card(m: dict):
+    """Compact card for the accumulator tab."""
+    home = m.get("home_team", "?")
+    away = m.get("away_team", "?")
+    direction = m.get("direction", "skip")
+    stake = m.get("stake", "none")
+    split = m.get("agreement_split", "?")
+    league = m.get("league", "") or ""
+    date = m.get("match_date", "") or ""
+
+    hs = m.get("home_score")
+    aws = m.get("away_score")
+    settled = hs is not None and aws is not None
+
+    if direction == "home":
+        pick_text = f"HOME — {home} (DC 1X)"
+    elif direction == "away":
+        pick_text = f"AWAY — {away} (DC X2)"
+    else:
+        pick_text = direction.upper() if direction else "?"
+
+    score_txt = ""
+    try:
+        score_val = calc_accumulator_score(m)
+        score_txt = f" · score {score_val:+.1f}"
+    except Exception:
+        score_txt = ""
+
+    result_txt = ""
+    if settled:
+        pl = m.get("profit_loss")
+        pl_txt = f"{pl:+.2f}u" if isinstance(pl, (int, float)) else "—"
+        hit = m.get("dc_hit")
+        verdict = "WIN" if hit == 1 else ("LOSS" if hit == 0 else "NO BET")
+        result_txt = f' · <span style="color:#a855f7">{hs}–{aws} {verdict} {pl_txt}</span>'
+
+    st.markdown(f"""
+    <div class="match-card acc">
+        <div class="match-title">{home} vs {away}</div>
+        <div class="match-meta">{league} · {date} · split {split} · stake {stake}{score_txt}{result_txt}</div>
+        <span class="pick-badge badge-acc">🎯 {pick_text}</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1235,6 +1377,9 @@ def build_row(facts, signals, decision):
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
 
+    # NEW: accumulator flag, frozen rule abs(score) >= 15
+    row["accumulator"] = compute_accumulator(facts, decision)
+
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
@@ -1255,6 +1400,7 @@ def build_row(facts, signals, decision):
         "agreement_nothing_count", "table_leader", "dissent_signal",
         "direction", "stake", "qualifying",
         "extracted_at",
+        "accumulator",   # NEW
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1263,7 +1409,9 @@ def build_row(facts, signals, decision):
 # TABS
 # ═══════════════════════════════════════════════════════════════════
 
-tab_new, tab_pending, tab_perf = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance"])
+tab_new, tab_pending, tab_acc, tab_perf = st.tabs(
+    ["➕ New Match", "⏳ Pending", "🎯 Accumulator", "📊 Performance"]
+)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1294,7 +1442,19 @@ with tab_new:
 
         st.markdown("### The Pick")
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
+        preview["accumulator"] = compute_accumulator(facts, decision)
         render_pending_card(preview)
+
+        # Show the accumulator score directly
+        try:
+            acc_score = calc_accumulator_score(facts)
+            st.markdown(
+                f"**Accumulator score:** `{acc_score:+.1f}` — "
+                f"threshold `±15.0` → "
+                f"{'**ELIGIBLE** 🎯' if abs(acc_score) >= Decimal('15.0') else 'not eligible'}"
+            )
+        except Exception as e:
+            st.caption(f"(could not compute accumulator score: {e})")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -1366,7 +1526,86 @@ with tab_pending:
 
 
 # ─────────────────────────────────────────────────────────────────
-# TAB 3 — PERFORMANCE
+# TAB 3 — ACCUMULATOR
+# ─────────────────────────────────────────────────────────────────
+with tab_acc:
+    st.markdown("### 🎯 Accumulator matches")
+    st.caption(
+        "All matches whose frozen accumulator flag is TRUE "
+        "(`qualifying = 1`, valid direction, and `|score| >= 15.0`)."
+    )
+
+    try:
+        acc_matches = db_accumulator_matches()
+    except Exception as e:
+        st.error(f"Could not load accumulator matches: {e}")
+        acc_matches = []
+
+    if not acc_matches:
+        st.info("No accumulator-eligible matches yet.")
+    else:
+        # Summary metrics
+        total = len(acc_matches)
+        settled = [m for m in acc_matches if m.get("home_score") is not None]
+        pending_acc = total - len(settled)
+
+        wins = sum(1 for m in settled if m.get("dc_hit") == 1)
+        losses = sum(1 for m in settled if m.get("dc_hit") == 0)
+        net = sum(
+            (m.get("profit_loss") or 0.0) for m in settled
+        )
+        hit_rate = (wins / len(settled) * 100) if settled else 0.0
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            st.markdown(f'<div class="metric-box"><div class="metric-value">{total}</div>'
+                        f'<div class="metric-label">Accumulator</div></div>',
+                        unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<div class="metric-box"><div class="metric-value">{pending_acc}</div>'
+                        f'<div class="metric-label">Pending</div></div>',
+                        unsafe_allow_html=True)
+        with c3:
+            st.markdown(f'<div class="metric-box"><div class="metric-value">{wins}</div>'
+                        f'<div class="metric-label">Wins</div></div>',
+                        unsafe_allow_html=True)
+        with c4:
+            st.markdown(f'<div class="metric-box"><div class="metric-value">{losses}</div>'
+                        f'<div class="metric-label">Losses</div></div>',
+                        unsafe_allow_html=True)
+        with c5:
+            color = "#10b981" if net >= 0 else "#ef4444"
+            st.markdown(
+                f'<div class="metric-box"><div class="metric-value" style="color:{color}">{net:+.2f}u</div>'
+                f'<div class="metric-label">Net P/L</div></div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("")
+        st.caption(f"Hit rate on settled accumulator matches: **{hit_rate:.1f}%**")
+
+        st.markdown("### Matches")
+        for m in acc_matches:
+            render_accumulator_card(m)
+
+        st.markdown("### Table")
+        df = pd.DataFrame(acc_matches)
+        keep = [c for c in [
+            "match_id", "match_date", "league", "home_team", "away_team",
+            "direction", "stake", "agreement_split",
+            "home_score", "away_score", "dc_hit", "profit_loss",
+        ] if c in df.columns]
+        if keep:
+            df_show = df[keep].copy()
+            # Add computed score for transparency
+            df_show["acc_score"] = [
+                float(calc_accumulator_score(m)) for m in acc_matches
+            ]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 4 — PERFORMANCE
 # ─────────────────────────────────────────────────────────────────
 with tab_perf:
     st.markdown("### Performance")
@@ -1383,6 +1622,8 @@ with tab_perf:
         df["dc_hit"] = pd.to_numeric(df["dc_hit"], errors="coerce")
         df["profit_loss"] = pd.to_numeric(df["profit_loss"], errors="coerce").fillna(0)
         df["qualifying"] = pd.to_numeric(df["qualifying"], errors="coerce").fillna(0)
+        if "accumulator" in df.columns:
+            df["accumulator"] = df["accumulator"].fillna(False).astype(bool)
 
         qualifying = df[df["qualifying"] == 1]
         bets = qualifying[qualifying["dc_hit"].notna()]
@@ -1422,6 +1663,33 @@ with tab_perf:
             half = int((bets["stake"] == "half").sum()) if not bets.empty else 0
             st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                         f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
+
+        # Accumulator-only performance breakdown
+        if "accumulator" in df.columns:
+            acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
+            if not acc_bets.empty:
+                acc_wins = int((acc_bets["dc_hit"] == 1).sum())
+                acc_total = len(acc_bets)
+                acc_net = float(acc_bets["profit_loss"].sum())
+                acc_hr = (acc_wins / acc_total * 100) if acc_total else 0.0
+                st.markdown("#### 🎯 Accumulator-only (settled)")
+                a1, a2, a3, a4 = st.columns(4)
+                with a1:
+                    st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_total}</div>'
+                                f'<div class="metric-label">Bets</div></div>', unsafe_allow_html=True)
+                with a2:
+                    st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_wins}</div>'
+                                f'<div class="metric-label">Wins</div></div>', unsafe_allow_html=True)
+                with a3:
+                    st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_hr:.1f}%</div>'
+                                f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
+                with a4:
+                    color = "#10b981" if acc_net >= 0 else "#ef4444"
+                    st.markdown(
+                        f'<div class="metric-box"><div class="metric-value" style="color:{color}">{acc_net:+.2f}u</div>'
+                        f'<div class="metric-label">Net P/L</div></div>',
+                        unsafe_allow_html=True,
+                    )
 
         st.markdown("### By agreement split")
         if not qualifying.empty:
