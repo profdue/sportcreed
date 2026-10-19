@@ -28,6 +28,32 @@ Form extraction, three sources in priority order:
   3. (nothing else — if both fail, form stays "nothing")
 
 Every field failure is logged. Missing data never votes silently.
+
+──────────────────────────────────────────────────────────────────────
+MIGRATION (run once, manually — not executed by this app)
+──────────────────────────────────────────────────────────────────────
+
+  -- Legacy: extracted_at remains TEXT. Do not alter.
+  alter table matches add column if not exists extracted_at_ts timestamptz;
+  alter table matches add column if not exists shadow_flags jsonb;
+  alter table matches add column if not exists would_have_skipped_away_table boolean;
+  alter table matches add column if not exists attack_sum float;
+  alter table matches add column if not exists exp_proxy_avg float;
+  -- only if tracking odds (one price per match):
+  alter table matches add column if not exists odds_market text;
+  alter table matches add column if not exists odds_value numeric;
+  alter table matches add column if not exists odds_book text;
+  alter table matches add column if not exists odds_captured_at timestamptz;
+
+  Notes:
+    - would_have_skipped_away_table is DERIVED from shadow_flags containing
+      'away_table_dissent'. Stable boolean for SQL; not independent.
+    - shadow_flags is jsonb array (not CSV text) because >1 flag accumulates.
+    - extracted_at_ts is canonical going forward; extracted_at remains written
+      but is legacy.
+    - If odds tracking becomes multi-bookmaker, drop these four columns in
+      favour of a child table — do not add more columns.
+    - No CHECK on odds_market yet; normalization deferred.
 """
 
 import re
@@ -593,6 +619,44 @@ def compute_accumulator(facts, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# GOAL PROXY — null-safe, all-or-nothing, storage only
+# ═══════════════════════════════════════════════════════════════════
+
+def _safe_rate(gf, played):
+    """Goals per game. Returns None if inputs missing or played == 0."""
+    if gf is None or played is None or played == 0:
+        return None
+    try:
+        return float(gf) / float(played)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _compute_goal_proxy(f):
+    """
+    attack_sum    = home_attack_rate + away_attack_rate
+    exp_proxy_avg = (home_att + away_att + home_def + away_def) / 2.0
+
+    Only written when ALL FOUR rates exist. No zero substitution.
+    Standings are pre-match snapshots captured at scrape time.
+    Not used in the DC decision — storage only, for prospective analysis.
+    """
+    home_att = _safe_rate(f.get("home_table_gf"), f.get("home_table_played"))
+    away_att = _safe_rate(f.get("away_table_gf"), f.get("away_table_played"))
+    home_def = _safe_rate(f.get("home_table_ga"), f.get("home_table_played"))
+    away_def = _safe_rate(f.get("away_table_ga"), f.get("away_table_played"))
+
+    if None not in (home_att, away_att, home_def, away_def):
+        f["attack_sum"]    = round(home_att + away_att, 4)
+        f["exp_proxy_avg"] = round(
+            (home_att + away_att + home_def + away_def) / 2.0, 4
+        )
+    else:
+        f["attack_sum"]    = None
+        f["exp_proxy_avg"] = None
+
+
+# ═══════════════════════════════════════════════════════════════════
 # HTML EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
 
@@ -970,7 +1034,6 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
 
 # --- keystat-item fallback ---
 
-# Match "4 wins, 2 defeats and 4 draws" and variants
 _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
@@ -984,21 +1047,8 @@ _KEYSTAT_PATTERNS = [
 def _parse_form_from_keystat(soup):
     """
     Fallback: read overall form from the keystat-item block.
-
-    Structure:
-        <div class="keystat-item">                     <!-- home team -->
-            <div class="stats-title-sub"><strong>Full-Time Result</strong></div>
-            <ul class="stats-list" id="ftr-hometeam">
-                <li>4 wins, 2 defeats and 4 draws in the previous 10 matches</li>
-                <li>5 wins, 2 defeats and 3 draws in the previous 10 home matches</li>
-            </ul>
-        </div>
-        <div class="keystat-item awaystats">           <!-- away team -->
-            ...
-        </div>
-
-    Returns (home_wdl, away_wdl). Each is (w, d, l) or None.
     Only the FIRST <li> is used (overall form). The second is venue form.
+    Returns (home_wdl, away_wdl). Each is (w, d, l) or None.
     """
     home_wdl = away_wdl = None
 
@@ -1006,7 +1056,6 @@ def _parse_form_from_keystat(soup):
         classes = item.get("class", [])
         is_away = "awaystats" in classes
 
-        # Find the "Full-Time Result" block title
         title = item.find("div", class_="stats-title-sub")
         if not title or "Full-Time Result" not in title.get_text():
             continue
@@ -1227,6 +1276,9 @@ def extract_facts(html: str) -> dict:
     ]:
         f.setdefault(k, None)
 
+    # Goal proxy — null-safe, all-or-nothing, storage only
+    _compute_goal_proxy(f)
+
     return f
 
 
@@ -1254,6 +1306,21 @@ def _away_support_strength(row) -> int:
         1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
         if row.get(k) == "away"
     )
+
+
+def _home_signature(row):
+    """Literal combination of signals voting home, e.g. 'T+F+V'."""
+    bits = []
+    if row.get("signal_table") == "home": bits.append("T")
+    if row.get("signal_form")  == "home": bits.append("F")
+    if row.get("signal_venue") == "home": bits.append("V")
+    if row.get("signal_h2h")   == "home": bits.append("H")
+    return "+".join(bits) if bits else "—"
+
+
+def _dissent_label(row):
+    """Dissent-signal bucket label (separate from literal combination)."""
+    return row.get("dissent_signal") or "none"
 
 
 def render_pending_card(m: dict):
@@ -1405,6 +1472,24 @@ def decision_columns(d):
     }
 
 
+def _compute_shadow_flags(decision):
+    """
+    Shadow flags are additive metadata, never inputs to decide().
+
+    - away_table_dissent : direction == away and dissent_signal == table
+    - low_hit_1-3        : agreement_split == '1-3' (historical low hit rate)
+
+    Neither flag alters direction, stake, qualifying, or accumulator.
+    """
+    flags = []
+    if (decision.get("direction") == "away"
+            and decision.get("dissent_signal") == "table"):
+        flags.append("away_table_dissent")
+    if decision.get("split") == "1-3":
+        flags.append("low_hit_1-3")
+    return flags
+
+
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
@@ -1416,10 +1501,18 @@ def build_row(facts, signals, decision):
     row.pop("away_form_source", None)
     row.update(signals_to_columns(signals))
     row.update(decision_columns(decision))
-    row["extracted_at"] = datetime.now(timezone.utc).isoformat()
 
-    # NEW: accumulator flag, frozen rule abs(score) >= 15
+    now_iso = datetime.now(timezone.utc).isoformat()
+    row["extracted_at"]    = now_iso   # legacy (TEXT)
+    row["extracted_at_ts"] = now_iso   # canonical (timestamptz)
+
+    # Frozen rule abs(score) >= 15
     row["accumulator"] = compute_accumulator(facts, decision)
+
+    # Shadow flags — derived, never influence the decision
+    shadow_flags = _compute_shadow_flags(decision)
+    row["shadow_flags"] = shadow_flags
+    row["would_have_skipped_away_table"] = "away_table_dissent" in shadow_flags
 
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
@@ -1440,8 +1533,10 @@ def build_row(facts, signals, decision):
         "agreement_split", "agreement_home_count", "agreement_away_count",
         "agreement_nothing_count", "table_leader", "dissent_signal",
         "direction", "stake", "qualifying",
-        "extracted_at",
-        "accumulator",   # NEW
+        "extracted_at", "extracted_at_ts",
+        "accumulator",
+        "attack_sum", "exp_proxy_avg",
+        "shadow_flags", "would_have_skipped_away_table",
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1476,15 +1571,21 @@ with tab_new:
             try:
                 facts = extract_facts(html_in)
                 signals = compute_signals(facts)
-                decision = decide(signals)
+                decision = decide(signals)   # frozen
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
                 st.stop()
+
+        # Shadow flags — metadata only, do not alter decision
+        shadow_flags = _compute_shadow_flags(decision)
 
         st.markdown("### The Pick")
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
         preview["accumulator"] = compute_accumulator(facts, decision)
         render_pending_card(preview)
+
+        if shadow_flags:
+            st.caption(f"Shadow flags: `{', '.join(shadow_flags)}` (reporting only — action unchanged)")
 
         # Show the accumulator score directly
         try:
@@ -1608,16 +1709,13 @@ with tab_acc:
     if not acc_matches:
         st.info("No accumulator-eligible matches yet.")
     else:
-        # Summary metrics
         total = len(acc_matches)
         settled = [m for m in acc_matches if m.get("home_score") is not None]
         pending_acc = total - len(settled)
 
         wins = sum(1 for m in settled if m.get("dc_hit") == 1)
         losses = sum(1 for m in settled if m.get("dc_hit") == 0)
-        net = sum(
-            (m.get("profit_loss") or 0.0) for m in settled
-        )
+        net = sum((m.get("profit_loss") or 0.0) for m in settled)
         hit_rate = (wins / len(settled) * 100) if settled else 0.0
 
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -1661,7 +1759,6 @@ with tab_acc:
         ] if c in df.columns]
         if keep:
             df_show = df[keep].copy()
-            # Add computed score for transparency
             df_show["acc_score"] = [
                 float(calc_accumulator_score(m)) for m in acc_matches
             ]
@@ -1781,7 +1878,7 @@ with tab_perf:
             st.info("No dissent-signal data yet.")
 
         # ─────────────────────────────────────────────────────────
-        # HOME BEST AGREEMENT — how many signals actually back home
+        # HOME BEST AGREEMENT — literal combination (not dissent)
         # ─────────────────────────────────────────────────────────
         st.markdown("### 🏠 Home support strength")
 
@@ -1794,8 +1891,6 @@ with tab_perf:
                 _away_support_strength, axis=1
             )
 
-            # Only matches that actually produced a home pick are
-            # "home best agreement" candidates.
             home_picks = strength_df[strength_df["direction"] == "home"]
             settled_home = home_picks[home_picks["dc_hit"].notna()]
 
@@ -1820,7 +1915,6 @@ with tab_perf:
                     "home_support", ascending=False
                 )
 
-                # Highlight the strongest bucket
                 best = by_home_support.iloc[0]
                 hc1, hc2, hc3 = st.columns(3)
                 with hc1:
@@ -1861,17 +1955,13 @@ with tab_perf:
             else:
                 st.info("No settled home picks yet.")
 
-            # ── Which signal combos produced the home picks? ──
-            st.markdown("#### Home pick — signal composition")
-
-            def _home_signature(row):
-                bits = []
-                if row.get("signal_table") == "home": bits.append("T")
-                if row.get("signal_form")  == "home": bits.append("F")
-                if row.get("signal_venue") == "home": bits.append("V")
-                if row.get("signal_h2h")   == "home": bits.append("H")
-                return "+".join(bits) if bits else "—"
-
+            # ── Table A: literal signal combination ──
+            st.markdown("#### Home pick — literal signal combination")
+            st.caption(
+                "Signals that actually voted home. T = table, F = form, "
+                "V = venue, H = H2H. This is the literal combination — "
+                "e.g. 'T+F+V' means those three voted home and H2H did not."
+            )
             if not settled_home.empty:
                 sig_df = settled_home.copy()
                 sig_df["home_signature"] = sig_df.apply(_home_signature, axis=1)
@@ -1891,13 +1981,9 @@ with tab_perf:
                 by_sig = by_sig.sort_values(
                     ["total", "hit_rate"], ascending=False
                 )
-                st.caption(
-                    "T = table, F = form, V = venue, H = H2H. "
-                    "Only shows settled home picks."
-                )
                 st.dataframe(
                     by_sig.rename(columns={
-                        "home_signature": "signals voting home",
+                        "home_signature": "signals voting home (literal)",
                         "total": "bets",
                         "wins": "wins",
                         "net": "net P/L",
@@ -1908,6 +1994,70 @@ with tab_perf:
                 )
             else:
                 st.info("No settled home picks yet.")
+
+            # ── Table B: dissent bucket ──
+            st.markdown("#### Home pick — dissent bucket")
+            st.caption(
+                "Groups by dissent_signal. This is NOT the literal signal "
+                "combination — it is the signal that voted against the "
+                "majority. A '3-1' home pick with dissent='h2h' appears "
+                "here, not in the 'T+F+V' literal bucket."
+            )
+            if not settled_home.empty:
+                diss_df = settled_home.copy()
+                diss_df["dissent_label"] = diss_df.apply(_dissent_label, axis=1)
+                by_diss = (
+                    diss_df
+                    .groupby("dissent_label")
+                    .agg(
+                        total=("match_id", "count"),
+                        wins=("dc_hit", lambda s: int((s == 1).sum())),
+                        net=("profit_loss", "sum"),
+                    )
+                    .reset_index()
+                )
+                by_diss["hit_rate"] = (
+                    by_diss["wins"] / by_diss["total"] * 100
+                ).round(1)
+                by_diss = by_diss.sort_values(
+                    ["total", "hit_rate"], ascending=False
+                )
+                st.dataframe(
+                    by_diss.rename(columns={
+                        "dissent_label": "dissent signal",
+                        "total": "bets",
+                        "wins": "wins",
+                        "net": "net P/L",
+                        "hit_rate": "hit %",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No settled home picks yet.")
+
+            # ── Shadow-flag tracking note ──
+            if "shadow_flags" in df.columns or "would_have_skipped_away_table" in df.columns:
+                st.markdown("#### Shadow flags (prospective)")
+                st.caption(
+                    "Shadow flags record what a proposed rule *would* have done. "
+                    "They do not affect direction, stake, or P/L. "
+                    "Evaluate prospectively over the next 100 settled matches."
+                )
+                if "would_have_skipped_away_table" in df.columns:
+                    wsa = df[df["would_have_skipped_away_table"] == True]  # noqa: E712
+                    wsa_settled = wsa[wsa["dc_hit"].notna()]
+                    if not wsa_settled.empty:
+                        wsa_wins = int((wsa_settled["dc_hit"] == 1).sum())
+                        wsa_total = len(wsa_settled)
+                        wsa_net = float(wsa_settled["profit_loss"].sum())
+                        st.write(
+                            f"**away_table_dissent** — "
+                            f"{wsa_total} settled, {wsa_wins} wins, "
+                            f"net {wsa_net:+.2f}u (actual, not shadowed)"
+                        )
+                    else:
+                        st.write("**away_table_dissent** — no settled matches yet.")
 
         st.markdown("### All settled matches")
         for m in settled:
