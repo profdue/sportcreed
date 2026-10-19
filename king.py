@@ -4,6 +4,9 @@ king.py — The Logic.
 
 Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
+See accumulator-eligible matches.
+
+One file. Two clauses. Four tabs.
 
 Parsing strategy: layered funnel, ID-anchored.
 
@@ -77,10 +80,6 @@ st.markdown("""
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
-    .badge-grade-a { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
-    .badge-grade-b { background: #3b82f622; color: #60a5fa; border: 1px solid #3b82f655; }
-    .badge-grade-c { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b55; }
-    .badge-grade-d { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
@@ -147,6 +146,10 @@ def db_settled():
 
 
 def db_accumulator_matches():
+    """
+    All matches (pending or settled) whose frozen accumulator flag is TRUE.
+    These are the matches eligible under the abs(score) >= 15 rule.
+    """
     sb = get_supabase()
     res = (sb.table("matches")
              .select("*")
@@ -157,8 +160,18 @@ def db_accumulator_matches():
 
 
 def db_find_existing(row: dict):
+    """
+    Look for an already-stored match that matches the natural key:
+        (match_date, kickoff_time, home_team, away_team, league)
+
+    Returns the existing row dict, or None.
+    """
     sb = get_supabase()
+
     q = sb.table("matches").select("*")
+
+    # Only add filters for fields that are actually present and non-null,
+    # so we don't accidentally match a NULL against a real value.
     for field in ("match_date", "kickoff_time", "league",
                   "home_team", "away_team"):
         val = row.get(field)
@@ -166,6 +179,7 @@ def db_find_existing(row: dict):
             q = q.is_(field, "null")
         else:
             q = q.eq(field, val)
+
     res = q.limit(1).execute()
     return res.data[0] if res.data else None
 
@@ -189,7 +203,7 @@ def db_delete(match_id: int):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TEAM ID EXTRACTION
+# TEAM ID EXTRACTION — the primary anchor
 # ═══════════════════════════════════════════════════════════════════
 
 def _team_id_from_img(img_tag):
@@ -213,7 +227,7 @@ def _extract_team_ids_from_t_top(soup):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# NAME MATCHING
+# NAME MATCHING — fallback only
 # ═══════════════════════════════════════════════════════════════════
 
 _TEAM_PREFIXES = (
@@ -345,7 +359,7 @@ def _team_aliases(soup, team_full, team_short):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — signals
+# THE LOGIC
 # ═══════════════════════════════════════════════════════════════════
 
 def _cmp_or_nothing(a, b):
@@ -375,154 +389,143 @@ def compute_signals(f: dict) -> dict:
     return {"table": table, "form": form, "venue": venue, "h2h": h2h}
 
 
-# ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — decide
-# ═══════════════════════════════════════════════════════════════════
-
-def _compute_gap(facts: dict):
-    h = facts.get("home_table_pts")
-    a = facts.get("away_table_pts")
-    if h is None or a is None:
-        return None
-    return abs(h - a)
-
-
-def _gap_band(gap):
-    if gap is None:
-        return None
-    if gap < 3:
-        return "close"
-    if gap < 8:
-        return "moderate"
-    return "large"
-
-
-def _compute_structure(signals: dict, direction: str) -> dict:
-    support = oppose = abstain = 0
-    opposing_signal = abstaining_signal = None
-    for name, val in signals.items():
-        if val is None or val == "nothing":
-            abstain += 1
-            if abstaining_signal is None:
-                abstaining_signal = name
-        elif val == direction:
-            support += 1
-        else:
-            oppose += 1
-            if opposing_signal is None:
-                opposing_signal = name
-    return {
-        "support": support,
-        "oppose": oppose,
-        "abstain": abstain,
-        "opposing_signal": opposing_signal,
-        "abstaining_signal": abstaining_signal,
-    }
-
-
-def _grade_pick(structure: dict) -> str:
-    s, o, a = structure["support"], structure["oppose"], structure["abstain"]
-    if s == 4:
-        return "A"
-    if s == 3 and o == 0 and a == 1:
-        return {"venue": "A", "h2h": "B", "form": "C"}.get(
-            structure["abstaining_signal"], "B")
-    if s == 3 and o == 1 and a == 0:
-        return {"h2h": "B", "form": "A", "venue": "D"}.get(
-            structure["opposing_signal"], "C")
-    if s == 2 and o == 1 and a == 1:
-        return "B"
-    return "C"
-
-
-def _skip_result(signals: dict, reason: str) -> dict:
+def decide(signals: dict) -> dict:
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
     nothing = sum(1 for v in signals.values() if v == "nothing")
-    return {
-        "direction": "skip",
-        "stake": "none",
-        "qualifying": 0,
-        "structure": None,
-        "grade": None,
-        "gap": None,
-        "gap_band": None,
-        "split": f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}",
-        "home_count": home,
-        "away_count": away,
-        "nothing_count": nothing,
-        "table_leader": signals["table"] if signals["table"] != "nothing" else None,
-        "dissent_signal": None,
-        "reason": reason,
-    }
+    table_leader = signals["table"]
+    table_leader_value = table_leader if table_leader != "nothing" else None
 
-
-_STAKE_MAP = {
-    (4, 0, 0): "full",
-    (0, 4, 0): "full",
-    (3, 1, 0): "half",
-    (1, 3, 0): "half",
-    (3, 0, 1): "full",
-    (0, 3, 1): "full",
-    (2, 1, 1): "half",
-}
-
-
-def decide(facts: dict, signals: dict) -> dict:
-    table = signals["table"]
-    venue = signals["venue"]
-    form = signals["form"]
-    h2h = signals["h2h"]
-
-    table_picks = table in ("home", "away")
-    venue_picks = venue in ("home", "away")
-
-    if table_picks and venue_picks:
-        if table == venue:
-            direction = table
-        else:
-            return _skip_result(signals, reason="top_tier_disagreement")
-    elif table_picks:
-        direction = table
-    elif venue_picks:
-        direction = venue
-    elif form in ("home", "away"):
-        direction = form
-    elif h2h in ("home", "away"):
-        direction = h2h
+    if home > away:
+        majority = "home"
+    elif away > home:
+        majority = "away"
     else:
-        return _skip_result(signals, reason="no_signals")
+        majority = None
 
-    structure = _compute_structure(signals, direction)
-    grade = _grade_pick(structure)
-    gap = _compute_gap(facts)
-    gap_band = _gap_band(gap)
+    # 4-0 / 0-4
+    if home == 4 or away == 4:
+        direction = "home" if home == 4 else "away"
+        return {
+            "direction": direction, "stake": "full", "qualifying": 1,
+            "dissent_signal": None, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
 
-    split_key = (structure["support"], structure["oppose"], structure["abstain"])
-    stake = _STAKE_MAP.get(split_key)
-    if stake is None:
-        return _skip_result(signals, reason="unsupported_split")
+    # 3-1 / 1-3: majority direction, half stake
+    if home == 3 and away == 1:
+        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        return {
+            "direction": majority, "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 3 and home == 1:
+        dissent = next((k for k, v in signals.items() if v == "home"), None)
+        return {
+            "direction": majority, "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
 
+    # 3-0-1 / 0-3-1: full stake
+    if home == 3 and away == 0 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
+        return {
+            "direction": "home", "stake": "full", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 3 and home == 0 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
+        return {
+            "direction": "away", "stake": "full", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-2: skip
+    if home == 2 and away == 2:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": "2-2",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-1-1 / 1-2-1: skip
+    if home == 2 and away == 1 and nothing == 1:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 2 and home == 1 and nothing == 1:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-0-2 / 0-2-2: skip
+    if home == 2 and away == 0 and nothing == 2:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 2 and home == 0 and nothing == 2:
+        return {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # Default: skip
+    split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
     return {
-        "direction": direction,
-        "stake": stake,
-        "qualifying": 1,
-        "structure": structure,
-        "grade": grade,
-        "gap": gap,
-        "gap_band": gap_band,
-        "split": f"{structure['support']}-{structure['oppose']}-{structure['abstain']}",
-        "home_count": sum(1 for v in signals.values() if v == "home"),
-        "away_count": sum(1 for v in signals.values() if v == "away"),
-        "nothing_count": sum(1 for v in signals.values() if v == "nothing"),
-        "table_leader": signals["table"] if signals["table"] != "nothing" else None,
-        "dissent_signal": None,
-        "reason": None,
+        "direction": "skip", "stake": "none", "qualifying": 0,
+        "dissent_signal": None, "split": split,
+        "home_count": home, "away_count": away, "nothing_count": nothing,
+        "table_leader": table_leader_value,
     }
+
+
+def settle(direction, stake, home_score, away_score):
+    if home_score > away_score:
+        result = "home_win"
+    elif away_score > home_score:
+        result = "away_win"
+    else:
+        result = "draw"
+
+    if direction == "skip":
+        return result, None, 0.0, 0.0
+
+    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
+
+    if direction == "home":
+        hit = result in ("home_win", "draw")
+    elif direction == "away":
+        hit = result in ("away_win", "draw")
+    else:
+        hit = False
+
+    profit = units if hit else -units
+    return result, (1 if hit else 0), units, profit
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — accumulator
+# ACCUMULATOR — frozen rule, mirrors the SQL backfill
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -544,6 +547,13 @@ def _zero_filled_difference(home_value, away_value):
 
 
 def calc_accumulator_score(facts):
+    """
+    Compute the frozen accumulator score from raw facts.
+
+    score = pts_diff*1 + form_diff*5 + venue_diff*3 + h2h_diff*1
+    Missing inputs on either side of a difference -> that component is 0.
+    Result is rounded to 1 decimal using ROUND_HALF_UP (matches SQL).
+    """
     raw = (
         _zero_filled_difference(facts.get("home_table_pts"), facts.get("away_table_pts"))
         + Decimal("5") * _zero_filled_difference(
@@ -560,46 +570,30 @@ def calc_accumulator_score(facts):
 
 
 def compute_accumulator(facts, decision):
+    """
+    Return TRUE / FALSE / NULL matching the SQL backfill:
+
+        qualifying != 1                       -> NULL
+        qualifying = 1, direction null/skip   -> FALSE
+        qualifying = 1, direction valid       -> TRUE if abs(score) >= 15, else FALSE
+    """
     qualifying = decision.get("qualifying")
+
+    # Non-qualifying rows: leave unevaluated
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
+
+    # Qualifying rows: always evaluated
     direction = decision.get("direction")
-    if _is_missing(direction):
-        return False
-    if direction == "skip":
-        return False
-    if direction not in ("home", "away"):
-        return None
+    direction_is_valid = (not _is_missing(direction)) and direction != "skip"
+
     score = calc_accumulator_score(facts)
-    return bool(abs(score) >= Decimal("15.0"))
-
-
-def settle(direction, stake, home_score, away_score):
-    if home_score > away_score:
-        result = "home_win"
-    elif away_score > home_score:
-        result = "away_win"
-    else:
-        result = "draw"
-
-    if direction == "skip":
-        return result, None, 0.0, 0.0
-
-    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}.get(stake, 0.0)
-
-    if direction == "home":
-        hit = result in ("home_win", "draw")
-    elif direction == "away":
-        hit = result in ("away_win", "draw")
-    else:
-        hit = False
-
-    profit = units if hit else -units
-    return result, (1 if hit else 0), units, profit
+    eligible = direction_is_valid and abs(score) >= Decimal("15.0")
+    return bool(eligible)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HTML EXTRACTION — identity
+# HTML EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_identity(soup, f):
@@ -694,7 +688,7 @@ def _extract_identity(soup, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# STANDINGS
+# STANDINGS — ID-ANCHORED
 # ═══════════════════════════════════════════════════════════════════
 
 def _gd_from_cells(cells):
@@ -774,7 +768,7 @@ def _parse_standings(soup, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# VENUE FORM
+# VENUE FORM — ID-ANCHORED + LABEL FALLBACK
 # ═══════════════════════════════════════════════════════════════════
 
 _WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
@@ -888,7 +882,7 @@ def _parse_venue(soup, home_sents, away_sents, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FORM — PROSE + KEYSTAT
+# FORM — PROSE + KEYSTAT FALLBACK
 # ═══════════════════════════════════════════════════════════════════
 
 def _parse_form_from_sentences(sents, required_first_word=None, other_team=None):
@@ -974,6 +968,9 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     return None
 
 
+# --- keystat-item fallback ---
+
+# Match "4 wins, 2 defeats and 4 draws" and variants
 _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
@@ -981,37 +978,49 @@ _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?),?\s+and\s+(\d+)\s+draws?", ("w","l","d")),
-    (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
 ]
 
 
 def _parse_form_from_keystat(soup):
-    home_wdl = away_wdl = None
+    """
+    Fallback: read overall form from the keystat-item block.
 
-    acceptable_titles = (
-        "full-time result", "recent form", "last 10", "form", "results"
-    )
+    Structure:
+        <div class="keystat-item">                     <!-- home team -->
+            <div class="stats-title-sub"><strong>Full-Time Result</strong></div>
+            <ul class="stats-list" id="ftr-hometeam">
+                <li>4 wins, 2 defeats and 4 draws in the previous 10 matches</li>
+                <li>5 wins, 2 defeats and 3 draws in the previous 10 home matches</li>
+            </ul>
+        </div>
+        <div class="keystat-item awaystats">           <!-- away team -->
+            ...
+        </div>
+
+    Returns (home_wdl, away_wdl). Each is (w, d, l) or None.
+    Only the FIRST <li> is used (overall form). The second is venue form.
+    """
+    home_wdl = away_wdl = None
 
     for item in soup.find_all("div", class_="keystat-item"):
         classes = item.get("class", [])
         is_away = "awaystats" in classes
 
+        # Find the "Full-Time Result" block title
         title = item.find("div", class_="stats-title-sub")
-        if not title:
-            continue
-        title_text = title.get_text().lower()
-        if not any(k in title_text for k in acceptable_titles):
+        if not title or "Full-Time Result" not in title.get_text():
             continue
 
         ul = item.find("ul", class_="stats-list")
         if not ul:
             continue
+
         first_li = ul.find("li")
         if not first_li:
             continue
 
         text = first_li.get_text(" ", strip=True)
+
         wdl = None
         for tmpl, mapping in _KEYSTAT_PATTERNS:
             m = re.search(tmpl, text, re.IGNORECASE)
@@ -1037,6 +1046,8 @@ def _parse_form_from_keystat(soup):
     return home_wdl, away_wdl
 
 
+# --- form dispatch ---
+
 def _apply_form(f, side, wdl, source="prose"):
     w, d, l = wdl
     total = w + d + l or 1
@@ -1054,6 +1065,7 @@ def _parse_form(soup, home_sents, away_sents, f):
     home_short = f.get("home_team_short") or f.get("home_team", "")
     away_short = f.get("away_team_short") or f.get("away_team", "")
 
+    # --- Primary: prose ---
     home_form = _parse_form_from_sentences(
         home_sents, required_first_word=home_short, other_team=away_short
     )
@@ -1066,6 +1078,7 @@ def _parse_form(soup, home_sents, away_sents, f):
     if away_form:
         _apply_form(f, "away", away_form, source="prose")
 
+    # --- Fallback: keystat-item block ---
     need_home = "home_form_ppg" not in f
     need_away = "away_form_ppg" not in f
     if need_home or need_away:
@@ -1227,14 +1240,6 @@ def signal_pill(name, value):
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
-def grade_badge(grade):
-    if not grade:
-        return ""
-    cls = {"A": "badge-grade-a", "B": "badge-grade-b",
-           "C": "badge-grade-c", "D": "badge-grade-d"}.get(grade, "badge-skip")
-    return f'<span class="pick-badge {cls}" style="margin-left:8px">Grade {grade}</span>'
-
-
 def render_pending_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1244,8 +1249,6 @@ def render_pending_card(m: dict):
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc = bool(m.get("accumulator"))
-    grade = m.get("grade")
-    gap_band = m.get("gap_band")
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
@@ -1258,12 +1261,8 @@ def render_pending_card(m: dict):
         pick_text = "SKIP"
 
     acc_badge = (
-        '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACC</span>'
+        '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
         if is_acc else ""
-    )
-    gap_badge = (
-        f'<span class="pick-badge badge-skip" style="margin-left:8px">gap: {gap_band}</span>'
-        if gap_band else ""
     )
 
     pills = "".join([
@@ -1277,7 +1276,7 @@ def render_pending_card(m: dict):
     <div class="match-card {card_cls}">
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge_cls}">{pick_text}</span>{grade_badge(grade)}{acc_badge}{gap_badge}
+        <span class="pick-badge {badge_cls}">{pick_text}</span>{acc_badge}
         <div class="signal-row">{pills}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1295,7 +1294,6 @@ def render_settled_card(m: dict):
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc = bool(m.get("accumulator"))
-    grade = m.get("grade")
 
     if dc_hit == 1:
         cls, badge, verdict = "win", "badge-win", "WIN"
@@ -1306,7 +1304,7 @@ def render_settled_card(m: dict):
 
     pl = f"{profit:+.2f}u" if dc_hit is not None else "—"
     acc_badge = (
-        '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACC</span>'
+        '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
         if is_acc else ""
     )
 
@@ -1314,12 +1312,13 @@ def render_settled_card(m: dict):
     <div class="match-card {cls}">
         <div class="match-title">{home} {hs}–{aws} {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge}">{verdict} · {pl}</span>{grade_badge(grade)}{acc_badge}
+        <span class="pick-badge {badge}">{verdict} · {pl}</span>{acc_badge}
     </div>
     """, unsafe_allow_html=True)
 
 
 def render_accumulator_card(m: dict):
+    """Compact card for the accumulator tab."""
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
     direction = m.get("direction", "skip")
@@ -1327,8 +1326,6 @@ def render_accumulator_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
-    grade = m.get("grade")
-    gap_band = m.get("gap_band")
 
     hs = m.get("home_score")
     aws = m.get("away_score")
@@ -1346,7 +1343,7 @@ def render_accumulator_card(m: dict):
         score_val = calc_accumulator_score(m)
         score_txt = f" · score {score_val:+.1f}"
     except Exception:
-        pass
+        score_txt = ""
 
     result_txt = ""
     if settled:
@@ -1356,16 +1353,11 @@ def render_accumulator_card(m: dict):
         verdict = "WIN" if hit == 1 else ("LOSS" if hit == 0 else "NO BET")
         result_txt = f' · <span style="color:#a855f7">{hs}–{aws} {verdict} {pl_txt}</span>'
 
-    gap_badge = (
-        f'<span class="pick-badge badge-skip" style="margin-left:8px">gap: {gap_band}</span>'
-        if gap_band else ""
-    )
-
     st.markdown(f"""
     <div class="match-card acc">
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}{score_txt}{result_txt}</div>
-        <span class="pick-badge badge-acc">🎯 {pick_text}</span>{grade_badge(grade)}{gap_badge}
+        <span class="pick-badge badge-acc">🎯 {pick_text}</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1384,26 +1376,17 @@ def signals_to_columns(signals):
 
 
 def decision_columns(d):
-    cols = {
+    return {
         "direction":               d["direction"],
         "stake":                   d["stake"],
         "qualifying":              d["qualifying"],
-        "dissent_signal":          d.get("dissent_signal"),
+        "dissent_signal":          d["dissent_signal"],
         "agreement_split":         d["split"],
         "agreement_home_count":    d["home_count"],
         "agreement_away_count":    d["away_count"],
         "agreement_nothing_count": d["nothing_count"],
         "table_leader":            d.get("table_leader"),
-        "grade":                   d.get("grade"),
-        "gap_band":                d.get("gap_band"),
     }
-    if d.get("structure"):
-        cols["support_count"]     = d["structure"]["support"]
-        cols["oppose_count"]      = d["structure"]["oppose"]
-        cols["abstain_count"]     = d["structure"]["abstain"]
-        cols["opposing_signal"]   = d["structure"]["opposing_signal"]
-        cols["abstaining_signal"] = d["structure"]["abstaining_signal"]
-    return cols
 
 
 def build_row(facts, signals, decision):
@@ -1419,7 +1402,7 @@ def build_row(facts, signals, decision):
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
 
-    row["accumulator_score"] = float(calc_accumulator_score(facts))
+    # NEW: accumulator flag, frozen rule abs(score) >= 15
     row["accumulator"] = compute_accumulator(facts, decision)
 
     allowed = {
@@ -1442,10 +1425,7 @@ def build_row(facts, signals, decision):
         "agreement_nothing_count", "table_leader", "dissent_signal",
         "direction", "stake", "qualifying",
         "extracted_at",
-        "accumulator", "accumulator_score",
-        "grade", "gap_band",
-        "support_count", "oppose_count", "abstain_count",
-        "opposing_signal", "abstaining_signal",
+        "accumulator",   # NEW
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1480,7 +1460,7 @@ with tab_new:
             try:
                 facts = extract_facts(html_in)
                 signals = compute_signals(facts)
-                decision = decide(facts, signals)
+                decision = decide(signals)
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
                 st.stop()
@@ -1490,23 +1470,14 @@ with tab_new:
         preview["accumulator"] = compute_accumulator(facts, decision)
         render_pending_card(preview)
 
+        # Show the accumulator score directly
         try:
             acc_score = calc_accumulator_score(facts)
-            acc_eligible = (
-                decision.get("qualifying") == 1
-                and decision.get("direction") in ("home", "away")
-                and abs(acc_score) >= Decimal("15.0")
-            )
             st.markdown(
                 f"**Accumulator score:** `{acc_score:+.1f}` — "
                 f"threshold `±15.0` → "
-                f"{'**ELIGIBLE** 🎯' if acc_eligible else 'not eligible'}"
+                f"{'**ELIGIBLE** 🎯' if abs(acc_score) >= Decimal('15.0') else 'not eligible'}"
             )
-            if decision.get("qualifying") != 1 and abs(acc_score) >= Decimal("15.0"):
-                st.caption(
-                    "Score meets threshold, but the pick was skipped — "
-                    "accumulator flag is NULL, not TRUE."
-                )
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
 
@@ -1541,7 +1512,8 @@ with tab_new:
             if stored_acc != new_acc:
                 st.warning(
                     f"⚠️ Accumulator flag differs — "
-                    f"stored: `{stored_acc}`, recomputed: `{new_acc}`."
+                    f"stored: `{stored_acc}`, recomputed: `{new_acc}`. "
+                    f"Check the frozen rule version if this surprises you."
                 )
         else:
             with st.spinner("Saving to Supabase..."):
@@ -1586,8 +1558,12 @@ with tab_pending:
                             m.get("direction"), m.get("stake"),
                             int(hs), int(aws)
                         )
-                        db_settle(m["match_id"], int(hs), int(aws),
-                                  result, dc_hit, profit)
+                        db_settle(
+                            m["match_id"], int(hs), int(aws),
+                            result,
+                            dc_hit,
+                            profit,
+                        )
                         st.success("Settled.")
                         st.rerun()
 
@@ -1603,8 +1579,8 @@ with tab_pending:
 with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
-        "All matches whose accumulator flag is TRUE "
-        "(`qualifying = 1`, valid direction, `|score| >= 15.0`)."
+        "All matches whose frozen accumulator flag is TRUE "
+        "(`qualifying = 1`, valid direction, and `|score| >= 15.0`)."
     )
 
     try:
@@ -1616,13 +1592,16 @@ with tab_acc:
     if not acc_matches:
         st.info("No accumulator-eligible matches yet.")
     else:
+        # Summary metrics
         total = len(acc_matches)
         settled = [m for m in acc_matches if m.get("home_score") is not None]
         pending_acc = total - len(settled)
 
         wins = sum(1 for m in settled if m.get("dc_hit") == 1)
         losses = sum(1 for m in settled if m.get("dc_hit") == 0)
-        net = sum((m.get("profit_loss") or 0.0) for m in settled)
+        net = sum(
+            (m.get("profit_loss") or 0.0) for m in settled
+        )
         hit_rate = (wins / len(settled) * 100) if settled else 0.0
 
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -1656,6 +1635,21 @@ with tab_acc:
         st.markdown("### Matches")
         for m in acc_matches:
             render_accumulator_card(m)
+
+        st.markdown("### Table")
+        df = pd.DataFrame(acc_matches)
+        keep = [c for c in [
+            "match_id", "match_date", "league", "home_team", "away_team",
+            "direction", "stake", "agreement_split",
+            "home_score", "away_score", "dc_hit", "profit_loss",
+        ] if c in df.columns]
+        if keep:
+            df_show = df[keep].copy()
+            # Add computed score for transparency
+            df_show["acc_score"] = [
+                float(calc_accumulator_score(m)) for m in acc_matches
+            ]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1718,6 +1712,7 @@ with tab_perf:
             st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                         f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
+        # Accumulator-only performance breakdown
         if "accumulator" in df.columns:
             acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
             if not acc_bets.empty:
@@ -1744,26 +1739,6 @@ with tab_perf:
                         unsafe_allow_html=True,
                     )
 
-        st.markdown("### By grade")
-        if "grade" in df.columns and not bets.empty:
-            by_grade = (bets
-                        .groupby("grade")
-                        .agg(total=("match_id", "count"),
-                             wins=("dc_hit", lambda s: int((s == 1).sum())),
-                             losses=("dc_hit", lambda s: int((s == 0).sum())))
-                        .reset_index())
-            st.dataframe(by_grade, use_container_width=True, hide_index=True)
-
-        st.markdown("### By gap band")
-        if "gap_band" in df.columns and not bets.empty:
-            by_gap = (bets
-                      .groupby("gap_band")
-                      .agg(total=("match_id", "count"),
-                           wins=("dc_hit", lambda s: int((s == 1).sum())),
-                           losses=("dc_hit", lambda s: int((s == 0).sum())))
-                      .reset_index())
-            st.dataframe(by_gap, use_container_width=True, hide_index=True)
-
         st.markdown("### By agreement split")
         if not qualifying.empty:
             by_split = (qualifying
@@ -1774,6 +1749,20 @@ with tab_perf:
                              net=("profit_loss", "sum"))
                         .reset_index())
             st.dataframe(by_split, use_container_width=True, hide_index=True)
+
+        st.markdown("### By dissent signal")
+        dissent_df = qualifying[qualifying["dissent_signal"].notna()]
+        if not dissent_df.empty:
+            by_dissent = (dissent_df
+                          .groupby("dissent_signal")
+                          .agg(total=("match_id", "count"),
+                               wins=("dc_hit", lambda s: int((s == 1).sum())),
+                               losses=("dc_hit", lambda s: int((s == 0).sum())),
+                               net=("profit_loss", "sum"))
+                          .reset_index())
+            st.dataframe(by_dissent, use_container_width=True, hide_index=True)
+        else:
+            st.info("No dissent-signal data yet.")
 
         st.markdown("### All settled matches")
         for m in settled:
