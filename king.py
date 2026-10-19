@@ -379,7 +379,7 @@ def compute_signals(f: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — decide (rewritten)
+# THE LOGIC — decide (priority rule + whitelist)
 # ═══════════════════════════════════════════════════════════════════
 
 def _compute_gap(facts: dict):
@@ -432,7 +432,7 @@ def _grade_pick(structure: dict) -> str:
     """
     s, o, a = structure["support"], structure["oppose"], structure["abstain"]
     if s == 4:
-        return "A"  # 92.3% observed
+        return "A"
     if s == 3 and o == 0 and a == 1:
         return {"venue": "A", "h2h": "B", "form": "C"}.get(
             structure["abstaining_signal"], "B")
@@ -440,7 +440,7 @@ def _grade_pick(structure: dict) -> str:
         return {"h2h": "B", "form": "A", "venue": "D"}.get(
             structure["opposing_signal"], "C")
     if s == 2 and o == 1 and a == 1:
-        return "B"  # 88% observed (pooled)
+        return "B"
     return "C"
 
 
@@ -473,7 +473,7 @@ _STAKE_MAP = {
     (1, 3, 0): "half",
     (3, 0, 1): "full",
     (0, 3, 1): "full",
-    (2, 1, 1): "half",   # promoted from skip; 22/25 validated
+    (2, 1, 1): "half",
 }
 
 
@@ -536,7 +536,7 @@ def decide(facts: dict, signals: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — accumulator
+# THE LOGIC — accumulator (parity-aligned with SQL)
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -558,7 +558,7 @@ def _zero_filled_difference(home_value, away_value):
 
 
 def calc_accumulator_score(facts):
-    """Unchanged — the weighted sum verified to correlate with hit rate."""
+    """Weighted sum verified to correlate with hit rate."""
     raw = (
         _zero_filled_difference(facts.get("home_table_pts"), facts.get("away_table_pts"))
         + Decimal("5") * _zero_filled_difference(
@@ -576,23 +576,33 @@ def calc_accumulator_score(facts):
 
 def compute_accumulator(facts, decision):
     """
-    Return TRUE / FALSE / NULL matching the SQL rule:
+    Return TRUE / FALSE / NULL — parallel to the SQL CASE:
         qualifying != 1                       -> NULL
-        qualifying = 1, direction null/skip   -> FALSE
-        qualifying = 1, direction valid       -> TRUE if |score| >= 15 else FALSE
+        qualifying = 1, direction = skip/NULL -> FALSE
+        qualifying = 1, direction in home/away:
+            score is NULL                     -> NULL
+            |score| >= 15                     -> TRUE
+            |score| < 15                      -> FALSE
+        qualifying = 1, other direction       -> NULL
     """
     qualifying = decision.get("qualifying")
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
+
     direction = decision.get("direction")
-    if direction not in ("home", "away"):
+    if _is_missing(direction):
         return False
+    if direction == "skip":
+        return False
+    if direction not in ("home", "away"):
+        return None  # invalid direction — data quality issue
+
     score = calc_accumulator_score(facts)
     return bool(abs(score) >= Decimal("15.0"))
 
 
 def settle(direction, stake, home_score, away_score):
-    """Settle a pick against the final score. Unchanged."""
+    """Settle a pick against the final score."""
     if home_score > away_score:
         result = "home_win"
     elif away_score > home_score:
@@ -712,7 +722,7 @@ def _extract_identity(soup, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# STANDINGS — ID-ANCHORED (unchanged)
+# STANDINGS
 # ═══════════════════════════════════════════════════════════════════
 
 def _gd_from_cells(cells):
@@ -792,7 +802,7 @@ def _parse_standings(soup, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# VENUE FORM — ID-ANCHORED + LABEL FALLBACK (unchanged)
+# VENUE FORM
 # ═══════════════════════════════════════════════════════════════════
 
 _WIN_WORDS  = r"(?:wins?|victor(?:y|ies)|won)"
@@ -999,7 +1009,7 @@ _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    # Oxford-comma variants (parser fix)
+    # Oxford-comma variants
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?),?\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
 ]
@@ -1008,7 +1018,7 @@ _KEYSTAT_PATTERNS = [
 def _parse_form_from_keystat(soup):
     """
     Fallback: read overall form from keystat blocks.
-    Broadened to accept alternative block titles (parser fix).
+    Broadened title match to accept alternative block titles.
     """
     home_wdl = away_wdl = None
 
@@ -1125,7 +1135,7 @@ def _team_sentences(aliases, sentences):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# H2H (unchanged)
+# H2H
 # ═══════════════════════════════════════════════════════════════════
 
 def _parse_h2h(soup, home_term, away_term, f):
@@ -1442,7 +1452,6 @@ def build_row(facts, signals, decision):
     row.update(decision_columns(decision))
     row["extracted_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Accumulator score and flag
     row["accumulator_score"] = float(calc_accumulator_score(facts))
     row["accumulator"] = compute_accumulator(facts, decision)
 
@@ -1732,7 +1741,6 @@ with tab_perf:
             st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                         f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
-        # Accumulator-only performance
         if "accumulator" in df.columns:
             acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
             if not acc_bets.empty:
