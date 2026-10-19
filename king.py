@@ -1240,6 +1240,22 @@ def signal_pill(name, value):
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
+def _home_support_strength(row) -> int:
+    """How many of the 4 signals voted home (0–4)."""
+    return sum(
+        1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
+        if row.get(k) == "home"
+    )
+
+
+def _away_support_strength(row) -> int:
+    """How many of the 4 signals voted away (0–4)."""
+    return sum(
+        1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
+        if row.get(k) == "away"
+    )
+
+
 def render_pending_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1763,6 +1779,135 @@ with tab_perf:
             st.dataframe(by_dissent, use_container_width=True, hide_index=True)
         else:
             st.info("No dissent-signal data yet.")
+
+        # ─────────────────────────────────────────────────────────
+        # HOME BEST AGREEMENT — how many signals actually back home
+        # ─────────────────────────────────────────────────────────
+        st.markdown("### 🏠 Home support strength")
+
+        if not qualifying.empty:
+            strength_df = qualifying.copy()
+            strength_df["home_support"] = strength_df.apply(
+                _home_support_strength, axis=1
+            )
+            strength_df["away_support"] = strength_df.apply(
+                _away_support_strength, axis=1
+            )
+
+            # Only matches that actually produced a home pick are
+            # "home best agreement" candidates.
+            home_picks = strength_df[strength_df["direction"] == "home"]
+            settled_home = home_picks[home_picks["dc_hit"].notna()]
+
+            if not settled_home.empty:
+                by_home_support = (
+                    settled_home
+                    .groupby("home_support")
+                    .agg(
+                        total=("match_id", "count"),
+                        wins=("dc_hit", lambda s: int((s == 1).sum())),
+                        losses=("dc_hit", lambda s: int((s == 0).sum())),
+                        net=("profit_loss", "sum"),
+                    )
+                    .reset_index()
+                )
+                by_home_support["hit_rate"] = (
+                    by_home_support["wins"]
+                    / by_home_support["total"]
+                    * 100
+                ).round(1)
+                by_home_support = by_home_support.sort_values(
+                    "home_support", ascending=False
+                )
+
+                # Highlight the strongest bucket
+                best = by_home_support.iloc[0]
+                hc1, hc2, hc3 = st.columns(3)
+                with hc1:
+                    st.markdown(
+                        f'<div class="metric-box">'
+                        f'<div class="metric-value">{int(best["home_support"])}/4</div>'
+                        f'<div class="metric-label">Strongest bucket</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                with hc2:
+                    st.markdown(
+                        f'<div class="metric-box">'
+                        f'<div class="metric-value">{best["hit_rate"]:.1f}%</div>'
+                        f'<div class="metric-label">Hit rate (best bucket)</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                with hc3:
+                    color = "#10b981" if best["net"] >= 0 else "#ef4444"
+                    st.markdown(
+                        f'<div class="metric-box">'
+                        f'<div class="metric-value" style="color:{color}">{best["net"]:+.2f}u</div>'
+                        f'<div class="metric-label">Net P/L (best bucket)</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                st.dataframe(
+                    by_home_support.rename(columns={
+                        "home_support": "home signals (of 4)",
+                        "total": "bets",
+                        "wins": "wins",
+                        "losses": "losses",
+                        "net": "net P/L",
+                        "hit_rate": "hit %",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No settled home picks yet.")
+
+            # ── Which signal combos produced the home picks? ──
+            st.markdown("#### Home pick — signal composition")
+
+            def _home_signature(row):
+                bits = []
+                if row.get("signal_table") == "home": bits.append("T")
+                if row.get("signal_form")  == "home": bits.append("F")
+                if row.get("signal_venue") == "home": bits.append("V")
+                if row.get("signal_h2h")   == "home": bits.append("H")
+                return "+".join(bits) if bits else "—"
+
+            if not settled_home.empty:
+                sig_df = settled_home.copy()
+                sig_df["home_signature"] = sig_df.apply(_home_signature, axis=1)
+                by_sig = (
+                    sig_df
+                    .groupby("home_signature")
+                    .agg(
+                        total=("match_id", "count"),
+                        wins=("dc_hit", lambda s: int((s == 1).sum())),
+                        net=("profit_loss", "sum"),
+                    )
+                    .reset_index()
+                )
+                by_sig["hit_rate"] = (
+                    by_sig["wins"] / by_sig["total"] * 100
+                ).round(1)
+                by_sig = by_sig.sort_values(
+                    ["total", "hit_rate"], ascending=False
+                )
+                st.caption(
+                    "T = table, F = form, V = venue, H = H2H. "
+                    "Only shows settled home picks."
+                )
+                st.dataframe(
+                    by_sig.rename(columns={
+                        "home_signature": "signals voting home",
+                        "total": "bets",
+                        "wins": "wins",
+                        "net": "net P/L",
+                        "hit_rate": "hit %",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No settled home picks yet.")
 
         st.markdown("### All settled matches")
         for m in settled:
