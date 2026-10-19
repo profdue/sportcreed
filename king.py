@@ -147,7 +147,6 @@ def db_settled():
 
 
 def db_accumulator_matches():
-    """All matches whose accumulator flag is TRUE."""
     sb = get_supabase()
     res = (sb.table("matches")
              .select("*")
@@ -158,7 +157,6 @@ def db_accumulator_matches():
 
 
 def db_find_existing(row: dict):
-    """Look for an already-stored match matching the natural key."""
     sb = get_supabase()
     q = sb.table("matches").select("*")
     for field in ("match_date", "kickoff_time", "league",
@@ -357,7 +355,6 @@ def _cmp_or_nothing(a, b):
 
 
 def compute_signals(f: dict) -> dict:
-    """Unchanged — verified correct against all 227 qualifying rows."""
     hp = f.get("home_table_pts")
     ap = f.get("away_table_pts")
     hg = f.get("home_table_gd") or 0
@@ -383,7 +380,6 @@ def compute_signals(f: dict) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 def _compute_gap(facts: dict):
-    """Absolute table-points gap, or None if either input is missing."""
     h = facts.get("home_table_pts")
     a = facts.get("away_table_pts")
     if h is None or a is None:
@@ -402,7 +398,6 @@ def _gap_band(gap):
 
 
 def _compute_structure(signals: dict, direction: str) -> dict:
-    """Support / oppose / abstain relative to the chosen direction."""
     support = oppose = abstain = 0
     opposing_signal = abstaining_signal = None
     for name, val in signals.items():
@@ -426,7 +421,6 @@ def _compute_structure(signals: dict, direction: str) -> dict:
 
 
 def _grade_pick(structure: dict) -> str:
-    """Grade the pick based on the observed agreement structure."""
     s, o, a = structure["support"], structure["oppose"], structure["abstain"]
     if s == 4:
         return "A"
@@ -475,11 +469,6 @@ _STAKE_MAP = {
 
 
 def decide(facts: dict, signals: dict) -> dict:
-    """
-    Priority order: table ≈ venue > form > H2H.
-    Skip when table and venue both pick but disagree.
-    Apply stake whitelist — only historically validated splits qualify.
-    """
     table = signals["table"]
     venue = signals["venue"]
     form = signals["form"]
@@ -533,7 +522,7 @@ def decide(facts: dict, signals: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — accumulator (parity-aligned with SQL)
+# THE LOGIC — accumulator
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -555,7 +544,6 @@ def _zero_filled_difference(home_value, away_value):
 
 
 def calc_accumulator_score(facts):
-    """Weighted sum verified to correlate with hit rate."""
     raw = (
         _zero_filled_difference(facts.get("home_table_pts"), facts.get("away_table_pts"))
         + Decimal("5") * _zero_filled_difference(
@@ -572,15 +560,6 @@ def calc_accumulator_score(facts):
 
 
 def compute_accumulator(facts, decision):
-    """
-    Return TRUE / FALSE / NULL — parallel to the SQL CASE:
-        qualifying != 1                       -> NULL
-        qualifying = 1, direction = skip/NULL -> FALSE
-        qualifying = 1, direction in home/away:
-            |score| >= 15                     -> TRUE
-            |score| < 15                      -> FALSE
-        qualifying = 1, other direction       -> NULL
-    """
     qualifying = decision.get("qualifying")
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
@@ -590,13 +569,12 @@ def compute_accumulator(facts, decision):
     if direction == "skip":
         return False
     if direction not in ("home", "away"):
-        return None  # invalid direction — data quality issue
+        return None
     score = calc_accumulator_score(facts)
     return bool(abs(score) >= Decimal("15.0"))
 
 
 def settle(direction, stake, home_score, away_score):
-    """Settle a pick against the final score."""
     if home_score > away_score:
         result = "home_win"
     elif away_score > home_score:
@@ -910,7 +888,7 @@ def _parse_venue(soup, home_sents, away_sents, f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FORM — PROSE + KEYSTAT (with parser fix)
+# FORM — PROSE + KEYSTAT
 # ═══════════════════════════════════════════════════════════════════
 
 def _parse_form_from_sentences(sents, required_first_word=None, other_team=None):
@@ -1009,7 +987,6 @@ _KEYSTAT_PATTERNS = [
 
 
 def _parse_form_from_keystat(soup):
-    """Fallback: read overall form from keystat blocks."""
     home_wdl = away_wdl = None
 
     acceptable_titles = (
@@ -1513,7 +1490,6 @@ with tab_new:
         preview["accumulator"] = compute_accumulator(facts, decision)
         render_pending_card(preview)
 
-        # Accumulator score display — MUST include qualifying and direction check
         try:
             acc_score = calc_accumulator_score(facts)
             acc_eligible = (
