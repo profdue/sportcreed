@@ -147,7 +147,7 @@ def db_settled():
 
 
 def db_accumulator_matches():
-    """All matches (pending or settled) whose accumulator flag is TRUE."""
+    """All matches whose accumulator flag is TRUE."""
     sb = get_supabase()
     res = (sb.table("matches")
              .select("*")
@@ -191,7 +191,7 @@ def db_delete(match_id: int):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TEAM ID EXTRACTION — the primary anchor
+# TEAM ID EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
 
 def _team_id_from_img(img_tag):
@@ -215,7 +215,7 @@ def _extract_team_ids_from_t_top(soup):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# NAME MATCHING — fallback only
+# NAME MATCHING
 # ═══════════════════════════════════════════════════════════════════
 
 _TEAM_PREFIXES = (
@@ -379,7 +379,7 @@ def compute_signals(f: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE LOGIC — decide (priority rule + whitelist)
+# THE LOGIC — decide
 # ═══════════════════════════════════════════════════════════════════
 
 def _compute_gap(facts: dict):
@@ -426,10 +426,7 @@ def _compute_structure(signals: dict, direction: str) -> dict:
 
 
 def _grade_pick(structure: dict) -> str:
-    """
-    Grade the pick based on the observed agreement structure.
-    Grades are descriptive (historical hit rate), not prescriptive.
-    """
+    """Grade the pick based on the observed agreement structure."""
     s, o, a = structure["support"], structure["oppose"], structure["abstain"]
     if s == 4:
         return "A"
@@ -580,7 +577,6 @@ def compute_accumulator(facts, decision):
         qualifying != 1                       -> NULL
         qualifying = 1, direction = skip/NULL -> FALSE
         qualifying = 1, direction in home/away:
-            score is NULL                     -> NULL
             |score| >= 15                     -> TRUE
             |score| < 15                      -> FALSE
         qualifying = 1, other direction       -> NULL
@@ -588,7 +584,6 @@ def compute_accumulator(facts, decision):
     qualifying = decision.get("qualifying")
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
-
     direction = decision.get("direction")
     if _is_missing(direction):
         return False
@@ -596,7 +591,6 @@ def compute_accumulator(facts, decision):
         return False
     if direction not in ("home", "away"):
         return None  # invalid direction — data quality issue
-
     score = calc_accumulator_score(facts)
     return bool(abs(score) >= Decimal("15.0"))
 
@@ -1009,17 +1003,13 @@ _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    # Oxford-comma variants
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?),?\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?,?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
 ]
 
 
 def _parse_form_from_keystat(soup):
-    """
-    Fallback: read overall form from keystat blocks.
-    Broadened title match to accept alternative block titles.
-    """
+    """Fallback: read overall form from keystat blocks."""
     home_wdl = away_wdl = None
 
     acceptable_titles = (
@@ -1523,13 +1513,24 @@ with tab_new:
         preview["accumulator"] = compute_accumulator(facts, decision)
         render_pending_card(preview)
 
+        # Accumulator score display — MUST include qualifying and direction check
         try:
             acc_score = calc_accumulator_score(facts)
+            acc_eligible = (
+                decision.get("qualifying") == 1
+                and decision.get("direction") in ("home", "away")
+                and abs(acc_score) >= Decimal("15.0")
+            )
             st.markdown(
                 f"**Accumulator score:** `{acc_score:+.1f}` — "
                 f"threshold `±15.0` → "
-                f"{'**ELIGIBLE** 🎯' if abs(acc_score) >= Decimal('15.0') else 'not eligible'}"
+                f"{'**ELIGIBLE** 🎯' if acc_eligible else 'not eligible'}"
             )
+            if decision.get("qualifying") != 1 and abs(acc_score) >= Decimal("15.0"):
+                st.caption(
+                    "Score meets threshold, but the pick was skipped — "
+                    "accumulator flag is NULL, not TRUE."
+                )
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
 
