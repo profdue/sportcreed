@@ -39,27 +39,14 @@ MIGRATION (run once, manually — not executed by this app)
   alter table matches add column if not exists would_have_skipped_away_table boolean;
   alter table matches add column if not exists attack_sum float;
   alter table matches add column if not exists exp_proxy_avg float;
-  alter table matches add column if not exists is_retrospective boolean not null default false;
-  alter table matches add column if not exists market_intent text;
   -- only if tracking odds (one price per match):
   alter table matches add column if not exists odds_market text;
   alter table matches add column if not exists odds_value numeric;
   alter table matches add column if not exists odds_book text;
   alter table matches add column if not exists odds_captured_at timestamptz;
 
-  -- Backfill provenance from the legacy free-text notes:
-  update matches
-     set is_retrospective = true
-   where notes ilike 'Retrospectively%'
-     and is_retrospective = false;
-
-  -- Backfill market_intent for historical rows: leave as 'legacy_unknown'
-  -- so the audit can distinguish intent from emission. Do NOT infer
-  -- intent from direction/stake — that reproduces the very drift the
-  -- audit is trying to expose.
-  update matches
-     set market_intent = 'legacy_unknown'
-   where market_intent is null;
+  -- No new columns beyond the above. Retrospective rows are quarantined
+  -- at query time via notes NOT LIKE '%Retrospectively reclassified%'.
 """
 
 import re
@@ -112,7 +99,6 @@ st.markdown("""
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
-    .badge-draw { background: #eab30822; color: #facc15; border: 1px solid #eab30855; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
@@ -218,6 +204,91 @@ def db_settle(match_id: int, home_score: int, away_score: int,
 def db_delete(match_id: int):
     sb = get_supabase()
     sb.table("matches").delete().eq("match_id", match_id).execute()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# QUARANTINE — notes-based, no schema change
+# ═══════════════════════════════════════════════════════════════════
+
+_RETRO_NOTE_MARKER = "Retrospectively reclassified"
+
+
+def _is_quarantined(row: dict) -> bool:
+    """
+    A row is quarantined if its notes field contains the retrospective
+    marker. The marker is the exact literal from the audit. Rows without
+    a notes field, or with a notes field that doesn't contain the marker,
+    are not quarantined.
+    """
+    notes = row.get("notes")
+    if not notes:
+        return False
+    return _RETRO_NOTE_MARKER in str(notes)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COHORT CLASSIFICATION — literal signal columns only
+# ═══════════════════════════════════════════════════════════════════
+
+def _cohort_label(signals: dict, direction: str) -> str:
+    """
+    Classify a row into one of the literal-signal cohorts. Uses only the
+    four signal_* columns, never agreement_split, never dc_hit.
+
+        A_home           — T=H, F=H, V=H, H2H=H
+        A_away           — T=A, F=A, V=A, H2H=A
+        B_home_h2h_fade  — T=H, F=H, V=H, H2H IN ('away','nothing')
+        C_home_tf        — T=H, F=H (not already A or B)
+        C_away_tf        — T=A, F=A (not already A)
+        other            — everything else
+    """
+    t = signals.get("table")
+    f = signals.get("form")
+    v = signals.get("venue")
+    h = signals.get("h2h")
+
+    if direction == "home":
+        if t == "home" and f == "home" and v == "home" and h == "home":
+            return "A_home"
+        if t == "home" and f == "home" and v == "home" and h in ("away", "nothing"):
+            return "B_home_h2h_fade"
+        if t == "home" and f == "home":
+            return "C_home_tf"
+    elif direction == "away":
+        if t == "away" and f == "away" and v == "away" and h == "away":
+            return "A_away"
+        if t == "away" and f == "away":
+            return "C_away_tf"
+
+    return "other"
+
+
+def _cohort_from_row(row: dict) -> str:
+    sig = {
+        "table": row.get("signal_table"),
+        "form":  row.get("signal_form"),
+        "venue": row.get("signal_venue"),
+        "h2h":   row.get("signal_h2h"),
+    }
+    return _cohort_label(sig, row.get("direction"))
+
+
+_COHORT_MARKET = {
+    "A_home":          "Home/Draw",
+    "A_away":          "Away/Draw",
+    "B_home_h2h_fade": "Home/Draw",
+    "C_home_tf":       "Home/Draw",
+    "C_away_tf":       "Away/Draw",
+    "other":           None,
+}
+
+
+def _market_label(direction: str) -> str:
+    if direction == "home":
+        return "Home/Draw"
+    if direction == "away":
+        return "Away/Draw"
+    return "No Bet"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -421,7 +492,6 @@ def decide(signals: dict) -> dict:
     else:
         majority = None
 
-    # 4-0 / 0-4 — full stake
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         return {
@@ -431,7 +501,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 3-1 / 1-3 — half stake
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
@@ -449,7 +518,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 3-0-1 / 0-3-1 — full stake
     if home == 3 and away == 0 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "nothing"), None)
         return {
@@ -467,7 +535,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 2-2 — skip
     if home == 2 and away == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -476,7 +543,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 2-1-1 with home majority — half stake home pick
     if home == 2 and away == 1 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
@@ -486,7 +552,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 1-2-1 with away majority — skip
     if away == 2 and home == 1 and nothing == 1:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -495,7 +560,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 2-0-2 / 0-2-2 — skip
     if home == 2 and away == 0 and nothing == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -511,7 +575,6 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # Default: skip
     split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
     return {
         "direction": "skip", "stake": "none", "qualifying": 0,
@@ -545,56 +608,8 @@ def settle(direction, stake, home_score, away_score):
     return result, (1 if hit else 0), units, profit
 
 
-def _market_intent_from_decision(decision: dict) -> str:
-    """
-    What the pick *meant* to bet, independent of what direction it emitted.
-    The settle() implementation treats home picks as DC 1X and away picks
-    as DC X2 — the market_intent column makes that explicit.
-    """
-    direction = decision.get("direction")
-    if direction == "home":
-        return "1X"
-    if direction == "away":
-        return "X2"
-    return "none"
-
-
-def _cohort_label(signals: dict, direction: str) -> str:
-    """
-    Literal-signal cohort label for reporting and for the audit. Not used
-    as an input to decide(); it is a read-only classification derived from
-    the stored signal_* columns.
-
-        A      — Unanimous: all four signals vote `direction`
-        A_away — Unanimous Away (explicit, because the Home and Away
-                 rates are asymmetric and must be reported separately)
-        B      — Home H2H Fade: T=H, F=H, V=H, H2H != H
-        C      — T+F Core: T=direction, F=direction
-        other  — anything else
-    """
-    t = signals.get("table")
-    f = signals.get("form")
-    v = signals.get("venue")
-    h = signals.get("h2h")
-
-    if direction == "home":
-        if t == "home" and f == "home" and v == "home" and h == "home":
-            return "A_home"
-        if t == "home" and f == "home" and v == "home" and h != "home":
-            return "B_home_h2h_fade"
-        if t == "home" and f == "home":
-            return "C_home_tf"
-    elif direction == "away":
-        if t == "away" and f == "away" and v == "away" and h == "away":
-            return "A_away"
-        if t == "away" and f == "away":
-            return "C_away_tf"
-
-    return "other"
-
-
 # ═══════════════════════════════════════════════════════════════════
-# ACCUMULATOR — frozen rule
+# ACCUMULATOR — frozen rule (unchanged)
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -1270,40 +1285,17 @@ def signal_pill(name, value):
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
-def _home_support_strength(row) -> int:
-    return sum(
-        1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
-        if row.get(k) == "home"
-    )
-
-
-def _away_support_strength(row) -> int:
-    return sum(
-        1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
-        if row.get(k) == "away"
-    )
-
-
-def _home_signature(row):
-    bits = []
-    if row.get("signal_table") == "home": bits.append("T")
-    if row.get("signal_form")  == "home": bits.append("F")
-    if row.get("signal_venue") == "home": bits.append("V")
-    if row.get("signal_h2h")   == "home": bits.append("H")
-    return "+".join(bits) if bits else "—"
-
-
-def _dissent_label(row):
-    return row.get("dissent_signal") or "none"
-
-
-def _verdict_label(dc_hit, result) -> str:
-    """DC win, DC loss, or no bet. Draws are wins on 1X/X2 — no caveat."""
+def _verdict_label(dc_hit) -> str:
+    """WIN / LOSS / NO BET. Draws on 1X/X2 are wins."""
     if dc_hit == 1:
         return "WIN"
     if dc_hit == 0:
         return "LOSS"
     return "NO BET"
+
+
+def _cohort_market_display(cohort: str) -> str:
+    return _COHORT_MARKET.get(cohort) or "No Bet"
 
 
 def render_pending_card(m: dict):
@@ -1318,10 +1310,10 @@ def render_pending_card(m: dict):
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
-        pick_text = f"HOME — {home} (DC 1X)"
+        pick_text = f"HOME — {home} · Home/Draw"
     elif direction == "away":
         card_cls, badge_cls = "pick-away", "badge-away"
-        pick_text = f"AWAY — {away} (DC X2)"
+        pick_text = f"AWAY — {away} · Away/Draw"
     else:
         card_cls, badge_cls = "skip", "badge-skip"
         pick_text = "SKIP"
@@ -1354,13 +1346,13 @@ def render_settled_card(m: dict):
     hs = m.get("home_score")
     aws = m.get("away_score")
     dc_hit = m.get("dc_hit")
-    result = m.get("result")
     profit = m.get("profit_loss") or 0.0
     stake = m.get("stake", "none")
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc = bool(m.get("accumulator"))
+    market = _market_label(m.get("direction"))
 
     if dc_hit == 1:
         cls, badge = "win", "badge-win"
@@ -1369,10 +1361,7 @@ def render_settled_card(m: dict):
     else:
         cls, badge = "skip", "badge-skip"
 
-    verdict = _verdict_label(dc_hit, result)
-    if verdict == "WIN (draw)":
-        badge = "badge-draw"
-
+    verdict = _verdict_label(dc_hit)
     pl = f"{profit:+.2f}u" if dc_hit is not None else "—"
     acc_badge = (
         '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
@@ -1383,7 +1372,7 @@ def render_settled_card(m: dict):
     <div class="match-card {cls}">
         <div class="match-title">{home} {hs}–{aws} {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge}">{verdict} · {pl}</span>{acc_badge}
+        <span class="pick-badge {badge}">{verdict} · {market} · {pl}</span>{acc_badge}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1396,15 +1385,16 @@ def render_accumulator_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
+    market = _market_label(direction)
 
     hs = m.get("home_score")
     aws = m.get("away_score")
     settled = hs is not None and aws is not None
 
     if direction == "home":
-        pick_text = f"HOME — {home} (DC 1X)"
+        pick_text = f"HOME — {home} · Home/Draw"
     elif direction == "away":
-        pick_text = f"AWAY — {away} (DC X2)"
+        pick_text = f"AWAY — {away} · Away/Draw"
     else:
         pick_text = direction.upper() if direction else "?"
 
@@ -1419,7 +1409,7 @@ def render_accumulator_card(m: dict):
     if settled:
         pl = m.get("profit_loss")
         pl_txt = f"{pl:+.2f}u" if isinstance(pl, (int, float)) else "—"
-        verdict = _verdict_label(m.get("dc_hit"), m.get("result"))
+        verdict = _verdict_label(m.get("dc_hit"))
         result_txt = f' · <span style="color:#a855f7">{hs}–{aws} {verdict} {pl_txt}</span>'
 
     st.markdown(f"""
@@ -1459,14 +1449,6 @@ def decision_columns(d):
 
 
 def _compute_shadow_flags(decision):
-    """
-    Shadow flags — additive metadata, never inputs to decide().
-
-    - away_table_dissent : direction == away and dissent_signal == table
-    - low_hit_1-3        : agreement_split == '1-3' (historical low hit rate)
-
-    Neither flag alters direction, stake, qualifying, or accumulator.
-    """
     flags = []
     if (decision.get("direction") == "away"
             and decision.get("dissent_signal") == "table"):
@@ -1498,10 +1480,6 @@ def build_row(facts, signals, decision):
     row["shadow_flags"] = shadow_flags
     row["would_have_skipped_away_table"] = "away_table_dissent" in shadow_flags
 
-    # Structured provenance and market intent
-    row["is_retrospective"] = False
-    row["market_intent"] = _market_intent_from_decision(decision)
-
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
@@ -1525,9 +1503,60 @@ def build_row(facts, signals, decision):
         "accumulator",
         "attack_sum", "exp_proxy_avg",
         "shadow_flags", "would_have_skipped_away_table",
-        "is_retrospective", "market_intent",
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COHORT METRICS — computed from signal_* and result, never from
+# agreement_split or dc_hit. Quarantined rows excluded.
+# ═══════════════════════════════════════════════════════════════════
+
+def _cohort_hit(row: dict) -> int | None:
+    """
+    Recompute hit/miss from result against the cohort's implied market.
+    Returns 1 (hit), 0 (miss), or None (unsettled).
+    """
+    result = row.get("result")
+    if result is None:
+        return None
+    cohort = _cohort_from_row(row)
+    if cohort in ("A_home", "B_home_h2h_fade", "C_home_tf"):
+        return 1 if result in ("home_win", "draw") else 0
+    if cohort in ("A_away", "C_away_tf"):
+        return 1 if result in ("away_win", "draw") else 0
+    return None
+
+
+def cohort_summary(rows: list) -> pd.DataFrame:
+    """
+    Build the cohort summary table. Rows must already be settled.
+    Quarantined rows are excluded before this is called.
+    """
+    records = []
+    for r in rows:
+        cohort = _cohort_from_row(r)
+        if cohort == "other":
+            continue
+        hit = _cohort_hit(r)
+        if hit is None:
+            continue
+        records.append({
+            "cohort": cohort,
+            "market": _cohort_market_display(cohort),
+            "hit": hit,
+        })
+    if not records:
+        return pd.DataFrame(columns=["cohort", "market", "n", "wins", "losses", "DC hit %"])
+    df = pd.DataFrame(records)
+    out = (
+        df.groupby(["cohort", "market"])
+        .agg(n=("hit", "count"), wins=("hit", "sum"))
+        .reset_index()
+    )
+    out["losses"] = out["n"] - out["wins"]
+    out["DC hit %"] = (out["wins"] / out["n"] * 100).round(1)
+    return out[["cohort", "market", "n", "wins", "losses", "DC hit %"]]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1585,12 +1614,8 @@ with tab_new:
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
 
-        # Cohort classification — literal signals, not agreement_split
         cohort = _cohort_label(signals, decision.get("direction"))
-        market = _market_intent_from_decision(decision)
-        st.markdown(
-            f"**Cohort:** `{cohort}` · **Market intent:** `{market}`"
-        )
+        st.markdown(f"**Cohort:** `{cohort}` · **Market:** `{_cohort_market_display(cohort)}`")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -1623,14 +1648,7 @@ with tab_new:
             if stored_acc != new_acc:
                 st.warning(
                     f"⚠️ Accumulator flag differs — "
-                    f"stored: `{stored_acc}`, recomputed: `{new_acc}`. "
-                    f"Check the rule version if this surprises you."
-                )
-            if existing.get("qualifying") == 0 and row.get("qualifying") == 1:
-                st.info(
-                    "ℹ️ This match was stored as a skip. The current logic "
-                    "promotes it to a half-stake home pick. The stored row "
-                    "is unchanged — only new inserts use the current rule."
+                    f"stored: `{stored_acc}`, recomputed: `{new_acc}`."
                 )
         else:
             with st.spinner("Saving to Supabase..."):
@@ -1696,15 +1714,22 @@ with tab_pending:
 with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
-        "All matches whose stored accumulator flag is TRUE "
-        "(`qualifying = 1`, valid direction, and `|score| >= 15.0`)."
+        "Matches whose stored `accumulator` flag is TRUE, restricted to "
+        "Cohort A (Unanimous Home or Unanimous Away), with retrospective "
+        "edits excluded."
     )
 
     try:
-        acc_matches = db_accumulator_matches()
+        raw_acc = db_accumulator_matches()
     except Exception as e:
         st.error(f"Could not load accumulator matches: {e}")
-        acc_matches = []
+        raw_acc = []
+
+    acc_matches = [
+        m for m in raw_acc
+        if not _is_quarantined(m)
+        and _cohort_from_row(m) in ("A_home", "A_away")
+    ]
 
     if not acc_matches:
         st.info("No accumulator-eligible matches yet.")
@@ -1779,302 +1804,135 @@ with tab_perf:
     if not settled:
         st.info("No settled matches yet.")
     else:
-        df = pd.DataFrame(settled)
-        df["dc_hit"] = pd.to_numeric(df["dc_hit"], errors="coerce")
-        df["profit_loss"] = pd.to_numeric(df["profit_loss"], errors="coerce").fillna(0)
-        df["qualifying"] = pd.to_numeric(df["qualifying"], errors="coerce").fillna(0)
-        if "accumulator" in df.columns:
-            df["accumulator"] = df["accumulator"].fillna(False).astype(bool)
-        if "is_retrospective" in df.columns:
-            df["is_retrospective"] = df["is_retrospective"].fillna(False).astype(bool)
+        # Exclude retrospective rows from all cohort metrics
+        clean_settled = [m for m in settled if not _is_quarantined(m)]
 
-        qualifying = df[df["qualifying"] == 1]
-        bets = qualifying[qualifying["dc_hit"].notna()]
-
-        total = len(bets)
-        wins = int((bets["dc_hit"] == 1).sum()) if not bets.empty else 0
-        losses = int((bets["dc_hit"] == 0).sum()) if not bets.empty else 0
-        net = float(df["profit_loss"].sum())
-        hit_rate = (wins / total * 100) if total else 0.0
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{total}</div>'
-                        f'<div class="metric-label">Bets</div></div>', unsafe_allow_html=True)
-        with c2:
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{wins}</div>'
-                        f'<div class="metric-label">Wins</div></div>', unsafe_allow_html=True)
-        with c3:
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{losses}</div>'
-                        f'<div class="metric-label">Losses</div></div>', unsafe_allow_html=True)
-        with c4:
-            color = "#10b981" if net >= 0 else "#ef4444"
-            st.markdown(f'<div class="metric-box"><div class="metric-value" style="color:{color}">{net:+.2f}u</div>'
-                        f'<div class="metric-label">Net P/L</div></div>', unsafe_allow_html=True)
-
-        st.markdown("")
-        c5, c6, c7 = st.columns(3)
-        with c5:
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{hit_rate:.1f}%</div>'
-                        f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
-        with c6:
-            skips = int((df["qualifying"] == 0).sum())
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{skips}</div>'
-                        f'<div class="metric-label">Skips</div></div>', unsafe_allow_html=True)
-        with c7:
-            full = int((bets["stake"] == "full").sum()) if not bets.empty else 0
-            half = int((bets["stake"] == "half").sum()) if not bets.empty else 0
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
-                        f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
-
-        if "accumulator" in df.columns:
-            acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
-            if not acc_bets.empty:
-                acc_wins = int((acc_bets["dc_hit"] == 1).sum())
-                acc_total = len(acc_bets)
-                acc_net = float(acc_bets["profit_loss"].sum())
-                acc_hr = (acc_wins / acc_total * 100) if acc_total else 0.0
-                st.markdown("#### 🎯 Accumulator-only (settled)")
-                a1, a2, a3, a4 = st.columns(4)
-                with a1:
-                    st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_total}</div>'
-                                f'<div class="metric-label">Bets</div></div>', unsafe_allow_html=True)
-                with a2:
-                    st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_wins}</div>'
-                                f'<div class="metric-label">Wins</div></div>', unsafe_allow_html=True)
-                with a3:
-                    st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_hr:.1f}%</div>'
-                                f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
-                with a4:
-                    color = "#10b981" if acc_net >= 0 else "#ef4444"
-                    st.markdown(
-                        f'<div class="metric-box"><div class="metric-value" style="color:{color}">{acc_net:+.2f}u</div>'
-                        f'<div class="metric-label">Net P/L</div></div>',
-                        unsafe_allow_html=True,
-                    )
-
-        # ─────────────────────────────────────────────────────────
-        # LITERAL COHORT REPORTING — replace agreement_split grouping
-        # ─────────────────────────────────────────────────────────
-        st.markdown("### Cohorts (literal signals, prospective only)")
-        st.caption(
-            "Grouped by literal signal predicates. Excludes any row with "
-            "`is_retrospective = true`. Home and Away reported separately."
-        )
-
-        if "is_retrospective" in qualifying.columns:
-            clean = qualifying[qualifying["is_retrospective"] == False]  # noqa: E712
+        df = pd.DataFrame(clean_settled)
+        if df.empty:
+            st.info("No settled matches after quarantine.")
         else:
-            clean = qualifying
+            df["dc_hit"] = pd.to_numeric(df["dc_hit"], errors="coerce")
+            df["profit_loss"] = pd.to_numeric(df["profit_loss"], errors="coerce").fillna(0)
+            df["qualifying"] = pd.to_numeric(df["qualifying"], errors="coerce").fillna(0)
+            if "accumulator" in df.columns:
+                df["accumulator"] = df["accumulator"].fillna(False).astype(bool)
 
-        def _cohort_of_row(row) -> str:
-            sig = {
-                "table": row.get("signal_table"),
-                "form":  row.get("signal_form"),
-                "venue": row.get("signal_venue"),
-                "h2h":   row.get("signal_h2h"),
-            }
-            return _cohort_label(sig, row.get("direction"))
+            qualifying = df[df["qualifying"] == 1]
+            bets = qualifying[qualifying["dc_hit"].notna()]
 
-        if not clean.empty:
-            clean_c = clean.copy()
-            clean_c["cohort"] = clean_c.apply(_cohort_of_row, axis=1)
-            clean_c["market"] = clean_c["direction"].map(
-                {"home": "1X", "away": "X2"}
-            )
+            total = len(bets)
+            wins = int((bets["dc_hit"] == 1).sum()) if not bets.empty else 0
+            losses = int((bets["dc_hit"] == 0).sum()) if not bets.empty else 0
+            net = float(df["profit_loss"].sum())
+            hit_rate = (wins / total * 100) if total else 0.0
 
-            by_cohort = (
-                clean_c
-                .groupby(["cohort", "market"], dropna=False)
-                .agg(
-                    n=("match_id", "count"),
-                    wins=("dc_hit", lambda s: int((s == 1).sum())),
-                    losses=("dc_hit", lambda s: int((s == 0).sum())),
-                )
-                .reset_index()
-            )
-            by_cohort["dc_hit_pct"] = (
-                by_cohort["wins"] / by_cohort["n"] * 100
-            ).round(1)
-            by_cohort = by_cohort.sort_values(
-                ["cohort", "market"], ascending=True
-            )
-            st.dataframe(
-                by_cohort.rename(columns={
-                    "cohort": "cohort",
-                    "market": "market",
-                    "n": "n",
-                    "wins": "wins",
-                    "losses": "losses",
-                    "dc_hit_pct": "DC hit %",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("No prospective qualifying picks yet.")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{total}</div>'
+                            f'<div class="metric-label">Bets</div></div>', unsafe_allow_html=True)
+            with c2:
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{wins}</div>'
+                            f'<div class="metric-label">Wins</div></div>', unsafe_allow_html=True)
+            with c3:
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{losses}</div>'
+                            f'<div class="metric-label">Losses</div></div>', unsafe_allow_html=True)
+            with c4:
+                color = "#10b981" if net >= 0 else "#ef4444"
+                st.markdown(f'<div class="metric-box"><div class="metric-value" style="color:{color}">{net:+.2f}u</div>'
+                            f'<div class="metric-label">Net P/L</div></div>', unsafe_allow_html=True)
 
-        st.markdown("### By agreement split (historical, for reference only)")
-        if not qualifying.empty:
-            by_split = (qualifying
-                        .groupby("agreement_split")
-                        .agg(total=("match_id", "count"),
-                             wins=("dc_hit", lambda s: int((s == 1).sum())),
-                             losses=("dc_hit", lambda s: int((s == 0).sum())),
-                             net=("profit_loss", "sum"))
-                        .reset_index())
-            st.dataframe(by_split, use_container_width=True, hide_index=True)
+            st.markdown("")
+            c5, c6, c7 = st.columns(3)
+            with c5:
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{hit_rate:.1f}%</div>'
+                            f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
+            with c6:
+                skips = int((df["qualifying"] == 0).sum())
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{skips}</div>'
+                            f'<div class="metric-label">Skips</div></div>', unsafe_allow_html=True)
+            with c7:
+                full = int((bets["stake"] == "full").sum()) if not bets.empty else 0
+                half = int((bets["stake"] == "half").sum()) if not bets.empty else 0
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
+                            f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
-        st.markdown("### By dissent signal")
-        dissent_df = qualifying[qualifying["dissent_signal"].notna()]
-        if not dissent_df.empty:
-            by_dissent = (dissent_df
-                          .groupby("dissent_signal")
-                          .agg(total=("match_id", "count"),
-                               wins=("dc_hit", lambda s: int((s == 1).sum())),
-                               losses=("dc_hit", lambda s: int((s == 0).sum())),
-                               net=("profit_loss", "sum"))
-                          .reset_index())
-            st.dataframe(by_dissent, use_container_width=True, hide_index=True)
-        else:
-            st.info("No dissent-signal data yet.")
-
-        st.markdown("### 🏠 Home support strength")
-
-        if not qualifying.empty:
-            strength_df = qualifying.copy()
-            strength_df["home_support"] = strength_df.apply(
-                _home_support_strength, axis=1
-            )
-
-            home_picks = strength_df[strength_df["direction"] == "home"]
-            settled_home = home_picks[home_picks["dc_hit"].notna()]
-
-            if not settled_home.empty:
-                by_home_support = (
-                    settled_home
-                    .groupby("home_support")
-                    .agg(
-                        total=("match_id", "count"),
-                        wins=("dc_hit", lambda s: int((s == 1).sum())),
-                        losses=("dc_hit", lambda s: int((s == 0).sum())),
-                        net=("profit_loss", "sum"),
-                    )
-                    .reset_index()
-                )
-                by_home_support["hit_rate"] = (
-                    by_home_support["wins"]
-                    / by_home_support["total"]
-                    * 100
-                ).round(1)
-                by_home_support = by_home_support.sort_values(
-                    "home_support", ascending=False
-                )
-
-                best = by_home_support.iloc[0]
-                hc1, hc2, hc3 = st.columns(3)
-                with hc1:
-                    st.markdown(
-                        f'<div class="metric-box">'
-                        f'<div class="metric-value">{int(best["home_support"])}/4</div>'
-                        f'<div class="metric-label">Strongest bucket</div></div>',
-                        unsafe_allow_html=True,
-                    )
-                with hc2:
-                    st.markdown(
-                        f'<div class="metric-box">'
-                        f'<div class="metric-value">{best["hit_rate"]:.1f}%</div>'
-                        f'<div class="metric-label">Hit rate (best bucket)</div></div>',
-                        unsafe_allow_html=True,
-                    )
-                with hc3:
-                    color = "#10b981" if best["net"] >= 0 else "#ef4444"
-                    st.markdown(
-                        f'<div class="metric-box">'
-                        f'<div class="metric-value" style="color:{color}">{best["net"]:+.2f}u</div>'
-                        f'<div class="metric-label">Net P/L (best bucket)</div></div>',
-                        unsafe_allow_html=True,
-                    )
-
-                st.dataframe(
-                    by_home_support.rename(columns={
-                        "home_support": "home signals (of 4)",
-                        "total": "bets",
-                        "wins": "wins",
-                        "losses": "losses",
-                        "net": "net P/L",
-                        "hit_rate": "hit %",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            # ─────────────────────────────────────────────────────
+            # COHORT REPORTING — the only rule-based table
+            # Computed from signal_* and result, not agreement_split,
+            # not dc_hit. Quarantined rows already excluded.
+            # ─────────────────────────────────────────────────────
+            st.markdown("### Cohorts")
+            cohort_df = cohort_summary(clean_settled)
+            if cohort_df.empty:
+                st.info("No cohort-classified settled picks yet.")
             else:
-                st.info("No settled home picks yet.")
-
-            st.markdown("#### Home pick — literal signal combination")
-            if not settled_home.empty:
-                sig_df = settled_home.copy()
-                sig_df["home_signature"] = sig_df.apply(_home_signature, axis=1)
-                by_sig = (
-                    sig_df
-                    .groupby("home_signature")
-                    .agg(
-                        total=("match_id", "count"),
-                        wins=("dc_hit", lambda s: int((s == 1).sum())),
-                        net=("profit_loss", "sum"),
-                    )
-                    .reset_index()
-                )
-                by_sig["hit_rate"] = (
-                    by_sig["wins"] / by_sig["total"] * 100
-                ).round(1)
-                by_sig = by_sig.sort_values(
-                    ["total", "hit_rate"], ascending=False
-                )
                 st.dataframe(
-                    by_sig.rename(columns={
-                        "home_signature": "signals voting home (literal)",
-                        "total": "bets",
-                        "wins": "wins",
-                        "net": "net P/L",
-                        "hit_rate": "hit %",
-                    }),
+                    cohort_df,
                     use_container_width=True,
                     hide_index=True,
                 )
 
-            st.markdown("#### Home pick — dissent bucket")
-            if not settled_home.empty:
-                diss_df = settled_home.copy()
-                diss_df["dissent_label"] = diss_df.apply(_dissent_label, axis=1)
-                by_diss = (
-                    diss_df
-                    .groupby("dissent_label")
-                    .agg(
-                        total=("match_id", "count"),
-                        wins=("dc_hit", lambda s: int((s == 1).sum())),
-                        net=("profit_loss", "sum"),
-                    )
+            # ─────────────────────────────────────────────────────
+            # Same table, grouped by direction for readability
+            # ─────────────────────────────────────────────────────
+            st.markdown("### Cohorts by direction")
+            clean_with_cohort = []
+            for m in clean_settled:
+                c = _cohort_from_row(m)
+                if c == "other":
+                    continue
+                hit = _cohort_hit(m)
+                if hit is None:
+                    continue
+                clean_with_cohort.append({
+                    "cohort": c,
+                    "market": _cohort_market_display(c),
+                    "hit": hit,
+                })
+            if clean_with_cohort:
+                cdf = pd.DataFrame(clean_with_cohort)
+                pivot = (
+                    cdf.groupby(["cohort", "market"])
+                    .agg(n=("hit", "count"), wins=("hit", "sum"))
                     .reset_index()
                 )
-                by_diss["hit_rate"] = (
-                    by_diss["wins"] / by_diss["total"] * 100
-                ).round(1)
-                by_diss = by_diss.sort_values(
-                    ["total", "hit_rate"], ascending=False
-                )
+                pivot["losses"] = pivot["n"] - pivot["wins"]
+                pivot["DC hit %"] = (pivot["wins"] / pivot["n"] * 100).round(1)
                 st.dataframe(
-                    by_diss.rename(columns={
-                        "dissent_label": "dissent signal",
-                        "total": "bets",
-                        "wins": "wins",
-                        "net": "net P/L",
-                        "hit_rate": "hit %",
-                    }),
+                    pivot[["cohort", "market", "n", "wins", "losses", "DC hit %"]],
                     use_container_width=True,
                     hide_index=True,
                 )
 
-        st.markdown("### All settled matches")
-        for m in settled:
-            render_settled_card(m)
+            # ─────────────────────────────────────────────────────
+            # Accumulator-only performance breakdown
+            # ─────────────────────────────────────────────────────
+            if "accumulator" in df.columns:
+                acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
+                if not acc_bets.empty:
+                    acc_wins = int((acc_bets["dc_hit"] == 1).sum())
+                    acc_total = len(acc_bets)
+                    acc_net = float(acc_bets["profit_loss"].sum())
+                    acc_hr = (acc_wins / acc_total * 100) if acc_total else 0.0
+                    st.markdown("#### 🎯 Accumulator-only (settled)")
+                    a1, a2, a3, a4 = st.columns(4)
+                    with a1:
+                        st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_total}</div>'
+                                    f'<div class="metric-label">Bets</div></div>', unsafe_allow_html=True)
+                    with a2:
+                        st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_wins}</div>'
+                                    f'<div class="metric-label">Wins</div></div>', unsafe_allow_html=True)
+                    with a3:
+                        st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_hr:.1f}%</div>'
+                                    f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
+                    with a4:
+                        color = "#10b981" if acc_net >= 0 else "#ef4444"
+                        st.markdown(
+                            f'<div class="metric-box"><div class="metric-value" style="color:{color}">{acc_net:+.2f}u</div>'
+                            f'<div class="metric-label">Net P/L</div></div>',
+                            unsafe_allow_html=True,
+                        )
+
+            st.markdown("### All settled matches")
+            for m in clean_settled:
+                render_settled_card(m)
