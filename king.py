@@ -214,12 +214,6 @@ _RETRO_NOTE_MARKER = "Retrospectively reclassified"
 
 
 def _is_quarantined(row: dict) -> bool:
-    """
-    A row is quarantined if its notes field contains the retrospective
-    marker. The marker is the exact literal from the audit. Rows without
-    a notes field, or with a notes field that doesn't contain the marker,
-    are not quarantined.
-    """
     notes = row.get("notes")
     if not notes:
         return False
@@ -231,17 +225,6 @@ def _is_quarantined(row: dict) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 def _cohort_label(signals: dict, direction: str) -> str:
-    """
-    Classify a row into one of the literal-signal cohorts. Uses only the
-    four signal_* columns, never agreement_split, never dc_hit.
-
-        A_home           — T=H, F=H, V=H, H2H=H
-        A_away           — T=A, F=A, V=A, H2H=A
-        B_home_h2h_fade  — T=H, F=H, V=H, H2H IN ('away','nothing')
-        C_home_tf        — T=H, F=H (not already A or B)
-        C_away_tf        — T=A, F=A (not already A)
-        other            — everything else
-    """
     t = signals.get("table")
     f = signals.get("form")
     v = signals.get("venue")
@@ -289,6 +272,29 @@ def _market_label(direction: str) -> str:
     if direction == "away":
         return "Away/Draw"
     return "No Bet"
+
+
+def _cohort_market_display(cohort: str) -> str:
+    return _COHORT_MARKET.get(cohort) or "No Bet"
+
+
+def _is_accumulator_eligible(row: dict) -> bool:
+    """
+    A row is accumulator-eligible iff:
+      - the stored accumulator boolean is TRUE, AND
+      - the row is not quarantined (notes don't contain the retro marker), AND
+      - the cohort is A_home or A_away (unanimous home or away).
+
+    This is the display/reporting rule. The stored accumulator column
+    itself is unchanged (frozen score rule >= 15).
+    """
+    if not row.get("accumulator"):
+        return False
+    if _is_quarantined(row):
+        return False
+    if _cohort_from_row(row) not in ("A_home", "A_away"):
+        return False
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -609,7 +615,7 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ACCUMULATOR — frozen rule (unchanged)
+# ACCUMULATOR — frozen score rule (unchanged)
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -1286,16 +1292,11 @@ def signal_pill(name, value):
 
 
 def _verdict_label(dc_hit) -> str:
-    """WIN / LOSS / NO BET. Draws on 1X/X2 are wins."""
     if dc_hit == 1:
         return "WIN"
     if dc_hit == 0:
         return "LOSS"
     return "NO BET"
-
-
-def _cohort_market_display(cohort: str) -> str:
-    return _COHORT_MARKET.get(cohort) or "No Bet"
 
 
 def render_pending_card(m: dict):
@@ -1306,7 +1307,7 @@ def render_pending_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
-    is_acc = bool(m.get("accumulator"))
+    is_acc_eligible = bool(m.get("accumulator_eligible", False))
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
@@ -1320,7 +1321,7 @@ def render_pending_card(m: dict):
 
     acc_badge = (
         '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
-        if is_acc else ""
+        if is_acc_eligible else ""
     )
 
     pills = "".join([
@@ -1340,7 +1341,7 @@ def render_pending_card(m: dict):
     """, unsafe_allow_html=True)
 
 
-def render_settled_card(m: dict):
+def render_settled_card(m: dict, is_acc_eligible: bool = False):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
     hs = m.get("home_score")
@@ -1351,7 +1352,6 @@ def render_settled_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
-    is_acc = bool(m.get("accumulator"))
     market = _market_label(m.get("direction"))
 
     if dc_hit == 1:
@@ -1365,7 +1365,7 @@ def render_settled_card(m: dict):
     pl = f"{profit:+.2f}u" if dc_hit is not None else "—"
     acc_badge = (
         '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
-        if is_acc else ""
+        if is_acc_eligible else ""
     )
 
     st.markdown(f"""
@@ -1512,11 +1512,7 @@ def build_row(facts, signals, decision):
 # agreement_split or dc_hit. Quarantined rows excluded.
 # ═══════════════════════════════════════════════════════════════════
 
-def _cohort_hit(row: dict) -> int | None:
-    """
-    Recompute hit/miss from result against the cohort's implied market.
-    Returns 1 (hit), 0 (miss), or None (unsettled).
-    """
+def _cohort_hit(row: dict):
     result = row.get("result")
     if result is None:
         return None
@@ -1529,10 +1525,6 @@ def _cohort_hit(row: dict) -> int | None:
 
 
 def cohort_summary(rows: list) -> pd.DataFrame:
-    """
-    Build the cohort summary table. Rows must already be settled.
-    Quarantined rows are excluded before this is called.
-    """
     records = []
     for r in rows:
         cohort = _cohort_from_row(r)
@@ -1547,7 +1539,9 @@ def cohort_summary(rows: list) -> pd.DataFrame:
             "hit": hit,
         })
     if not records:
-        return pd.DataFrame(columns=["cohort", "market", "n", "wins", "losses", "DC hit %"])
+        return pd.DataFrame(
+            columns=["cohort", "market", "n", "wins", "losses", "DC hit %"]
+        )
     df = pd.DataFrame(records)
     out = (
         df.groupby(["cohort", "market"])
@@ -1595,10 +1589,16 @@ with tab_new:
                 st.stop()
 
         shadow_flags = _compute_shadow_flags(decision)
+        cohort = _cohort_label(signals, decision.get("direction"))
+        market = _cohort_market_display(cohort)
 
-        st.markdown("### The Pick")
+        # Build the preview row the same way build_row does, then
+        # decide accumulator eligibility for the card badge only.
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
         preview["accumulator"] = compute_accumulator(facts, decision)
+        preview["accumulator_eligible"] = _is_accumulator_eligible(preview)
+
+        st.markdown("### The Pick")
         render_pending_card(preview)
 
         if shadow_flags:
@@ -1609,13 +1609,12 @@ with tab_new:
             st.markdown(
                 f"**Accumulator score:** `{acc_score:+.1f}` — "
                 f"threshold `±15.0` → "
-                f"{'**ELIGIBLE** 🎯' if abs(acc_score) >= Decimal('15.0') else 'not eligible'}"
+                f"{'**ELIGIBLE** 🎯' if preview['accumulator_eligible'] else 'not eligible'}"
             )
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
 
-        cohort = _cohort_label(signals, decision.get("direction"))
-        st.markdown(f"**Cohort:** `{cohort}` · **Market:** `{_cohort_market_display(cohort)}`")
+        st.markdown(f"**Cohort:** `{cohort}` · **Market:** `{market}`")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -1676,7 +1675,10 @@ with tab_pending:
         st.info("No pending matches.")
     else:
         for m in pending:
-            render_pending_card(m)
+            # Attach the eligibility flag for the badge only
+            pending_view = dict(m)
+            pending_view["accumulator_eligible"] = _is_accumulator_eligible(m)
+            render_pending_card(pending_view)
             with st.expander("Enter result"):
                 c1, c2, c3 = st.columns([1, 1, 2])
                 with c1:
@@ -1725,11 +1727,7 @@ with tab_acc:
         st.error(f"Could not load accumulator matches: {e}")
         raw_acc = []
 
-    acc_matches = [
-        m for m in raw_acc
-        if not _is_quarantined(m)
-        and _cohort_from_row(m) in ("A_home", "A_away")
-    ]
+    acc_matches = [m for m in raw_acc if _is_accumulator_eligible(m)]
 
     if not acc_matches:
         st.info("No accumulator-eligible matches yet.")
@@ -1856,11 +1854,7 @@ with tab_perf:
                 st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                             f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
-            # ─────────────────────────────────────────────────────
-            # COHORT REPORTING — the only rule-based table
-            # Computed from signal_* and result, not agreement_split,
-            # not dc_hit. Quarantined rows already excluded.
-            # ─────────────────────────────────────────────────────
+            # COHORT REPORTING — computed from signal_* and result
             st.markdown("### Cohorts")
             cohort_df = cohort_summary(clean_settled)
             if cohort_df.empty:
@@ -1872,41 +1866,7 @@ with tab_perf:
                     hide_index=True,
                 )
 
-            # ─────────────────────────────────────────────────────
-            # Same table, grouped by direction for readability
-            # ─────────────────────────────────────────────────────
-            st.markdown("### Cohorts by direction")
-            clean_with_cohort = []
-            for m in clean_settled:
-                c = _cohort_from_row(m)
-                if c == "other":
-                    continue
-                hit = _cohort_hit(m)
-                if hit is None:
-                    continue
-                clean_with_cohort.append({
-                    "cohort": c,
-                    "market": _cohort_market_display(c),
-                    "hit": hit,
-                })
-            if clean_with_cohort:
-                cdf = pd.DataFrame(clean_with_cohort)
-                pivot = (
-                    cdf.groupby(["cohort", "market"])
-                    .agg(n=("hit", "count"), wins=("hit", "sum"))
-                    .reset_index()
-                )
-                pivot["losses"] = pivot["n"] - pivot["wins"]
-                pivot["DC hit %"] = (pivot["wins"] / pivot["n"] * 100).round(1)
-                st.dataframe(
-                    pivot[["cohort", "market", "n", "wins", "losses", "DC hit %"]],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            # ─────────────────────────────────────────────────────
             # Accumulator-only performance breakdown
-            # ─────────────────────────────────────────────────────
             if "accumulator" in df.columns:
                 acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
                 if not acc_bets.empty:
@@ -1935,4 +1895,4 @@ with tab_perf:
 
             st.markdown("### All settled matches")
             for m in clean_settled:
-                render_settled_card(m)
+                render_settled_card(m, is_acc_eligible=_is_accumulator_eligible(m))
