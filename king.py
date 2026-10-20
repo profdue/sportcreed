@@ -30,6 +30,34 @@ Form extraction, three sources in priority order:
 Every field failure is logged. Missing data never votes silently.
 
 ──────────────────────────────────────────────────────────────────────
+DECIDE() VERSION HISTORY
+──────────────────────────────────────────────────────────────────────
+
+  v1 (frozen, superseded by v2):
+    - 4-0 / 0-4         -> full stake
+    - 3-1 / 1-3         -> half stake (majority direction)
+    - 3-0-1 / 0-3-1     -> full stake
+    - 2-2               -> skip
+    - 2-1-1 / 1-2-1     -> skip
+    - 2-0-2 / 0-2-2     -> skip
+    - else              -> skip
+
+  v2 (current, promoted from retrospective 2-1-1 rule):
+    - 2-1-1             -> home, half stake, qualifying = 1
+    - 1-2-1             -> away, half stake, qualifying = 1
+    - all other rules unchanged from v1
+
+  Rationale for v2: 21 retrospective 2-1-1 picks in the 263-match
+  cohort hit 18/21 (85.7%), vs 83.8% for original-only picks. The
+  rule was already being applied via the `notes` field; v2 makes it
+  live so new matches are picked correctly at extraction time.
+
+  Everything else — 4-0, 0-4, 3-1, 1-3, 3-0-1, 0-3-1, 2-2, 2-0-2,
+  0-2-2, default skip, all stake sizes, settle(), compute_signals(),
+  compute_accumulator(), and the abs(score) >= 15 accumulator rule —
+  is FROZEN. Do not change without a new version entry above.
+
+──────────────────────────────────────────────────────────────────────
 MIGRATION (run once, manually — not executed by this app)
 ──────────────────────────────────────────────────────────────────────
 
@@ -106,6 +134,7 @@ st.markdown("""
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
+    .badge-promoted { background: #06b6d422; color: #22d3ee; border: 1px solid #06b6d455; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
@@ -196,8 +225,6 @@ def db_find_existing(row: dict):
 
     q = sb.table("matches").select("*")
 
-    # Only add filters for fields that are actually present and non-null,
-    # so we don't accidentally match a NULL against a real value.
     for field in ("match_date", "kickoff_time", "league",
                   "home_team", "away_team"):
         val = row.get(field)
@@ -416,6 +443,12 @@ def compute_signals(f: dict) -> dict:
 
 
 def decide(signals: dict) -> dict:
+    """
+    Frozen v2. See DECIDE() VERSION HISTORY at top of file.
+
+    v2 change from v1: 2-1-1 and 1-2-1 are now qualifying picks at
+    half stake instead of skips. All other rules unchanged.
+    """
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
     nothing = sum(1 for v in signals.values() if v == "nothing")
@@ -429,7 +462,7 @@ def decide(signals: dict) -> dict:
     else:
         majority = None
 
-    # 4-0 / 0-4
+    # 4-0 / 0-4 — FROZEN v1
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         return {
@@ -439,7 +472,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 3-1 / 1-3: majority direction, half stake
+    # 3-1 / 1-3 — FROZEN v1 (half stake, majority direction)
     if home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         return {
@@ -457,7 +490,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 3-0-1 / 0-3-1: full stake
+    # 3-0-1 / 0-3-1 — FROZEN v1 (full stake)
     if home == 3 and away == 0 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "nothing"), None)
         return {
@@ -475,7 +508,30 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 2-2: skip
+    # 2-1-1 / 1-2-1 — PROMOTED IN v2 (was skip in v1)
+    #
+    # 2-1-1: two signals home, one away, one abstained -> pick home at half.
+    # Dissent is the one away voter; the abstainer is not dissent.
+    #
+    # 1-2-1: mirror.
+    if home == 2 and away == 1 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        return {
+            "direction": "home", "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    if away == 2 and home == 1 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "home"), None)
+        return {
+            "direction": "away", "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-2 — FROZEN v1 (skip)
     if home == 2 and away == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -484,23 +540,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # 2-1-1 / 1-2-1: skip
-    if home == 2 and away == 1 and nothing == 1:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-    if away == 2 and home == 1 and nothing == 1:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    # 2-0-2 / 0-2-2: skip
+    # 2-0-2 / 0-2-2 — FROZEN v1 (skip)
     if home == 2 and away == 0 and nothing == 2:
         return {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -516,7 +556,7 @@ def decide(signals: dict) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # Default: skip
+    # Default — FROZEN v1 (skip)
     split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
     return {
         "direction": "skip", "stake": "none", "qualifying": 0,
@@ -527,6 +567,7 @@ def decide(signals: dict) -> dict:
 
 
 def settle(direction, stake, home_score, away_score):
+    """FROZEN. Do not change — settlement must match stored dc_hit/profit_loss."""
     if home_score > away_score:
         result = "home_win"
     elif away_score > home_score:
@@ -605,11 +646,9 @@ def compute_accumulator(facts, decision):
     """
     qualifying = decision.get("qualifying")
 
-    # Non-qualifying rows: leave unevaluated
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
 
-    # Qualifying rows: always evaluated
     direction = decision.get("direction")
     direction_is_valid = (not _is_missing(direction)) and direction != "skip"
 
@@ -1032,8 +1071,6 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     return None
 
 
-# --- keystat-item fallback ---
-
 _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
@@ -1095,8 +1132,6 @@ def _parse_form_from_keystat(soup):
     return home_wdl, away_wdl
 
 
-# --- form dispatch ---
-
 def _apply_form(f, side, wdl, source="prose"):
     w, d, l = wdl
     total = w + d + l or 1
@@ -1114,7 +1149,6 @@ def _parse_form(soup, home_sents, away_sents, f):
     home_short = f.get("home_team_short") or f.get("home_team", "")
     away_short = f.get("away_team_short") or f.get("away_team", "")
 
-    # --- Primary: prose ---
     home_form = _parse_form_from_sentences(
         home_sents, required_first_word=home_short, other_team=away_short
     )
@@ -1127,7 +1161,6 @@ def _parse_form(soup, home_sents, away_sents, f):
     if away_form:
         _apply_form(f, "away", away_form, source="prose")
 
-    # --- Fallback: keystat-item block ---
     need_home = "home_form_ppg" not in f
     need_away = "away_form_ppg" not in f
     if need_home or need_away:
@@ -1276,7 +1309,6 @@ def extract_facts(html: str) -> dict:
     ]:
         f.setdefault(k, None)
 
-    # Goal proxy — null-safe, all-or-nothing, storage only
     _compute_goal_proxy(f)
 
     return f
@@ -1293,7 +1325,6 @@ def signal_pill(name, value):
 
 
 def _home_support_strength(row) -> int:
-    """How many of the 4 signals voted home (0–4)."""
     return sum(
         1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
         if row.get(k) == "home"
@@ -1301,7 +1332,6 @@ def _home_support_strength(row) -> int:
 
 
 def _away_support_strength(row) -> int:
-    """How many of the 4 signals voted away (0–4)."""
     return sum(
         1 for k in ("signal_table", "signal_form", "signal_venue", "signal_h2h")
         if row.get(k) == "away"
@@ -1309,7 +1339,6 @@ def _away_support_strength(row) -> int:
 
 
 def _home_signature(row):
-    """Literal combination of signals voting home, e.g. 'T+F+V'."""
     bits = []
     if row.get("signal_table") == "home": bits.append("T")
     if row.get("signal_form")  == "home": bits.append("F")
@@ -1319,8 +1348,13 @@ def _home_signature(row):
 
 
 def _dissent_label(row):
-    """Dissent-signal bucket label (separate from literal combination)."""
     return row.get("dissent_signal") or "none"
+
+
+def _is_promoted_2_1_1(row) -> bool:
+    """True if this row qualifies under the v2 2-1-1 / 1-2-1 rule."""
+    split = row.get("agreement_split")
+    return split in ("2-1-1", "1-2-1")
 
 
 def render_pending_card(m: dict):
@@ -1332,6 +1366,7 @@ def render_pending_card(m: dict):
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc = bool(m.get("accumulator"))
+    is_promoted = _is_promoted_2_1_1(m)
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
@@ -1347,6 +1382,10 @@ def render_pending_card(m: dict):
         '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
         if is_acc else ""
     )
+    promoted_badge = (
+        '<span class="pick-badge badge-promoted" style="margin-left:8px">↑ v2 2-1-1</span>'
+        if is_promoted else ""
+    )
 
     pills = "".join([
         signal_pill("Table", m.get("signal_table", "nothing")),
@@ -1359,7 +1398,7 @@ def render_pending_card(m: dict):
     <div class="match-card {card_cls}">
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge_cls}">{pick_text}</span>{acc_badge}
+        <span class="pick-badge {badge_cls}">{pick_text}</span>{acc_badge}{promoted_badge}
         <div class="signal-row">{pills}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1377,6 +1416,7 @@ def render_settled_card(m: dict):
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc = bool(m.get("accumulator"))
+    is_promoted = _is_promoted_2_1_1(m)
 
     if dc_hit == 1:
         cls, badge, verdict = "win", "badge-win", "WIN"
@@ -1390,18 +1430,21 @@ def render_settled_card(m: dict):
         '<span class="pick-badge badge-acc" style="margin-left:8px">🎯 ACCUMULATOR</span>'
         if is_acc else ""
     )
+    promoted_badge = (
+        '<span class="pick-badge badge-promoted" style="margin-left:8px">↑ v2 2-1-1</span>'
+        if is_promoted else ""
+    )
 
     st.markdown(f"""
     <div class="match-card {cls}">
         <div class="match-title">{home} {hs}–{aws} {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
-        <span class="pick-badge {badge}">{verdict} · {pl}</span>{acc_badge}
+        <span class="pick-badge {badge}">{verdict} · {pl}</span>{acc_badge}{promoted_badge}
     </div>
     """, unsafe_allow_html=True)
 
 
 def render_accumulator_card(m: dict):
-    """Compact card for the accumulator tab."""
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
     direction = m.get("direction", "skip")
@@ -1478,8 +1521,11 @@ def _compute_shadow_flags(decision):
 
     - away_table_dissent : direction == away and dissent_signal == table
     - low_hit_1-3        : agreement_split == '1-3' (historical low hit rate)
+    - promoted_2-1-1     : qualifying 2-1-1 / 1-2-1 pick under v2
+                           (identifies which picks only exist because of
+                           the v2 promotion, without re-parsing notes)
 
-    Neither flag alters direction, stake, qualifying, or accumulator.
+    None of these alter direction, stake, qualifying, or accumulator.
     """
     flags = []
     if (decision.get("direction") == "away"
@@ -1487,6 +1533,9 @@ def _compute_shadow_flags(decision):
         flags.append("away_table_dissent")
     if decision.get("split") == "1-3":
         flags.append("low_hit_1-3")
+    if (decision.get("qualifying") == 1
+            and decision.get("split") in ("2-1-1", "1-2-1")):
+        flags.append("promoted_2-1-1")
     return flags
 
 
@@ -1506,10 +1555,8 @@ def build_row(facts, signals, decision):
     row["extracted_at"]    = now_iso   # legacy (TEXT)
     row["extracted_at_ts"] = now_iso   # canonical (timestamptz)
 
-    # Frozen rule abs(score) >= 15
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    # Shadow flags — derived, never influence the decision
     shadow_flags = _compute_shadow_flags(decision)
     row["shadow_flags"] = shadow_flags
     row["would_have_skipped_away_table"] = "away_table_dissent" in shadow_flags
@@ -1571,12 +1618,11 @@ with tab_new:
             try:
                 facts = extract_facts(html_in)
                 signals = compute_signals(facts)
-                decision = decide(signals)   # frozen
+                decision = decide(signals)   # frozen v2
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
                 st.stop()
 
-        # Shadow flags — metadata only, do not alter decision
         shadow_flags = _compute_shadow_flags(decision)
 
         st.markdown("### The Pick")
@@ -1587,7 +1633,6 @@ with tab_new:
         if shadow_flags:
             st.caption(f"Shadow flags: `{', '.join(shadow_flags)}` (reporting only — action unchanged)")
 
-        # Show the accumulator score directly
         try:
             acc_score = calc_accumulator_score(facts)
             st.markdown(
@@ -1786,13 +1831,24 @@ with tab_perf:
         if "accumulator" in df.columns:
             df["accumulator"] = df["accumulator"].fillna(False).astype(bool)
 
+        # Unit of account: dc_hit * stake (independent of profit_loss, which
+        # is 0 on the 21 retrospective 2-1-1 rows by design).
+        df["stake_units"] = df["stake"].map(
+            {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}
+        ).fillna(0.0)
+        df["units"] = df.apply(
+            lambda r: (r["stake_units"] if r["dc_hit"] == 1 else -r["stake_units"])
+                      if pd.notna(r["dc_hit"]) else 0.0,
+            axis=1,
+        )
+
         qualifying = df[df["qualifying"] == 1]
         bets = qualifying[qualifying["dc_hit"].notna()]
 
         total = len(bets)
         wins = int((bets["dc_hit"] == 1).sum()) if not bets.empty else 0
         losses = int((bets["dc_hit"] == 0).sum()) if not bets.empty else 0
-        net = float(df["profit_loss"].sum())
+        net = float(df["units"].sum())          # corrected unit total
         hit_rate = (wins / total * 100) if total else 0.0
 
         c1, c2, c3, c4 = st.columns(4)
@@ -1808,7 +1864,7 @@ with tab_perf:
         with c4:
             color = "#10b981" if net >= 0 else "#ef4444"
             st.markdown(f'<div class="metric-box"><div class="metric-value" style="color:{color}">{net:+.2f}u</div>'
-                        f'<div class="metric-label">Net P/L</div></div>', unsafe_allow_html=True)
+                        f'<div class="metric-label">Net Units (dc_hit×stake)</div></div>', unsafe_allow_html=True)
 
         st.markdown("")
         c5, c6, c7 = st.columns(3)
@@ -1825,13 +1881,12 @@ with tab_perf:
             st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                         f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
-        # Accumulator-only performance breakdown
         if "accumulator" in df.columns:
             acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
             if not acc_bets.empty:
                 acc_wins = int((acc_bets["dc_hit"] == 1).sum())
                 acc_total = len(acc_bets)
-                acc_net = float(acc_bets["profit_loss"].sum())
+                acc_net = float(acc_bets["units"].sum())
                 acc_hr = (acc_wins / acc_total * 100) if acc_total else 0.0
                 st.markdown("#### 🎯 Accumulator-only (settled)")
                 a1, a2, a3, a4 = st.columns(4)
@@ -1848,9 +1903,36 @@ with tab_perf:
                     color = "#10b981" if acc_net >= 0 else "#ef4444"
                     st.markdown(
                         f'<div class="metric-box"><div class="metric-value" style="color:{color}">{acc_net:+.2f}u</div>'
-                        f'<div class="metric-label">Net P/L</div></div>',
+                        f'<div class="metric-label">Net Units</div></div>',
                         unsafe_allow_html=True,
                     )
+
+        # ── Promoted 2-1-1 rule performance ──
+        st.markdown("#### ↑ v2 2-1-1 promotion")
+        st.caption(
+            "Picks that only qualify because of the v2 promotion "
+            "(split = '2-1-1' or '1-2-1', qualifying = 1, half stake). "
+            "Includes the 21 retrospective rows from the original cohort."
+        )
+        promoted = bets[bets["agreement_split"].isin(["2-1-1", "1-2-1"])]
+        if not promoted.empty:
+            p_wins = int((promoted["dc_hit"] == 1).sum())
+            p_total = len(promoted)
+            p_net = float(promoted["units"].sum())
+            p_hr = (p_wins / p_total * 100) if p_total else 0.0
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{p_total}</div>'
+                            f'<div class="metric-label">Picks</div></div>', unsafe_allow_html=True)
+            with p2:
+                st.markdown(f'<div class="metric-box"><div class="metric-value">{p_hr:.1f}%</div>'
+                            f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
+            with p3:
+                color = "#10b981" if p_net >= 0 else "#ef4444"
+                st.markdown(f'<div class="metric-box"><div class="metric-value" style="color:{color}">{p_net:+.2f}u</div>'
+                            f'<div class="metric-label">Net Units</div></div>', unsafe_allow_html=True)
+        else:
+            st.info("No promoted 2-1-1 picks settled yet.")
 
         st.markdown("### By agreement split")
         if not qualifying.empty:
@@ -1859,8 +1941,9 @@ with tab_perf:
                         .agg(total=("match_id", "count"),
                              wins=("dc_hit", lambda s: int((s == 1).sum())),
                              losses=("dc_hit", lambda s: int((s == 0).sum())),
-                             net=("profit_loss", "sum"))
-                        .reset_index())
+                             units=("units", "sum"))
+                        .reset_index()
+                        .sort_values("total", ascending=False))
             st.dataframe(by_split, use_container_width=True, hide_index=True)
 
         st.markdown("### By dissent signal")
@@ -1871,25 +1954,18 @@ with tab_perf:
                           .agg(total=("match_id", "count"),
                                wins=("dc_hit", lambda s: int((s == 1).sum())),
                                losses=("dc_hit", lambda s: int((s == 0).sum())),
-                               net=("profit_loss", "sum"))
-                          .reset_index())
+                               units=("units", "sum"))
+                          .reset_index()
+                          .sort_values("total", ascending=False))
             st.dataframe(by_dissent, use_container_width=True, hide_index=True)
         else:
             st.info("No dissent-signal data yet.")
 
-        # ─────────────────────────────────────────────────────────
-        # HOME BEST AGREEMENT — literal combination (not dissent)
-        # ─────────────────────────────────────────────────────────
+        # ── Home support strength ──
         st.markdown("### 🏠 Home support strength")
-
         if not qualifying.empty:
             strength_df = qualifying.copy()
-            strength_df["home_support"] = strength_df.apply(
-                _home_support_strength, axis=1
-            )
-            strength_df["away_support"] = strength_df.apply(
-                _away_support_strength, axis=1
-            )
+            strength_df["home_support"] = strength_df.apply(_home_support_strength, axis=1)
 
             home_picks = strength_df[strength_df["direction"] == "home"]
             settled_home = home_picks[home_picks["dc_hit"].notna()]
@@ -1902,14 +1978,12 @@ with tab_perf:
                         total=("match_id", "count"),
                         wins=("dc_hit", lambda s: int((s == 1).sum())),
                         losses=("dc_hit", lambda s: int((s == 0).sum())),
-                        net=("profit_loss", "sum"),
+                        units=("units", "sum"),
                     )
                     .reset_index()
                 )
                 by_home_support["hit_rate"] = (
-                    by_home_support["wins"]
-                    / by_home_support["total"]
-                    * 100
+                    by_home_support["wins"] / by_home_support["total"] * 100
                 ).round(1)
                 by_home_support = by_home_support.sort_values(
                     "home_support", ascending=False
@@ -1932,11 +2006,11 @@ with tab_perf:
                         unsafe_allow_html=True,
                     )
                 with hc3:
-                    color = "#10b981" if best["net"] >= 0 else "#ef4444"
+                    color = "#10b981" if best["units"] >= 0 else "#ef4444"
                     st.markdown(
                         f'<div class="metric-box">'
-                        f'<div class="metric-value" style="color:{color}">{best["net"]:+.2f}u</div>'
-                        f'<div class="metric-label">Net P/L (best bucket)</div></div>',
+                        f'<div class="metric-value" style="color:{color}">{best["units"]:+.2f}u</div>'
+                        f'<div class="metric-label">Units (best bucket)</div></div>',
                         unsafe_allow_html=True,
                     )
 
@@ -1946,21 +2020,18 @@ with tab_perf:
                         "total": "bets",
                         "wins": "wins",
                         "losses": "losses",
-                        "net": "net P/L",
+                        "units": "units",
                         "hit_rate": "hit %",
                     }),
                     use_container_width=True,
                     hide_index=True,
                 )
-            else:
-                st.info("No settled home picks yet.")
 
-            # ── Table A: literal signal combination ──
+            # Literal signal combination
             st.markdown("#### Home pick — literal signal combination")
             st.caption(
                 "Signals that actually voted home. T = table, F = form, "
-                "V = venue, H = H2H. This is the literal combination — "
-                "e.g. 'T+F+V' means those three voted home and H2H did not."
+                "V = venue, H = H2H."
             )
             if not settled_home.empty:
                 sig_df = settled_home.copy()
@@ -1971,37 +2042,28 @@ with tab_perf:
                     .agg(
                         total=("match_id", "count"),
                         wins=("dc_hit", lambda s: int((s == 1).sum())),
-                        net=("profit_loss", "sum"),
+                        units=("units", "sum"),
                     )
                     .reset_index()
                 )
-                by_sig["hit_rate"] = (
-                    by_sig["wins"] / by_sig["total"] * 100
-                ).round(1)
-                by_sig = by_sig.sort_values(
-                    ["total", "hit_rate"], ascending=False
-                )
+                by_sig["hit_rate"] = (by_sig["wins"] / by_sig["total"] * 100).round(1)
+                by_sig = by_sig.sort_values(["total", "hit_rate"], ascending=False)
                 st.dataframe(
                     by_sig.rename(columns={
                         "home_signature": "signals voting home (literal)",
                         "total": "bets",
                         "wins": "wins",
-                        "net": "net P/L",
+                        "units": "units",
                         "hit_rate": "hit %",
                     }),
                     use_container_width=True,
                     hide_index=True,
                 )
-            else:
-                st.info("No settled home picks yet.")
 
-            # ── Table B: dissent bucket ──
+            # Dissent bucket
             st.markdown("#### Home pick — dissent bucket")
             st.caption(
-                "Groups by dissent_signal. This is NOT the literal signal "
-                "combination — it is the signal that voted against the "
-                "majority. A '3-1' home pick with dissent='h2h' appears "
-                "here, not in the 'T+F+V' literal bucket."
+                "Groups by dissent_signal. NOT the literal signal combination."
             )
             if not settled_home.empty:
                 diss_df = settled_home.copy()
@@ -2012,36 +2074,30 @@ with tab_perf:
                     .agg(
                         total=("match_id", "count"),
                         wins=("dc_hit", lambda s: int((s == 1).sum())),
-                        net=("profit_loss", "sum"),
+                        units=("units", "sum"),
                     )
                     .reset_index()
                 )
-                by_diss["hit_rate"] = (
-                    by_diss["wins"] / by_diss["total"] * 100
-                ).round(1)
-                by_diss = by_diss.sort_values(
-                    ["total", "hit_rate"], ascending=False
-                )
+                by_diss["hit_rate"] = (by_diss["wins"] / by_diss["total"] * 100).round(1)
+                by_diss = by_diss.sort_values(["total", "hit_rate"], ascending=False)
                 st.dataframe(
                     by_diss.rename(columns={
                         "dissent_label": "dissent signal",
                         "total": "bets",
                         "wins": "wins",
-                        "net": "net P/L",
+                        "units": "units",
                         "hit_rate": "hit %",
                     }),
                     use_container_width=True,
                     hide_index=True,
                 )
-            else:
-                st.info("No settled home picks yet.")
 
-            # ── Shadow-flag tracking note ──
+            # Shadow flags (prospective)
             if "shadow_flags" in df.columns or "would_have_skipped_away_table" in df.columns:
                 st.markdown("#### Shadow flags (prospective)")
                 st.caption(
                     "Shadow flags record what a proposed rule *would* have done. "
-                    "They do not affect direction, stake, or P/L. "
+                    "They do not affect direction, stake, or units. "
                     "Evaluate prospectively over the next 100 settled matches."
                 )
                 if "would_have_skipped_away_table" in df.columns:
@@ -2050,11 +2106,11 @@ with tab_perf:
                     if not wsa_settled.empty:
                         wsa_wins = int((wsa_settled["dc_hit"] == 1).sum())
                         wsa_total = len(wsa_settled)
-                        wsa_net = float(wsa_settled["profit_loss"].sum())
+                        wsa_units = float(wsa_settled["units"].sum())
                         st.write(
                             f"**away_table_dissent** — "
                             f"{wsa_total} settled, {wsa_wins} wins, "
-                            f"net {wsa_net:+.2f}u (actual, not shadowed)"
+                            f"net {wsa_units:+.2f}u (actual, not shadowed)"
                         )
                     else:
                         st.write("**away_table_dissent** — no settled matches yet.")
