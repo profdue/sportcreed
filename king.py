@@ -221,10 +221,10 @@ def _is_quarantined(row: dict) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SIGNAL SET CLASSIFICATION — literal signal columns only
+# COHORT CLASSIFICATION — literal signal columns only
 # ═══════════════════════════════════════════════════════════════════
 
-def _signal_set_label(signals: dict, direction: str) -> str:
+def _cohort_label(signals: dict, direction: str) -> str:
     t = signals.get("table")
     f = signals.get("form")
     v = signals.get("venue")
@@ -232,39 +232,68 @@ def _signal_set_label(signals: dict, direction: str) -> str:
 
     if direction == "home":
         if t == "home" and f == "home" and v == "home" and h == "home":
-            return "A_home"
+            return "A"
         if t == "home" and f == "home" and v == "home" and h in ("away", "nothing"):
-            return "B_home_h2h_fade"
+            return "B"
         if t == "home" and f == "home":
-            return "C_home_tf"
+            return "C"
     elif direction == "away":
         if t == "away" and f == "away" and v == "away" and h == "away":
-            return "A_away"
+            return "A"
         if t == "away" and f == "away":
-            return "C_away_tf"
+            return "C"
 
     return "other"
 
 
-def _signal_set_from_row(row: dict) -> str:
+def _cohort_from_row(row: dict) -> str:
     sig = {
         "table": row.get("signal_table"),
         "form":  row.get("signal_form"),
         "venue": row.get("signal_venue"),
         "h2h":   row.get("signal_h2h"),
     }
-    return _signal_set_label(sig, row.get("direction"))
+    return _cohort_label(sig, row.get("direction"))
 
 
-_SIGNAL_SET_MARKET = {
-    "A_home":          "Home/Draw",
-    "A_away":          "Away/Draw",
-    "B_home_h2h_fade": "Home/Draw",
-    "C_home_tf":       "Home/Draw",
-    "C_away_tf":       "Away/Draw",
-    "other":           None,
+def _cohort_meaning(signals: dict, direction: str) -> str:
+    """Generate the explicit signal description for the cohort, e.g. 'T=A, F=A, V=A, H2H=A'."""
+    t = signals.get("table")
+    f = signals.get("form")
+    v = signals.get("venue")
+    h = signals.get("h2h")
+
+    def short(sig):
+        if sig == "home": return "H"
+        if sig == "away": return "A"
+        return "N"
+
+    return f"T={short(t)}, F={short(f)}, V={short(v)}, H2H={short(h)}"
+
+
+def _cohort_meaning_from_row(row: dict) -> str:
+    sig = {
+        "table": row.get("signal_table"),
+        "form":  row.get("signal_form"),
+        "venue": row.get("signal_venue"),
+        "h2h":   row.get("signal_h2h"),
+    }
+    return _cohort_meaning(sig, row.get("direction"))
+
+
+_COHORT_MARKET = {
+    "A": "Unanimous",
+    "B": "H2H Fade",
+    "C": "T+F Core",
+    "other": None,
 }
 
+def _cohort_market_display(cohort: str, direction: str) -> str:
+    market = "Home/Draw" if direction == "home" else ("Away/Draw" if direction == "away" else "No Bet")
+    desc = _COHORT_MARKET.get(cohort)
+    if desc:
+        return f"{desc} ({market})"
+    return market
 
 def _market_label(direction: str) -> str:
     if direction == "home":
@@ -274,16 +303,12 @@ def _market_label(direction: str) -> str:
     return "No Bet"
 
 
-def _signal_set_market_display(signal_set: str) -> str:
-    return _SIGNAL_SET_MARKET.get(signal_set) or "No Bet"
-
-
 def _is_accumulator_eligible(row: dict) -> bool:
     if not row.get("accumulator"):
         return False
     if _is_quarantined(row):
         return False
-    if _signal_set_from_row(row) not in ("A_home", "A_away"):
+    if _cohort_from_row(row) != "A":
         return False
     return True
 
@@ -1499,48 +1524,64 @@ def build_row(facts, signals, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SIGNAL SET METRICS — computed from signal_* and result
+# COHORT METRICS — computed from signal_* and result, never from
+# agreement_split or dc_hit. Quarantined rows excluded.
 # ═══════════════════════════════════════════════════════════════════
 
-def _signal_set_hit(row: dict):
+def _cohort_hit(row: dict):
     result = row.get("result")
     if result is None:
         return None
-    sig_set = _signal_set_from_row(row)
-    if sig_set in ("A_home", "B_home_h2h_fade", "C_home_tf"):
+    cohort = _cohort_from_row(row)
+    if cohort == "A":
+        direction = row.get("direction")
+        if direction == "home":
+            return 1 if result in ("home_win", "draw") else 0
+        if direction == "away":
+            return 1 if result in ("away_win", "draw") else 0
+    if cohort == "B":
         return 1 if result in ("home_win", "draw") else 0
-    if sig_set in ("A_away", "C_away_tf"):
-        return 1 if result in ("away_win", "draw") else 0
+    if cohort == "C":
+        direction = row.get("direction")
+        if direction == "home":
+            return 1 if result in ("home_win", "draw") else 0
+        if direction == "away":
+            return 1 if result in ("away_win", "draw") else 0
     return None
 
 
-def signal_set_summary(rows: list) -> pd.DataFrame:
+def cohort_summary(rows: list) -> pd.DataFrame:
     records = []
     for r in rows:
-        sig_set = _signal_set_from_row(r)
-        if sig_set == "other":
+        cohort = _cohort_from_row(r)
+        if cohort == "other":
             continue
-        hit = _signal_set_hit(r)
+        hit = _cohort_hit(r)
         if hit is None:
             continue
         records.append({
-            "signal_set": sig_set,
-            "market": _signal_set_market_display(sig_set),
+            "cohort": cohort,
+            "meaning": _cohort_meaning_from_row(r),
+            "market": _cohort_market_display(cohort, r.get("direction")),
             "hit": hit,
         })
     if not records:
         return pd.DataFrame(
-            columns=["signal_set", "market", "n", "wins", "losses", "DC hit %"]
+            columns=["cohort", "meaning", "market", "n", "wins", "losses", "DC hit %"]
         )
+    
     df = pd.DataFrame(records)
     out = (
-        df.groupby(["signal_set", "market"])
+        df.groupby(["cohort", "meaning", "market"])
         .agg(n=("hit", "count"), wins=("hit", "sum"))
         .reset_index()
     )
     out["losses"] = out["n"] - out["wins"]
     out["DC hit %"] = (out["wins"] / out["n"] * 100).round(1)
-    return out[["signal_set", "market", "n", "wins", "losses", "DC hit %"]]
+    
+    # Sort by Cohort (A, B, C) and then by n desc
+    out = out.sort_values(by=["cohort", "n"], ascending=[True, False])
+    return out[["cohort", "meaning", "market", "n", "wins", "losses", "DC hit %"]]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1579,9 +1620,12 @@ with tab_new:
                 st.stop()
 
         shadow_flags = _compute_shadow_flags(decision)
-        sig_set = _signal_set_label(signals, decision.get("direction"))
-        market = _signal_set_market_display(sig_set)
+        cohort = _cohort_label(signals, decision.get("direction"))
+        market = _cohort_market_display(cohort, decision.get("direction"))
+        meaning = _cohort_meaning(signals, decision.get("direction"))
 
+        # Build the preview row the same way build_row does, then
+        # decide accumulator eligibility for the card badge only.
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
         preview["accumulator"] = compute_accumulator(facts, decision)
         preview["accumulator_eligible"] = _is_accumulator_eligible(preview)
@@ -1602,7 +1646,7 @@ with tab_new:
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
 
-        st.markdown(f"**Signal Set:** `{sig_set}` · **Market:** `{market}`")
+        st.markdown(f"**Cohort {cohort}** · {meaning} · **Market:** {market}")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -1663,6 +1707,7 @@ with tab_pending:
         st.info("No pending matches.")
     else:
         for m in pending:
+            # Attach the eligibility flag for the badge only
             pending_view = dict(m)
             pending_view["accumulator_eligible"] = _is_accumulator_eligible(m)
             render_pending_card(pending_view)
@@ -1704,8 +1749,7 @@ with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
         "Matches whose stored `accumulator` flag is TRUE, restricted to "
-        "Unanimous Signal Sets (A_home / A_away), with retrospective "
-        "edits excluded."
+        "Cohort A (Unanimous), with retrospective edits excluded."
     )
 
     try:
@@ -1789,6 +1833,7 @@ with tab_perf:
     if not settled:
         st.info("No settled matches yet.")
     else:
+        # Exclude retrospective rows from all cohort metrics
         clean_settled = [m for m in settled if not _is_quarantined(m)]
 
         df = pd.DataFrame(clean_settled)
@@ -1840,17 +1885,19 @@ with tab_perf:
                 st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                             f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
-            st.markdown("### Signal Sets")
-            sets_df = signal_set_summary(clean_settled)
-            if sets_df.empty:
-                st.info("No signal-set classified settled picks yet.")
+            # COHORT REPORTING — computed from signal_* and result
+            st.markdown("### Cohorts")
+            cohort_df = cohort_summary(clean_settled)
+            if cohort_df.empty:
+                st.info("No cohort-classified settled picks yet.")
             else:
                 st.dataframe(
-                    sets_df,
+                    cohort_df,
                     use_container_width=True,
                     hide_index=True,
                 )
 
+            # Accumulator-only performance breakdown
             if "accumulator" in df.columns:
                 acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
                 if not acc_bets.empty:
