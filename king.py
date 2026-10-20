@@ -35,10 +35,10 @@ MIGRATION (run once, manually — not executed by this app)
 
   -- Legacy: extracted_at remains TEXT. Do not alter.
   alter table matches add column if not exists extracted_at_ts timestamptz;
-  alter table matches add column if not exists shadow_flags jsonb;
   alter table matches add column if not exists would_have_skipped_away_table boolean;
   alter table matches add column if not exists attack_sum float;
   alter table matches add column if not exists exp_proxy_avg float;
+  alter table matches add column if not exists venue_opposition boolean;
   -- only if tracking odds (one price per match):
   alter table matches add column if not exists odds_market text;
   alter table matches add column if not exists odds_value numeric;
@@ -257,7 +257,6 @@ def _cohort_from_row(row: dict) -> str:
 
 
 def _cohort_meaning(signals: dict, direction: str) -> str:
-    """Generate the explicit signal description for the cohort, e.g. 'T=A, F=A, V=A, H2H=A'."""
     t = signals.get("table")
     f = signals.get("form")
     v = signals.get("venue")
@@ -1464,16 +1463,6 @@ def decision_columns(d):
     }
 
 
-def _compute_shadow_flags(decision):
-    flags = []
-    if (decision.get("direction") == "away"
-            and decision.get("dissent_signal") == "table"):
-        flags.append("away_table_dissent")
-    if decision.get("split") == "1-3":
-        flags.append("low_hit_1-3")
-    return flags
-
-
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
@@ -1492,9 +1481,18 @@ def build_row(facts, signals, decision):
 
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    shadow_flags = _compute_shadow_flags(decision)
-    row["shadow_flags"] = shadow_flags
-    row["would_have_skipped_away_table"] = "away_table_dissent" in shadow_flags
+    # NEW: venue_opposition flag
+    direction = decision.get("direction")
+    venue = signals.get("venue")
+    row["venue_opposition"] = (
+        direction in ("home", "away") 
+        and venue not in ("nothing", direction)
+    )
+    
+    # Maintain would_have_skipped_away_table for backward compatibility
+    row["would_have_skipped_away_table"] = (
+        direction == "away" and decision.get("dissent_signal") == "table"
+    )
 
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
@@ -1518,7 +1516,8 @@ def build_row(facts, signals, decision):
         "extracted_at", "extracted_at_ts",
         "accumulator",
         "attack_sum", "exp_proxy_avg",
-        "shadow_flags", "would_have_skipped_away_table",
+        "would_have_skipped_away_table",
+        "venue_opposition",
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1579,9 +1578,33 @@ def cohort_summary(rows: list) -> pd.DataFrame:
     out["losses"] = out["n"] - out["wins"]
     out["DC hit %"] = (out["wins"] / out["n"] * 100).round(1)
     
-    # Sort by Cohort (A, B, C) and then by n desc
     out = out.sort_values(by=["cohort", "n"], ascending=[True, False])
     return out[["cohort", "meaning", "market", "n", "wins", "losses", "DC hit %"]]
+
+
+def venue_opposition_summary(rows: list) -> pd.DataFrame:
+    records = []
+    for r in rows:
+        if r.get("direction") not in ("home", "away"):
+            continue
+        if r.get("dc_hit") is None:
+            continue
+        
+        records.append({
+            "opposes": bool(r.get("venue_opposition", False)),
+            "hit": int(r["dc_hit"]),
+        })
+    
+    if not records:
+        return pd.DataFrame(columns=["venue_opposition", "n", "wins", "losses", "Hit Rate %"])
+    
+    df = pd.DataFrame(records)
+    out = df.groupby("opposes").agg(n=("hit", "count"), wins=("hit", "sum")).reset_index()
+    out["losses"] = out["n"] - out["wins"]
+    out["Hit Rate %"] = (out["wins"] / out["n"] * 100).round(1)
+    out["venue_opposition"] = out["opposes"].map({True: "Yes (Fought Pick)", False: "No"})
+    out = out.sort_values(by="venue_opposition", ascending=False)
+    return out[["venue_opposition", "n", "wins", "losses", "Hit Rate %"]]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1619,13 +1642,14 @@ with tab_new:
                 st.error(f"Extraction failed: {e}")
                 st.stop()
 
-        shadow_flags = _compute_shadow_flags(decision)
         cohort = _cohort_label(signals, decision.get("direction"))
         market = _cohort_market_display(cohort, decision.get("direction"))
         meaning = _cohort_meaning(signals, decision.get("direction"))
+        
+        direction = decision.get("direction")
+        venue = signals.get("venue")
+        venue_opposition = (direction in ("home", "away") and venue not in ("nothing", direction))
 
-        # Build the preview row the same way build_row does, then
-        # decide accumulator eligibility for the card badge only.
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
         preview["accumulator"] = compute_accumulator(facts, decision)
         preview["accumulator_eligible"] = _is_accumulator_eligible(preview)
@@ -1633,8 +1657,8 @@ with tab_new:
         st.markdown("### The Pick")
         render_pending_card(preview)
 
-        if shadow_flags:
-            st.caption(f"Shadow flags: `{', '.join(shadow_flags)}` (reporting only — action unchanged)")
+        if venue_opposition:
+            st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (Tracking this as a candidate negative signal)")
 
         try:
             acc_score = calc_accumulator_score(facts)
@@ -1674,13 +1698,6 @@ with tab_new:
                 f"saved {existing.get('extracted_at', 'earlier')}). "
                 f"Prediction was regenerated above but **not** re-saved."
             )
-            stored_acc = existing.get("accumulator")
-            new_acc = row.get("accumulator")
-            if stored_acc != new_acc:
-                st.warning(
-                    f"⚠️ Accumulator flag differs — "
-                    f"stored: `{stored_acc}`, recomputed: `{new_acc}`."
-                )
         else:
             with st.spinner("Saving to Supabase..."):
                 try:
@@ -1707,7 +1724,6 @@ with tab_pending:
         st.info("No pending matches.")
     else:
         for m in pending:
-            # Attach the eligibility flag for the badge only
             pending_view = dict(m)
             pending_view["accumulator_eligible"] = _is_accumulator_eligible(m)
             render_pending_card(pending_view)
@@ -1833,7 +1849,6 @@ with tab_perf:
     if not settled:
         st.info("No settled matches yet.")
     else:
-        # Exclude retrospective rows from all cohort metrics
         clean_settled = [m for m in settled if not _is_quarantined(m)]
 
         df = pd.DataFrame(clean_settled)
@@ -1885,7 +1900,6 @@ with tab_perf:
                 st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
                             f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
 
-            # COHORT REPORTING — computed from signal_* and result
             st.markdown("### Cohorts")
             cohort_df = cohort_summary(clean_settled)
             if cohort_df.empty:
@@ -1897,32 +1911,17 @@ with tab_perf:
                     hide_index=True,
                 )
 
-            # Accumulator-only performance breakdown
-            if "accumulator" in df.columns:
-                acc_bets = bets[bets["accumulator"] == True]  # noqa: E712
-                if not acc_bets.empty:
-                    acc_wins = int((acc_bets["dc_hit"] == 1).sum())
-                    acc_total = len(acc_bets)
-                    acc_net = float(acc_bets["profit_loss"].sum())
-                    acc_hr = (acc_wins / acc_total * 100) if acc_total else 0.0
-                    st.markdown("#### 🎯 Accumulator-only (settled)")
-                    a1, a2, a3, a4 = st.columns(4)
-                    with a1:
-                        st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_total}</div>'
-                                    f'<div class="metric-label">Bets</div></div>', unsafe_allow_html=True)
-                    with a2:
-                        st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_wins}</div>'
-                                    f'<div class="metric-label">Wins</div></div>', unsafe_allow_html=True)
-                    with a3:
-                        st.markdown(f'<div class="metric-box"><div class="metric-value">{acc_hr:.1f}%</div>'
-                                    f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
-                    with a4:
-                        color = "#10b981" if acc_net >= 0 else "#ef4444"
-                        st.markdown(
-                            f'<div class="metric-box"><div class="metric-value" style="color:{color}">{acc_net:+.2f}u</div>'
-                            f'<div class="metric-label">Net P/L</div></div>',
-                            unsafe_allow_html=True,
-                        )
+            st.markdown("### Venue Opposition (Experiment)")
+            st.caption("Tracks when the Venue signal actively opposes the pick direction.")
+            venue_df = venue_opposition_summary(clean_settled)
+            if venue_df.empty:
+                st.info("No settled venue opposition data yet.")
+            else:
+                st.dataframe(
+                    venue_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
             st.markdown("### All settled matches")
             for m in clean_settled:
