@@ -1298,13 +1298,9 @@ def _dissent_label(row):
 
 
 def _verdict_label(dc_hit, result) -> str:
-    """
-    Honest verdict label. A DC pick that hits on a draw is a WIN, but not
-    a WIN on the Moneyline. Show the distinction so DC is never presented
-    as a straight-win prediction.
-    """
+    """DC win, DC loss, or no bet. Draws are wins on 1X/X2 — no caveat."""
     if dc_hit == 1:
-        return "WIN (draw)" if result == "draw" else "WIN"
+        return "WIN"
     if dc_hit == 0:
         return "LOSS"
     return "NO BET"
