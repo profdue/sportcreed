@@ -39,11 +39,27 @@ MIGRATION (run once, manually — not executed by this app)
   alter table matches add column if not exists would_have_skipped_away_table boolean;
   alter table matches add column if not exists attack_sum float;
   alter table matches add column if not exists exp_proxy_avg float;
+  alter table matches add column if not exists is_retrospective boolean not null default false;
+  alter table matches add column if not exists market_intent text;
   -- only if tracking odds (one price per match):
   alter table matches add column if not exists odds_market text;
   alter table matches add column if not exists odds_value numeric;
   alter table matches add column if not exists odds_book text;
   alter table matches add column if not exists odds_captured_at timestamptz;
+
+  -- Backfill provenance from the legacy free-text notes:
+  update matches
+     set is_retrospective = true
+   where notes ilike 'Retrospectively%'
+     and is_retrospective = false;
+
+  -- Backfill market_intent for historical rows: leave as 'legacy_unknown'
+  -- so the audit can distinguish intent from emission. Do NOT infer
+  -- intent from direction/stake — that reproduces the very drift the
+  -- audit is trying to expose.
+  update matches
+     set market_intent = 'legacy_unknown'
+   where market_intent is null;
 """
 
 import re
@@ -96,6 +112,7 @@ st.markdown("""
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
+    .badge-draw { background: #eab30822; color: #facc15; border: 1px solid #eab30855; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
@@ -526,6 +543,54 @@ def settle(direction, stake, home_score, away_score):
 
     profit = units if hit else -units
     return result, (1 if hit else 0), units, profit
+
+
+def _market_intent_from_decision(decision: dict) -> str:
+    """
+    What the pick *meant* to bet, independent of what direction it emitted.
+    The settle() implementation treats home picks as DC 1X and away picks
+    as DC X2 — the market_intent column makes that explicit.
+    """
+    direction = decision.get("direction")
+    if direction == "home":
+        return "1X"
+    if direction == "away":
+        return "X2"
+    return "none"
+
+
+def _cohort_label(signals: dict, direction: str) -> str:
+    """
+    Literal-signal cohort label for reporting and for the audit. Not used
+    as an input to decide(); it is a read-only classification derived from
+    the stored signal_* columns.
+
+        A      — Unanimous: all four signals vote `direction`
+        A_away — Unanimous Away (explicit, because the Home and Away
+                 rates are asymmetric and must be reported separately)
+        B      — Home H2H Fade: T=H, F=H, V=H, H2H != H
+        C      — T+F Core: T=direction, F=direction
+        other  — anything else
+    """
+    t = signals.get("table")
+    f = signals.get("form")
+    v = signals.get("venue")
+    h = signals.get("h2h")
+
+    if direction == "home":
+        if t == "home" and f == "home" and v == "home" and h == "home":
+            return "A_home"
+        if t == "home" and f == "home" and v == "home" and h != "home":
+            return "B_home_h2h_fade"
+        if t == "home" and f == "home":
+            return "C_home_tf"
+    elif direction == "away":
+        if t == "away" and f == "away" and v == "away" and h == "away":
+            return "A_away"
+        if t == "away" and f == "away":
+            return "C_away_tf"
+
+    return "other"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1232,6 +1297,19 @@ def _dissent_label(row):
     return row.get("dissent_signal") or "none"
 
 
+def _verdict_label(dc_hit, result) -> str:
+    """
+    Honest verdict label. A DC pick that hits on a draw is a WIN, but not
+    a WIN on the Moneyline. Show the distinction so DC is never presented
+    as a straight-win prediction.
+    """
+    if dc_hit == 1:
+        return "WIN (draw)" if result == "draw" else "WIN"
+    if dc_hit == 0:
+        return "LOSS"
+    return "NO BET"
+
+
 def render_pending_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1280,6 +1358,7 @@ def render_settled_card(m: dict):
     hs = m.get("home_score")
     aws = m.get("away_score")
     dc_hit = m.get("dc_hit")
+    result = m.get("result")
     profit = m.get("profit_loss") or 0.0
     stake = m.get("stake", "none")
     split = m.get("agreement_split", "?")
@@ -1288,11 +1367,15 @@ def render_settled_card(m: dict):
     is_acc = bool(m.get("accumulator"))
 
     if dc_hit == 1:
-        cls, badge, verdict = "win", "badge-win", "WIN"
+        cls, badge = "win", "badge-win"
     elif dc_hit == 0:
-        cls, badge, verdict = "loss", "badge-loss", "LOSS"
+        cls, badge = "loss", "badge-loss"
     else:
-        cls, badge, verdict = "skip", "badge-skip", "NO BET"
+        cls, badge = "skip", "badge-skip"
+
+    verdict = _verdict_label(dc_hit, result)
+    if verdict == "WIN (draw)":
+        badge = "badge-draw"
 
     pl = f"{profit:+.2f}u" if dc_hit is not None else "—"
     acc_badge = (
@@ -1340,8 +1423,7 @@ def render_accumulator_card(m: dict):
     if settled:
         pl = m.get("profit_loss")
         pl_txt = f"{pl:+.2f}u" if isinstance(pl, (int, float)) else "—"
-        hit = m.get("dc_hit")
-        verdict = "WIN" if hit == 1 else ("LOSS" if hit == 0 else "NO BET")
+        verdict = _verdict_label(m.get("dc_hit"), m.get("result"))
         result_txt = f' · <span style="color:#a855f7">{hs}–{aws} {verdict} {pl_txt}</span>'
 
     st.markdown(f"""
@@ -1420,6 +1502,10 @@ def build_row(facts, signals, decision):
     row["shadow_flags"] = shadow_flags
     row["would_have_skipped_away_table"] = "away_table_dissent" in shadow_flags
 
+    # Structured provenance and market intent
+    row["is_retrospective"] = False
+    row["market_intent"] = _market_intent_from_decision(decision)
+
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
@@ -1443,6 +1529,7 @@ def build_row(facts, signals, decision):
         "accumulator",
         "attack_sum", "exp_proxy_avg",
         "shadow_flags", "would_have_skipped_away_table",
+        "is_retrospective", "market_intent",
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1501,6 +1588,13 @@ with tab_new:
             )
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
+
+        # Cohort classification — literal signals, not agreement_split
+        cohort = _cohort_label(signals, decision.get("direction"))
+        market = _market_intent_from_decision(decision)
+        st.markdown(
+            f"**Cohort:** `{cohort}` · **Market intent:** `{market}`"
+        )
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -1695,6 +1789,8 @@ with tab_perf:
         df["qualifying"] = pd.to_numeric(df["qualifying"], errors="coerce").fillna(0)
         if "accumulator" in df.columns:
             df["accumulator"] = df["accumulator"].fillna(False).astype(bool)
+        if "is_retrospective" in df.columns:
+            df["is_retrospective"] = df["is_retrospective"].fillna(False).astype(bool)
 
         qualifying = df[df["qualifying"] == 1]
         bets = qualifying[qualifying["dc_hit"].notna()]
@@ -1761,7 +1857,68 @@ with tab_perf:
                         unsafe_allow_html=True,
                     )
 
-        st.markdown("### By agreement split")
+        # ─────────────────────────────────────────────────────────
+        # LITERAL COHORT REPORTING — replace agreement_split grouping
+        # ─────────────────────────────────────────────────────────
+        st.markdown("### Cohorts (literal signals, prospective only)")
+        st.caption(
+            "Grouped by literal signal predicates. Excludes any row with "
+            "`is_retrospective = true`. Home and Away reported separately."
+        )
+
+        if "is_retrospective" in qualifying.columns:
+            clean = qualifying[qualifying["is_retrospective"] == False]  # noqa: E712
+        else:
+            clean = qualifying
+
+        def _cohort_of_row(row) -> str:
+            sig = {
+                "table": row.get("signal_table"),
+                "form":  row.get("signal_form"),
+                "venue": row.get("signal_venue"),
+                "h2h":   row.get("signal_h2h"),
+            }
+            return _cohort_label(sig, row.get("direction"))
+
+        if not clean.empty:
+            clean_c = clean.copy()
+            clean_c["cohort"] = clean_c.apply(_cohort_of_row, axis=1)
+            clean_c["market"] = clean_c["direction"].map(
+                {"home": "1X", "away": "X2"}
+            )
+
+            by_cohort = (
+                clean_c
+                .groupby(["cohort", "market"], dropna=False)
+                .agg(
+                    n=("match_id", "count"),
+                    wins=("dc_hit", lambda s: int((s == 1).sum())),
+                    losses=("dc_hit", lambda s: int((s == 0).sum())),
+                )
+                .reset_index()
+            )
+            by_cohort["dc_hit_pct"] = (
+                by_cohort["wins"] / by_cohort["n"] * 100
+            ).round(1)
+            by_cohort = by_cohort.sort_values(
+                ["cohort", "market"], ascending=True
+            )
+            st.dataframe(
+                by_cohort.rename(columns={
+                    "cohort": "cohort",
+                    "market": "market",
+                    "n": "n",
+                    "wins": "wins",
+                    "losses": "losses",
+                    "dc_hit_pct": "DC hit %",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No prospective qualifying picks yet.")
+
+        st.markdown("### By agreement split (historical, for reference only)")
         if not qualifying.empty:
             by_split = (qualifying
                         .groupby("agreement_split")
