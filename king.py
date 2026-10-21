@@ -531,9 +531,6 @@ def compute_signals(f: dict) -> dict:
     return {"table": table, "form": form, "venue": venue, "h2h": h2h}
 
 
-# ── CHANGE 1 ──
-# Replaces _compute_goal_gap(). Now returns the full profile: home_exp,
-# away_exp, total, gap. The gap column stores the ABSOLUTE margin.
 def _compute_goal_profile(facts):
     """
     Goal expectation profile for the match.
@@ -566,9 +563,6 @@ def _compute_goal_profile(facts):
     }
 
 
-# ── CHANGE 2 ──
-# Signed per-pick gap — positive means the pick is favored by the goal model,
-# negative means it isn't. Used only for display, not stored.
 def _pick_goal_gap(profile, direction):
     if profile is None:
         return None
@@ -579,10 +573,6 @@ def _pick_goal_gap(profile, direction):
     return None
 
 
-# ── CHANGE 3 ──
-# decide() now runs signal logic only. The Goal Gap Veto block is removed.
-# The goal profile is computed and stored in build_row() for analysis, but it
-# never overrides the signal decision.
 def decide(signals: dict, facts: dict = None) -> dict:
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
@@ -805,8 +795,7 @@ def _compute_goal_proxy(f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HTML EXTRACTION
-# ═══════════════════════════════════════════════════════════════════
+# HTML EXTRACTION# ═══════════════════════════════════════════════════════════════════
 
 def _extract_identity(soup, f):
     t_top = soup.find("div", class_="t_top")
@@ -1522,8 +1511,6 @@ def signal_pill(name, value):
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
-# ── CHANGE 5 (part 1 of 2) ──
-# Both-sides goal display. Used by pending + settled cards.
 def _goal_profile_html(m: dict) -> str:
     home_exp = m.get("goal_exp_home")
     away_exp = m.get("goal_exp_away")
@@ -1716,10 +1703,6 @@ def decision_columns(d):
     }
 
 
-# ── CHANGE 4 ──
-# build_row now populates the four goal-profile columns. All four are
-# populated together or none of them are (they depend on the same four
-# venue GF/GA inputs).
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
@@ -1872,9 +1855,11 @@ def venue_opposition_summary(rows: list) -> pd.DataFrame:
     return out[["venue_opposition", "n", "wins", "losses", "Hit Rate %"]]
 
 
-# ── CHANGE 7 (part 1 of 2) ──
-# The old goal_gap_summary was built around the veto. Replaced with two
-# analysis summaries: by total bucket and by gap bucket.
+# ── FIX: nan-safe round ──
+# Replaces .replace(0, pd.NA) with .replace(0, float("nan")).
+# pd.NA doesn't implement __round__, which broke .round(1) whenever a
+# bucket had zero rows. float("nan") propagates cleanly through
+# pandas' vectorised round.
 def goal_total_summary(rows: list) -> pd.DataFrame:
     records = []
     for r in rows:
@@ -1904,7 +1889,9 @@ def goal_total_summary(rows: list) -> pd.DataFrame:
              .reset_index()
              .rename(columns={"bucket": "total_bucket"}))
     out["losses"] = out["n"] - out["wins"]
-    out["hit_pct"] = (out["wins"] / out["n"].replace(0, float("nan")) * 100).round(1)
+    # ── FIX: nan-safe round ──
+    safe_n = out["n"].replace(0, float("nan"))
+    out["hit_pct"] = (out["wins"] / safe_n * 100).round(1)
     return out[["total_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
 
 
@@ -1937,40 +1924,9 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
              .reset_index()
              .rename(columns={"bucket": "gap_bucket"}))
     out["losses"] = out["n"] - out["wins"]
-    out["hit_pct"] = (out["wins"] / out["n"].replace(0, float("nan")) * 100).round(1)
-    return out[["gap_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
-
-
-def goal_gap_summary(rows: list) -> pd.DataFrame:
-    records = []
-    for r in rows:
-        if r.get("direction") not in ("home", "away"):
-            continue
-        if r.get("dc_hit") is None:
-            continue
-        gap = r.get("goal_gap")
-        if gap is None:
-            continue
-        records.append({"gap": float(gap), "hit": int(r["dc_hit"]),
-                        "pl": float(r.get("profit_loss") or 0.0)})
-
-    if not records:
-        return pd.DataFrame(columns=["gap_bucket", "n", "wins", "losses",
-                                     "hit_pct", "net_pl"])
-
-    df = pd.DataFrame(records)
-    df["bucket"] = pd.cut(
-        df["gap"],
-        bins=[0, 0.30, 0.50, 0.75, 100.0],
-        labels=["< 0.30", "0.30–0.50", "0.50–0.75", "> 0.75"],
-    )
-    out = (df.groupby("bucket", observed=False)
-             .agg(n=("hit", "count"), wins=("hit", "sum"),
-                  net_pl=("pl", "sum"))
-             .reset_index()
-             .rename(columns={"bucket": "gap_bucket"}))
-    out["losses"] = out["n"] - out["wins"]
-    out["hit_pct"] = (out["wins"] / out["n"].replace(0, pd.NA) * 100).round(1)
+    # ── FIX: nan-safe round ──
+    safe_n = out["n"].replace(0, float("nan"))
+    out["hit_pct"] = (out["wins"] / safe_n * 100).round(1)
     return out[["gap_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
 
 
@@ -2021,7 +1977,6 @@ with tab_new:
         preview["accumulator"] = compute_accumulator(facts, decision)
         preview["accumulator_eligible"] = _is_accumulator_eligible(preview)
 
-        # Attach the goal profile to preview so the card displays it
         profile = _compute_goal_profile(facts)
         if profile:
             preview["goal_exp_home"] = profile["goal_exp_home"]
@@ -2035,8 +1990,6 @@ with tab_new:
         if venue_opposition:
             st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (tracking only)")
 
-        # ── CHANGE 6 ──
-        # Replaced the old veto display with the plain goal profile.
         if profile:
             pick_gap = _pick_goal_gap(profile, direction)
             pick_txt = (
@@ -2321,9 +2274,6 @@ with tab_perf:
                     hide_index=True,
                 )
 
-            # ── CHANGE 7 (part 2 of 2) ──
-            # New analysis section. Replaces the old veto-oriented summary.
-            # Both tables are descriptive only — no rule fires from them.
             st.markdown("### Goal Profile Analysis")
             st.caption(
                 "Descriptive only. Uses the stored per-side expectations. "
