@@ -1904,8 +1904,41 @@ def goal_total_summary(rows: list) -> pd.DataFrame:
              .reset_index()
              .rename(columns={"bucket": "total_bucket"}))
     out["losses"] = out["n"] - out["wins"]
-    out["hit_pct"] = (out["wins"] / out["n"].replace(0, pd.NA) * 100).round(1)
+    out["hit_pct"] = (out["wins"] / out["n"].replace(0, float("nan")) * 100).round(1)
     return out[["total_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
+
+
+def goal_gap_summary(rows: list) -> pd.DataFrame:
+    records = []
+    for r in rows:
+        if r.get("direction") not in ("home", "away"):
+            continue
+        if r.get("dc_hit") is None:
+            continue
+        gap = r.get("goal_gap")
+        if gap is None:
+            continue
+        records.append({"gap": float(gap), "hit": int(r["dc_hit"]),
+                        "pl": float(r.get("profit_loss") or 0.0)})
+
+    if not records:
+        return pd.DataFrame(columns=["gap_bucket", "n", "wins", "losses",
+                                     "hit_pct", "net_pl"])
+
+    df = pd.DataFrame(records)
+    df["bucket"] = pd.cut(
+        df["gap"],
+        bins=[0, 0.30, 0.50, 0.75, 100.0],
+        labels=["< 0.30", "0.30–0.50", "0.50–0.75", "> 0.75"],
+    )
+    out = (df.groupby("bucket", observed=False)
+             .agg(n=("hit", "count"), wins=("hit", "sum"),
+                  net_pl=("pl", "sum"))
+             .reset_index()
+             .rename(columns={"bucket": "gap_bucket"}))
+    out["losses"] = out["n"] - out["wins"]
+    out["hit_pct"] = (out["wins"] / out["n"].replace(0, float("nan")) * 100).round(1)
+    return out[["gap_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
 
 
 def goal_gap_summary(rows: list) -> pd.DataFrame:
