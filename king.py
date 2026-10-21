@@ -39,6 +39,14 @@ MIGRATION (run once, manually — not executed by this app)
   alter table matches add column if not exists attack_sum float;
   alter table matches add column if not exists exp_proxy_avg float;
   alter table matches add column if not exists venue_opposition boolean;
+  
+  -- Goal Gap tracking (shadow metric, not a live rule)
+  alter table matches add column if not exists home_home_gf float;
+  alter table matches add column if not exists home_home_ga float;
+  alter table matches add column if not exists away_away_gf float;
+  alter table matches add column if not exists away_away_ga float;
+  alter table matches add column if not exists goal_gap float;
+
   -- only if tracking odds (one price per match):
   alter table matches add column if not exists odds_market text;
   alter table matches add column if not exists odds_value numeric;
@@ -426,6 +434,15 @@ def _int_any(text):
     return _word_to_int(text)
 
 
+def _float_any(text):
+    if text is None:
+        return None
+    try:
+        return float(str(text).strip())
+    except (ValueError, TypeError):
+        return None
+
+
 def _num(s):
     if s is None:
         return None
@@ -627,6 +644,32 @@ def settle(direction, stake, home_score, away_score):
 
     profit = units if hit else -units
     return result, (1 if hit else 0), units, profit
+
+
+def _compute_goal_gap(facts, direction):
+    """
+    Compute the pre-match expected goal gap in favor of the picked side.
+    Requires all four venue GF/GA values. Returns None if any are missing.
+    Sign is flipped for away picks: goal_gap is always "in favor of pick".
+    """
+    h_gf = facts.get("home_home_gf")
+    h_ga = facts.get("home_home_ga")
+    a_gf = facts.get("away_away_gf")
+    a_ga = facts.get("away_away_ga")
+
+    if None in (h_gf, h_ga, a_gf, a_ga):
+        return None
+    try:
+        home_exp = (float(h_gf) + float(a_ga)) / 2.0
+        away_exp = (float(a_gf) + float(h_ga)) / 2.0
+    except (ValueError, TypeError):
+        return None
+
+    if direction == "home":
+        return round(home_exp - away_exp, 2)
+    if direction == "away":
+        return round(away_exp - home_exp, 2)
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -960,17 +1003,31 @@ def _parse_venue(soup, home_sents, away_sents, f):
             img = row.find("img")
             row_id = _team_id_from_img(img)
             label = " ".join(cells).lower()
+            
+            target = None
             if row_id:
                 if row_id == home_id:
-                    home_wdl = wdl
-                    continue
+                    target = "home"
                 elif row_id == away_id:
-                    away_wdl = wdl
-                    continue
-            if "home stats" in label and not home_wdl:
+                    target = "away"
+            
+            if not target:
+                if "home stats" in label:
+                    target = "home"
+                elif "away stats" in label:
+                    target = "away"
+
+            if target == "home" and not home_wdl:
                 home_wdl = wdl
-            elif "away stats" in label and not away_wdl:
+                # Extract GF (cells[3]) and GA (cells[4]) based on HTML structure
+                if len(cells) >= 5:
+                    f["home_home_gf"] = _float_any(cells[3])
+                    f["home_home_ga"] = _float_any(cells[4])
+            elif target == "away" and not away_wdl:
                 away_wdl = wdl
+                if len(cells) >= 5:
+                    f["away_away_gf"] = _float_any(cells[3])
+                    f["away_away_ga"] = _float_any(cells[4])
 
     if home_wdl:
         _apply_venue(f, "home", home_wdl)
@@ -1288,6 +1345,7 @@ def extract_facts(html: str) -> dict:
         "home_table_gd", "away_table_gd",
         "home_table_pts", "away_table_pts",
         "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
+        "home_home_gf", "home_home_ga", "away_away_gf", "away_away_ga"
     ]:
         f.setdefault(k, None)
 
@@ -1481,7 +1539,10 @@ def build_row(facts, signals, decision):
 
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    # NEW: venue_opposition flag
+    # Add Goal Gap shadow metric
+    row["goal_gap"] = _compute_goal_gap(facts, decision.get("direction"))
+
+    # Venue opposition flag
     direction = decision.get("direction")
     venue = signals.get("venue")
     row["venue_opposition"] = (
@@ -1518,6 +1579,8 @@ def build_row(facts, signals, decision):
         "attack_sum", "exp_proxy_avg",
         "would_have_skipped_away_table",
         "venue_opposition",
+        "home_home_gf", "home_home_ga", "away_away_gf", "away_away_ga",
+        "goal_gap",
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1607,6 +1670,30 @@ def venue_opposition_summary(rows: list) -> pd.DataFrame:
     return out[["venue_opposition", "n", "wins", "losses", "Hit Rate %"]]
 
 
+def goal_gap_summary(rows: list) -> pd.DataFrame:
+    records = []
+    for r in rows:
+        gap = r.get("goal_gap")
+        hit = r.get("dc_hit")
+        if gap is None or hit is None:
+            continue
+        
+        records.append({
+            "bucket": "< 0.50" if gap < 0.50 else ">= 0.50",
+            "hit": int(hit),
+        })
+    
+    if not records:
+        return pd.DataFrame(columns=["goal_gap_bucket", "n", "wins", "losses", "Hit Rate %"])
+    
+    df = pd.DataFrame(records)
+    out = df.groupby("bucket").agg(n=("hit", "count"), wins=("hit", "sum")).reset_index()
+    out["losses"] = out["n"] - out["wins"]
+    out["Hit Rate %"] = (out["wins"] / out["n"] * 100).round(1)
+    out = out.rename(columns={"bucket": "goal_gap_bucket"})
+    return out[["goal_gap_bucket", "n", "wins", "losses", "Hit Rate %"]]
+
+
 # ═══════════════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════════════
@@ -1649,6 +1736,7 @@ with tab_new:
         direction = decision.get("direction")
         venue = signals.get("venue")
         venue_opposition = (direction in ("home", "away") and venue not in ("nothing", direction))
+        goal_gap = _compute_goal_gap(facts, direction)
 
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
         preview["accumulator"] = compute_accumulator(facts, decision)
@@ -1659,6 +1747,10 @@ with tab_new:
 
         if venue_opposition:
             st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (Tracking this as a candidate negative signal)")
+
+        if goal_gap is not None:
+            color = "red" if goal_gap < 0.50 else "green"
+            st.markdown(f"**Goal Gap (Shadow):** <span style='color:{color}; font-weight:bold;'>{goal_gap:+.2f}</span> (Threshold for veto is < 0.50)", unsafe_allow_html=True)
 
         try:
             acc_score = calc_accumulator_score(facts)
@@ -1919,6 +2011,19 @@ with tab_perf:
             else:
                 st.dataframe(
                     venue_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("### Goal Gap Buckets (Experiment)")
+            st.caption("Filters to accumulator-eligible picks where pre-match goal gap was successfully calculated. Threshold: 0.50.")
+            acc_clean = [m for m in clean_settled if _is_accumulator_eligible(m)]
+            gap_df = goal_gap_summary(acc_clean)
+            if gap_df.empty:
+                st.info("No accumulator picks with goal gap data yet.")
+            else:
+                st.dataframe(
+                    gap_df,
                     use_container_width=True,
                     hide_index=True,
                 )
