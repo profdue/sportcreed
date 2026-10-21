@@ -33,34 +33,37 @@ Venue extraction, in priority order:
   3. prose sentences mentioning home/away
   4. (nothing else — if all fail, venue stays "nothing")
 
-Every field failure is logged. Missing data never votes silently.
+Goal profile (telemetry only, no veto):
+  - goal_exp_home = (home_home_gf + away_away_ga) / 2
+  - goal_exp_away = (away_away_gf + home_home_ga) / 2
+  - goal_total    = home_exp + away_exp
+  - goal_gap      = |home_exp - away_exp|
 
 ──────────────────────────────────────────────────────────────────────
 MIGRATION (run once, manually — not executed by this app)
 ──────────────────────────────────────────────────────────────────────
 
-  -- Legacy: extracted_at remains TEXT. Do not alter.
   alter table matches add column if not exists extracted_at_ts timestamptz;
   alter table matches add column if not exists would_have_skipped_away_table boolean;
   alter table matches add column if not exists attack_sum float;
   alter table matches add column if not exists exp_proxy_avg float;
   alter table matches add column if not exists venue_opposition boolean;
-  
-  -- Goal Gap tracking (Live Rule)
+
   alter table matches add column if not exists home_home_gf float;
   alter table matches add column if not exists home_home_ga float;
   alter table matches add column if not exists away_away_gf float;
   alter table matches add column if not exists away_away_ga float;
-  alter table matches add column if not exists goal_gap float;
 
-  -- only if tracking odds (one price per match):
+  -- Goal profile (stored for later analysis, never used as a veto)
+  alter table matches add column if not exists goal_exp_home float;
+  alter table matches add column if not exists goal_exp_away float;
+  alter table matches add column if not exists goal_total    float;
+  alter table matches add column if not exists goal_gap      float;
+
   alter table matches add column if not exists odds_market text;
   alter table matches add column if not exists odds_value numeric;
   alter table matches add column if not exists odds_book text;
   alter table matches add column if not exists odds_captured_at timestamptz;
-
-  -- No new columns beyond the above. Retrospective rows are quarantined
-  -- at query time via notes NOT LIKE '%Retrospectively reclassified%'.
 """
 
 import re
@@ -121,6 +124,11 @@ st.markdown("""
     .signal-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
     .signal-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
     .signal-pill.nothing { background: #64748b15; color: #94a3b8; border-color: #64748b40; }
+    .goal-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+    .goal-pill {
+        font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
+        background: #0f172a; color: #cbd5e1; border: 1px solid #1e293b;
+    }
     .metric-box {
         background: #1a1f2e; border-radius: 12px; padding: 16px;
         text-align: center; border: 1px solid #232a3d;
@@ -502,11 +510,6 @@ def _cmp_or_nothing(a, b):
 
 
 def compute_signals(f: dict) -> dict:
-    # ── FIX 7 ──
-    # Previously: hg = f.get("home_table_gd") or 0
-    # That coerced unknown GD (None) to 0, indistinguishable from actual 0.
-    # Now we only fall through to GD when both points are equal AND both GDs
-    # are known. Otherwise, table stays "nothing".
     hp = f.get("home_table_pts")
     ap = f.get("away_table_pts")
     hg = f.get("home_table_gd")
@@ -528,11 +531,19 @@ def compute_signals(f: dict) -> dict:
     return {"table": table, "form": form, "venue": venue, "h2h": h2h}
 
 
-def _compute_goal_gap(facts, direction):
+# ── CHANGE 1 ──
+# Replaces _compute_goal_gap(). Now returns the full profile: home_exp,
+# away_exp, total, gap. The gap column stores the ABSOLUTE margin.
+def _compute_goal_profile(facts):
     """
-    Compute the pre-match expected goal gap in favor of the picked side.
-    Requires all four venue GF/GA values. Returns None if any are missing.
-    Sign is flipped for away picks: goal_gap is always "in favor of pick".
+    Goal expectation profile for the match.
+    Returns dict with home_exp, away_exp, total, gap, or None if any of
+    the four venue GF/GA values are missing.
+
+    home_exp = (home_home_gf + away_away_ga) / 2
+    away_exp = (away_away_gf + home_home_ga) / 2
+    total    = home_exp + away_exp
+    gap      = |home_exp - away_exp| (absolute margin)
     """
     h_gf = facts.get("home_home_gf")
     h_ga = facts.get("home_home_ga")
@@ -542,18 +553,36 @@ def _compute_goal_gap(facts, direction):
     if None in (h_gf, h_ga, a_gf, a_ga):
         return None
     try:
-        home_exp = (float(h_gf) + float(a_ga)) / 2.0
-        away_exp = (float(a_gf) + float(h_ga)) / 2.0
+        home_exp = round((float(h_gf) + float(a_ga)) / 2.0, 2)
+        away_exp = round((float(a_gf) + float(h_ga)) / 2.0, 2)
     except (ValueError, TypeError):
         return None
 
+    return {
+        "goal_exp_home": home_exp,
+        "goal_exp_away": away_exp,
+        "goal_total":    round(home_exp + away_exp, 2),
+        "goal_gap":      round(abs(home_exp - away_exp), 2),
+    }
+
+
+# ── CHANGE 2 ──
+# Signed per-pick gap — positive means the pick is favored by the goal model,
+# negative means it isn't. Used only for display, not stored.
+def _pick_goal_gap(profile, direction):
+    if profile is None:
+        return None
     if direction == "home":
-        return round(home_exp - away_exp, 2)
+        return round(profile["goal_exp_home"] - profile["goal_exp_away"], 2)
     if direction == "away":
-        return round(away_exp - home_exp, 2)
+        return round(profile["goal_exp_away"] - profile["goal_exp_home"], 2)
     return None
 
 
+# ── CHANGE 3 ──
+# decide() now runs signal logic only. The Goal Gap Veto block is removed.
+# The goal profile is computed and stored in build_row() for analysis, but it
+# never overrides the signal decision.
 def decide(signals: dict, facts: dict = None) -> dict:
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
@@ -670,17 +699,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "table_leader": table_leader_value,
         }
 
-    # ─────────────────────────────────────────────────────────
-    # GOAL GAP VETO (The new rule)
-    # ─────────────────────────────────────────────────────────
-    if base_decision["direction"] in ("home", "away") and facts is not None:
-        gap = _compute_goal_gap(facts, base_decision["direction"])
-        if gap is not None and gap < 0.50:
-            base_decision["direction"] = "skip"
-            base_decision["stake"] = "none"
-            base_decision["qualifying"] = 0
-            base_decision["dissent_signal"] = "goal_gap"
-
     return base_decision
 
 
@@ -709,7 +727,7 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ACCUMULATOR — frozen score rule (unchanged)
+# ACCUMULATOR
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -983,10 +1001,6 @@ def _venue_sentence(sents):
 
 
 def _extract_window_size(text, default=10):
-    """
-    Parse the match window from a sentence like 'previous 10 matches'.
-    Returns int, or the default if not found.
-    """
     m = re.search(r"(?:previous|last|past)\s+(\d+)\s+(?:home\s+|away\s+)?matches?", text, re.I)
     if m:
         return int(m.group(1))
@@ -994,18 +1008,14 @@ def _extract_window_size(text, default=10):
 
 
 def _parse_venue_from_sentences(sents):
-    # ── FIX 1 (part) ──
-    # Added 2-clause patterns. When only 2 are matched, infer the third
-    # from the window size stated in the sentence ('previous 10 matches').
     patterns = [
-        # 3-clause (existing)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
-        # 2-clause (new) — draws inferred from window
+        # 2-clause: draws inferred from window
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
     ]
@@ -1043,10 +1053,6 @@ def _apply_venue(f, side, wdl):
     f[f"{prefix}_ppg"] = round(pts / total, 2)
 
 
-# ── FIX 2 + FIX 4 ──
-# New: extract venue W-D-L from the keystat-item "Full-Time Result" block.
-# The SECOND <li> in each block is home/away specific form.
-# This is the path that recovers Venue for Cucuta-style pages (no st-table).
 def _parse_venue_from_keystat(soup):
     home_wdl = away_wdl = None
     home_gf = home_ga = away_gf = away_ga = None
@@ -1066,7 +1072,6 @@ def _parse_venue_from_keystat(soup):
             continue
 
         text = lis[1].get_text(" ", strip=True)
-        # Reuse the keystat patterns (which FIX 1 has extended)
         wdl = None
         for tmpl, mapping in _KEYSTAT_PATTERNS:
             m = re.search(tmpl, text, re.IGNORECASE)
@@ -1094,7 +1099,6 @@ def _parse_venue_from_keystat(soup):
         else:
             home_wdl = wdl
 
-    # Goals section (separate keystat-item)
     for item in soup.find_all("div", class_="keystat-item"):
         classes = item.get("class", [])
         is_away = "awaystats" in classes
@@ -1106,11 +1110,9 @@ def _parse_venue_from_keystat(soup):
         if not ul:
             continue
         lis = ul.find_all("li")
-        # Second <li> is the venue-specific goals line
         if len(lis) < 2:
             continue
         text = lis[1].get_text(" ", strip=True)
-        # "... 2.10 goals scored and 0.70 conceded ... home matches"
         m = re.search(
             r"(\d+\.\d+)\s+goals?\s+scored\s+and\s+(\d+\.\d+)\s+conceded",
             text, re.I
@@ -1178,16 +1180,12 @@ def _parse_venue(soup, home_sents, away_sents, f):
     if away_wdl:
         _apply_venue(f, "away", away_wdl)
 
-    # ── FIX 2 / FIX 4 ──
-    # If st-table didn't give us venue data, try keystat-item before prose.
-    # This is what recovers Cucuta (and every non-English-league page).
     if "home_home_ppg" not in f or "away_away_ppg" not in f:
         ks_home, ks_away, h_gf, h_ga, a_gf, a_ga = _parse_venue_from_keystat(soup)
         if "home_home_ppg" not in f and ks_home:
             _apply_venue(f, "home", ks_home)
         if "away_away_ppg" not in f and ks_away:
             _apply_venue(f, "away", ks_away)
-        # Backfill goals for goal_gap
         if f.get("home_home_gf") is None and h_gf is not None:
             f["home_home_gf"] = h_gf
             f["home_home_ga"] = h_ga
@@ -1234,8 +1232,6 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
         (rf"have\s+won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
         (rf"have\s+won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
-    # ── FIX 6 ──
-    # Added 2-clause patterns. Window inferred from 'previous N matches'.
     patterns_2 = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
@@ -1244,11 +1240,6 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
 
     for s in filtered:
         s_low = s.lower()
-        # ── FIX 5 ──
-        # Removed required_first_word filter. _team_sentences already
-        # team-scoped this sentence by alias, so applying the full-name
-        # filter here was redundant and dropped valid sentences
-        # (e.g. "Rovers have 5 wins..." when required is "Bristol Rovers").
         search_area = s
         if not search_area:
             continue
@@ -1272,11 +1263,9 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
-            # ── FIX 6 (part) ──
-            # Infer the window from the sentence rather than hardcoding 10.
             window = _extract_window_size(s, default=None)
             if window is None:
-                window = 10  # old behaviour fallback
+                window = 10
             inferred = window - vals["w"] - vals["l"]
             if inferred < 0:
                 continue
@@ -1288,18 +1277,14 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     return None
 
 
-# ── FIX 1 ──
-# Added 2-clause patterns. When only 2 are matched, infer draws from
-# the 'previous N matches' clause in the same text.
 _KEYSTAT_PATTERNS = [
-    # 3-clause (existing)
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    # 2-clause (new)
+    # 2-clause
     (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
     (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
 ]
@@ -1537,6 +1522,35 @@ def signal_pill(name, value):
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
+# ── CHANGE 5 (part 1 of 2) ──
+# Both-sides goal display. Used by pending + settled cards.
+def _goal_profile_html(m: dict) -> str:
+    home_exp = m.get("goal_exp_home")
+    away_exp = m.get("goal_exp_away")
+    total    = m.get("goal_total")
+    gap      = m.get("goal_gap")
+
+    if home_exp is None or away_exp is None:
+        return ""
+
+    total_pill = (
+        f'<span class="goal-pill">Total <strong style="color:#c084fc;">{total:.2f}</strong></span>'
+        if total is not None else ""
+    )
+    gap_pill = (
+        f'<span class="goal-pill">Gap <strong>{gap:.2f}</strong></span>'
+        if gap is not None else ""
+    )
+
+    return (
+        '<div class="goal-row">'
+        f'<span class="goal-pill">Home exp <strong style="color:#34d399;">{home_exp:.2f}</strong></span>'
+        f'<span class="goal-pill">Away exp <strong style="color:#fbbf24;">{away_exp:.2f}</strong></span>'
+        f'{total_pill}{gap_pill}'
+        '</div>'
+    )
+
+
 def _verdict_label(dc_hit) -> str:
     if dc_hit == 1:
         return "WIN"
@@ -1555,18 +1569,12 @@ def render_pending_card(m: dict):
     date = m.get("match_date", "") or ""
     is_acc_eligible = bool(m.get("accumulator_eligible", False))
 
-    dissent = m.get("dissent_signal")
-    is_goal_gap_skip = (direction == "skip" and dissent == "goal_gap")
-
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
         pick_text = f"HOME — {home} · Home/Draw"
     elif direction == "away":
         card_cls, badge_cls = "pick-away", "badge-away"
         pick_text = f"AWAY — {away} · Away/Draw"
-    elif is_goal_gap_skip:
-        card_cls, badge_cls = "skip", "badge-skip"
-        pick_text = "SKIP — Goal Gap Veto"
     else:
         card_cls, badge_cls = "skip", "badge-skip"
         pick_text = "SKIP"
@@ -1583,12 +1591,15 @@ def render_pending_card(m: dict):
         signal_pill("H2H",   m.get("signal_h2h",   "nothing")),
     ])
 
+    goal_html = _goal_profile_html(m)
+
     st.markdown(f"""
     <div class="match-card {card_cls}">
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
         <span class="pick-badge {badge_cls}">{pick_text}</span>{acc_badge}
         <div class="signal-row">{pills}</div>
+        {goal_html}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1620,11 +1631,14 @@ def render_settled_card(m: dict, is_acc_eligible: bool = False):
         if is_acc_eligible else ""
     )
 
+    goal_html = _goal_profile_html(m)
+
     st.markdown(f"""
     <div class="match-card {cls}">
         <div class="match-title">{home} {hs}–{aws} {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
         <span class="pick-badge {badge}">{verdict} · {market} · {pl}</span>{acc_badge}
+        {goal_html}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1637,7 +1651,6 @@ def render_accumulator_card(m: dict):
     split = m.get("agreement_split", "?")
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
-    market = _market_label(direction)
 
     hs = m.get("home_score")
     aws = m.get("away_score")
@@ -1664,11 +1677,14 @@ def render_accumulator_card(m: dict):
         verdict = _verdict_label(m.get("dc_hit"))
         result_txt = f' · <span style="color:#a855f7">{hs}–{aws} {verdict} {pl_txt}</span>'
 
+    goal_html = _goal_profile_html(m)
+
     st.markdown(f"""
     <div class="match-card acc">
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}{score_txt}{result_txt}</div>
         <span class="pick-badge badge-acc">🎯 {pick_text}</span>
+        {goal_html}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1700,6 +1716,10 @@ def decision_columns(d):
     }
 
 
+# ── CHANGE 4 ──
+# build_row now populates the four goal-profile columns. All four are
+# populated together or none of them are (they depend on the same four
+# venue GF/GA inputs).
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
@@ -1718,15 +1738,21 @@ def build_row(facts, signals, decision):
 
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    row["goal_gap"] = _compute_goal_gap(facts, decision.get("direction"))
+    # Goal profile — telemetry only, never influences decision.
+    profile = _compute_goal_profile(facts)
+    if profile:
+        row["goal_exp_home"] = profile["goal_exp_home"]
+        row["goal_exp_away"] = profile["goal_exp_away"]
+        row["goal_total"]    = profile["goal_total"]
+        row["goal_gap"]      = profile["goal_gap"]
 
     direction = decision.get("direction")
     venue = signals.get("venue")
     row["venue_opposition"] = (
-        direction in ("home", "away") 
+        direction in ("home", "away")
         and venue not in ("nothing", direction)
     )
-    
+
     row["would_have_skipped_away_table"] = (
         direction == "away" and decision.get("dissent_signal") == "table"
     )
@@ -1757,6 +1783,7 @@ def build_row(facts, signals, decision):
         "venue_opposition",
         "home_home_gf", "home_home_ga", "away_away_gf", "away_away_ga",
         "goal_gap",
+        "goal_exp_home", "goal_exp_away", "goal_total",
     }
     return {k: v for k, v in row.items() if k in allowed and v is not None}
 
@@ -1806,7 +1833,7 @@ def cohort_summary(rows: list) -> pd.DataFrame:
         return pd.DataFrame(
             columns=["cohort", "meaning", "market", "n", "wins", "losses", "DC hit %"]
         )
-    
+
     df = pd.DataFrame(records)
     out = (
         df.groupby(["cohort", "meaning", "market"])
@@ -1815,7 +1842,7 @@ def cohort_summary(rows: list) -> pd.DataFrame:
     )
     out["losses"] = out["n"] - out["wins"]
     out["DC hit %"] = (out["wins"] / out["n"] * 100).round(1)
-    
+
     out = out.sort_values(by=["cohort", "n"], ascending=[True, False])
     return out[["cohort", "meaning", "market", "n", "wins", "losses", "DC hit %"]]
 
@@ -1827,15 +1854,15 @@ def venue_opposition_summary(rows: list) -> pd.DataFrame:
             continue
         if r.get("dc_hit") is None:
             continue
-        
+
         records.append({
             "opposes": bool(r.get("venue_opposition", False)),
             "hit": int(r["dc_hit"]),
         })
-    
+
     if not records:
         return pd.DataFrame(columns=["venue_opposition", "n", "wins", "losses", "Hit Rate %"])
-    
+
     df = pd.DataFrame(records)
     out = df.groupby("opposes").agg(n=("hit", "count"), wins=("hit", "sum")).reset_index()
     out["losses"] = out["n"] - out["wins"]
@@ -1845,28 +1872,73 @@ def venue_opposition_summary(rows: list) -> pd.DataFrame:
     return out[["venue_opposition", "n", "wins", "losses", "Hit Rate %"]]
 
 
+# ── CHANGE 7 (part 1 of 2) ──
+# The old goal_gap_summary was built around the veto. Replaced with two
+# analysis summaries: by total bucket and by gap bucket.
+def goal_total_summary(rows: list) -> pd.DataFrame:
+    records = []
+    for r in rows:
+        if r.get("direction") not in ("home", "away"):
+            continue
+        if r.get("dc_hit") is None:
+            continue
+        total = r.get("goal_total")
+        if total is None:
+            continue
+        records.append({"total": float(total), "hit": int(r["dc_hit"]),
+                        "pl": float(r.get("profit_loss") or 0.0)})
+
+    if not records:
+        return pd.DataFrame(columns=["total_bucket", "n", "wins", "losses",
+                                     "hit_pct", "net_pl"])
+
+    df = pd.DataFrame(records)
+    df["bucket"] = pd.cut(
+        df["total"],
+        bins=[0, 2.0, 2.5, 3.0, 100.0],
+        labels=["< 2.0", "2.0–2.5", "2.5–3.0", "> 3.0"],
+    )
+    out = (df.groupby("bucket", observed=False)
+             .agg(n=("hit", "count"), wins=("hit", "sum"),
+                  net_pl=("pl", "sum"))
+             .reset_index()
+             .rename(columns={"bucket": "total_bucket"}))
+    out["losses"] = out["n"] - out["wins"]
+    out["hit_pct"] = (out["wins"] / out["n"].replace(0, pd.NA) * 100).round(1)
+    return out[["total_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
+
+
 def goal_gap_summary(rows: list) -> pd.DataFrame:
     records = []
     for r in rows:
-        gap = r.get("goal_gap")
-        hit = r.get("dc_hit")
-        if gap is None or hit is None:
+        if r.get("direction") not in ("home", "away"):
             continue
-        
-        records.append({
-            "bucket": "< 0.50 (Vetoed)" if gap < 0.50 else ">= 0.50 (Allowed)",
-            "hit": int(hit),
-        })
-    
+        if r.get("dc_hit") is None:
+            continue
+        gap = r.get("goal_gap")
+        if gap is None:
+            continue
+        records.append({"gap": float(gap), "hit": int(r["dc_hit"]),
+                        "pl": float(r.get("profit_loss") or 0.0)})
+
     if not records:
-        return pd.DataFrame(columns=["goal_gap_bucket", "n", "wins", "losses", "Hit Rate %"])
-    
+        return pd.DataFrame(columns=["gap_bucket", "n", "wins", "losses",
+                                     "hit_pct", "net_pl"])
+
     df = pd.DataFrame(records)
-    out = df.groupby("bucket").agg(n=("hit", "count"), wins=("hit", "sum")).reset_index()
+    df["bucket"] = pd.cut(
+        df["gap"],
+        bins=[0, 0.30, 0.50, 0.75, 100.0],
+        labels=["< 0.30", "0.30–0.50", "0.50–0.75", "> 0.75"],
+    )
+    out = (df.groupby("bucket", observed=False)
+             .agg(n=("hit", "count"), wins=("hit", "sum"),
+                  net_pl=("pl", "sum"))
+             .reset_index()
+             .rename(columns={"bucket": "gap_bucket"}))
     out["losses"] = out["n"] - out["wins"]
-    out["Hit Rate %"] = (out["wins"] / out["n"] * 100).round(1)
-    out = out.rename(columns={"bucket": "goal_gap_bucket"})
-    return out[["goal_gap_bucket", "n", "wins", "losses", "Hit Rate %"]]
+    out["hit_pct"] = (out["wins"] / out["n"].replace(0, pd.NA) * 100).round(1)
+    return out[["gap_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1907,28 +1979,47 @@ with tab_new:
         cohort = _cohort_label(signals, decision.get("direction"))
         market = _cohort_market_display(cohort, decision.get("direction"))
         meaning = _cohort_meaning(signals, decision.get("direction"))
-        
+
         direction = decision.get("direction")
         venue = signals.get("venue")
         venue_opposition = (direction in ("home", "away") and venue not in ("nothing", direction))
-        goal_gap = _compute_goal_gap(facts, direction)
 
         preview = {**facts, **signals_to_columns(signals), **decision_columns(decision)}
         preview["accumulator"] = compute_accumulator(facts, decision)
         preview["accumulator_eligible"] = _is_accumulator_eligible(preview)
 
+        # Attach the goal profile to preview so the card displays it
+        profile = _compute_goal_profile(facts)
+        if profile:
+            preview["goal_exp_home"] = profile["goal_exp_home"]
+            preview["goal_exp_away"] = profile["goal_exp_away"]
+            preview["goal_total"]    = profile["goal_total"]
+            preview["goal_gap"]      = profile["goal_gap"]
+
         st.markdown("### The Pick")
         render_pending_card(preview)
 
         if venue_opposition:
-            st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (Tracking this as a candidate negative signal)")
+            st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (tracking only)")
 
-        if goal_gap is not None:
-            is_vetoed = (decision.get("dissent_signal") == "goal_gap")
-            if is_vetoed:
-                st.error(f"🛑 **GOAL GAP VETO TRIGGERED** — Gap is {goal_gap:+.2f}, which is below the 0.50 threshold. The consensus pick was overruled to protect against a thin-edge loss.")
-            else:
-                st.markdown(f"**Goal Gap:** <span style='color:green; font-weight:bold;'>{goal_gap:+.2f}</span> (Passes the < 0.50 veto threshold)", unsafe_allow_html=True)
+        # ── CHANGE 6 ──
+        # Replaced the old veto display with the plain goal profile.
+        if profile:
+            pick_gap = _pick_goal_gap(profile, direction)
+            pick_txt = (
+                f" · pick gap **{pick_gap:+.2f}**" if pick_gap is not None else ""
+            )
+            st.markdown(
+                f"**Goal profile:** "
+                f"Home exp **{profile['goal_exp_home']:.2f}** · "
+                f"Away exp **{profile['goal_exp_away']:.2f}** · "
+                f"Total **{profile['goal_total']:.2f}** · "
+                f"Gap **{profile['goal_gap']:.2f}**"
+                f"{pick_txt}"
+            )
+            st.caption("Stored for analysis. No veto is applied — the signals decide.")
+        else:
+            st.caption("(goal profile unavailable — some venue GF/GA missing)")
 
         try:
             acc_score = calc_accumulator_score(facts)
@@ -2099,6 +2190,7 @@ with tab_acc:
             "match_id", "match_date", "league", "home_team", "away_team",
             "direction", "stake", "agreement_split",
             "home_score", "away_score", "dc_hit", "profit_loss",
+            "goal_exp_home", "goal_exp_away", "goal_total", "goal_gap",
         ] if c in df.columns]
         if keep:
             df_show = df[keep].copy()
@@ -2196,18 +2288,53 @@ with tab_perf:
                     hide_index=True,
                 )
 
-            st.markdown("### Goal Gap Performance")
-            st.caption("Filters to accumulator-eligible picks where pre-match goal gap was successfully calculated.")
-            acc_clean = [m for m in clean_settled if _is_accumulator_eligible(m)]
-            gap_df = goal_gap_summary(acc_clean)
-            if gap_df.empty:
-                st.info("No accumulator picks with goal gap data yet.")
+            # ── CHANGE 7 (part 2 of 2) ──
+            # New analysis section. Replaces the old veto-oriented summary.
+            # Both tables are descriptive only — no rule fires from them.
+            st.markdown("### Goal Profile Analysis")
+            st.caption(
+                "Descriptive only. Uses the stored per-side expectations. "
+                "No veto is applied to any pick — this is here so you can "
+                "study the profile against outcomes and choose thresholds later."
+            )
+
+            total_df = goal_total_summary(clean_settled)
+            gap_df   = goal_gap_summary(clean_settled)
+
+            if total_df.empty and gap_df.empty:
+                st.info("No settled rows with goal profile data yet.")
             else:
-                st.dataframe(
-                    gap_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                if not total_df.empty:
+                    st.markdown("**By expected total**")
+                    st.dataframe(total_df, use_container_width=True, hide_index=True)
+                if not gap_df.empty:
+                    st.markdown("**By absolute gap**")
+                    st.dataframe(gap_df, use_container_width=True, hide_index=True)
+
+                st.markdown("**Raw rows (sorted by gap)**")
+                raw_rows = []
+                for m in clean_settled:
+                    if m.get("goal_exp_home") is None:
+                        continue
+                    if m.get("dc_hit") is None:
+                        continue
+                    if m.get("direction") not in ("home", "away"):
+                        continue
+                    raw_rows.append({
+                        "match":   f"{m.get('home_team','?')} vs {m.get('away_team','?')}",
+                        "pick":    m.get("direction"),
+                        "home_exp": m["goal_exp_home"],
+                        "away_exp": m["goal_exp_away"],
+                        "total":   m.get("goal_total"),
+                        "gap":     m.get("goal_gap"),
+                        "dc_hit":  m.get("dc_hit"),
+                        "pl":      m.get("profit_loss") or 0.0,
+                    })
+                if raw_rows:
+                    st.dataframe(
+                        pd.DataFrame(raw_rows).sort_values("gap"),
+                        use_container_width=True, hide_index=True,
+                    )
 
             st.markdown("### All settled matches")
             for m in clean_settled:
