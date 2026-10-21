@@ -22,10 +22,16 @@ Parsing strategy: layered funnel, ID-anchored.
     - initials
     - first/last word
 
-Form extraction, three sources in priority order:
-  1. Prose sentences ("Team have X wins, Y draws and Z losses")
-  2. keystat-item block ("Full-Time Result" list item)
-  3. (nothing else — if both fail, form stays "nothing")
+Form extraction, in priority order:
+  1. keystat-item "Full-Time Result" first <li>  (structured, reliable)
+  2. prose sentences ("Team have X wins, Y draws and Z losses")
+  3. (nothing else — if all fail, form stays "nothing")
+
+Venue extraction, in priority order:
+  1. st-table "Last 10 League Games" table (W-D-L cells)
+  2. keystat-item "Full-Time Result" second <li>  (home/away specific)
+  3. prose sentences mentioning home/away
+  4. (nothing else — if all fail, venue stays "nothing")
 
 Every field failure is logged. Missing data never votes silently.
 
@@ -496,16 +502,22 @@ def _cmp_or_nothing(a, b):
 
 
 def compute_signals(f: dict) -> dict:
+    # ── FIX 7 ──
+    # Previously: hg = f.get("home_table_gd") or 0
+    # That coerced unknown GD (None) to 0, indistinguishable from actual 0.
+    # Now we only fall through to GD when both points are equal AND both GDs
+    # are known. Otherwise, table stays "nothing".
     hp = f.get("home_table_pts")
     ap = f.get("away_table_pts")
-    hg = f.get("home_table_gd") or 0
-    ag = f.get("away_table_gd") or 0
+    hg = f.get("home_table_gd")
+    ag = f.get("away_table_gd")
+
     if hp is None or ap is None:
         table = "nothing"
-    elif (hp, hg) > (ap, ag):
-        table = "home"
-    elif (ap, ag) > (hp, hg):
-        table = "away"
+    elif hp != ap:
+        table = "home" if hp > ap else "away"
+    elif hg is not None and ag is not None and hg != ag:
+        table = "home" if hg > ag else "away"
     else:
         table = "nothing"
 
@@ -668,7 +680,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             base_decision["stake"] = "none"
             base_decision["qualifying"] = 0
             base_decision["dissent_signal"] = "goal_gap"
-            # We keep the split count intact so you know what the signals originally said.
 
     return base_decision
 
@@ -971,14 +982,32 @@ def _venue_sentence(sents):
     return [s for s in sents if any(k in s.lower() for k in keywords)]
 
 
+def _extract_window_size(text, default=10):
+    """
+    Parse the match window from a sentence like 'previous 10 matches'.
+    Returns int, or the default if not found.
+    """
+    m = re.search(r"(?:previous|last|past)\s+(\d+)\s+(?:home\s+|away\s+)?matches?", text, re.I)
+    if m:
+        return int(m.group(1))
+    return default
+
+
 def _parse_venue_from_sentences(sents):
+    # ── FIX 1 (part) ──
+    # Added 2-clause patterns. When only 2 are matched, infer the third
+    # from the window size stated in the sentence ('previous 10 matches').
     patterns = [
+        # 3-clause (existing)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
+        # 2-clause (new) — draws inferred from window
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
     ]
     for s in sents:
         for tmpl, mapping in patterns:
@@ -988,6 +1017,13 @@ def _parse_venue_from_sentences(sents):
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
+
+            if len(mapping) == 2:
+                window = _extract_window_size(s, default=sum(vals.values()))
+                inferred = window - vals["w"] - vals["l"]
+                if inferred < 0:
+                    continue
+                vals["d"] = inferred
             total = sum(vals.values())
             if total < 5 or total > 15:
                 continue
@@ -1005,6 +1041,90 @@ def _apply_venue(f, side, wdl):
     f[f"{prefix}_losses"] = l
     f[f"{prefix}_pts"] = pts
     f[f"{prefix}_ppg"] = round(pts / total, 2)
+
+
+# ── FIX 2 + FIX 4 ──
+# New: extract venue W-D-L from the keystat-item "Full-Time Result" block.
+# The SECOND <li> in each block is home/away specific form.
+# This is the path that recovers Venue for Cucuta-style pages (no st-table).
+def _parse_venue_from_keystat(soup):
+    home_wdl = away_wdl = None
+    home_gf = home_ga = away_gf = away_ga = None
+
+    for item in soup.find_all("div", class_="keystat-item"):
+        classes = item.get("class", [])
+        is_away = "awaystats" in classes
+
+        title = item.find("div", class_="stats-title-sub")
+        if not title or "Full-Time Result" not in title.get_text():
+            continue
+        ul = item.find("ul", class_="stats-list")
+        if not ul:
+            continue
+        lis = ul.find_all("li")
+        if len(lis) < 2:
+            continue
+
+        text = lis[1].get_text(" ", strip=True)
+        # Reuse the keystat patterns (which FIX 1 has extended)
+        wdl = None
+        for tmpl, mapping in _KEYSTAT_PATTERNS:
+            m = re.search(tmpl, text, re.IGNORECASE)
+            if not m:
+                continue
+            vals = {"w": 0, "d": 0, "l": 0}
+            for i, key in enumerate(mapping):
+                vals[key] = int(m.group(i + 1))
+            if len(mapping) == 2:
+                window = _extract_window_size(text, default=sum(vals.values()))
+                inferred = window - vals["w"] - vals["l"]
+                if inferred < 0:
+                    continue
+                vals["d"] = inferred
+            total = sum(vals.values())
+            if total < 5 or total > 15:
+                continue
+            wdl = (vals["w"], vals["d"], vals["l"])
+            break
+
+        if not wdl:
+            continue
+        if is_away:
+            away_wdl = wdl
+        else:
+            home_wdl = wdl
+
+    # Goals section (separate keystat-item)
+    for item in soup.find_all("div", class_="keystat-item"):
+        classes = item.get("class", [])
+        is_away = "awaystats" in classes
+
+        title = item.find("div", class_="stats-title-sub")
+        if not title or "Goals" not in title.get_text():
+            continue
+        ul = item.find("ul", class_="stats-list")
+        if not ul:
+            continue
+        lis = ul.find_all("li")
+        # Second <li> is the venue-specific goals line
+        if len(lis) < 2:
+            continue
+        text = lis[1].get_text(" ", strip=True)
+        # "... 2.10 goals scored and 0.70 conceded ... home matches"
+        m = re.search(
+            r"(\d+\.\d+)\s+goals?\s+scored\s+and\s+(\d+\.\d+)\s+conceded",
+            text, re.I
+        )
+        if not m:
+            continue
+        gf = float(m.group(1))
+        ga = float(m.group(2))
+        if is_away:
+            away_gf, away_ga = gf, ga
+        else:
+            home_gf, home_ga = gf, ga
+
+    return home_wdl, away_wdl, home_gf, home_ga, away_gf, away_ga
 
 
 def _parse_venue(soup, home_sents, away_sents, f):
@@ -1028,14 +1148,14 @@ def _parse_venue(soup, home_sents, away_sents, f):
             img = row.find("img")
             row_id = _team_id_from_img(img)
             label = " ".join(cells).lower()
-            
+
             target = None
             if row_id:
                 if row_id == home_id:
                     target = "home"
                 elif row_id == away_id:
                     target = "away"
-            
+
             if not target:
                 if "home stats" in label:
                     target = "home"
@@ -1044,7 +1164,6 @@ def _parse_venue(soup, home_sents, away_sents, f):
 
             if target == "home" and not home_wdl:
                 home_wdl = wdl
-                # Extract GF (cells[3]) and GA (cells[4]) based on HTML structure
                 if len(cells) >= 5:
                     f["home_home_gf"] = _float_any(cells[3])
                     f["home_home_ga"] = _float_any(cells[4])
@@ -1058,6 +1177,23 @@ def _parse_venue(soup, home_sents, away_sents, f):
         _apply_venue(f, "home", home_wdl)
     if away_wdl:
         _apply_venue(f, "away", away_wdl)
+
+    # ── FIX 2 / FIX 4 ──
+    # If st-table didn't give us venue data, try keystat-item before prose.
+    # This is what recovers Cucuta (and every non-English-league page).
+    if "home_home_ppg" not in f or "away_away_ppg" not in f:
+        ks_home, ks_away, h_gf, h_ga, a_gf, a_ga = _parse_venue_from_keystat(soup)
+        if "home_home_ppg" not in f and ks_home:
+            _apply_venue(f, "home", ks_home)
+        if "away_away_ppg" not in f and ks_away:
+            _apply_venue(f, "away", ks_away)
+        # Backfill goals for goal_gap
+        if f.get("home_home_gf") is None and h_gf is not None:
+            f["home_home_gf"] = h_gf
+            f["home_home_ga"] = h_ga
+        if f.get("away_away_gf") is None and a_gf is not None:
+            f["away_away_gf"] = a_gf
+            f["away_away_ga"] = a_ga
 
     if "home_home_ppg" not in f and home_sents:
         result = _parse_venue_from_sentences(_venue_sentence(home_sents))
@@ -1098,6 +1234,8 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
         (rf"have\s+won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
         (rf"have\s+won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
+    # ── FIX 6 ──
+    # Added 2-clause patterns. Window inferred from 'previous N matches'.
     patterns_2 = [
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
@@ -1106,20 +1244,12 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
 
     for s in filtered:
         s_low = s.lower()
-        if required_first_word:
-            req_low = required_first_word.lower()
-            if req_low not in s_low:
-                continue
-            team_idx = s_low.find(req_low)
-            search_area = s[team_idx:]
-            if other_team:
-                other_low = other_team.lower()
-                other_idx = s_low.find(other_low, team_idx + len(req_low))
-                if other_idx != -1:
-                    search_area = s[team_idx:other_idx]
-        else:
-            search_area = s
-
+        # ── FIX 5 ──
+        # Removed required_first_word filter. _team_sentences already
+        # team-scoped this sentence by alias, so applying the full-name
+        # filter here was redundant and dropped valid sentences
+        # (e.g. "Rovers have 5 wins..." when required is "Bristol Rovers").
+        search_area = s
         if not search_area:
             continue
 
@@ -1142,10 +1272,15 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
-            total = vals["w"] + vals["l"]
-            if total < 2 or total > 10:
+            # ── FIX 6 (part) ──
+            # Infer the window from the sentence rather than hardcoding 10.
+            window = _extract_window_size(s, default=None)
+            if window is None:
+                window = 10  # old behaviour fallback
+            inferred = window - vals["w"] - vals["l"]
+            if inferred < 0:
                 continue
-            vals["d"] = max(0, 10 - total)
+            vals["d"] = inferred
             if sum(vals.values()) < 5 or sum(vals.values()) > 15:
                 continue
             return vals["w"], vals["d"], vals["l"]
@@ -1153,13 +1288,20 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     return None
 
 
+# ── FIX 1 ──
+# Added 2-clause patterns. When only 2 are matched, infer draws from
+# the 'previous N matches' clause in the same text.
 _KEYSTAT_PATTERNS = [
+    # 3-clause (existing)
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
+    # 2-clause (new)
+    (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
+    (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
 ]
 
 
@@ -1188,6 +1330,12 @@ def _parse_form_from_keystat(soup):
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = int(m.group(i + 1))
+            if len(mapping) == 2:
+                window = _extract_window_size(text, default=sum(vals.values()))
+                inferred = window - vals["w"] - vals["l"]
+                if inferred < 0:
+                    continue
+                vals["d"] = inferred
             total = sum(vals.values())
             if total < 5 or total > 15:
                 continue
@@ -1406,8 +1554,7 @@ def render_pending_card(m: dict):
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc_eligible = bool(m.get("accumulator_eligible", False))
-    
-    # Check if the skip is due to Goal Gap
+
     dissent = m.get("dissent_signal")
     is_goal_gap_skip = (direction == "skip" and dissent == "goal_gap")
 
@@ -1566,15 +1713,13 @@ def build_row(facts, signals, decision):
     row.update(decision_columns(decision))
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    row["extracted_at"]    = now_iso   # legacy (TEXT)
-    row["extracted_at_ts"] = now_iso   # canonical (timestamptz)
+    row["extracted_at"]    = now_iso
+    row["extracted_at_ts"] = now_iso
 
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    # Add Goal Gap shadow metric (stored for tracking)
     row["goal_gap"] = _compute_goal_gap(facts, decision.get("direction"))
 
-    # Venue opposition flag
     direction = decision.get("direction")
     venue = signals.get("venue")
     row["venue_opposition"] = (
@@ -1582,7 +1727,6 @@ def build_row(facts, signals, decision):
         and venue not in ("nothing", direction)
     )
     
-    # Maintain would_have_skipped_away_table for backward compatibility
     row["would_have_skipped_away_table"] = (
         direction == "away" and decision.get("dissent_signal") == "table"
     )
@@ -1618,8 +1762,7 @@ def build_row(facts, signals, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# COHORT METRICS — computed from signal_* and result, never from
-# agreement_split or dc_hit. Quarantined rows excluded.
+# COHORT METRICS
 # ═══════════════════════════════════════════════════════════════════
 
 def _cohort_hit(row: dict):
@@ -1781,13 +1924,11 @@ with tab_new:
             st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (Tracking this as a candidate negative signal)")
 
         if goal_gap is not None:
-            # It's only a veto if the decision was actually flipped to skip
             is_vetoed = (decision.get("dissent_signal") == "goal_gap")
             if is_vetoed:
                 st.error(f"🛑 **GOAL GAP VETO TRIGGERED** — Gap is {goal_gap:+.2f}, which is below the 0.50 threshold. The consensus pick was overruled to protect against a thin-edge loss.")
             else:
-                color = "green"
-                st.markdown(f"**Goal Gap:** <span style='color:{color}; font-weight:bold;'>{goal_gap:+.2f}</span> (Passes the < 0.50 veto threshold)", unsafe_allow_html=True)
+                st.markdown(f"**Goal Gap:** <span style='color:green; font-weight:bold;'>{goal_gap:+.2f}</span> (Passes the < 0.50 veto threshold)", unsafe_allow_html=True)
 
         try:
             acc_score = calc_accumulator_score(facts)
