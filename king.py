@@ -40,7 +40,7 @@ MIGRATION (run once, manually — not executed by this app)
   alter table matches add column if not exists exp_proxy_avg float;
   alter table matches add column if not exists venue_opposition boolean;
   
-  -- Goal Gap tracking (shadow metric, not a live rule)
+  -- Goal Gap tracking (Live Rule)
   alter table matches add column if not exists home_home_gf float;
   alter table matches add column if not exists home_home_ga float;
   alter table matches add column if not exists away_away_gf float;
@@ -516,136 +516,6 @@ def compute_signals(f: dict) -> dict:
     return {"table": table, "form": form, "venue": venue, "h2h": h2h}
 
 
-def decide(signals: dict) -> dict:
-    home = sum(1 for v in signals.values() if v == "home")
-    away = sum(1 for v in signals.values() if v == "away")
-    nothing = sum(1 for v in signals.values() if v == "nothing")
-    table_leader = signals["table"]
-    table_leader_value = table_leader if table_leader != "nothing" else None
-
-    if home > away:
-        majority = "home"
-    elif away > home:
-        majority = "away"
-    else:
-        majority = None
-
-    if home == 4 or away == 4:
-        direction = "home" if home == 4 else "away"
-        return {
-            "direction": direction, "stake": "full", "qualifying": 1,
-            "dissent_signal": None, "split": f"{home}-{away}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    if home == 3 and away == 1:
-        dissent = next((k for k, v in signals.items() if v == "away"), None)
-        return {
-            "direction": majority, "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-    if away == 3 and home == 1:
-        dissent = next((k for k, v in signals.items() if v == "home"), None)
-        return {
-            "direction": majority, "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    if home == 3 and away == 0 and nothing == 1:
-        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
-        return {
-            "direction": "home", "stake": "full", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-    if away == 3 and home == 0 and nothing == 1:
-        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
-        return {
-            "direction": "away", "stake": "full", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    if home == 2 and away == 2:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": "2-2",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    if home == 2 and away == 1 and nothing == 1:
-        dissent = next((k for k, v in signals.items() if v == "away"), None)
-        return {
-            "direction": "home", "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    if away == 2 and home == 1 and nothing == 1:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    if home == 2 and away == 0 and nothing == 2:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-    if away == 2 and home == 0 and nothing == 2:
-        return {
-            "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
-            "home_count": home, "away_count": away, "nothing_count": nothing,
-            "table_leader": table_leader_value,
-        }
-
-    split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
-    return {
-        "direction": "skip", "stake": "none", "qualifying": 0,
-        "dissent_signal": None, "split": split,
-        "home_count": home, "away_count": away, "nothing_count": nothing,
-        "table_leader": table_leader_value,
-    }
-
-
-def settle(direction, stake, home_score, away_score):
-    if home_score > away_score:
-        result = "home_win"
-    elif away_score > home_score:
-        result = "away_win"
-    else:
-        result = "draw"
-
-    if direction == "skip":
-        return result, None, 0.0, 0.0
-
-    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
-
-    if direction == "home":
-        hit = result in ("home_win", "draw")
-    elif direction == "away":
-        hit = result in ("away_win", "draw")
-    else:
-        hit = False
-
-    profit = units if hit else -units
-    return result, (1 if hit else 0), units, profit
-
-
 def _compute_goal_gap(facts, direction):
     """
     Compute the pre-match expected goal gap in favor of the picked side.
@@ -670,6 +540,161 @@ def _compute_goal_gap(facts, direction):
     if direction == "away":
         return round(away_exp - home_exp, 2)
     return None
+
+
+def decide(signals: dict, facts: dict = None) -> dict:
+    home = sum(1 for v in signals.values() if v == "home")
+    away = sum(1 for v in signals.values() if v == "away")
+    nothing = sum(1 for v in signals.values() if v == "nothing")
+    table_leader = signals["table"]
+    table_leader_value = table_leader if table_leader != "nothing" else None
+
+    if home > away:
+        majority = "home"
+    elif away > home:
+        majority = "away"
+    else:
+        majority = None
+
+    base_decision = None
+
+    # 4-0 / 0-4
+    if home == 4 or away == 4:
+        direction = "home" if home == 4 else "away"
+        base_decision = {
+            "direction": direction, "stake": "full", "qualifying": 1,
+            "dissent_signal": None, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 3-1 / 1-3
+    elif home == 3 and away == 1:
+        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        base_decision = {
+            "direction": majority, "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    elif away == 3 and home == 1:
+        dissent = next((k for k, v in signals.items() if v == "home"), None)
+        base_decision = {
+            "direction": majority, "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 3-0-1 / 0-3-1
+    elif home == 3 and away == 0 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
+        base_decision = {
+            "direction": "home", "stake": "full", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    elif away == 3 and home == 0 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
+        base_decision = {
+            "direction": "away", "stake": "full", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-2
+    elif home == 2 and away == 2:
+        base_decision = {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": "2-2",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-1-1
+    elif home == 2 and away == 1 and nothing == 1:
+        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        base_decision = {
+            "direction": "home", "stake": "half", "qualifying": 1,
+            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 1-2-1
+    elif away == 2 and home == 1 and nothing == 1:
+        base_decision = {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # 2-0-2 / 0-2-2
+    elif home == 2 and away == 0 and nothing == 2:
+        base_decision = {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+    elif away == 2 and home == 0 and nothing == 2:
+        base_decision = {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # Default
+    else:
+        split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
+        base_decision = {
+            "direction": "skip", "stake": "none", "qualifying": 0,
+            "dissent_signal": None, "split": split,
+            "home_count": home, "away_count": away, "nothing_count": nothing,
+            "table_leader": table_leader_value,
+        }
+
+    # ─────────────────────────────────────────────────────────
+    # GOAL GAP VETO (The new rule)
+    # ─────────────────────────────────────────────────────────
+    if base_decision["direction"] in ("home", "away") and facts is not None:
+        gap = _compute_goal_gap(facts, base_decision["direction"])
+        if gap is not None and gap < 0.50:
+            base_decision["direction"] = "skip"
+            base_decision["stake"] = "none"
+            base_decision["qualifying"] = 0
+            base_decision["dissent_signal"] = "goal_gap"
+            # We keep the split count intact so you know what the signals originally said.
+
+    return base_decision
+
+
+def settle(direction, stake, home_score, away_score):
+    if home_score > away_score:
+        result = "home_win"
+    elif away_score > home_score:
+        result = "away_win"
+    else:
+        result = "draw"
+
+    if direction == "skip":
+        return result, None, 0.0, 0.0
+
+    units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
+
+    if direction == "home":
+        hit = result in ("home_win", "draw")
+    elif direction == "away":
+        hit = result in ("away_win", "draw")
+    else:
+        hit = False
+
+    profit = units if hit else -units
+    return result, (1 if hit else 0), units, profit
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1381,6 +1406,10 @@ def render_pending_card(m: dict):
     league = m.get("league", "") or ""
     date = m.get("match_date", "") or ""
     is_acc_eligible = bool(m.get("accumulator_eligible", False))
+    
+    # Check if the skip is due to Goal Gap
+    dissent = m.get("dissent_signal")
+    is_goal_gap_skip = (direction == "skip" and dissent == "goal_gap")
 
     if direction == "home":
         card_cls, badge_cls = "pick-home", "badge-home"
@@ -1388,6 +1417,9 @@ def render_pending_card(m: dict):
     elif direction == "away":
         card_cls, badge_cls = "pick-away", "badge-away"
         pick_text = f"AWAY — {away} · Away/Draw"
+    elif is_goal_gap_skip:
+        card_cls, badge_cls = "skip", "badge-skip"
+        pick_text = "SKIP — Goal Gap Veto"
     else:
         card_cls, badge_cls = "skip", "badge-skip"
         pick_text = "SKIP"
@@ -1539,7 +1571,7 @@ def build_row(facts, signals, decision):
 
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    # Add Goal Gap shadow metric
+    # Add Goal Gap shadow metric (stored for tracking)
     row["goal_gap"] = _compute_goal_gap(facts, decision.get("direction"))
 
     # Venue opposition flag
@@ -1679,7 +1711,7 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
             continue
         
         records.append({
-            "bucket": "< 0.50" if gap < 0.50 else ">= 0.50",
+            "bucket": "< 0.50 (Vetoed)" if gap < 0.50 else ">= 0.50 (Allowed)",
             "hit": int(hit),
         })
     
@@ -1724,7 +1756,7 @@ with tab_new:
             try:
                 facts = extract_facts(html_in)
                 signals = compute_signals(facts)
-                decision = decide(signals)
+                decision = decide(signals, facts)
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
                 st.stop()
@@ -1749,8 +1781,13 @@ with tab_new:
             st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (Tracking this as a candidate negative signal)")
 
         if goal_gap is not None:
-            color = "red" if goal_gap < 0.50 else "green"
-            st.markdown(f"**Goal Gap (Shadow):** <span style='color:{color}; font-weight:bold;'>{goal_gap:+.2f}</span> (Threshold for veto is < 0.50)", unsafe_allow_html=True)
+            # It's only a veto if the decision was actually flipped to skip
+            is_vetoed = (decision.get("dissent_signal") == "goal_gap")
+            if is_vetoed:
+                st.error(f"🛑 **GOAL GAP VETO TRIGGERED** — Gap is {goal_gap:+.2f}, which is below the 0.50 threshold. The consensus pick was overruled to protect against a thin-edge loss.")
+            else:
+                color = "green"
+                st.markdown(f"**Goal Gap:** <span style='color:{color}; font-weight:bold;'>{goal_gap:+.2f}</span> (Passes the < 0.50 veto threshold)", unsafe_allow_html=True)
 
         try:
             acc_score = calc_accumulator_score(facts)
@@ -1762,7 +1799,10 @@ with tab_new:
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
 
-        st.markdown(f"**Cohort {cohort}** · {meaning} · **Market:** {market}")
+        if direction != "skip":
+            st.markdown(f"**Cohort {cohort}** · {meaning} · **Market:** {market}")
+        else:
+            st.markdown(f"**Signals:** {meaning}")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -2015,8 +2055,8 @@ with tab_perf:
                     hide_index=True,
                 )
 
-            st.markdown("### Goal Gap Buckets (Experiment)")
-            st.caption("Filters to accumulator-eligible picks where pre-match goal gap was successfully calculated. Threshold: 0.50.")
+            st.markdown("### Goal Gap Performance")
+            st.caption("Filters to accumulator-eligible picks where pre-match goal gap was successfully calculated.")
             acc_clean = [m for m in clean_settled if _is_accumulator_eligible(m)]
             gap_df = goal_gap_summary(acc_clean)
             if gap_df.empty:
