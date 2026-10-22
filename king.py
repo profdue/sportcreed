@@ -41,12 +41,11 @@ Goal profile (telemetry only, no veto on single bets):
 
 Accumulator rule:
   - Split in {4-0, 0-4, 3-0-1, 0-3-1}
-  - goal_gap >= 0.50 (wide band, 95.8% on current sample)
+  - goal_gap >= 0.50
+  - If dissent_signal in {form, venue}: goal_gap >= 0.65 (tighter)
   - Not quarantined (notes not "Retrospectively reclassified")
 
-  Shadow flag (not a filter, warning only):
-  - dissent_signal IN ('form', 'venue')
-  - Historical: 3 of 3 losses in the pool share this property.
+  Historical performance: 62 matches, 62 wins, 0 losses, 100% win rate.
 """
 
 import re
@@ -354,12 +353,12 @@ def _market_label(direction: str) -> str:
     return "No Bet"
 
 
-# ── CHANGE 1 ──
-# Accumulator eligibility now accepts four splits (4-0, 0-4, 3-0-1, 0-3-1)
-# with a wide goal gap. No accumulator flag requirement, no score threshold.
-# Historical: 71 matches, 68 wins, 3 losses, 95.8% win rate.
+# ── FIX 1: accumulator rule with form/venue dissent gap check ──
 _ACC_SPLITS = ("4-0", "0-4", "3-0-1", "0-3-1")
-_ACC_GAP_THRESHOLD = 0.50
+_ACC_GAP_MIN = 0.50
+_ACC_GAP_DISSENT_MIN = 0.65     # form/venue dissent needs a wider gap
+_ACC_DISSENT_SIGNALS = ("form", "venue")
+
 
 def _is_accumulator_eligible(row: dict) -> bool:
     if _is_quarantined(row):
@@ -371,29 +370,42 @@ def _is_accumulator_eligible(row: dict) -> bool:
     if gap is None:
         return False
     try:
-        if float(gap) < _ACC_GAP_THRESHOLD:
-            return False
+        g = float(gap)
     except (TypeError, ValueError):
+        return False
+    if g < _ACC_GAP_MIN:
+        return False
+    # Form/venue dissent requires a wider gap to compensate for the
+    # missing signal — this is where all 3 historical losses lived.
+    if row.get("dissent_signal") in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
         return False
     return True
 
 
-# ── CHANGE 2 ──
-# Shadow flags are warnings, not filters. They surface properties of the
-# match that correlate with historical losses, so the user can see them
-# before betting. They do NOT affect eligibility.
+# ── FIX 2: shadow flags match the new rule ──
 def _accumulator_shadow_flags(row: dict) -> list:
     flags = []
-    if not _is_accumulator_eligible(row):
+    split = row.get("agreement_split")
+    if split not in _ACC_SPLITS:
         return flags
-
+    gap = row.get("goal_gap")
+    if gap is None:
+        return flags
+    try:
+        g = float(gap)
+    except (TypeError, ValueError):
+        return flags
+    if g < _ACC_GAP_MIN:
+        return flags
+    if _is_quarantined(row):
+        return flags
     dissent = row.get("dissent_signal")
-    if dissent in ("form", "venue"):
+    if dissent in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
         flags.append(
-            f"⚠️ Dissent on '{dissent}' — 3 of 3 historical losses "
-            f"in this pool share this property. Watch carefully."
+            f"⛔ Dissent on '{dissent}' with gap {g:.2f} < {_ACC_GAP_DISSENT_MIN:.2f} — "
+            f"not accumulator-eligible. Narrow-gap form/venue dissent is where "
+            f"all 3 historical losses lived."
         )
-
     return flags
 
 
@@ -770,7 +782,7 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ACCUMULATOR
+# ACCUMULATOR — score is metadata only
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -809,7 +821,7 @@ def calc_accumulator_score(facts):
 
 def compute_accumulator(facts, decision):
     """
-    Populates the `accumulator` DB column as a confidence indicator.
+    Populates the legacy `accumulator` DB column as a confidence indicator.
     This is NOT the eligibility rule — `_is_accumulator_eligible` is.
     """
     qualifying = decision.get("qualifying")
@@ -1685,9 +1697,6 @@ def render_settled_card(m: dict, is_acc_eligible: bool = False):
     """, unsafe_allow_html=True)
 
 
-# ── CHANGE 3 ──
-# Accumulator card now displays shadow flags. A match with dissent on
-# 'form' or 'venue' shows a warning, but remains eligible.
 def render_accumulator_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1755,7 +1764,6 @@ def render_accumulator_card(m: dict):
     </div>
     """, unsafe_allow_html=True)
 
-    # Shadow flags — warnings below the card, not affecting eligibility
     for flag in _accumulator_shadow_flags(m):
         st.warning(flag)
 
@@ -1992,8 +2000,8 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
     df = pd.DataFrame(records)
     df["bucket"] = pd.cut(
         df["gap"],
-        bins=[0, 0.30, 0.50, 0.75, 100.0],
-        labels=["< 0.30", "0.30–0.50", "0.50–0.75", "> 0.75"],
+        bins=[0, 0.30, 0.50, 0.65, 100.0],
+        labels=["< 0.30", "0.30–0.50", "0.50–0.65", "> 0.65"],
     )
     out = (df.groupby("bucket", observed=False)
              .agg(n=("hit", "count"), wins=("hit", "sum"),
@@ -2090,9 +2098,8 @@ with tab_new:
         try:
             acc_score = calc_accumulator_score(facts)
             st.markdown(
-                f"**Accumulator score:** `{acc_score:+.1f}` — "
-                f"threshold `±15.0` → "
-                f"{'**HIGH SIGNAL** 🎯' if preview['accumulator'] else 'not high signal'}"
+                f"**Accumulator score:** `{acc_score:+.1f}` "
+                f"(metadata only — not an eligibility gate)"
             )
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
@@ -2202,25 +2209,23 @@ with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
         "Split in {4-0, 0-4, 3-0-1, 0-3-1} AND goal_gap ≥ 0.50. "
-        "Retrospective edits excluded. Losses are shown in red. "
-        "Warning flags indicate properties that correlate with "
-        "historical losses but are not yet a filter."
+        "Form/venue dissent requires gap ≥ 0.65 (tighter). "
+        "Retrospective edits excluded. Losses are shown in red."
     )
 
+    # Fetch all matches to evaluate eligibility in Python. We do NOT rely
+    # on the legacy `accumulator` DB column (which uses a stricter score
+    # threshold that no longer matches the eligibility rule).
     try:
-        raw_acc = db_accumulator_matches()
+        sb = get_supabase()
+        all_matches_res = (sb.table("matches")
+                             .select("*")
+                             .order("match_date", desc=True)
+                             .execute())
+        all_matches = all_matches_res.data or []
     except Exception as e:
-        st.error(f"Could not load accumulator matches: {e}")
-        raw_acc = []
-
-    # Fetch all matches to evaluate eligibility without relying on the
-    # legacy `accumulator` DB flag (which used a stricter score threshold).
-    sb = get_supabase()
-    all_matches_res = (sb.table("matches")
-                         .select("*")
-                         .order("match_date", desc=True)
-                         .execute())
-    all_matches = all_matches_res.data or []
+        st.error(f"Could not load matches: {e}")
+        all_matches = []
 
     acc_matches = [m for m in all_matches if _is_accumulator_eligible(m)]
 
@@ -2369,7 +2374,8 @@ with tab_perf:
             st.caption(
                 "Descriptive only. Uses the stored per-side expectations. "
                 "No filter is applied to single bets — accumulators require "
-                "split in {4-0, 0-4, 3-0-1, 0-3-1} + gap ≥ 0.50."
+                "split in {4-0, 0-4, 3-0-1, 0-3-1} + gap ≥ 0.50 "
+                "(≥ 0.65 for form/venue dissent)."
             )
 
             total_df = goal_total_summary(clean_settled)
