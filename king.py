@@ -40,9 +40,13 @@ Goal profile (telemetry only, no veto on single bets):
   - goal_gap      = |home_exp - away_exp|
 
 Accumulator rule:
-  - Cohort A (all four signals agree)
-  - goal_gap >= 0.50 (wide band, 32/32 on current sample)
-  - not quarantined, not retrospective
+  - Split in {4-0, 0-4, 3-0-1, 0-3-1}
+  - goal_gap >= 0.50 (wide band, 95.8% on current sample)
+  - Not quarantined (notes not "Retrospectively reclassified")
+
+  Shadow flag (not a filter, warning only):
+  - dissent_signal IN ('form', 'venue')
+  - Historical: 3 of 3 losses in the pool share this property.
 """
 
 import re
@@ -83,7 +87,6 @@ st.markdown("""
     .match-card.win       { border-left-color: #10b981; }
     .match-card.loss      { border-left-color: #ef4444; }
     .match-card.acc       { border-left-color: #a855f7; }
-    /* Accumulator-specific loss state — strong red so it stands out in the tab */
     .match-card.acc-loss {
         border-left-color: #ef4444;
         background: linear-gradient(135deg, #2a1a1f 0%, #3d232a 100%);
@@ -106,7 +109,6 @@ st.markdown("""
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
-    /* Accumulator specific verdict badges */
     .badge-acc-win  { background: #10b98122; color: #34d399; border: 1px solid #10b98155; }
     .badge-acc-loss { background: #ef444433; color: #fca5a5; border: 1px solid #ef444488; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
@@ -353,20 +355,46 @@ def _market_label(direction: str) -> str:
 
 
 # ── CHANGE 1 ──
-# Accumulator eligibility now requires a wide goal gap (>= 0.50) in
-# addition to Cohort A. This is the 32/32 cell from the cohort × gap data.
-# Single bets are unaffected — this only shrinks the accumulator pool.
+# Accumulator eligibility now accepts four splits (4-0, 0-4, 3-0-1, 0-3-1)
+# with a wide goal gap. No accumulator flag requirement, no score threshold.
+# Historical: 71 matches, 68 wins, 3 losses, 95.8% win rate.
+_ACC_SPLITS = ("4-0", "0-4", "3-0-1", "0-3-1")
+_ACC_GAP_THRESHOLD = 0.50
+
 def _is_accumulator_eligible(row: dict) -> bool:
-    if not row.get("accumulator"):
-        return False
     if _is_quarantined(row):
         return False
-    if _cohort_from_row(row) != "A":
+    split = row.get("agreement_split")
+    if split not in _ACC_SPLITS:
         return False
     gap = row.get("goal_gap")
-    if gap is None or float(gap) < 0.50:
+    if gap is None:
+        return False
+    try:
+        if float(gap) < _ACC_GAP_THRESHOLD:
+            return False
+    except (TypeError, ValueError):
         return False
     return True
+
+
+# ── CHANGE 2 ──
+# Shadow flags are warnings, not filters. They surface properties of the
+# match that correlate with historical losses, so the user can see them
+# before betting. They do NOT affect eligibility.
+def _accumulator_shadow_flags(row: dict) -> list:
+    flags = []
+    if not _is_accumulator_eligible(row):
+        return flags
+
+    dissent = row.get("dissent_signal")
+    if dissent in ("form", "venue"):
+        flags.append(
+            f"⚠️ Dissent on '{dissent}' — 3 of 3 historical losses "
+            f"in this pool share this property. Watch carefully."
+        )
+
+    return flags
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -567,11 +595,6 @@ def compute_signals(f: dict) -> dict:
 
 
 def _compute_goal_profile(facts):
-    """
-    Goal expectation profile for the match.
-    Returns dict with home_exp, away_exp, total, gap, or None if any of
-    the four venue GF/GA values are missing.
-    """
     h_gf = facts.get("home_home_gf")
     h_ga = facts.get("home_home_ga")
     a_gf = facts.get("away_away_gf")
@@ -785,6 +808,10 @@ def calc_accumulator_score(facts):
 
 
 def compute_accumulator(facts, decision):
+    """
+    Populates the `accumulator` DB column as a confidence indicator.
+    This is NOT the eligibility rule — `_is_accumulator_eligible` is.
+    """
     qualifying = decision.get("qualifying")
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
@@ -1035,7 +1062,6 @@ def _parse_venue_from_sentences(sents):
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
-        # 2-clause: draws inferred from window
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
     ]
@@ -1659,9 +1685,9 @@ def render_settled_card(m: dict, is_acc_eligible: bool = False):
     """, unsafe_allow_html=True)
 
 
-# ── CHANGE 2 ──
-# Accumulator card now colors by outcome. A loss in the accumulator tab
-# gets a red-accented card and a red badge so it's immediately visible.
+# ── CHANGE 3 ──
+# Accumulator card now displays shadow flags. A match with dissent on
+# 'form' or 'venue' shows a warning, but remains eligible.
 def render_accumulator_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1676,7 +1702,6 @@ def render_accumulator_card(m: dict):
     dc_hit = m.get("dc_hit")
     settled = hs is not None and aws is not None
 
-    # Card styling depends on outcome
     if settled and dc_hit == 0:
         card_cls = "acc-loss"
     elif settled and dc_hit == 1:
@@ -1698,7 +1723,6 @@ def render_accumulator_card(m: dict):
     except Exception:
         score_txt = ""
 
-    # Verdict badge — red on loss, green on win, purple (default) pending
     if settled and dc_hit == 0:
         pl = m.get("profit_loss")
         pl_txt = f"{pl:+.2f}u" if isinstance(pl, (int, float)) else "—"
@@ -1730,6 +1754,10 @@ def render_accumulator_card(m: dict):
         {goal_html}
     </div>
     """, unsafe_allow_html=True)
+
+    # Shadow flags — warnings below the card, not affecting eligibility
+    for flag in _accumulator_shadow_flags(m):
+        st.warning(flag)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2044,11 +2072,8 @@ with tab_new:
                 f" · pick gap **{pick_gap:+.2f}**" if pick_gap is not None else ""
             )
             acc_note = ""
-            if preview.get("accumulator"):
-                if profile["goal_gap"] >= 0.50:
-                    acc_note = " · **Accumulator-qualified** (gap ≥ 0.50)"
-                else:
-                    acc_note = " · Accumulator flag present but gap < 0.50 → not eligible"
+            if preview["accumulator_eligible"]:
+                acc_note = " · **Accumulator-qualified**"
             st.markdown(
                 f"**Goal profile:** "
                 f"Home exp **{profile['goal_exp_home']:.2f}** · "
@@ -2067,7 +2092,7 @@ with tab_new:
             st.markdown(
                 f"**Accumulator score:** `{acc_score:+.1f}` — "
                 f"threshold `±15.0` → "
-                f"{'**ELIGIBLE** 🎯' if preview['accumulator_eligible'] else 'not eligible'}"
+                f"{'**HIGH SIGNAL** 🎯' if preview['accumulator'] else 'not high signal'}"
             )
         except Exception as e:
             st.caption(f"(could not compute accumulator score: {e})")
@@ -2176,8 +2201,10 @@ with tab_pending:
 with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
-        "Cohort A (unanimous) AND goal_gap ≥ 0.50. Retrospective edits "
-        "excluded. Losses are shown in red so they stand out."
+        "Split in {4-0, 0-4, 3-0-1, 0-3-1} AND goal_gap ≥ 0.50. "
+        "Retrospective edits excluded. Losses are shown in red. "
+        "Warning flags indicate properties that correlate with "
+        "historical losses but are not yet a filter."
     )
 
     try:
@@ -2186,8 +2213,16 @@ with tab_acc:
         st.error(f"Could not load accumulator matches: {e}")
         raw_acc = []
 
-    # Only matches that pass the new stricter filter are shown.
-    acc_matches = [m for m in raw_acc if _is_accumulator_eligible(m)]
+    # Fetch all matches to evaluate eligibility without relying on the
+    # legacy `accumulator` DB flag (which used a stricter score threshold).
+    sb = get_supabase()
+    all_matches_res = (sb.table("matches")
+                         .select("*")
+                         .order("match_date", desc=True)
+                         .execute())
+    all_matches = all_matches_res.data or []
+
+    acc_matches = [m for m in all_matches if _is_accumulator_eligible(m)]
 
     if not acc_matches:
         st.info("No accumulator-eligible matches yet.")
@@ -2237,7 +2272,8 @@ with tab_acc:
         df = pd.DataFrame(acc_matches)
         keep = [c for c in [
             "match_id", "match_date", "league", "home_team", "away_team",
-            "direction", "stake", "agreement_split",
+            "agreement_split", "direction", "stake",
+            "dissent_signal",
             "home_score", "away_score", "dc_hit", "profit_loss",
             "goal_exp_home", "goal_exp_away", "goal_total", "goal_gap",
         ] if c in df.columns]
@@ -2319,11 +2355,7 @@ with tab_perf:
             if cohort_df.empty:
                 st.info("No cohort-classified settled picks yet.")
             else:
-                st.dataframe(
-                    cohort_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(cohort_df, use_container_width=True, hide_index=True)
 
             st.markdown("### Venue Opposition (Experiment)")
             st.caption("Tracks when the Venue signal actively opposes the pick direction.")
@@ -2331,17 +2363,13 @@ with tab_perf:
             if venue_df.empty:
                 st.info("No settled venue opposition data yet.")
             else:
-                st.dataframe(
-                    venue_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(venue_df, use_container_width=True, hide_index=True)
 
             st.markdown("### Goal Profile Analysis")
             st.caption(
                 "Descriptive only. Uses the stored per-side expectations. "
-                "No filter is applied to single bets — only accumulators "
-                "require gap ≥ 0.50."
+                "No filter is applied to single bets — accumulators require "
+                "split in {4-0, 0-4, 3-0-1, 0-3-1} + gap ≥ 0.50."
             )
 
             total_df = goal_total_summary(clean_settled)
