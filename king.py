@@ -33,37 +33,16 @@ Venue extraction, in priority order:
   3. prose sentences mentioning home/away
   4. (nothing else — if all fail, venue stays "nothing")
 
-Goal profile (telemetry only, no veto):
+Goal profile (telemetry only, no veto on single bets):
   - goal_exp_home = (home_home_gf + away_away_ga) / 2
   - goal_exp_away = (away_away_gf + home_home_ga) / 2
   - goal_total    = home_exp + away_exp
   - goal_gap      = |home_exp - away_exp|
 
-──────────────────────────────────────────────────────────────────────
-MIGRATION (run once, manually — not executed by this app)
-──────────────────────────────────────────────────────────────────────
-
-  alter table matches add column if not exists extracted_at_ts timestamptz;
-  alter table matches add column if not exists would_have_skipped_away_table boolean;
-  alter table matches add column if not exists attack_sum float;
-  alter table matches add column if not exists exp_proxy_avg float;
-  alter table matches add column if not exists venue_opposition boolean;
-
-  alter table matches add column if not exists home_home_gf float;
-  alter table matches add column if not exists home_home_ga float;
-  alter table matches add column if not exists away_away_gf float;
-  alter table matches add column if not exists away_away_ga float;
-
-  -- Goal profile (stored for later analysis, never used as a veto)
-  alter table matches add column if not exists goal_exp_home float;
-  alter table matches add column if not exists goal_exp_away float;
-  alter table matches add column if not exists goal_total    float;
-  alter table matches add column if not exists goal_gap      float;
-
-  alter table matches add column if not exists odds_market text;
-  alter table matches add column if not exists odds_value numeric;
-  alter table matches add column if not exists odds_book text;
-  alter table matches add column if not exists odds_captured_at timestamptz;
+Accumulator rule:
+  - Cohort A (all four signals agree)
+  - goal_gap >= 0.50 (wide band, 32/32 on current sample)
+  - not quarantined, not retrospective
 """
 
 import re
@@ -104,6 +83,17 @@ st.markdown("""
     .match-card.win       { border-left-color: #10b981; }
     .match-card.loss      { border-left-color: #ef4444; }
     .match-card.acc       { border-left-color: #a855f7; }
+    /* Accumulator-specific loss state — strong red so it stands out in the tab */
+    .match-card.acc-loss {
+        border-left-color: #ef4444;
+        background: linear-gradient(135deg, #2a1a1f 0%, #3d232a 100%);
+        box-shadow: 0 4px 20px rgba(239,68,68,0.30);
+    }
+    .match-card.acc-win {
+        border-left-color: #10b981;
+        background: linear-gradient(135deg, #1a2e1f 0%, #23402d 100%);
+        box-shadow: 0 4px 20px rgba(16,185,129,0.30);
+    }
     .match-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin: 0 0 4px 0; }
     .match-meta { font-size: 0.82rem; color: #94a3b8; margin-bottom: 14px; }
     .pick-badge {
@@ -116,6 +106,9 @@ st.markdown("""
     .badge-win  { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
     .badge-acc  { background: #a855f722; color: #c084fc; border: 1px solid #a855f755; }
+    /* Accumulator specific verdict badges */
+    .badge-acc-win  { background: #10b98122; color: #34d399; border: 1px solid #10b98155; }
+    .badge-acc-loss { background: #ef444433; color: #fca5a5; border: 1px solid #ef444488; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.75rem; padding: 4px 10px; border-radius: 8px;
@@ -196,9 +189,6 @@ def db_accumulator_matches():
     return res.data or []
 
 
-# ── CHANGE 3 ──
-# db_find_existing now keys on team IDs (stable across seasons and re-runs)
-# instead of team names (subject to alias drift and double-header collisions).
 def db_find_existing(row: dict):
     sb = get_supabase()
     q = sb.table("matches").select("*")
@@ -213,18 +203,13 @@ def db_find_existing(row: dict):
     return res.data[0] if res.data else None
 
 
-# ── CHANGE 1 ──
-# Backfill only NULL columns on an existing row. Never touches settlement
-# fields, never overwrites an existing value, never creates a duplicate.
 def db_backfill_missing(existing: dict, fresh: dict) -> dict:
     """
-    For each column in `fresh`:
-      - skip if it's in the PROTECTED set (settlement + metadata)
-      - skip if `fresh` has None for it
-      - skip if `existing` already has a non-None value
-      - otherwise add it to the UPDATE payload
-
-    Returns the dict of fields that were actually written (empty if none).
+    Update an existing match row with only the fields that are currently NULL
+    in the database but populated in the fresh extraction.
+    Never overwrites a field that already has a value.
+    Never touches settlement fields.
+    Returns the dict of fields that were updated (empty if nothing changed).
     """
     PROTECTED = {
         "match_id",
@@ -367,6 +352,10 @@ def _market_label(direction: str) -> str:
     return "No Bet"
 
 
+# ── CHANGE 1 ──
+# Accumulator eligibility now requires a wide goal gap (>= 0.50) in
+# addition to Cohort A. This is the 32/32 cell from the cohort × gap data.
+# Single bets are unaffected — this only shrinks the accumulator pool.
 def _is_accumulator_eligible(row: dict) -> bool:
     if not row.get("accumulator"):
         return False
@@ -375,7 +364,7 @@ def _is_accumulator_eligible(row: dict) -> bool:
     if _cohort_from_row(row) != "A":
         return False
     gap = row.get("goal_gap")
-    if gap is None or gap < 0.50:
+    if gap is None or float(gap) < 0.50:
         return False
     return True
 
@@ -582,11 +571,6 @@ def _compute_goal_profile(facts):
     Goal expectation profile for the match.
     Returns dict with home_exp, away_exp, total, gap, or None if any of
     the four venue GF/GA values are missing.
-
-    home_exp = (home_home_gf + away_away_ga) / 2
-    away_exp = (away_away_gf + home_home_ga) / 2
-    total    = home_exp + away_exp
-    gap      = |home_exp - away_exp| (absolute margin)
     """
     h_gf = facts.get("home_home_gf")
     h_ga = facts.get("home_home_ga")
@@ -1275,7 +1259,6 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
     ]
 
     for s in filtered:
-        s_low = s.lower()
         search_area = s
         if not search_area:
             continue
@@ -1320,7 +1303,6 @@ _KEYSTAT_PATTERNS = [
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    # 2-clause
     (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
     (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
 ]
@@ -1677,6 +1659,9 @@ def render_settled_card(m: dict, is_acc_eligible: bool = False):
     """, unsafe_allow_html=True)
 
 
+# ── CHANGE 2 ──
+# Accumulator card now colors by outcome. A loss in the accumulator tab
+# gets a red-accented card and a red badge so it's immediately visible.
 def render_accumulator_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1688,7 +1673,16 @@ def render_accumulator_card(m: dict):
 
     hs = m.get("home_score")
     aws = m.get("away_score")
+    dc_hit = m.get("dc_hit")
     settled = hs is not None and aws is not None
+
+    # Card styling depends on outcome
+    if settled and dc_hit == 0:
+        card_cls = "acc-loss"
+    elif settled and dc_hit == 1:
+        card_cls = "acc-win"
+    else:
+        card_cls = "acc"
 
     if direction == "home":
         pick_text = f"HOME — {home} · Home/Draw"
@@ -1704,20 +1698,35 @@ def render_accumulator_card(m: dict):
     except Exception:
         score_txt = ""
 
-    result_txt = ""
-    if settled:
+    # Verdict badge — red on loss, green on win, purple (default) pending
+    if settled and dc_hit == 0:
         pl = m.get("profit_loss")
         pl_txt = f"{pl:+.2f}u" if isinstance(pl, (int, float)) else "—"
-        verdict = _verdict_label(m.get("dc_hit"))
-        result_txt = f' · <span style="color:#a855f7">{hs}–{aws} {verdict} {pl_txt}</span>'
+        result_html = (
+            f'<span class="pick-badge badge-acc-loss">'
+            f'❌ {hs}–{aws} LOSS · {pl_txt}'
+            f'</span>'
+        )
+    elif settled and dc_hit == 1:
+        pl = m.get("profit_loss")
+        pl_txt = f"{pl:+.2f}u" if isinstance(pl, (int, float)) else "—"
+        result_html = (
+            f'<span class="pick-badge badge-acc-win">'
+            f'✅ {hs}–{aws} WIN · {pl_txt}'
+            f'</span>'
+        )
+    else:
+        result_html = (
+            f'<span class="pick-badge badge-acc">🎯 {pick_text}</span>'
+        )
 
     goal_html = _goal_profile_html(m)
 
     st.markdown(f"""
-    <div class="match-card acc">
+    <div class="match-card {card_cls}">
         <div class="match-title">{home} vs {away}</div>
-        <div class="match-meta">{league} · {date} · split {split} · stake {stake}{score_txt}{result_txt}</div>
-        <span class="pick-badge badge-acc">🎯 {pick_text}</span>
+        <div class="match-meta">{league} · {date} · split {split} · stake {stake}{score_txt}</div>
+        {result_html}
         {goal_html}
     </div>
     """, unsafe_allow_html=True)
@@ -1750,10 +1759,6 @@ def decision_columns(d):
     }
 
 
-# ── CHANGE 2 ──
-# build_row now lets home_team_id and away_team_id through so that
-# db_find_existing can use them as the stable lookup key. They are
-# never NULL (extracted from the logo URLs) and never change for a match.
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
@@ -1793,7 +1798,6 @@ def build_row(facts, signals, decision):
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
-        "home_team_id", "away_team_id",           # <-- kept for the lookup key
         "home_table_pos", "away_table_pos", "home_table_pts", "away_table_pts",
         "home_table_gd", "away_table_gd", "home_table_gf", "away_table_gf",
         "home_table_ga", "away_table_ga", "home_table_played", "away_table_played",
@@ -2039,6 +2043,12 @@ with tab_new:
             pick_txt = (
                 f" · pick gap **{pick_gap:+.2f}**" if pick_gap is not None else ""
             )
+            acc_note = ""
+            if preview.get("accumulator"):
+                if profile["goal_gap"] >= 0.50:
+                    acc_note = " · **Accumulator-qualified** (gap ≥ 0.50)"
+                else:
+                    acc_note = " · Accumulator flag present but gap < 0.50 → not eligible"
             st.markdown(
                 f"**Goal profile:** "
                 f"Home exp **{profile['goal_exp_home']:.2f}** · "
@@ -2046,8 +2056,9 @@ with tab_new:
                 f"Total **{profile['goal_total']:.2f}** · "
                 f"Gap **{profile['goal_gap']:.2f}**"
                 f"{pick_txt}"
+                f"{acc_note}"
             )
-            st.caption("Stored for analysis. No filter is applied — the signals decide.")
+            st.caption("Stored for analysis. No filter is applied to single bets.")
         else:
             st.caption("(goal profile unavailable — some venue GF/GA missing)")
 
@@ -2079,10 +2090,6 @@ with tab_new:
 
         row = build_row(facts, signals, decision)
 
-        # ── CHANGE 4 ──
-        # If the match is already stored, backfill only the missing columns.
-        # If it's new, insert normally. Never duplicate, never overwrite
-        # settlement data, never touch manually-edited fields.
         with st.spinner("Checking for an existing match..."):
             try:
                 existing = db_find_existing(row)
@@ -2169,8 +2176,8 @@ with tab_pending:
 with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
-        "Matches whose stored `accumulator` flag is TRUE, restricted to "
-        "Cohort A (Unanimous), with retrospective edits excluded."
+        "Cohort A (unanimous) AND goal_gap ≥ 0.50. Retrospective edits "
+        "excluded. Losses are shown in red so they stand out."
     )
 
     try:
@@ -2179,6 +2186,7 @@ with tab_acc:
         st.error(f"Could not load accumulator matches: {e}")
         raw_acc = []
 
+    # Only matches that pass the new stricter filter are shown.
     acc_matches = [m for m in raw_acc if _is_accumulator_eligible(m)]
 
     if not acc_matches:
@@ -2207,7 +2215,7 @@ with tab_acc:
                         f'<div class="metric-label">Wins</div></div>',
                         unsafe_allow_html=True)
         with c4:
-            st.markdown(f'<div class="metric-box"><div class="metric-value">{losses}</div>'
+            st.markdown(f'<div class="metric-box"><div class="metric-value" style="color:#ef4444">{losses}</div>'
                         f'<div class="metric-label">Losses</div></div>',
                         unsafe_allow_html=True)
         with c5:
@@ -2332,8 +2340,8 @@ with tab_perf:
             st.markdown("### Goal Profile Analysis")
             st.caption(
                 "Descriptive only. Uses the stored per-side expectations. "
-                "No filter is applied to any pick — this is here so you can "
-                "study the profile against outcomes and choose thresholds later."
+                "No filter is applied to single bets — only accumulators "
+                "require gap ≥ 0.50."
             )
 
             total_df = goal_total_summary(clean_settled)
