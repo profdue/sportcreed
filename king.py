@@ -374,6 +374,9 @@ def _is_accumulator_eligible(row: dict) -> bool:
         return False
     if _cohort_from_row(row) != "A":
         return False
+    gap = row.get("goal_gap")
+    if gap is None or gap < 0.50:
+        return False
     return True
 
 
