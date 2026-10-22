@@ -196,11 +196,14 @@ def db_accumulator_matches():
     return res.data or []
 
 
+# ── CHANGE 3 ──
+# db_find_existing now keys on team IDs (stable across seasons and re-runs)
+# instead of team names (subject to alias drift and double-header collisions).
 def db_find_existing(row: dict):
     sb = get_supabase()
     q = sb.table("matches").select("*")
-    for field in ("match_date", "kickoff_time", "league",
-                  "home_team", "away_team"):
+    for field in ("match_date", "kickoff_time",
+                  "home_team_id", "away_team_id"):
         val = row.get(field)
         if val is None:
             q = q.is_(field, "null")
@@ -208,6 +211,46 @@ def db_find_existing(row: dict):
             q = q.eq(field, val)
     res = q.limit(1).execute()
     return res.data[0] if res.data else None
+
+
+# ── CHANGE 1 ──
+# Backfill only NULL columns on an existing row. Never touches settlement
+# fields, never overwrites an existing value, never creates a duplicate.
+def db_backfill_missing(existing: dict, fresh: dict) -> dict:
+    """
+    For each column in `fresh`:
+      - skip if it's in the PROTECTED set (settlement + metadata)
+      - skip if `fresh` has None for it
+      - skip if `existing` already has a non-None value
+      - otherwise add it to the UPDATE payload
+
+    Returns the dict of fields that were actually written (empty if none).
+    """
+    PROTECTED = {
+        "match_id",
+        "home_score", "away_score", "result", "dc_hit", "profit_loss",
+        "settled_at", "notes",
+        "extracted_at", "extracted_at_ts",
+        "accumulator", "accumulator_score",
+    }
+
+    update = {}
+    for key, fresh_val in fresh.items():
+        if key in PROTECTED:
+            continue
+        if fresh_val is None:
+            continue
+        if existing.get(key) is None:
+            update[key] = fresh_val
+
+    if not update:
+        return {}
+
+    sb = get_supabase()
+    sb.table("matches").update(update).eq(
+        "match_id", existing["match_id"]
+    ).execute()
+    return update
 
 
 def db_settle(match_id: int, home_score: int, away_score: int,
@@ -795,7 +838,8 @@ def _compute_goal_proxy(f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HTML EXTRACTION# ═══════════════════════════════════════════════════════════════════
+# HTML EXTRACTION
+# ═══════════════════════════════════════════════════════════════════
 
 def _extract_identity(soup, f):
     t_top = soup.find("div", class_="t_top")
@@ -1703,13 +1747,17 @@ def decision_columns(d):
     }
 
 
+# ── CHANGE 2 ──
+# build_row now lets home_team_id and away_team_id through so that
+# db_find_existing can use them as the stable lookup key. They are
+# never NULL (extracted from the logo URLs) and never change for a match.
 def build_row(facts, signals, decision):
     row = dict(facts)
     row.pop("_parse_warnings", None)
     row.pop("home_team_short", None)
     row.pop("away_team_short", None)
-    row.pop("home_team_id", None)
-    row.pop("away_team_id", None)
+    # NOTE: home_team_id / away_team_id are no longer popped — we keep them
+    # so the lookup key is stable across re-runs.
     row.pop("home_form_source", None)
     row.pop("away_form_source", None)
     row.update(signals_to_columns(signals))
@@ -1721,7 +1769,6 @@ def build_row(facts, signals, decision):
 
     row["accumulator"] = compute_accumulator(facts, decision)
 
-    # Goal profile — telemetry only, never influences decision.
     profile = _compute_goal_profile(facts)
     if profile:
         row["goal_exp_home"] = profile["goal_exp_home"]
@@ -1743,6 +1790,7 @@ def build_row(facts, signals, decision):
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
+        "home_team_id", "away_team_id",           # <-- kept for the lookup key
         "home_table_pos", "away_table_pos", "home_table_pts", "away_table_pts",
         "home_table_gd", "away_table_gd", "home_table_gf", "away_table_gf",
         "home_table_ga", "away_table_ga", "home_table_played", "away_table_played",
@@ -1855,11 +1903,6 @@ def venue_opposition_summary(rows: list) -> pd.DataFrame:
     return out[["venue_opposition", "n", "wins", "losses", "Hit Rate %"]]
 
 
-# ── FIX: nan-safe round ──
-# Replaces .replace(0, pd.NA) with .replace(0, float("nan")).
-# pd.NA doesn't implement __round__, which broke .round(1) whenever a
-# bucket had zero rows. float("nan") propagates cleanly through
-# pandas' vectorised round.
 def goal_total_summary(rows: list) -> pd.DataFrame:
     records = []
     for r in rows:
@@ -1889,7 +1932,6 @@ def goal_total_summary(rows: list) -> pd.DataFrame:
              .reset_index()
              .rename(columns={"bucket": "total_bucket"}))
     out["losses"] = out["n"] - out["wins"]
-    # ── FIX: nan-safe round ──
     safe_n = out["n"].replace(0, float("nan"))
     out["hit_pct"] = (out["wins"] / safe_n * 100).round(1)
     return out[["total_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
@@ -1924,7 +1966,6 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
              .reset_index()
              .rename(columns={"bucket": "gap_bucket"}))
     out["losses"] = out["n"] - out["wins"]
-    # ── FIX: nan-safe round ──
     safe_n = out["n"].replace(0, float("nan"))
     out["hit_pct"] = (out["wins"] / safe_n * 100).round(1)
     return out[["gap_bucket", "n", "wins", "losses", "hit_pct", "net_pl"]]
@@ -2003,7 +2044,7 @@ with tab_new:
                 f"Gap **{profile['goal_gap']:.2f}**"
                 f"{pick_txt}"
             )
-            st.caption("Stored for analysis. No veto is applied — the signals decide.")
+            st.caption("Stored for analysis. No filter is applied — the signals decide.")
         else:
             st.caption("(goal profile unavailable — some venue GF/GA missing)")
 
@@ -2035,6 +2076,10 @@ with tab_new:
 
         row = build_row(facts, signals, decision)
 
+        # ── CHANGE 4 ──
+        # If the match is already stored, backfill only the missing columns.
+        # If it's new, insert normally. Never duplicate, never overwrite
+        # settlement data, never touch manually-edited fields.
         with st.spinner("Checking for an existing match..."):
             try:
                 existing = db_find_existing(row)
@@ -2043,11 +2088,18 @@ with tab_new:
                 st.warning(f"Could not check for duplicates: {e}")
 
         if existing:
-            st.info(
-                f"ℹ️ This match is already stored (match_id **{existing['match_id']}**, "
-                f"saved {existing.get('extracted_at', 'earlier')}). "
-                f"Prediction was regenerated above but **not** re-saved."
-            )
+            updated = db_backfill_missing(existing, row)
+            if updated:
+                fields = ", ".join(sorted(updated.keys()))
+                st.success(
+                    f"Match already stored (match_id **{existing['match_id']}**). "
+                    f"Filled **{len(updated)}** missing field(s): {fields}"
+                )
+            else:
+                st.info(
+                    f"Match already stored (match_id **{existing['match_id']}**) "
+                    f"and nothing is missing. Prediction was regenerated but not saved."
+                )
         else:
             with st.spinner("Saving to Supabase..."):
                 try:
@@ -2277,7 +2329,7 @@ with tab_perf:
             st.markdown("### Goal Profile Analysis")
             st.caption(
                 "Descriptive only. Uses the stored per-side expectations. "
-                "No veto is applied to any pick — this is here so you can "
+                "No filter is applied to any pick — this is here so you can "
                 "study the profile against outcomes and choose thresholds later."
             )
 
