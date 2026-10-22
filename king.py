@@ -202,8 +202,8 @@ def db_accumulator_matches():
 def db_find_existing(row: dict):
     sb = get_supabase()
     q = sb.table("matches").select("*")
-    for field in ("match_date", "kickoff_time",
-                  "home_team_id", "away_team_id"):
+    for field in ("match_date", "kickoff_time", "league",
+                  "home_team", "away_team"):
         val = row.get(field)
         if val is None:
             q = q.is_(field, "null")
@@ -1756,8 +1756,8 @@ def build_row(facts, signals, decision):
     row.pop("_parse_warnings", None)
     row.pop("home_team_short", None)
     row.pop("away_team_short", None)
-    # NOTE: home_team_id / away_team_id are no longer popped — we keep them
-    # so the lookup key is stable across re-runs.
+    row.pop("home_team_id", None)
+    row.pop("away_team_id", None)
     row.pop("home_form_source", None)
     row.pop("away_form_source", None)
     row.update(signals_to_columns(signals))
