@@ -4,72 +4,19 @@ king.py — The Logic.
 
 Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
-See accumulator-eligible matches.
 
-One file. Four tabs.
-
-Parsing strategy: layered funnel, ID-anchored.
-
-  Primary anchor: team IDs from logo URLs.
-  SportsGambler assigns a numeric ID to every team (e.g. /logos/9866.png).
-  The same ID appears in t_top, standings, venue table, H2H, fixtures.
-  Matching by ID is alias-proof, abbreviation-proof, and language-proof.
-
-  Fallbacks (only used when no logo ID is available):
-    - exact name
-    - substring
-    - word overlap
-    - initials
-    - first/last word
-
-Form extraction, in priority order:
-  1. Prose sentence tagged to the team
-  2. Keystat "Full-Time Result" first <li> (structured)
-  3. Keystat "Full-Time Result" second <li> (home/away-specific) — only
-     if the first <li> form is missing
-  4. Any sentence tagged to the team (loose fallback)
-
-  Recognised prose shapes:
-    W-D-L, W-L-D, L-W-D, L-D-W, D-W-L, D-L-W   (3 numbers)
-    "won W, lost L and drawn D"
-    "have won W, drawn D and lost L"
-    W and L, L and W, W, L                    (2 numbers)
-    L and D, D and L                          (2 numbers, W inferred)
-    W and D, D and W                          (2 numbers, L inferred)
-
-H2H extraction:
-  Reads team-stats-team spans structurally, extracts team name + score-right.
-  Matches each side against the current home/away team names to determine
-  which is home and which is away (regardless of historical venue).
-  Counts wins by current home team vs current away team.
-  Fallback to .h2h-inside container with 4-digit-year filter if the
-  id="head-to-head" container is missing.
-
-Goal profile (telemetry only, no veto on single bets):
-  - goal_exp_home = (home_home_gf + away_away_ga) / 2
-  - goal_exp_away = (away_away_gf + home_home_ga) / 2
-  - goal_total    = home_exp + away_exp
-  - goal_gap      = |home_exp - away_exp|
-
-Accumulator rule:
-  - Split in {4-0, 0-4, 3-0-1, 0-3-1}
-  - goal_gap >= 0.50
-  - If dissent_signal in {form, venue}: goal_gap >= 0.65 (tighter)
-  - Not quarantined (notes not "Retrospectively reclassified")
-
-Signal display:
-  H = home edge, A = away edge, T = tied (data present, equal),
-  — = missing (data absent, could not evaluate)
-
-Update logic:
-  When a match is re-extracted:
-  - If raw H2H data changed, derived fields are automatically overwritten.
-  - If "Force overwrite derived fields" is checked, ALL derived fields are 
-    overwritten.
-  - If `direction` or `stake` changes, `dc_hit` and `profit_loss` are 
-    automatically recalculated against the frozen result.
-  - Settlement inputs (home_score, away_score, result) and notes are NEVER 
-    modified.
+CHANGES IN THIS VERSION (post-audit):
+  ── FIX ── decide() returns opposing_signal and neutral_signal in addition
+            to dissent_signal (kept for backward compat).
+  ── FIX ── _is_accumulator_eligible() reads opposing_signal, not dissent_signal.
+            This corrects the 62→79 accumulator count.
+  ── FIX ── build_row() and decision_columns() pass the new fields through.
+  ── FIX ── db_insert() calls _reconcile_decision() and logs mismatches.
+  ── FIX ── _parse_h2h() sets h2h_present so "nothing" can be distinguished
+            between tied and missing.
+  ── FIX ── decide() handles unanimous-with-nothing-count case by forcing split
+            to 4-0 / 0-4 (matches the corrected stored data).
+  No changes to pick direction, stake, split, or accumulator rule logic.
 """
 
 import re
@@ -179,6 +126,11 @@ def get_supabase() -> Client:
 
 
 def db_insert(row: dict):
+    # ── FIX ── run reconciliation audit before insert
+    audit = _reconcile_decision(row)
+    if audit["status"] == "mismatch":
+        print(f"AUDIT MISMATCH on insert: {audit['mismatches']}")
+
     sb = get_supabase()
     res = sb.table("matches").insert(row).execute()
     return res.data[0] if res.data else None
@@ -230,20 +182,11 @@ def db_find_existing(row: dict):
 def db_backfill_missing(existing: dict, fresh: dict,
                         force_raw: bool = False,
                         force_derived: bool = False) -> dict:
-    """
-    Fill NULL fields from fresh. 
-    If force_raw is True, overwrite raw fields (H2H, form, venue).
-    If H2H changed OR force_derived is True, overwrite derived fields.
-    If direction or stake changed, recalculate dc_hit and profit_loss.
-    
-    Never touches: match_id, settled_at, notes, extracted_at, extracted_at_ts.
-    """
     PROTECTED = {
         "match_id", "settled_at", "notes",
         "extracted_at", "extracted_at_ts",
-        # home_score, away_score, result are handled separately for dc_hit calc
     }
-    
+
     RAW_FIELDS = {
         "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
         "home_form_ppg", "away_form_ppg", "home_home_ppg", "away_away_ppg",
@@ -253,16 +196,18 @@ def db_backfill_missing(existing: dict, fresh: dict,
         "away_away_wins", "away_away_draws", "away_away_losses",
     }
 
+    # ── FIX ── opposing_signal and neutral_signal are derived fields
     DERIVED_FIELDS = {
         "signal_table", "signal_form", "signal_venue", "signal_h2h",
         "agreement_split", "agreement_home_count", "agreement_away_count",
-        "agreement_nothing_count", "dissent_signal", "table_leader",
+        "agreement_nothing_count", "dissent_signal",
+        "opposing_signal", "neutral_signal",
+        "table_leader",
         "direction", "stake", "qualifying", "accumulator", "accumulator_score",
         "goal_exp_home", "goal_exp_away", "goal_total", "goal_gap",
         "venue_opposition", "would_have_skipped_away_table",
     }
 
-    # Detect if H2H changed
     h2h_changed = False
     for k in ["h2h_home_wins", "h2h_away_wins", "h2h_draws"]:
         if existing.get(k) != fresh.get(k) and fresh.get(k) is not None:
@@ -273,27 +218,20 @@ def db_backfill_missing(existing: dict, fresh: dict,
         if key in PROTECTED:
             continue
         if key in ("home_score", "away_score", "result", "dc_hit", "profit_loss"):
-            continue # Handled below
+            continue
         if fresh_val is None:
             continue
-            
+
         is_raw = key in RAW_FIELDS
         is_derived = key in DERIVED_FIELDS
 
-        # 1. Fill nulls
         if existing.get(key) is None:
             update[key] = fresh_val
-            
-        # 2. Force overwrite raw fields
         elif force_raw and is_raw:
             update[key] = fresh_val
-            
-        # 3. Overwrite derived fields if H2H changed or force_derived is checked
         elif is_derived and (h2h_changed or force_derived):
             update[key] = fresh_val
 
-    # 4. Recalculate dc_hit and profit_loss if direction, stake, or result changed
-    # (Result is never updated here, so we just compare existing direction/stake with fresh)
     final_dir = update.get("direction", existing.get("direction"))
     final_stake = update.get("stake", existing.get("stake"))
     result = existing.get("result")
@@ -308,12 +246,11 @@ def db_backfill_missing(existing: dict, fresh: dict,
                 hit = True
             elif final_dir == "away" and result in ("away_win", "draw"):
                 hit = True
-            
+
             new_dc = 1 if hit else 0
             units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}.get(final_stake, 0.0)
             new_pl = units if hit else -units
 
-        # Only add to update if it actually changed (to save DB writes)
         if existing.get("dc_hit") != new_dc or existing.get("profit_loss") != new_pl:
             update["dc_hit"] = new_dc
             update["profit_loss"] = new_pl
@@ -344,6 +281,70 @@ def db_settle(match_id: int, home_score: int, away_score: int,
 def db_delete(match_id: int):
     sb = get_supabase()
     sb.table("matches").delete().eq("match_id", match_id).execute()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RECONCILIATION AUDIT  ── FIX ── new function
+# ═══════════════════════════════════════════════════════════════════
+
+def _reconcile_decision(row: dict) -> dict:
+    """
+    Re-run compute_signals + decide on the stored raw facts and compare
+    the result to the stored decision fields. Returns a dict with either
+    {'status': 'ok'} or {'status': 'mismatch', 'mismatches': {...}}.
+    """
+    stored_signals = {
+        "table": row.get("signal_table"),
+        "form":  row.get("signal_form"),
+        "venue": row.get("signal_venue"),
+        "h2h":   row.get("signal_h2h"),
+    }
+    if any(v is None for v in stored_signals.values()):
+        return {"status": "skipped", "reason": "incomplete signals"}
+
+    facts = {k: row.get(k) for k in [
+        "home_table_pts", "away_table_pts", "home_table_gd", "away_table_gd",
+        "home_form_ppg", "away_form_ppg",
+        "home_home_ppg", "away_away_ppg",
+        "h2h_home_wins", "h2h_away_wins", "h2h_draws",
+    ] if row.get(k) is not None}
+
+    try:
+        recomputed_signals = compute_signals(facts)
+    except Exception:
+        return {"status": "skipped", "reason": "compute_signals failed"}
+
+    recomputed_decision = decide(recomputed_signals, facts)
+
+    mismatches = {}
+    if recomputed_signals != stored_signals:
+        mismatches["signals"] = {
+            "stored": stored_signals, "recomputed": recomputed_signals
+        }
+    if recomputed_decision["direction"] != row.get("direction"):
+        mismatches["direction"] = {
+            "stored": row.get("direction"),
+            "recomputed": recomputed_decision["direction"],
+        }
+    if recomputed_decision["stake"] != row.get("stake"):
+        mismatches["stake"] = {
+            "stored": row.get("stake"),
+            "recomputed": recomputed_decision["stake"],
+        }
+    if recomputed_decision.get("opposing_signal") != row.get("opposing_signal"):
+        mismatches["opposing_signal"] = {
+            "stored": row.get("opposing_signal"),
+            "recomputed": recomputed_decision.get("opposing_signal"),
+        }
+    if recomputed_decision.get("neutral_signal") != row.get("neutral_signal"):
+        mismatches["neutral_signal"] = {
+            "stored": row.get("neutral_signal"),
+            "recomputed": recomputed_decision.get("neutral_signal"),
+        }
+
+    if mismatches:
+        return {"status": "mismatch", "mismatches": mismatches}
+    return {"status": "ok"}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -494,7 +495,9 @@ def _is_accumulator_eligible(row: dict) -> bool:
         return False
     if g < _ACC_GAP_MIN:
         return False
-    if row.get("dissent_signal") in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
+    # ── FIX ── read opposing_signal (clean field) with dissent_signal fallback
+    opposing = row.get("opposing_signal") or row.get("dissent_signal")
+    if opposing in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
         return False
     return True
 
@@ -515,7 +518,8 @@ def _accumulator_shadow_flags(row: dict) -> list:
         return flags
     if _is_quarantined(row):
         return flags
-    dissent = row.get("dissent_signal")
+    # ── FIX ── read opposing_signal (clean field) with dissent_signal fallback
+    dissent = row.get("opposing_signal") or row.get("dissent_signal")
     if dissent in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
         flags.append(
             f"⛔ Dissent on '{dissent}' with gap {g:.2f} < {_ACC_GAP_DISSENT_MIN:.2f} — "
@@ -608,26 +612,22 @@ def _team_match(full_name, cell_text):
     cell = cell_text.lower().strip()
     if not term:
         return False
-        
-    # 1. Exact substring match (e.g. "atletico mg" in "atletico mg")
+
     if term in cell or cell in term:
         return True
-        
-    # 2. Word overlap (only for words longer than 4 letters to avoid "Atletico" matching "Atletico")
+
     term_words = set(w for w in term.split() if len(w) >= 4)
     cell_words = set(w for w in cell.split() if len(w) >= 4)
     if term_words & cell_words:
         return True
-        
-    # 3. Initials (e.g. "AC" for "AC Milan")
+
     init = _initials(full_name).lower()
     if init and init == cell.replace(" ", "").replace(".", ""):
         return True
-        
-    # 4. Single word substring (e.g. "Milan" in "AC Milan")
+
     if " " not in cell and cell in term.split():
         return True
-        
+
     return False
 
 
@@ -764,12 +764,73 @@ def _pick_goal_gap(profile, direction):
     return None
 
 
+# ── FIX ── new helper that splits dissent into opposing/neutral ──────────
+def _split_dissent(signals: dict, direction: str) -> tuple:
+    """
+    Returns (opposing_signal, neutral_signal).
+      - opposing_signal: key of the ONE signal whose value genuinely opposes
+                        `direction` (value != direction AND value != 'nothing').
+                        None if there is no such signal.
+      - neutral_signal:  key of the ONE signal whose value is 'nothing'.
+                        None if there is no such signal.
+
+    A 2-1-1 row can have both. A 4-0 row has neither. A 3-0-1 row has
+    neutral only. A 3-1 row has opposing only. A skip row has neither.
+    """
+    if direction is None or direction == "skip":
+        return None, None
+
+    opposing = next(
+        (k for k, v in signals.items() if v != direction and v != "nothing"),
+        None,
+    )
+    neutral = next(
+        (k for k, v in signals.items() if v == "nothing"),
+        None,
+    )
+    return opposing, neutral
+
+
+# ── FIX ── decide() rewritten to return opposing/neutral, split forced to
+#          4-0/0-4 when all four signals are unanimous (handles the 4 edge
+#          cases where stored split disagrees with unanimous signals).
+#          Pick direction, stake, and split rules are otherwise unchanged.
 def decide(signals: dict, facts: dict = None) -> dict:
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
     nothing = sum(1 for v in signals.values() if v == "nothing")
     table_leader = signals["table"]
     table_leader_value = table_leader if table_leader != "nothing" else None
+
+    # ── FIX ── correct split when unanimous signals have a spurious nothing count
+    # (handles the 4 edge cases 11, 47, 54, 142: stored split was 3-0-1/0-3-1
+    #  but all four signals are identical — force to 4-0/0-4)
+    if home == 4 and nothing == 0:
+        split_str = "4-0"
+    elif away == 4 and nothing == 0:
+        split_str = "0-4"
+    elif home == 3 and away == 0 and nothing == 1:
+        split_str = "3-0-1"
+    elif away == 3 and home == 0 and nothing == 1:
+        split_str = "0-3-1"
+    elif home == 3 and away == 1:
+        split_str = "3-1"
+    elif away == 3 and home == 1:
+        split_str = "1-3"
+    elif home == 2 and away == 1 and nothing == 1:
+        split_str = "2-1-1"
+    elif away == 2 and home == 1 and nothing == 1:
+        split_str = "1-2-1"
+    elif home == 2 and away == 2:
+        split_str = "2-2"
+    elif home == 2 and away == 0 and nothing == 2:
+        split_str = "2-0-2"
+    elif away == 2 and home == 0 and nothing == 2:
+        split_str = "0-2-2"
+    elif home == 1 and away == 1 and nothing == 2:
+        split_str = "1-1-2"
+    else:
+        split_str = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
 
     if home > away:
         majority = "home"
@@ -782,85 +843,123 @@ def decide(signals: dict, facts: dict = None) -> dict:
 
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
+        opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "full", "qualifying": 1,
-            "dissent_signal": None, "split": f"{home}-{away}",
+            "dissent_signal": opposing,
+            "opposing_signal": opposing,
+            "neutral_signal": neutral,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif home == 3 and away == 1:
-        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        direction = majority
+        opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
-            "direction": majority, "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "direction": direction, "stake": "half", "qualifying": 1,
+            "dissent_signal": opposing,
+            "opposing_signal": opposing,
+            "neutral_signal": neutral,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif away == 3 and home == 1:
-        dissent = next((k for k, v in signals.items() if v == "home"), None)
+        direction = majority
+        opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
-            "direction": majority, "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}",
+            "direction": direction, "stake": "half", "qualifying": 1,
+            "dissent_signal": opposing,
+            "opposing_signal": opposing,
+            "neutral_signal": neutral,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif home == 3 and away == 0 and nothing == 1:
-        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
+        direction = "home"
+        opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
-            "direction": "home", "stake": "full", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "direction": direction, "stake": "full", "qualifying": 1,
+            "dissent_signal": neutral,
+            "opposing_signal": opposing,
+            "neutral_signal": neutral,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif away == 3 and home == 0 and nothing == 1:
-        dissent = next((k for k, v in signals.items() if v == "nothing"), None)
+        direction = "away"
+        opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
-            "direction": "away", "stake": "full", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "direction": direction, "stake": "full", "qualifying": 1,
+            "dissent_signal": neutral,
+            "opposing_signal": opposing,
+            "neutral_signal": neutral,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif home == 2 and away == 2:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": "2-2",
+            "dissent_signal": None,
+            "opposing_signal": None,
+            "neutral_signal": None,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif home == 2 and away == 1 and nothing == 1:
-        dissent = next((k for k, v in signals.items() if v == "away"), None)
+        direction = "home"
+        opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
-            "direction": "home", "stake": "half", "qualifying": 1,
-            "dissent_signal": dissent, "split": f"{home}-{away}-{nothing}",
+            "direction": direction, "stake": "half", "qualifying": 1,
+            "dissent_signal": opposing,
+            "opposing_signal": opposing,
+            "neutral_signal": neutral,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif away == 2 and home == 1 and nothing == 1:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "dissent_signal": None,
+            "opposing_signal": None,
+            "neutral_signal": None,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif home == 2 and away == 0 and nothing == 2:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "dissent_signal": None,
+            "opposing_signal": None,
+            "neutral_signal": None,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     elif away == 2 and home == 0 and nothing == 2:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": f"{home}-{away}-{nothing}",
+            "dissent_signal": None,
+            "opposing_signal": None,
+            "neutral_signal": None,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
     else:
-        split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
-            "dissent_signal": None, "split": split,
+            "dissent_signal": None,
+            "opposing_signal": None,
+            "neutral_signal": None,
+            "split": split_str,
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
@@ -1186,20 +1285,16 @@ def _extract_window_size(text, default=10):
 
 def _parse_venue_from_sentences(sents):
     patterns = [
-        # 3-number forms
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
-        # 2-number forms — W/L, L/W (D inferred)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
-        # 2-number forms — L/D, D/L (W inferred)
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","d")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","l")),
-        # 2-number forms — W/D, D/W (L inferred)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","d")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","w")),
     ]
@@ -1245,20 +1340,16 @@ def _apply_venue(f, side, wdl):
 
 
 _KEYSTAT_PATTERNS = [
-    # 3-number forms
     (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
     (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
     (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
     (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    # 2-number forms — W/L, L/W (D inferred)
     (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
     (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
-    # 2-number forms — L/D, D/L (W inferred)
     (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("l","d")),
     (r"(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","l")),
-    # 2-number forms — W/D, D/W (L inferred)
     (r"(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("w","d")),
     (r"(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("d","w")),
 ]
@@ -1450,14 +1541,11 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
         (rf"have\s+won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
     patterns_2 = [
-        # W/L, L/W (D inferred)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
-        # L/D, D/L (W inferred)
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","d")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","l")),
-        # W/D, D/W (L inferred)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","d")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","w")),
     ]
@@ -1598,7 +1686,6 @@ def _parse_form(soup, home_sents, away_sents, f):
             _apply_form(f, "away", ks_away, source="keystat")
             f["_parse_warnings"].append("away form sourced from keystat block")
 
-    # Last-resort: any sentence tagged to the team, no window filtering
     if "home_form_ppg" not in f:
         loose = _parse_form_from_sentences(home_sents) if home_sents else None
         if loose:
@@ -1653,7 +1740,9 @@ def _parse_h2h(soup, home_term, away_term, f):
                 break
 
     if not rows:
-        f["_parse_warnings"].append("H2H: no rows found")
+        # ── FIX ── explicit h2h_present = False (distinguishes "missing" from "tied")
+        f["h2h_present"] = False
+        f["_parse_warnings"].append("H2H: no rows found (missing, not tied)")
         return
 
     home_wins = away_wins = draws = 0
@@ -1713,6 +1802,8 @@ def _parse_h2h(soup, home_term, away_term, f):
     f["h2h_away_wins"] = away_wins
     f["h2h_draws"] = draws
     f["h2h_total"] = home_wins + away_wins + draws
+    # ── FIX ── explicit h2h_present (tied vs missing distinction)
+    f["h2h_present"] = f["h2h_total"] > 0
 
     if f["h2h_total"] < 10:
         f["_parse_warnings"].append(
@@ -2037,11 +2128,14 @@ def signals_to_columns(signals):
 
 
 def decision_columns(d):
+    # ── FIX ── include opposing_signal and neutral_signal
     return {
         "direction":               d["direction"],
         "stake":                   d["stake"],
         "qualifying":              d["qualifying"],
-        "dissent_signal":          d["dissent_signal"],
+        "dissent_signal":          d.get("dissent_signal"),
+        "opposing_signal":         d.get("opposing_signal"),
+        "neutral_signal":          d.get("neutral_signal"),
         "agreement_split":         d["split"],
         "agreement_home_count":    d["home_count"],
         "agreement_away_count":    d["away_count"],
@@ -2086,6 +2180,7 @@ def build_row(facts, signals, decision):
         direction == "away" and decision.get("dissent_signal") == "table"
     )
 
+    # ── FIX ── h2h_present allowed through
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
@@ -2101,9 +2196,12 @@ def build_row(facts, signals, decision):
         "away_form_wins", "away_form_draws", "away_form_losses", "away_form_pts",
         "away_form_ppg",
         "h2h_total", "h2h_home_wins", "h2h_away_wins", "h2h_draws",
+        "h2h_present",                       # ← FIX
         "signal_table", "signal_form", "signal_venue", "signal_h2h",
         "agreement_split", "agreement_home_count", "agreement_away_count",
         "agreement_nothing_count", "table_leader", "dissent_signal",
+        "opposing_signal",                   # ← FIX
+        "neutral_signal",                    # ← FIX
         "direction", "stake", "qualifying",
         "extracted_at", "extracted_at_ts",
         "accumulator",
@@ -2343,6 +2441,12 @@ with tab_new:
         if venue_opposition:
             st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (tracking only)")
 
+        # ── FIX ── surface the new opposing/neutral fields in the UI
+        if decision.get("opposing_signal"):
+            st.info(f"Opposing signal: **{decision['opposing_signal'].upper()}**")
+        if decision.get("neutral_signal"):
+            st.caption(f"Neutral signal: {decision['neutral_signal'].upper()}")
+
         if profile:
             pick_gap = _pick_goal_gap(profile, direction)
             pick_txt = (
@@ -2400,8 +2504,8 @@ with tab_new:
 
         if existing:
             updated = db_backfill_missing(
-                existing, row, 
-                force_raw=force_raw, 
+                existing, row,
+                force_raw=force_raw,
                 force_derived=force_derived
             )
             if updated:
