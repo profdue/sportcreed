@@ -1460,9 +1460,15 @@ def _team_sentences(aliases, sentences):
 def _parse_h2h(soup, home_term, away_term, f):
     """
     Parse the H2H section.
-    Structural read: each row has team-stats-team spans, each with a
-    score-right child. First span = home side.
-    No text-order heuristic. No date contamination.
+
+    Counts wins by the *current home team* and the *current away team*,
+    regardless of which venue each historical meeting was played at.
+
+    Structural read: each row has two team-stats-team spans, each with a
+    score-right child. Team names are extracted from the span text (minus
+    the trailing score). Each span is matched against home_term / away_term
+    to determine which side is the current home team. If a match can't be
+    determined, fall back to position (first span = first-listed team).
     """
     rows = []
     section = soup.find("div", id="head-to-head")
@@ -1470,7 +1476,6 @@ def _parse_h2h(soup, home_term, away_term, f):
         rows = section.find_all("li", class_="team-stat-list-item")
 
     if not rows:
-        # Fallback: locate the H2H container by structure, not text.
         for container in soup.find_all("div", class_="h2h-inside"):
             candidate = container.find_all("li", class_="team-stat-list-item")
             candidate = [
@@ -1486,24 +1491,51 @@ def _parse_h2h(soup, home_term, away_term, f):
         return
 
     home_wins = away_wins = draws = 0
+    unmatched = 0
+
     for row in rows:
         sides = row.find_all("span", class_="team-stats-team")
         if len(sides) < 2:
             continue
 
-        def _score(span):
-            s = span.find("span", class_="score-right")
-            if not s:
-                return None
+        def _side(span):
+            score_span = span.find("span", class_="score-right")
+            if not score_span:
+                return None, None
             try:
-                return int(s.get_text(strip=True))
+                score = int(score_span.get_text(strip=True))
             except (TypeError, ValueError):
-                return None
+                return None, None
+            # Name = span text minus the trailing score
+            name = span.get_text(" ", strip=True)
+            name = re.sub(r"\s*\d+\s*$", "", name).strip()
+            return name, score
 
-        hs = _score(sides[0])
-        aws = _score(sides[1])
-        if hs is None or aws is None:
+        name_a, score_a = _side(sides[0])
+        name_b, score_b = _side(sides[1])
+        if score_a is None or score_b is None:
             continue
+
+        # Which side is the current home team?
+        a_is_home = _team_match(home_term, name_a)
+        b_is_away = _team_match(away_term, name_b)
+        b_is_home = _team_match(home_term, name_b)
+        a_is_away = _team_match(away_term, name_a)
+
+        if a_is_home and b_is_away:
+            hs, aws = score_a, score_b
+        elif b_is_home and a_is_away:
+            hs, aws = score_b, score_a
+        elif a_is_home or b_is_away:
+            # Only one side matched as home — assume first span is home
+            hs, aws = score_a, score_b
+        elif b_is_home or a_is_away:
+            # Only one side matched as away — assume second span is home
+            hs, aws = score_b, score_a
+        else:
+            # Neither side matched — fall back to position, count as unmatched
+            hs, aws = score_a, score_b
+            unmatched += 1
 
         if hs > aws:
             home_wins += 1
@@ -1520,6 +1552,11 @@ def _parse_h2h(soup, home_term, away_term, f):
     if f["h2h_total"] != 10:
         f["_parse_warnings"].append(
             f"H2H: expected 10 rows, parsed {f['h2h_total']}"
+        )
+    if unmatched:
+        f["_parse_warnings"].append(
+            f"H2H: {unmatched} rows could not match home/away team names; "
+            f"counted by position instead"
         )
 
 
