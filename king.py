@@ -4,9 +4,9 @@ king.py — The Logic.
 
 Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
-See accumulator-eligible matches. Recompute derived fields.
+See accumulator-eligible matches.
 
-One file. Five tabs.
+One file. Four tabs.
 
 Parsing strategy: layered funnel, ID-anchored.
 
@@ -61,13 +61,14 @@ Signal display:
   H = home edge, A = away edge, T = tied (data present, equal),
   — = missing (data absent, could not evaluate)
 
-Recalculate tab:
-  Recomputes signal_*, agreement_*, dissent_signal, direction, stake,
-  qualifying, accumulator, accumulator_score, goal_*, venue_opposition,
-  would_have_skipped_away_table, dc_hit, profit_loss from raw inputs.
-
-  Never touches: match identity, home_score, away_score, result,
-  settled_at, notes, extracted_at, extracted_at_ts.
+Update logic:
+  When a match is re-extracted:
+  - If raw H2H data changed, derived fields (signals, direction, stake) are 
+    automatically overwritten.
+  - If "Force overwrite derived fields" is checked, ALL derived fields are 
+    overwritten regardless of raw data changes.
+  - Settlement inputs (home_score, away_score, result) and notes are NEVER 
+    modified.
 """
 
 import re
@@ -226,21 +227,44 @@ def db_find_existing(row: dict):
 
 
 def db_backfill_missing(existing: dict, fresh: dict,
-                        force_fields: set = None) -> dict:
+                        force_raw: bool = False,
+                        force_derived: bool = False) -> dict:
     """
-    Fill NULL fields from fresh. If force_fields is provided, also overwrite
-    those fields even when the existing value is not NULL.
-
-    Never touches: match identity, home_score, away_score, result, settled_at,
-    notes, extracted_at, extracted_at_ts.
+    Fill NULL fields from fresh. 
+    If force_raw is True, overwrite raw fields (H2H, form, venue).
+    If H2H changed OR force_derived is True, overwrite derived fields.
+    
+    Never touches: match_id, home_score, away_score, result, settled_at, notes.
     """
     PROTECTED = {
         "match_id",
-        "home_score", "away_score", "result", "dc_hit", "profit_loss",
-        "settled_at", "notes",
+        "home_score", "away_score", "result", "settled_at", "notes",
         "extracted_at", "extracted_at_ts",
     }
-    force_fields = force_fields or set()
+    
+    RAW_FIELDS = {
+        "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
+        "home_form_ppg", "away_form_ppg", "home_home_ppg", "away_away_ppg",
+        "home_form_wins", "home_form_draws", "home_form_losses",
+        "away_form_wins", "away_form_draws", "away_form_losses",
+        "home_home_wins", "home_home_draws", "home_home_losses",
+        "away_away_wins", "away_away_draws", "away_away_losses",
+    }
+
+    DERIVED_FIELDS = {
+        "signal_table", "signal_form", "signal_venue", "signal_h2h",
+        "agreement_split", "agreement_home_count", "agreement_away_count",
+        "agreement_nothing_count", "dissent_signal", "table_leader",
+        "direction", "stake", "qualifying", "accumulator", "accumulator_score",
+        "goal_exp_home", "goal_exp_away", "goal_total", "goal_gap",
+        "venue_opposition", "would_have_skipped_away_table",
+    }
+
+    # Detect if H2H changed
+    h2h_changed = False
+    for k in ["h2h_home_wins", "h2h_away_wins", "h2h_draws"]:
+        if existing.get(k) != fresh.get(k) and fresh.get(k) is not None:
+            h2h_changed = True
 
     update = {}
     for key, fresh_val in fresh.items():
@@ -248,7 +272,20 @@ def db_backfill_missing(existing: dict, fresh: dict,
             continue
         if fresh_val is None:
             continue
-        if existing.get(key) is None or key in force_fields:
+            
+        is_raw = key in RAW_FIELDS
+        is_derived = key in DERIVED_FIELDS
+
+        # 1. Fill nulls
+        if existing.get(key) is None:
+            update[key] = fresh_val
+            
+        # 2. Force overwrite raw fields
+        elif force_raw and is_raw:
+            update[key] = fresh_val
+            
+        # 3. Overwrite derived fields if H2H changed or force_derived is checked
+        elif is_derived and (h2h_changed or force_derived):
             update[key] = fresh_val
 
     if not update:
@@ -330,7 +367,6 @@ def _cohort_from_row(row: dict) -> str:
 
 
 def _signal_has_data(row: dict, signal_name: str) -> bool:
-    """Return True if the raw inputs for this signal are present."""
     if signal_name == "table":
         return (row.get("home_table_pts") is not None
                 and row.get("away_table_pts") is not None)
@@ -347,7 +383,6 @@ def _signal_has_data(row: dict, signal_name: str) -> bool:
 
 
 def _short_signal(sig, present):
-    """Render a single signal as H/A/T/—."""
     if sig == "home":
         return "H"
     if sig == "away":
@@ -1092,12 +1127,6 @@ def _venue_sentence(sents):
 
 
 def _extract_window_size(text, default=10):
-    """
-    Extract the 'previous N matches' / 'last N games' window size.
-    Handles: previous N, last N, past N, in N, N matches, N games.
-    Falls back to `default` when nothing matches.
-    """
-    # Preferred patterns
     m = re.search(
         r"(?:previous|last|past|in\s+the\s+last|in\s+the\s+past|in\s+the\s+previous)"
         r"\s+(\d+)\s+(?:home\s+|away\s+)?(?:matches?|games?)",
@@ -1105,11 +1134,9 @@ def _extract_window_size(text, default=10):
     )
     if m:
         return int(m.group(1))
-    # "in the last N" without explicit matches
     m = re.search(r"in\s+the\s+(?:last|previous|past)\s+(\d+)", text, re.I)
     if m:
         return int(m.group(1))
-    # "N games at home/away"
     m = re.search(r"(\d+)\s+(?:home\s+|away\s+)?(?:matches?|games?)", text, re.I)
     if m:
         return int(m.group(1))
@@ -1117,13 +1144,6 @@ def _extract_window_size(text, default=10):
 
 
 def _parse_venue_from_sentences(sents):
-    """
-    Recognised venue form prose shapes:
-      W-D-L, W-L-D, L-W-D, L-D-W, D-W-L, D-L-W   (3 numbers)
-      W and L, L and W                          (2 numbers, D inferred)
-      L and D, D and L                          (2 numbers, W inferred)
-      W and D, D and W                          (2 numbers, L inferred)
-    """
     patterns = [
         # 3-number forms
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
@@ -1157,7 +1177,6 @@ def _parse_venue_from_sentences(sents):
                 missing = window - known
                 if missing < 0:
                     continue
-                # Fill the missing slot
                 if "w" not in mapping:
                     vals["w"] = missing
                 elif "d" not in mapping:
@@ -1576,18 +1595,6 @@ def _team_sentences(aliases, sentences):
 
 
 def _parse_h2h(soup, home_term, away_term, f):
-    """
-    Parse the H2H section.
-
-    Reads team-stats-team spans structurally, extracts team name + score-right.
-    Matches each side's name against the current home/away team names to
-    determine which side is home and which is away, regardless of historical
-    venue.
-
-    Strict matching: requires exactly one side to match home_term and the
-    other to match away_term. When ambiguous (both sides match home_term, or
-    neither matches), falls back to the first span as home and logs a warning.
-    """
     rows = []
     section = soup.find("div", id="head-to-head")
     if section:
@@ -1639,18 +1646,15 @@ def _parse_h2h(soup, home_term, away_term, f):
         b_is_home = _team_match(home_term, name_b)
         b_is_away = _team_match(away_term, name_b)
 
-        # Strict interpretation: exactly one side matches home, other matches away
         if a_is_home and b_is_away and not a_is_away and not b_is_home:
             hs, aws = score_a, score_b
         elif b_is_home and a_is_away and not b_is_away and not a_is_home:
             hs, aws = score_b, score_a
         elif a_is_home and b_is_away:
-            # Both conditions met even with some ambiguity — accept
             hs, aws = score_a, score_b
         elif b_is_home and a_is_away:
             hs, aws = score_b, score_a
         else:
-            # Ambiguous: fall back to positional read (first span = home)
             hs, aws = score_a, score_b
             if a_is_home or b_is_home or a_is_away or b_is_away:
                 ambiguous += 1
@@ -1765,13 +1769,6 @@ def extract_facts(html: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 def signal_pill(name, value, has_data=True):
-    """
-    Render a signal pill.
-    - value: 'home', 'away', or 'nothing'
-    - has_data: True if the raw inputs for this signal were present.
-      Distinguishes 'tied' (nothing + has_data → T) from 'missing'
-      (nothing + not has_data → —).
-    """
     if value == "home":
         cls, label = "home", "H"
     elif value == "away":
@@ -2080,122 +2077,6 @@ def build_row(facts, signals, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# RECOMPUTE
-# ═══════════════════════════════════════════════════════════════════
-
-RECOMPUTE_RAW_FIELDS = [
-    "home_table_pts", "away_table_pts",
-    "home_table_gd", "away_table_gd",
-    "home_table_gf", "away_table_gf",
-    "home_table_ga", "away_table_ga",
-    "home_table_played", "away_table_played",
-    "home_home_ppg", "away_away_ppg",
-    "home_home_gf", "home_home_ga",
-    "away_away_gf", "away_away_ga",
-    "home_home_wins", "home_home_draws", "home_home_losses",
-    "away_away_wins", "away_away_draws", "away_away_losses",
-    "home_home_pts", "away_away_pts",
-    "home_form_ppg", "away_form_ppg",
-    "home_form_wins", "home_form_draws", "home_form_losses",
-    "away_form_wins", "away_form_draws", "away_form_losses",
-    "home_form_pts", "away_form_pts",
-    "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
-]
-
-
-def recompute_derived(row: dict) -> dict:
-    facts = {k: row.get(k) for k in RECOMPUTE_RAW_FIELDS}
-    signals = compute_signals(facts)
-    decision = decide(signals, facts)
-    acc_flag = compute_accumulator(facts, decision)
-    profile = _compute_goal_profile(facts)
-
-    direction = decision["direction"]
-    stake = decision["stake"]
-    result = row.get("result")
-
-    dc_hit = None
-    profit_loss = None
-    if result is not None and direction in ("home", "away"):
-        if direction == "home":
-            dc_hit = 1 if result in ("home_win", "draw") else 0
-        elif direction == "away":
-            dc_hit = 1 if result in ("away_win", "draw") else 0
-        units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
-        profit_loss = units if dc_hit == 1 else -units if dc_hit == 0 else 0.0
-
-    update = {
-        "signal_table":               signals["table"],
-        "signal_form":                signals["form"],
-        "signal_venue":               signals["venue"],
-        "signal_h2h":                 signals["h2h"],
-        "agreement_split":            decision["split"],
-        "agreement_home_count":       decision["home_count"],
-        "agreement_away_count":       decision["away_count"],
-        "agreement_nothing_count":    decision["nothing_count"],
-        "dissent_signal":             decision["dissent_signal"],
-        "table_leader":               decision.get("table_leader"),
-        "direction":                  direction,
-        "stake":                      stake,
-        "qualifying":                 decision["qualifying"],
-        "accumulator":                acc_flag,
-        "accumulator_score":          float(calc_accumulator_score(facts))
-                                      if decision["qualifying"] else None,
-        "dc_hit":                     dc_hit,
-        "profit_loss":                profit_loss,
-    }
-
-    if profile:
-        update["goal_exp_home"] = profile["goal_exp_home"]
-        update["goal_exp_away"] = profile["goal_exp_away"]
-        update["goal_total"]    = profile["goal_total"]
-        update["goal_gap"]      = profile["goal_gap"]
-    else:
-        update["goal_exp_home"] = None
-        update["goal_exp_away"] = None
-        update["goal_total"]    = None
-        update["goal_gap"]      = None
-
-    update["venue_opposition"] = bool(
-        direction in ("home", "away")
-        and signals["venue"] not in ("nothing", direction)
-    )
-    update["would_have_skipped_away_table"] = (
-        direction == "away" and decision.get("dissent_signal") == "table"
-    )
-
-    return update
-
-
-RECOMPUTE_PROTECTED = {
-    "match_id",
-    "home_score", "away_score", "result", "settled_at", "notes",
-    "extracted_at", "extracted_at_ts",
-    "match_date", "kickoff_time", "league", "country", "venue",
-    "home_team", "away_team",
-}
-
-
-def diff_derived(row: dict, new_derived: dict) -> dict:
-    diff = {}
-    for k, v in new_derived.items():
-        if k in RECOMPUTE_PROTECTED:
-            continue
-        old_v = row.get(k)
-        if old_v is None and v is None:
-            continue
-        try:
-            if float(old_v) == float(v):
-                continue
-        except (TypeError, ValueError):
-            pass
-        if old_v == v:
-            continue
-        diff[k] = v
-    return diff
-
-
-# ═══════════════════════════════════════════════════════════════════
 # COHORT METRICS
 # ═══════════════════════════════════════════════════════════════════
 
@@ -2344,8 +2225,8 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
 # TABS
 # ═══════════════════════════════════════════════════════════════════
 
-tab_new, tab_pending, tab_acc, tab_perf, tab_recalc = st.tabs(
-    ["➕ New Match", "⏳ Pending", "🎯 Accumulator", "📊 Performance", "🔄 Recalculate"]
+tab_new, tab_pending, tab_acc, tab_perf = st.tabs(
+    ["➕ New Match", "⏳ Pending", "🎯 Accumulator", "📊 Performance"]
 )
 
 
@@ -2361,11 +2242,19 @@ with tab_new:
         placeholder="<html> ... </html>"
     )
 
-    force_raw = st.checkbox(
-        "Force-overwrite raw inputs (H2H, form, venue) on existing rows",
-        value=False,
-        help="Use when re-extracting a match whose raw inputs were parsed by an old buggy parser.",
-    )
+    c_force1, c_force2 = st.columns(2)
+    with c_force1:
+        force_raw = st.checkbox(
+            "Force overwrite raw inputs (H2H, form, venue)",
+            value=False,
+            help="Use when re-extracting a match whose raw inputs were parsed by an old buggy parser.",
+        )
+    with c_force2:
+        force_derived = st.checkbox(
+            "Force overwrite derived fields (signals, split, direction)",
+            value=False,
+            help="Use when you changed the parser and want to recalculate the pick for this specific match.",
+        )
 
     col_a, col_b = st.columns([1, 3])
     with col_a:
@@ -2469,22 +2358,17 @@ with tab_new:
                 st.warning(f"Could not check for duplicates: {e}")
 
         if existing:
-            force = (
-                {"h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total"}
-                if force_raw else None
+            updated = db_backfill_missing(
+                existing, row, 
+                force_raw=force_raw, 
+                force_derived=force_derived
             )
-            updated = db_backfill_missing(existing, row, force_fields=force)
             if updated:
                 fields = ", ".join(sorted(updated.keys()))
                 st.success(
                     f"Match already stored (match_id **{existing['match_id']}**). "
-                    f"Filled **{len(updated)}** field(s): {fields}"
+                    f"Updated **{len(updated)}** field(s): {fields}"
                 )
-                if force_raw:
-                    st.info(
-                        "Raw H2H was force-overwritten. Run the Recalculate tab to "
-                        "recompute derived fields from the new raw data."
-                    )
             else:
                 st.info(
                     f"Match already stored (match_id **{existing['match_id']}**) "
@@ -2695,124 +2579,3 @@ with tab_perf:
             st.markdown("### All settled matches")
             for m in clean_settled:
                 render_settled_card(m, is_acc_eligible=_is_accumulator_eligible(m))
-
-
-# ─────────────────────────────────────────────────────────────────
-# TAB 5 — RECALCULATE
-# ─────────────────────────────────────────────────────────────────
-with tab_recalc:
-    st.markdown("### 🔄 Recalculate derived fields")
-    st.caption(
-        "Recomputes signal_*, agreement_*, dissent_signal, direction, stake, "
-        "qualifying, accumulator, accumulator_score, goal_*, venue_opposition, "
-        "would_have_skipped_away_table, dc_hit, and profit_loss from raw inputs.\n\n"
-        "Settlement inputs (home_score, away_score, result, settled_at) and "
-        "notes are never modified."
-    )
-
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        recalc_clicked = st.button("Preview changes", type="secondary", use_container_width=True)
-    with col2:
-        st.caption("Dry run first — shows what would change without writing.")
-
-    if recalc_clicked:
-        with st.spinner("Loading matches..."):
-            try:
-                all_rows = db_all_matches()
-            except Exception as e:
-                st.error(f"Could not load matches: {e}")
-                all_rows = []
-
-        if not all_rows:
-            st.info("No matches in the database.")
-        else:
-            changes = []
-            field_counts = {}
-            split_changes = []
-            dc_hit_changes = []
-
-            for row in all_rows:
-                try:
-                    new_derived = recompute_derived(row)
-                except Exception as e:
-                    st.warning(f"match_id {row.get('match_id')}: {e}")
-                    continue
-
-                diff = diff_derived(row, new_derived)
-                if not diff:
-                    continue
-
-                changes.append({"match_id": row["match_id"], "diff": diff})
-
-                for f in diff:
-                    field_counts[f] = field_counts.get(f, 0) + 1
-
-                if "agreement_split" in diff:
-                    split_changes.append({
-                        "match_id": row["match_id"],
-                        "home":     row.get("home_team"),
-                        "away":     row.get("away_team"),
-                        "old":      row.get("agreement_split"),
-                        "new":      diff["agreement_split"],
-                    })
-
-                if "direction" in diff or "dc_hit" in diff:
-                    dc_hit_changes.append({
-                        "match_id": row["match_id"],
-                        "old_dir":  row.get("direction"),
-                        "new_dir":  new_derived["direction"],
-                        "old_dc":   row.get("dc_hit"),
-                        "new_dc":   new_derived["dc_hit"],
-                        "old_pl":   row.get("profit_loss"),
-                        "new_pl":   new_derived["profit_loss"],
-                    })
-
-            st.markdown(f"### Results ({len(changes)} rows would change)")
-
-            if field_counts:
-                st.markdown("**Fields that would change:**")
-                fdf = pd.DataFrame(
-                    [{"field": k, "rows": v} for k, v in field_counts.items()]
-                ).sort_values("rows", ascending=False)
-                st.dataframe(fdf, use_container_width=True, hide_index=True)
-
-            if split_changes:
-                st.markdown(f"**Splits that would change ({len(split_changes)}):**")
-                st.dataframe(
-                    pd.DataFrame(split_changes),
-                    use_container_width=True, hide_index=True,
-                )
-
-            if dc_hit_changes:
-                st.markdown(f"**Settlement that would change ({len(dc_hit_changes)}):**")
-                st.dataframe(
-                    pd.DataFrame(dc_hit_changes),
-                    use_container_width=True, hide_index=True,
-                )
-
-            if changes:
-                st.markdown("---")
-                confirm = st.checkbox(
-                    f"I have reviewed the {len(changes)} changes and want to apply them."
-                )
-                if confirm:
-                    if st.button("Apply changes", type="primary"):
-                        sb = get_supabase()
-                        applied = 0
-                        failed = 0
-                        for c in changes:
-                            try:
-                                sb.table("matches").update(c["diff"]).eq(
-                                    "match_id", c["match_id"]
-                                ).execute()
-                                applied += 1
-                            except Exception as e:
-                                failed += 1
-                                st.error(f"Failed for match_id {c['match_id']}: {e}")
-
-                        st.success(
-                            f"Applied {applied} updates. "
-                            f"{failed} failed."
-                        )
-                        st.rerun()
