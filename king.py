@@ -4,9 +4,9 @@ king.py — The Logic.
 
 Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
-See accumulator-eligible matches.
+See accumulator-eligible matches. Recompute derived fields.
 
-One file. Two clauses. Four tabs.
+One file. Five tabs.
 
 Parsing strategy: layered funnel, ID-anchored.
 
@@ -22,16 +22,8 @@ Parsing strategy: layered funnel, ID-anchored.
     - initials
     - first/last word
 
-Form extraction, in priority order:
-  1. keystat-item "Full-Time Result" first <li>  (structured, reliable)
-  2. prose sentences ("Team have X wins, Y draws and Z losses")
-  3. (nothing else — if all fail, form stays "nothing")
-
-Venue extraction, in priority order:
-  1. st-table "Last 10 League Games" table (W-D-L cells)
-  2. keystat-item "Full-Time Result" second <li>  (home/away specific)
-  3. prose sentences mentioning home/away
-  4. (nothing else — if all fail, venue stays "nothing")
+H2H extraction reads team-stats-team spans structurally (first span = home),
+then reads score-right per side. No text-order heuristic. No date contamination.
 
 Goal profile (telemetry only, no veto on single bets):
   - goal_exp_home = (home_home_gf + away_away_ga) / 2
@@ -45,7 +37,17 @@ Accumulator rule:
   - If dissent_signal in {form, venue}: goal_gap >= 0.65 (tighter)
   - Not quarantined (notes not "Retrospectively reclassified")
 
-  Historical performance: 62 matches, 62 wins, 0 losses, 100% win rate.
+Recalculate tab:
+  Recomputes signal_*, agreement_*, dissent_signal, direction, stake,
+  qualifying, accumulator, accumulator_score, goal_*, venue_opposition,
+  would_have_skipped_away_table, dc_hit, profit_loss — from raw inputs.
+
+  Never touches: match identity, home_score, away_score, result,
+  settled_at, notes, extracted_at, extracted_at_ts.
+
+  dc_hit and profit_loss ARE recomputed when direction or stake changes,
+  because they are derived from those fields + the frozen result. The
+  settlement inputs (home_score, away_score, result) are never modified.
 """
 
 import re
@@ -204,21 +206,22 @@ def db_find_existing(row: dict):
     return res.data[0] if res.data else None
 
 
-def db_backfill_missing(existing: dict, fresh: dict) -> dict:
+def db_backfill_missing(existing: dict, fresh: dict,
+                        force_fields: set = None) -> dict:
     """
-    Update an existing match row with only the fields that are currently NULL
-    in the database but populated in the fresh extraction.
-    Never overwrites a field that already has a value.
-    Never touches settlement fields.
-    Returns the dict of fields that were updated (empty if nothing changed).
+    Fill NULL fields from fresh. If force_fields is provided, also overwrite
+    those fields even when the existing value is not NULL.
+
+    Never touches: match identity, home_score, away_score, result, settled_at,
+    notes, extracted_at, extracted_at_ts.
     """
     PROTECTED = {
         "match_id",
         "home_score", "away_score", "result", "dc_hit", "profit_loss",
         "settled_at", "notes",
         "extracted_at", "extracted_at_ts",
-        "accumulator", "accumulator_score",
     }
+    force_fields = force_fields or set()
 
     update = {}
     for key, fresh_val in fresh.items():
@@ -226,7 +229,7 @@ def db_backfill_missing(existing: dict, fresh: dict) -> dict:
             continue
         if fresh_val is None:
             continue
-        if existing.get(key) is None:
+        if existing.get(key) is None or key in force_fields:
             update[key] = fresh_val
 
     if not update:
@@ -257,6 +260,15 @@ def db_delete(match_id: int):
     sb.table("matches").delete().eq("match_id", match_id).execute()
 
 
+def db_all_matches():
+    sb = get_supabase()
+    res = (sb.table("matches")
+             .select("*")
+             .order("match_date", desc=True)
+             .execute())
+    return res.data or []
+
+
 # ═══════════════════════════════════════════════════════════════════
 # QUARANTINE — notes-based, no schema change
 # ═══════════════════════════════════════════════════════════════════
@@ -272,7 +284,7 @@ def _is_quarantined(row: dict) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# COHORT CLASSIFICATION — literal signal columns only
+# COHORT CLASSIFICATION
 # ═══════════════════════════════════════════════════════════════════
 
 def _cohort_label(signals: dict, direction: str) -> str:
@@ -353,10 +365,10 @@ def _market_label(direction: str) -> str:
     return "No Bet"
 
 
-# ── FIX 1: accumulator rule with form/venue dissent gap check ──
+# Accumulator constants
 _ACC_SPLITS = ("4-0", "0-4", "3-0-1", "0-3-1")
 _ACC_GAP_MIN = 0.50
-_ACC_GAP_DISSENT_MIN = 0.65     # form/venue dissent needs a wider gap
+_ACC_GAP_DISSENT_MIN = 0.65
 _ACC_DISSENT_SIGNALS = ("form", "venue")
 
 
@@ -375,14 +387,11 @@ def _is_accumulator_eligible(row: dict) -> bool:
         return False
     if g < _ACC_GAP_MIN:
         return False
-    # Form/venue dissent requires a wider gap to compensate for the
-    # missing signal — this is where all 3 historical losses lived.
     if row.get("dissent_signal") in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
         return False
     return True
 
 
-# ── FIX 2: shadow flags match the new rule ──
 def _accumulator_shadow_flags(row: dict) -> list:
     flags = []
     split = row.get("agreement_split")
@@ -410,7 +419,7 @@ def _accumulator_shadow_flags(row: dict) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TEAM ID EXTRACTION — the primary anchor
+# TEAM ID EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
 
 def _team_id_from_img(img_tag):
@@ -434,7 +443,7 @@ def _extract_team_ids_from_t_top(soup):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# NAME MATCHING — fallback only
+# NAME MATCHING
 # ═══════════════════════════════════════════════════════════════════
 
 _TEAM_PREFIXES = (
@@ -654,7 +663,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
 
     base_decision = None
 
-    # 4-0 / 0-4
     if home == 4 or away == 4:
         direction = "home" if home == 4 else "away"
         base_decision = {
@@ -663,8 +671,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # 3-1 / 1-3
     elif home == 3 and away == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         base_decision = {
@@ -681,8 +687,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # 3-0-1 / 0-3-1
     elif home == 3 and away == 0 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "nothing"), None)
         base_decision = {
@@ -699,8 +703,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # 2-2
     elif home == 2 and away == 2:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -708,8 +710,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # 2-1-1
     elif home == 2 and away == 1 and nothing == 1:
         dissent = next((k for k, v in signals.items() if v == "away"), None)
         base_decision = {
@@ -718,8 +718,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # 1-2-1
     elif away == 2 and home == 1 and nothing == 1:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -727,8 +725,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # 2-0-2 / 0-2-2
     elif home == 2 and away == 0 and nothing == 2:
         base_decision = {
             "direction": "skip", "stake": "none", "qualifying": 0,
@@ -743,8 +739,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
             "home_count": home, "away_count": away, "nothing_count": nothing,
             "table_leader": table_leader_value,
         }
-
-    # Default
     else:
         split = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
         base_decision = {
@@ -782,7 +776,7 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ACCUMULATOR — score is metadata only
+# ACCUMULATOR SCORE (metadata only)
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -820,10 +814,6 @@ def calc_accumulator_score(facts):
 
 
 def compute_accumulator(facts, decision):
-    """
-    Populates the legacy `accumulator` DB column as a confidence indicator.
-    This is NOT the eligibility rule — `_is_accumulator_eligible` is.
-    """
     qualifying = decision.get("qualifying")
     if _is_missing(qualifying) or int(qualifying) != 1:
         return None
@@ -835,7 +825,7 @@ def compute_accumulator(facts, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# GOAL PROXY — null-safe, storage only
+# GOAL PROXY
 # ═══════════════════════════════════════════════════════════════════
 
 def _safe_rate(gf, played):
@@ -958,18 +948,27 @@ def _extract_identity(soup, f):
                 continue
 
 
-def _gd_from_cells(cells):
-    for c in cells:
-        if re.match(r"^\d+:\d+$", c.strip()):
+# ── FIXED: read clt-gd by class, fall back to explicit +/- ──
+def _gd_from_cells(cells, row=None):
+    """
+    Extract goal difference from a standings row.
+    Prefer the clt-gd cell (bare signed integer).
+    Fall back to explicit +/-, never to a GF:GA ratio.
+    """
+    if row is not None:
+        gd_cell = row.find("td", class_="clt-gd")
+        if gd_cell:
+            txt = gd_cell.get_text(strip=True)
             try:
-                a, b = c.split(":")
-                return int(a) - int(b)
-            except Exception:
+                return int(txt)
+            except (TypeError, ValueError):
                 pass
+
     for c in reversed(cells[:-1]):
         s = c.strip()
         if (s.startswith("-") or s.startswith("+")) and s[1:].isdigit():
             return int(s)
+
     return None
 
 
@@ -1019,7 +1018,7 @@ def _parse_standings(soup, f):
             nums = [_int_any(c) for c in cells if _int_any(c) is not None]
             pos = nums[0] if nums else None
             pts = nums[-1] if nums else None
-            gd = _gd_from_cells(cells)
+            gd = _gd_from_cells(cells, row=row)
 
             f[f"{target}_table_pos"] = pos
             f[f"{target}_table_pts"] = pts
@@ -1457,39 +1456,59 @@ def _team_sentences(aliases, sentences):
     return result
 
 
+# ── FIXED: structural H2H read ──
 def _parse_h2h(soup, home_term, away_term, f):
+    """
+    Parse the H2H section.
+    Structural read: each row has team-stats-team spans, each with a
+    score-right child. First span = home side.
+    No text-order heuristic. No date contamination.
+    """
     rows = []
     section = soup.find("div", id="head-to-head")
     if section:
         rows = section.find_all("li", class_="team-stat-list-item")
+
     if not rows:
-        for h in soup.find_all(["h3", "h4", "div"], string=re.compile("head to head", re.I)):
-            parent = h.find_parent()
-            if parent:
-                candidate_rows = parent.find_all("li", class_="team-stat-list-item")
-                if candidate_rows:
-                    rows = candidate_rows
-                    break
+        # Fallback: locate the H2H container by structure, not text.
+        for container in soup.find_all("div", class_="h2h-inside"):
+            candidate = container.find_all("li", class_="team-stat-list-item")
+            candidate = [
+                r for r in candidate
+                if re.search(r"\b(19|20)\d{2}\b", r.get_text(" ", strip=True))
+            ]
+            if len(candidate) >= 5:
+                rows = candidate
+                break
+
     if not rows:
         f["_parse_warnings"].append("H2H: no rows found")
         return
 
     home_wins = away_wins = draws = 0
     for row in rows:
-        text = row.get_text(" ", strip=True)
-        nums = re.findall(r"\b(\d+)\b", text)
-        if len(nums) < 2:
+        sides = row.find_all("span", class_="team-stats-team")
+        if len(sides) < 2:
             continue
-        hs, aws = int(nums[-2]), int(nums[-1])
-        idx_home = text.lower().find((home_term or "").lower())
-        idx_away = text.lower().find((away_term or "").lower())
-        home_first = idx_home != -1 and (idx_away == -1 or idx_home < idx_away)
+
+        def _score(span):
+            s = span.find("span", class_="score-right")
+            if not s:
+                return None
+            try:
+                return int(s.get_text(strip=True))
+            except (TypeError, ValueError):
+                return None
+
+        hs = _score(sides[0])
+        aws = _score(sides[1])
+        if hs is None or aws is None:
+            continue
+
         if hs > aws:
-            home_wins += 1 if home_first else 0
-            away_wins += 0 if home_first else 1
+            home_wins += 1
         elif aws > hs:
-            away_wins += 1 if home_first else 0
-            home_wins += 0 if home_first else 1
+            away_wins += 1
         else:
             draws += 1
 
@@ -1497,6 +1516,11 @@ def _parse_h2h(soup, home_term, away_term, f):
     f["h2h_away_wins"] = away_wins
     f["h2h_draws"] = draws
     f["h2h_total"] = home_wins + away_wins + draws
+
+    if f["h2h_total"] != 10:
+        f["_parse_warnings"].append(
+            f"H2H: expected 10 rows, parsed {f['h2h_total']}"
+        )
 
 
 def extract_facts(html: str) -> dict:
@@ -1863,6 +1887,127 @@ def build_row(facts, signals, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# RECOMPUTE — pure function used by the Recalculate tab
+# ═══════════════════════════════════════════════════════════════════
+
+RECOMPUTE_RAW_FIELDS = [
+    "home_table_pts", "away_table_pts",
+    "home_table_gd", "away_table_gd",
+    "home_table_gf", "away_table_gf",
+    "home_table_ga", "away_table_ga",
+    "home_table_played", "away_table_played",
+    "home_home_ppg", "away_away_ppg",
+    "home_home_gf", "home_home_ga",
+    "away_away_gf", "away_away_ga",
+    "home_home_wins", "home_home_draws", "home_home_losses",
+    "away_away_wins", "away_away_draws", "away_away_losses",
+    "home_home_pts", "away_away_pts",
+    "home_form_ppg", "away_form_ppg",
+    "home_form_wins", "home_form_draws", "home_form_losses",
+    "away_form_wins", "away_form_draws", "away_form_losses",
+    "home_form_pts", "away_form_pts",
+    "h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total",
+]
+
+
+def recompute_derived(row: dict) -> dict:
+    """
+    Recompute all derived fields from raw inputs.
+    dc_hit and profit_loss recomputed from result + new direction/stake.
+    Settlement inputs (home_score, away_score, result) are never modified.
+    """
+    facts = {k: row.get(k) for k in RECOMPUTE_RAW_FIELDS}
+    signals = compute_signals(facts)
+    decision = decide(signals, facts)
+    acc_flag = compute_accumulator(facts, decision)
+    profile = _compute_goal_profile(facts)
+
+    direction = decision["direction"]
+    stake = decision["stake"]
+    result = row.get("result")
+
+    dc_hit = None
+    profit_loss = None
+    if result is not None and direction in ("home", "away"):
+        if direction == "home":
+            dc_hit = 1 if result in ("home_win", "draw") else 0
+        elif direction == "away":
+            dc_hit = 1 if result in ("away_win", "draw") else 0
+        units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}[stake]
+        profit_loss = units if dc_hit == 1 else -units if dc_hit == 0 else 0.0
+
+    update = {
+        "signal_table":               signals["table"],
+        "signal_form":                signals["form"],
+        "signal_venue":               signals["venue"],
+        "signal_h2h":                 signals["h2h"],
+        "agreement_split":            decision["split"],
+        "agreement_home_count":       decision["home_count"],
+        "agreement_away_count":       decision["away_count"],
+        "agreement_nothing_count":    decision["nothing_count"],
+        "dissent_signal":             decision["dissent_signal"],
+        "table_leader":               decision.get("table_leader"),
+        "direction":                  direction,
+        "stake":                      stake,
+        "qualifying":                 decision["qualifying"],
+        "accumulator":                acc_flag,
+        "accumulator_score":          float(calc_accumulator_score(facts))
+                                      if decision["qualifying"] else None,
+        "dc_hit":                     dc_hit,
+        "profit_loss":                profit_loss,
+    }
+
+    if profile:
+        update["goal_exp_home"] = profile["goal_exp_home"]
+        update["goal_exp_away"] = profile["goal_exp_away"]
+        update["goal_total"]    = profile["goal_total"]
+        update["goal_gap"]      = profile["goal_gap"]
+    else:
+        update["goal_exp_home"] = None
+        update["goal_exp_away"] = None
+        update["goal_total"]    = None
+        update["goal_gap"]      = None
+
+    update["venue_opposition"] = bool(
+        direction in ("home", "away")
+        and signals["venue"] not in ("nothing", direction)
+    )
+    update["would_have_skipped_away_table"] = (
+        direction == "away" and decision.get("dissent_signal") == "table"
+    )
+
+    return update
+
+
+RECOMPUTE_PROTECTED = {
+    "match_id",
+    "home_score", "away_score", "result", "settled_at", "notes",
+    "extracted_at", "extracted_at_ts",
+    "match_date", "kickoff_time", "league", "country", "venue",
+    "home_team", "away_team",
+}
+
+
+def diff_derived(row: dict, new_derived: dict) -> dict:
+    diff = {}
+    for k, v in new_derived.items():
+        if k in RECOMPUTE_PROTECTED:
+            continue
+        old_v = row.get(k)
+        if old_v is None and v is None:
+            continue
+        try:
+            if float(old_v) == float(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if old_v == v:
+            continue
+        diff[k] = v
+    return diff
+
+
+# ═══════════════════════════════════════════════════════════════════
 # COHORT METRICS
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1928,15 +2073,12 @@ def venue_opposition_summary(rows: list) -> pd.DataFrame:
             continue
         if r.get("dc_hit") is None:
             continue
-
         records.append({
             "opposes": bool(r.get("venue_opposition", False)),
             "hit": int(r["dc_hit"]),
         })
-
     if not records:
         return pd.DataFrame(columns=["venue_opposition", "n", "wins", "losses", "Hit Rate %"])
-
     df = pd.DataFrame(records)
     out = df.groupby("opposes").agg(n=("hit", "count"), wins=("hit", "sum")).reset_index()
     out["losses"] = out["n"] - out["wins"]
@@ -1958,11 +2100,9 @@ def goal_total_summary(rows: list) -> pd.DataFrame:
             continue
         records.append({"total": float(total), "hit": int(r["dc_hit"]),
                         "pl": float(r.get("profit_loss") or 0.0)})
-
     if not records:
         return pd.DataFrame(columns=["total_bucket", "n", "wins", "losses",
                                      "hit_pct", "net_pl"])
-
     df = pd.DataFrame(records)
     df["bucket"] = pd.cut(
         df["total"],
@@ -1992,11 +2132,9 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
             continue
         records.append({"gap": float(gap), "hit": int(r["dc_hit"]),
                         "pl": float(r.get("profit_loss") or 0.0)})
-
     if not records:
         return pd.DataFrame(columns=["gap_bucket", "n", "wins", "losses",
                                      "hit_pct", "net_pl"])
-
     df = pd.DataFrame(records)
     df["bucket"] = pd.cut(
         df["gap"],
@@ -2018,8 +2156,8 @@ def goal_gap_summary(rows: list) -> pd.DataFrame:
 # TABS
 # ═══════════════════════════════════════════════════════════════════
 
-tab_new, tab_pending, tab_acc, tab_perf = st.tabs(
-    ["➕ New Match", "⏳ Pending", "🎯 Accumulator", "📊 Performance"]
+tab_new, tab_pending, tab_acc, tab_perf, tab_recalc = st.tabs(
+    ["➕ New Match", "⏳ Pending", "🎯 Accumulator", "📊 Performance", "🔄 Recalculate"]
 )
 
 
@@ -2033,6 +2171,12 @@ with tab_new:
     html_in = st.text_area(
         "HTML", height=220, label_visibility="collapsed",
         placeholder="<html> ... </html>"
+    )
+
+    force_raw = st.checkbox(
+        "Force-overwrite raw inputs (H2H, form, venue) on existing rows",
+        value=False,
+        help="Use when re-extracting a match whose raw inputs were parsed by an old buggy parser.",
     )
 
     col_a, col_b = st.columns([1, 3])
@@ -2130,13 +2274,22 @@ with tab_new:
                 st.warning(f"Could not check for duplicates: {e}")
 
         if existing:
-            updated = db_backfill_missing(existing, row)
+            force = (
+                {"h2h_home_wins", "h2h_away_wins", "h2h_draws", "h2h_total"}
+                if force_raw else None
+            )
+            updated = db_backfill_missing(existing, row, force_fields=force)
             if updated:
                 fields = ", ".join(sorted(updated.keys()))
                 st.success(
                     f"Match already stored (match_id **{existing['match_id']}**). "
-                    f"Filled **{len(updated)}** missing field(s): {fields}"
+                    f"Filled **{len(updated)}** field(s): {fields}"
                 )
+                if force_raw:
+                    st.info(
+                        "Raw H2H was force-overwritten. Run the Recalculate tab to "
+                        "recompute derived fields from the new raw data."
+                    )
             else:
                 st.info(
                     f"Match already stored (match_id **{existing['match_id']}**) "
@@ -2209,20 +2362,11 @@ with tab_acc:
     st.markdown("### 🎯 Accumulator matches")
     st.caption(
         "Split in {4-0, 0-4, 3-0-1, 0-3-1} AND goal_gap ≥ 0.50. "
-        "Form/venue dissent requires gap ≥ 0.65 (tighter). "
-        "Retrospective edits excluded. Losses are shown in red."
+        "Form/venue dissent requires gap ≥ 0.65. Retrospective edits excluded."
     )
 
-    # Fetch all matches to evaluate eligibility in Python. We do NOT rely
-    # on the legacy `accumulator` DB column (which uses a stricter score
-    # threshold that no longer matches the eligibility rule).
     try:
-        sb = get_supabase()
-        all_matches_res = (sb.table("matches")
-                             .select("*")
-                             .order("match_date", desc=True)
-                             .execute())
-        all_matches = all_matches_res.data or []
+        all_matches = db_all_matches()
     except Exception as e:
         st.error(f"Could not load matches: {e}")
         all_matches = []
@@ -2273,22 +2417,6 @@ with tab_acc:
         for m in acc_matches:
             render_accumulator_card(m)
 
-        st.markdown("### Table")
-        df = pd.DataFrame(acc_matches)
-        keep = [c for c in [
-            "match_id", "match_date", "league", "home_team", "away_team",
-            "agreement_split", "direction", "stake",
-            "dissent_signal",
-            "home_score", "away_score", "dc_hit", "profit_loss",
-            "goal_exp_home", "goal_exp_away", "goal_total", "goal_gap",
-        ] if c in df.columns]
-        if keep:
-            df_show = df[keep].copy()
-            df_show["acc_score"] = [
-                float(calc_accumulator_score(m)) for m in acc_matches
-            ]
-            st.dataframe(df_show, use_container_width=True, hide_index=True)
-
 
 # ─────────────────────────────────────────────────────────────────
 # TAB 4 — PERFORMANCE
@@ -2313,8 +2441,6 @@ with tab_perf:
             df["dc_hit"] = pd.to_numeric(df["dc_hit"], errors="coerce")
             df["profit_loss"] = pd.to_numeric(df["profit_loss"], errors="coerce").fillna(0)
             df["qualifying"] = pd.to_numeric(df["qualifying"], errors="coerce").fillna(0)
-            if "accumulator" in df.columns:
-                df["accumulator"] = df["accumulator"].fillna(False).astype(bool)
 
             qualifying = df[df["qualifying"] == 1]
             bets = qualifying[qualifying["dc_hit"].notna()]
@@ -2341,19 +2467,7 @@ with tab_perf:
                             f'<div class="metric-label">Net P/L</div></div>', unsafe_allow_html=True)
 
             st.markdown("")
-            c5, c6, c7 = st.columns(3)
-            with c5:
-                st.markdown(f'<div class="metric-box"><div class="metric-value">{hit_rate:.1f}%</div>'
-                            f'<div class="metric-label">Hit rate</div></div>', unsafe_allow_html=True)
-            with c6:
-                skips = int((df["qualifying"] == 0).sum())
-                st.markdown(f'<div class="metric-box"><div class="metric-value">{skips}</div>'
-                            f'<div class="metric-label">Skips</div></div>', unsafe_allow_html=True)
-            with c7:
-                full = int((bets["stake"] == "full").sum()) if not bets.empty else 0
-                half = int((bets["stake"] == "half").sum()) if not bets.empty else 0
-                st.markdown(f'<div class="metric-box"><div class="metric-value">{full}/{half}</div>'
-                            f'<div class="metric-label">Full / Half</div></div>', unsafe_allow_html=True)
+            st.markdown(f"**Hit rate:** {hit_rate:.1f}%")
 
             st.markdown("### Cohorts")
             cohort_df = cohort_summary(clean_settled)
@@ -2362,22 +2476,14 @@ with tab_perf:
             else:
                 st.dataframe(cohort_df, use_container_width=True, hide_index=True)
 
-            st.markdown("### Venue Opposition (Experiment)")
-            st.caption("Tracks when the Venue signal actively opposes the pick direction.")
+            st.markdown("### Venue Opposition")
             venue_df = venue_opposition_summary(clean_settled)
             if venue_df.empty:
-                st.info("No settled venue opposition data yet.")
+                st.info("No venue opposition data yet.")
             else:
                 st.dataframe(venue_df, use_container_width=True, hide_index=True)
 
             st.markdown("### Goal Profile Analysis")
-            st.caption(
-                "Descriptive only. Uses the stored per-side expectations. "
-                "No filter is applied to single bets — accumulators require "
-                "split in {4-0, 0-4, 3-0-1, 0-3-1} + gap ≥ 0.50 "
-                "(≥ 0.65 for form/venue dissent)."
-            )
-
             total_df = goal_total_summary(clean_settled)
             gap_df   = goal_gap_summary(clean_settled)
 
@@ -2391,31 +2497,127 @@ with tab_perf:
                     st.markdown("**By absolute gap**")
                     st.dataframe(gap_df, use_container_width=True, hide_index=True)
 
-                st.markdown("**Raw rows (sorted by gap)**")
-                raw_rows = []
-                for m in clean_settled:
-                    if m.get("goal_exp_home") is None:
-                        continue
-                    if m.get("dc_hit") is None:
-                        continue
-                    if m.get("direction") not in ("home", "away"):
-                        continue
-                    raw_rows.append({
-                        "match":   f"{m.get('home_team','?')} vs {m.get('away_team','?')}",
-                        "pick":    m.get("direction"),
-                        "home_exp": m["goal_exp_home"],
-                        "away_exp": m["goal_exp_away"],
-                        "total":   m.get("goal_total"),
-                        "gap":     m.get("goal_gap"),
-                        "dc_hit":  m.get("dc_hit"),
-                        "pl":      m.get("profit_loss") or 0.0,
-                    })
-                if raw_rows:
-                    st.dataframe(
-                        pd.DataFrame(raw_rows).sort_values("gap"),
-                        use_container_width=True, hide_index=True,
-                    )
-
             st.markdown("### All settled matches")
             for m in clean_settled:
                 render_settled_card(m, is_acc_eligible=_is_accumulator_eligible(m))
+
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 5 — RECALCULATE
+# ─────────────────────────────────────────────────────────────────
+with tab_recalc:
+    st.markdown("### 🔄 Recalculate derived fields")
+    st.caption(
+        "Recomputes signal_*, agreement_*, dissent_signal, direction, stake, "
+        "qualifying, accumulator, accumulator_score, goal_*, venue_opposition, "
+        "would_have_skipped_away_table, dc_hit, and profit_loss from raw inputs.\n\n"
+        "Settlement inputs (home_score, away_score, result, settled_at) and "
+        "notes are never modified."
+    )
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        recalc_clicked = st.button("Preview changes", type="secondary", use_container_width=True)
+    with col2:
+        st.caption("Dry run first — shows what would change without writing.")
+
+    if recalc_clicked:
+        with st.spinner("Loading matches..."):
+            try:
+                all_rows = db_all_matches()
+            except Exception as e:
+                st.error(f"Could not load matches: {e}")
+                all_rows = []
+
+        if not all_rows:
+            st.info("No matches in the database.")
+        else:
+            changes = []
+            field_counts = {}
+            split_changes = []
+            dc_hit_changes = []
+
+            for row in all_rows:
+                try:
+                    new_derived = recompute_derived(row)
+                except Exception as e:
+                    st.warning(f"match_id {row.get('match_id')}: {e}")
+                    continue
+
+                diff = diff_derived(row, new_derived)
+                if not diff:
+                    continue
+
+                changes.append({"match_id": row["match_id"], "diff": diff})
+
+                for f in diff:
+                    field_counts[f] = field_counts.get(f, 0) + 1
+
+                if "agreement_split" in diff:
+                    split_changes.append({
+                        "match_id": row["match_id"],
+                        "home":     row.get("home_team"),
+                        "away":     row.get("away_team"),
+                        "old":      row.get("agreement_split"),
+                        "new":      diff["agreement_split"],
+                    })
+
+                if "direction" in diff or "dc_hit" in diff:
+                    dc_hit_changes.append({
+                        "match_id": row["match_id"],
+                        "old_dir":  row.get("direction"),
+                        "new_dir":  new_derived["direction"],
+                        "old_dc":   row.get("dc_hit"),
+                        "new_dc":   new_derived["dc_hit"],
+                        "old_pl":   row.get("profit_loss"),
+                        "new_pl":   new_derived["profit_loss"],
+                    })
+
+            st.markdown(f"### Results ({len(changes)} rows would change)")
+
+            if field_counts:
+                st.markdown("**Fields that would change:**")
+                fdf = pd.DataFrame(
+                    [{"field": k, "rows": v} for k, v in field_counts.items()]
+                ).sort_values("rows", ascending=False)
+                st.dataframe(fdf, use_container_width=True, hide_index=True)
+
+            if split_changes:
+                st.markdown(f"**Splits that would change ({len(split_changes)}):**")
+                st.dataframe(
+                    pd.DataFrame(split_changes),
+                    use_container_width=True, hide_index=True,
+                )
+
+            if dc_hit_changes:
+                st.markdown(f"**Settlement that would change ({len(dc_hit_changes)}):**")
+                st.dataframe(
+                    pd.DataFrame(dc_hit_changes),
+                    use_container_width=True, hide_index=True,
+                )
+
+            if changes:
+                st.markdown("---")
+                confirm = st.checkbox(
+                    f"I have reviewed the {len(changes)} changes and want to apply them."
+                )
+                if confirm:
+                    if st.button("Apply changes", type="primary"):
+                        sb = get_supabase()
+                        applied = 0
+                        failed = 0
+                        for c in changes:
+                            try:
+                                sb.table("matches").update(c["diff"]).eq(
+                                    "match_id", c["match_id"]
+                                ).execute()
+                                applied += 1
+                            except Exception as e:
+                                failed += 1
+                                st.error(f"Failed for match_id {c['match_id']}: {e}")
+
+                        st.success(
+                            f"Applied {applied} updates. "
+                            f"{failed} failed."
+                        )
+                        st.rerun()
