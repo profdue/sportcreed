@@ -63,10 +63,11 @@ Signal display:
 
 Update logic:
   When a match is re-extracted:
-  - If raw H2H data changed, derived fields (signals, direction, stake) are 
-    automatically overwritten.
+  - If raw H2H data changed, derived fields are automatically overwritten.
   - If "Force overwrite derived fields" is checked, ALL derived fields are 
-    overwritten regardless of raw data changes.
+    overwritten.
+  - If `direction` or `stake` changes, `dc_hit` and `profit_loss` are 
+    automatically recalculated against the frozen result.
   - Settlement inputs (home_score, away_score, result) and notes are NEVER 
     modified.
 """
@@ -233,13 +234,14 @@ def db_backfill_missing(existing: dict, fresh: dict,
     Fill NULL fields from fresh. 
     If force_raw is True, overwrite raw fields (H2H, form, venue).
     If H2H changed OR force_derived is True, overwrite derived fields.
+    If direction or stake changed, recalculate dc_hit and profit_loss.
     
-    Never touches: match_id, home_score, away_score, result, settled_at, notes.
+    Never touches: match_id, settled_at, notes, extracted_at, extracted_at_ts.
     """
     PROTECTED = {
-        "match_id",
-        "home_score", "away_score", "result", "settled_at", "notes",
+        "match_id", "settled_at", "notes",
         "extracted_at", "extracted_at_ts",
+        # home_score, away_score, result are handled separately for dc_hit calc
     }
     
     RAW_FIELDS = {
@@ -270,6 +272,8 @@ def db_backfill_missing(existing: dict, fresh: dict,
     for key, fresh_val in fresh.items():
         if key in PROTECTED:
             continue
+        if key in ("home_score", "away_score", "result", "dc_hit", "profit_loss"):
+            continue # Handled below
         if fresh_val is None:
             continue
             
@@ -287,6 +291,32 @@ def db_backfill_missing(existing: dict, fresh: dict,
         # 3. Overwrite derived fields if H2H changed or force_derived is checked
         elif is_derived and (h2h_changed or force_derived):
             update[key] = fresh_val
+
+    # 4. Recalculate dc_hit and profit_loss if direction, stake, or result changed
+    # (Result is never updated here, so we just compare existing direction/stake with fresh)
+    final_dir = update.get("direction", existing.get("direction"))
+    final_stake = update.get("stake", existing.get("stake"))
+    result = existing.get("result")
+
+    if result is not None:
+        if final_dir == "skip" or final_dir is None:
+            new_dc = None
+            new_pl = 0.0
+        else:
+            hit = False
+            if final_dir == "home" and result in ("home_win", "draw"):
+                hit = True
+            elif final_dir == "away" and result in ("away_win", "draw"):
+                hit = True
+            
+            new_dc = 1 if hit else 0
+            units = {"full": 1.0, "half": 0.5, "quarter": 0.25, "none": 0.0}.get(final_stake, 0.0)
+            new_pl = units if hit else -units
+
+        # Only add to update if it actually changed (to save DB writes)
+        if existing.get("dc_hit") != new_dc or existing.get("profit_loss") != new_pl:
+            update["dc_hit"] = new_dc
+            update["profit_loss"] = new_pl
 
     if not update:
         return {}
@@ -578,15 +608,26 @@ def _team_match(full_name, cell_text):
     cell = cell_text.lower().strip()
     if not term:
         return False
+        
+    # 1. Exact substring match (e.g. "atletico mg" in "atletico mg")
     if term in cell or cell in term:
         return True
-    if set(term.split()) & set(cell.split()):
+        
+    # 2. Word overlap (only for words longer than 4 letters to avoid "Atletico" matching "Atletico")
+    term_words = set(w for w in term.split() if len(w) >= 4)
+    cell_words = set(w for w in cell.split() if len(w) >= 4)
+    if term_words & cell_words:
         return True
+        
+    # 3. Initials (e.g. "AC" for "AC Milan")
     init = _initials(full_name).lower()
     if init and init == cell.replace(" ", "").replace(".", ""):
         return True
+        
+    # 4. Single word substring (e.g. "Milan" in "AC Milan")
     if " " not in cell and cell in term.split():
         return True
+        
     return False
 
 
