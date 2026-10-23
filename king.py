@@ -6,7 +6,7 @@ Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
 See accumulator-eligible matches. Recompute derived fields.
 
-One file. Five tabs.
+One file. Six tabs.
 
 Parsing strategy: layered funnel, ID-anchored.
 
@@ -22,8 +22,13 @@ Parsing strategy: layered funnel, ID-anchored.
     - initials
     - first/last word
 
-H2H extraction reads team-stats-team spans structurally (first span = home),
-then reads score-right per side. No text-order heuristic. No date contamination.
+H2H extraction:
+  Reads team-stats-team spans structurally, extracts team name + score-right.
+  Matches each side against the current home/away team names to determine
+  which is home and which is away (regardless of historical venue).
+  Counts wins by current home team vs current away team.
+  Fallback to .h2h-inside container with 4-digit-year filter if the
+  id="head-to-head" container is missing.
 
 Goal profile (telemetry only, no veto on single bets):
   - goal_exp_home = (home_home_gf + away_away_ga) / 2
@@ -37,17 +42,17 @@ Accumulator rule:
   - If dissent_signal in {form, venue}: goal_gap >= 0.65 (tighter)
   - Not quarantined (notes not "Retrospectively reclassified")
 
+Signal display:
+  H = home edge, A = away edge, T = tied (data present, equal),
+  — = missing (data absent, could not evaluate)
+
 Recalculate tab:
   Recomputes signal_*, agreement_*, dissent_signal, direction, stake,
   qualifying, accumulator, accumulator_score, goal_*, venue_opposition,
-  would_have_skipped_away_table, dc_hit, profit_loss — from raw inputs.
+  would_have_skipped_away_table, dc_hit, profit_loss from raw inputs.
 
   Never touches: match identity, home_score, away_score, result,
   settled_at, notes, extracted_at, extracted_at_ts.
-
-  dc_hit and profit_loss ARE recomputed when direction or stake changes,
-  because they are derived from those fields + the frozen result. The
-  settlement inputs (home_score, away_score, result) are never modified.
 """
 
 import re
@@ -192,6 +197,15 @@ def db_accumulator_matches():
     return res.data or []
 
 
+def db_all_matches():
+    sb = get_supabase()
+    res = (sb.table("matches")
+             .select("*")
+             .order("match_date", desc=True)
+             .execute())
+    return res.data or []
+
+
 def db_find_existing(row: dict):
     sb = get_supabase()
     q = sb.table("matches").select("*")
@@ -260,17 +274,8 @@ def db_delete(match_id: int):
     sb.table("matches").delete().eq("match_id", match_id).execute()
 
 
-def db_all_matches():
-    sb = get_supabase()
-    res = (sb.table("matches")
-             .select("*")
-             .order("match_date", desc=True)
-             .execute())
-    return res.data or []
-
-
 # ═══════════════════════════════════════════════════════════════════
-# QUARANTINE — notes-based, no schema change
+# QUARANTINE
 # ═══════════════════════════════════════════════════════════════════
 
 _RETRO_NOTE_MARKER = "Retrospectively reclassified"
@@ -319,18 +324,45 @@ def _cohort_from_row(row: dict) -> str:
     return _cohort_label(sig, row.get("direction"))
 
 
-def _cohort_meaning(signals: dict, direction: str) -> str:
+def _signal_has_data(row: dict, signal_name: str) -> bool:
+    """Return True if the raw inputs for this signal are present."""
+    if signal_name == "table":
+        return (row.get("home_table_pts") is not None
+                and row.get("away_table_pts") is not None)
+    if signal_name == "form":
+        return (row.get("home_form_ppg") is not None
+                and row.get("away_form_ppg") is not None)
+    if signal_name == "venue":
+        return (row.get("home_home_ppg") is not None
+                and row.get("away_away_ppg") is not None)
+    if signal_name == "h2h":
+        total = row.get("h2h_total")
+        return total is not None and total > 0
+    return False
+
+
+def _short_signal(sig, present):
+    """Render a single signal as H/A/T/—."""
+    if sig == "home":
+        return "H"
+    if sig == "away":
+        return "A"
+    return "T" if present else "—"
+
+
+def _cohort_meaning(signals: dict, direction: str, has_data: dict = None) -> str:
+    has_data = has_data or {}
     t = signals.get("table")
     f = signals.get("form")
     v = signals.get("venue")
     h = signals.get("h2h")
 
-    def short(sig):
-        if sig == "home": return "H"
-        if sig == "away": return "A"
-        return "N"
-
-    return f"T={short(t)}, F={short(f)}, V={short(v)}, H2H={short(h)}"
+    return (
+        f"T={_short_signal(t, has_data.get('table', True))}, "
+        f"F={_short_signal(f, has_data.get('form', True))}, "
+        f"V={_short_signal(v, has_data.get('venue', True))}, "
+        f"H2H={_short_signal(h, has_data.get('h2h', True))}"
+    )
 
 
 def _cohort_meaning_from_row(row: dict) -> str:
@@ -340,7 +372,13 @@ def _cohort_meaning_from_row(row: dict) -> str:
         "venue": row.get("signal_venue"),
         "h2h":   row.get("signal_h2h"),
     }
-    return _cohort_meaning(sig, row.get("direction"))
+    has_data = {
+        "table": _signal_has_data(row, "table"),
+        "form":  _signal_has_data(row, "form"),
+        "venue": _signal_has_data(row, "venue"),
+        "h2h":   _signal_has_data(row, "h2h"),
+    }
+    return _cohort_meaning(sig, row.get("direction"), has_data)
 
 
 _COHORT_MARKET = {
@@ -365,7 +403,6 @@ def _market_label(direction: str) -> str:
     return "No Bet"
 
 
-# Accumulator constants
 _ACC_SPLITS = ("4-0", "0-4", "3-0-1", "0-3-1")
 _ACC_GAP_MIN = 0.50
 _ACC_GAP_DISSENT_MIN = 0.65
@@ -412,8 +449,7 @@ def _accumulator_shadow_flags(row: dict) -> list:
     if dissent in _ACC_DISSENT_SIGNALS and g < _ACC_GAP_DISSENT_MIN:
         flags.append(
             f"⛔ Dissent on '{dissent}' with gap {g:.2f} < {_ACC_GAP_DISSENT_MIN:.2f} — "
-            f"not accumulator-eligible. Narrow-gap form/venue dissent is where "
-            f"all 3 historical losses lived."
+            f"not accumulator-eligible."
         )
     return flags
 
@@ -776,7 +812,7 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ACCUMULATOR SCORE (metadata only)
+# ACCUMULATOR SCORE
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_missing(value):
@@ -948,13 +984,7 @@ def _extract_identity(soup, f):
                 continue
 
 
-# ── FIXED: read clt-gd by class, fall back to explicit +/- ──
 def _gd_from_cells(cells, row=None):
-    """
-    Extract goal difference from a standings row.
-    Prefer the clt-gd cell (bare signed integer).
-    Fall back to explicit +/-, never to a GF:GA ratio.
-    """
     if row is not None:
         gd_cell = row.find("td", class_="clt-gd")
         if gd_cell:
@@ -963,12 +993,10 @@ def _gd_from_cells(cells, row=None):
                 return int(txt)
             except (TypeError, ValueError):
                 pass
-
     for c in reversed(cells[:-1]):
         s = c.strip()
         if (s.startswith("-") or s.startswith("+")) and s[1:].isdigit():
             return int(s)
-
     return None
 
 
@@ -1456,19 +1484,12 @@ def _team_sentences(aliases, sentences):
     return result
 
 
-# ── FIXED: structural H2H read ──
 def _parse_h2h(soup, home_term, away_term, f):
     """
     Parse the H2H section.
-
-    Counts wins by the *current home team* and the *current away team*,
-    regardless of which venue each historical meeting was played at.
-
-    Structural read: each row has two team-stats-team spans, each with a
-    score-right child. Team names are extracted from the span text (minus
-    the trailing score). Each span is matched against home_term / away_term
-    to determine which side is the current home team. If a match can't be
-    determined, fall back to position (first span = first-listed team).
+    Counts wins by the *current home team* and *current away team*,
+    regardless of historical venue.
+    Structural read of team-stats-team spans + score-right children.
     """
     rows = []
     section = soup.find("div", id="head-to-head")
@@ -1506,7 +1527,6 @@ def _parse_h2h(soup, home_term, away_term, f):
                 score = int(score_span.get_text(strip=True))
             except (TypeError, ValueError):
                 return None, None
-            # Name = span text minus the trailing score
             name = span.get_text(" ", strip=True)
             name = re.sub(r"\s*\d+\s*$", "", name).strip()
             return name, score
@@ -1516,7 +1536,6 @@ def _parse_h2h(soup, home_term, away_term, f):
         if score_a is None or score_b is None:
             continue
 
-        # Which side is the current home team?
         a_is_home = _team_match(home_term, name_a)
         b_is_away = _team_match(away_term, name_b)
         b_is_home = _team_match(home_term, name_b)
@@ -1527,13 +1546,10 @@ def _parse_h2h(soup, home_term, away_term, f):
         elif b_is_home and a_is_away:
             hs, aws = score_b, score_a
         elif a_is_home or b_is_away:
-            # Only one side matched as home — assume first span is home
             hs, aws = score_a, score_b
         elif b_is_home or a_is_away:
-            # Only one side matched as away — assume second span is home
             hs, aws = score_b, score_a
         else:
-            # Neither side matched — fall back to position, count as unmatched
             hs, aws = score_a, score_b
             unmatched += 1
 
@@ -1549,14 +1565,20 @@ def _parse_h2h(soup, home_term, away_term, f):
     f["h2h_draws"] = draws
     f["h2h_total"] = home_wins + away_wins + draws
 
-    if f["h2h_total"] != 10:
+    if f["h2h_total"] < 10:
         f["_parse_warnings"].append(
-            f"H2H: expected 10 rows, parsed {f['h2h_total']}"
+            f"H2H: source contains {f['h2h_total']} rows "
+            f"(parser assumes 10). Signal computed on {f['h2h_total']}."
+        )
+    elif f["h2h_total"] > 10:
+        f["_parse_warnings"].append(
+            f"H2H: source contains {f['h2h_total']} rows "
+            f"(more than expected 10). Only the first 10 were used."
         )
     if unmatched:
         f["_parse_warnings"].append(
-            f"H2H: {unmatched} rows could not match home/away team names; "
-            f"counted by position instead"
+            f"H2H: {unmatched} rows could not match home/away names; "
+            f"counted by position"
         )
 
 
@@ -1633,9 +1655,23 @@ def extract_facts(html: str) -> dict:
 # UI HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def signal_pill(name, value):
-    cls = value if value in ("home", "away", "nothing") else "nothing"
-    label = {"home": "H", "away": "A", "nothing": "—"}.get(value, "—")
+def signal_pill(name, value, has_data=True):
+    """
+    Render a signal pill.
+    - value: 'home', 'away', or 'nothing'
+    - has_data: True if the raw inputs for this signal were present.
+      Distinguishes 'tied' (nothing + has_data → T) from 'missing'
+      (nothing + not has_data → —).
+    """
+    if value == "home":
+        cls, label = "home", "H"
+    elif value == "away":
+        cls, label = "away", "A"
+    else:
+        if has_data:
+            cls, label = "nothing", "T"
+        else:
+            cls, label = "nothing", "—"
     return f'<span class="signal-pill {cls}">{name}: {label}</span>'
 
 
@@ -1674,6 +1710,19 @@ def _verdict_label(dc_hit) -> str:
     return "NO BET"
 
 
+def _render_signal_row(m: dict) -> str:
+    return "".join([
+        signal_pill("Table", m.get("signal_table", "nothing"),
+                    _signal_has_data(m, "table")),
+        signal_pill("Form",  m.get("signal_form",  "nothing"),
+                    _signal_has_data(m, "form")),
+        signal_pill("Venue", m.get("signal_venue", "nothing"),
+                    _signal_has_data(m, "venue")),
+        signal_pill("H2H",   m.get("signal_h2h",   "nothing"),
+                    _signal_has_data(m, "h2h")),
+    ])
+
+
 def render_pending_card(m: dict):
     home = m.get("home_team", "?")
     away = m.get("away_team", "?")
@@ -1699,13 +1748,7 @@ def render_pending_card(m: dict):
         if is_acc_eligible else ""
     )
 
-    pills = "".join([
-        signal_pill("Table", m.get("signal_table", "nothing")),
-        signal_pill("Form",  m.get("signal_form",  "nothing")),
-        signal_pill("Venue", m.get("signal_venue", "nothing")),
-        signal_pill("H2H",   m.get("signal_h2h",   "nothing")),
-    ])
-
+    pills = _render_signal_row(m)
     goal_html = _goal_profile_html(m)
 
     st.markdown(f"""
@@ -1746,6 +1789,7 @@ def render_settled_card(m: dict, is_acc_eligible: bool = False):
         if is_acc_eligible else ""
     )
 
+    pills = _render_signal_row(m)
     goal_html = _goal_profile_html(m)
 
     st.markdown(f"""
@@ -1753,6 +1797,7 @@ def render_settled_card(m: dict, is_acc_eligible: bool = False):
         <div class="match-title">{home} {hs}–{aws} {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}</div>
         <span class="pick-badge {badge}">{verdict} · {market} · {pl}</span>{acc_badge}
+        <div class="signal-row">{pills}</div>
         {goal_html}
     </div>
     """, unsafe_allow_html=True)
@@ -1814,6 +1859,7 @@ def render_accumulator_card(m: dict):
             f'<span class="pick-badge badge-acc">🎯 {pick_text}</span>'
         )
 
+    pills = _render_signal_row(m)
     goal_html = _goal_profile_html(m)
 
     st.markdown(f"""
@@ -1821,6 +1867,7 @@ def render_accumulator_card(m: dict):
         <div class="match-title">{home} vs {away}</div>
         <div class="match-meta">{league} · {date} · split {split} · stake {stake}{score_txt}</div>
         {result_html}
+        <div class="signal-row">{pills}</div>
         {goal_html}
     </div>
     """, unsafe_allow_html=True)
@@ -1924,7 +1971,7 @@ def build_row(facts, signals, decision):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# RECOMPUTE — pure function used by the Recalculate tab
+# RECOMPUTE
 # ═══════════════════════════════════════════════════════════════════
 
 RECOMPUTE_RAW_FIELDS = [
@@ -1948,11 +1995,6 @@ RECOMPUTE_RAW_FIELDS = [
 
 
 def recompute_derived(row: dict) -> dict:
-    """
-    Recompute all derived fields from raw inputs.
-    dc_hit and profit_loss recomputed from result + new direction/stake.
-    Settlement inputs (home_score, away_score, result) are never modified.
-    """
     facts = {k: row.get(k) for k in RECOMPUTE_RAW_FIELDS}
     signals = compute_signals(facts)
     decision = decide(signals, facts)
@@ -2232,7 +2274,14 @@ with tab_new:
 
         cohort = _cohort_label(signals, decision.get("direction"))
         market = _cohort_market_display(cohort, decision.get("direction"))
-        meaning = _cohort_meaning(signals, decision.get("direction"))
+
+        has_data = {
+            "table": facts.get("home_table_pts") is not None and facts.get("away_table_pts") is not None,
+            "form":  facts.get("home_form_ppg") is not None and facts.get("away_form_ppg") is not None,
+            "venue": facts.get("home_home_ppg") is not None and facts.get("away_away_ppg") is not None,
+            "h2h":   facts.get("h2h_total") is not None and facts.get("h2h_total", 0) > 0,
+        }
+        meaning = _cohort_meaning(signals, decision.get("direction"), has_data)
 
         direction = decision.get("direction")
         venue = signals.get("venue")
