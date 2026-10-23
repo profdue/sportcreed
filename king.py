@@ -6,7 +6,7 @@ Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
 See accumulator-eligible matches. Recompute derived fields.
 
-One file. Six tabs.
+One file. Five tabs.
 
 Parsing strategy: layered funnel, ID-anchored.
 
@@ -21,6 +21,21 @@ Parsing strategy: layered funnel, ID-anchored.
     - word overlap
     - initials
     - first/last word
+
+Form extraction, in priority order:
+  1. Prose sentence tagged to the team
+  2. Keystat "Full-Time Result" first <li> (structured)
+  3. Keystat "Full-Time Result" second <li> (home/away-specific) — only
+     if the first <li> form is missing
+  4. Any sentence tagged to the team (loose fallback)
+
+  Recognised prose shapes:
+    W-D-L, W-L-D, L-W-D, L-D-W, D-W-L, D-L-W   (3 numbers)
+    "won W, lost L and drawn D"
+    "have won W, drawn D and lost L"
+    W and L, L and W, W, L                    (2 numbers)
+    L and D, D and L                          (2 numbers, W inferred)
+    W and D, D and W                          (2 numbers, L inferred)
 
 H2H extraction:
   Reads team-stats-team spans structurally, extracts team name + score-right.
@@ -182,16 +197,6 @@ def db_settled():
     res = (sb.table("matches")
              .select("*")
              .not_.is_("home_score", "null")
-             .order("match_date", desc=True)
-             .execute())
-    return res.data or []
-
-
-def db_accumulator_matches():
-    sb = get_supabase()
-    res = (sb.table("matches")
-             .select("*")
-             .eq("accumulator", True)
              .order("match_date", desc=True)
              .execute())
     return res.data or []
@@ -1087,22 +1092,55 @@ def _venue_sentence(sents):
 
 
 def _extract_window_size(text, default=10):
-    m = re.search(r"(?:previous|last|past)\s+(\d+)\s+(?:home\s+|away\s+)?matches?", text, re.I)
+    """
+    Extract the 'previous N matches' / 'last N games' window size.
+    Handles: previous N, last N, past N, in N, N matches, N games.
+    Falls back to `default` when nothing matches.
+    """
+    # Preferred patterns
+    m = re.search(
+        r"(?:previous|last|past|in\s+the\s+last|in\s+the\s+past|in\s+the\s+previous)"
+        r"\s+(\d+)\s+(?:home\s+|away\s+)?(?:matches?|games?)",
+        text, re.I
+    )
+    if m:
+        return int(m.group(1))
+    # "in the last N" without explicit matches
+    m = re.search(r"in\s+the\s+(?:last|previous|past)\s+(\d+)", text, re.I)
+    if m:
+        return int(m.group(1))
+    # "N games at home/away"
+    m = re.search(r"(\d+)\s+(?:home\s+|away\s+)?(?:matches?|games?)", text, re.I)
     if m:
         return int(m.group(1))
     return default
 
 
 def _parse_venue_from_sentences(sents):
+    """
+    Recognised venue form prose shapes:
+      W-D-L, W-L-D, L-W-D, L-D-W, D-W-L, D-L-W   (3 numbers)
+      W and L, L and W                          (2 numbers, D inferred)
+      L and D, D and L                          (2 numbers, W inferred)
+      W and D, D and W                          (2 numbers, L inferred)
+    """
     patterns = [
+        # 3-number forms
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
         (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
+        # 2-number forms — W/L, L/W (D inferred)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
+        # 2-number forms — L/D, D/L (W inferred)
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","d")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","l")),
+        # 2-number forms — W/D, D/W (L inferred)
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","d")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","w")),
     ]
     for s in sents:
         for tmpl, mapping in patterns:
@@ -1115,10 +1153,18 @@ def _parse_venue_from_sentences(sents):
 
             if len(mapping) == 2:
                 window = _extract_window_size(s, default=sum(vals.values()))
-                inferred = window - vals["w"] - vals["l"]
-                if inferred < 0:
+                known = vals["w"] + vals["d"] + vals["l"]
+                missing = window - known
+                if missing < 0:
                     continue
-                vals["d"] = inferred
+                # Fill the missing slot
+                if "w" not in mapping:
+                    vals["w"] = missing
+                elif "d" not in mapping:
+                    vals["d"] = missing
+                else:
+                    vals["l"] = missing
+
             total = sum(vals.values())
             if total < 5 or total > 15:
                 continue
@@ -1136,6 +1182,26 @@ def _apply_venue(f, side, wdl):
     f[f"{prefix}_losses"] = l
     f[f"{prefix}_pts"] = pts
     f[f"{prefix}_ppg"] = round(pts / total, 2)
+
+
+_KEYSTAT_PATTERNS = [
+    # 3-number forms
+    (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
+    (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
+    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
+    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
+    (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
+    (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
+    # 2-number forms — W/L, L/W (D inferred)
+    (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
+    (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
+    # 2-number forms — L/D, D/L (W inferred)
+    (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("l","d")),
+    (r"(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","l")),
+    # 2-number forms — W/D, D/W (L inferred)
+    (r"(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("w","d")),
+    (r"(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("d","w")),
+]
 
 
 def _parse_venue_from_keystat(soup):
@@ -1167,10 +1233,16 @@ def _parse_venue_from_keystat(soup):
                 vals[key] = int(m.group(i + 1))
             if len(mapping) == 2:
                 window = _extract_window_size(text, default=sum(vals.values()))
-                inferred = window - vals["w"] - vals["l"]
-                if inferred < 0:
+                known = vals["w"] + vals["d"] + vals["l"]
+                missing = window - known
+                if missing < 0:
                     continue
-                vals["d"] = inferred
+                if "w" not in mapping:
+                    vals["w"] = missing
+                elif "d" not in mapping:
+                    vals["d"] = missing
+                else:
+                    vals["l"] = missing
             total = sum(vals.values())
             if total < 5 or total > 15:
                 continue
@@ -1318,9 +1390,16 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
         (rf"have\s+won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
     ]
     patterns_2 = [
+        # W/L, L/W (D inferred)
         (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
         (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
         (rf"{_NUM_PAT}\s+{_WIN_WORDS},\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
+        # L/D, D/L (W inferred)
+        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","d")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","l")),
+        # W/D, D/W (L inferred)
+        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","d")),
+        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","w")),
     ]
 
     for s in filtered:
@@ -1347,30 +1426,23 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
             vals = {"w": 0, "d": 0, "l": 0}
             for i, key in enumerate(mapping):
                 vals[key] = _num(m.group(i + 1)) or 0
-            window = _extract_window_size(s, default=None)
-            if window is None:
-                window = 10
-            inferred = window - vals["w"] - vals["l"]
-            if inferred < 0:
+            window = _extract_window_size(s, default=sum(vals.values()))
+            known = vals["w"] + vals["d"] + vals["l"]
+            missing = window - known
+            if missing < 0:
                 continue
-            vals["d"] = inferred
-            if sum(vals.values()) < 5 or sum(vals.values()) > 15:
+            if "w" not in mapping:
+                vals["w"] = missing
+            elif "d" not in mapping:
+                vals["d"] = missing
+            else:
+                vals["l"] = missing
+            total = sum(vals.values())
+            if total < 5 or total > 15:
                 continue
             return vals["w"], vals["d"], vals["l"]
 
     return None
-
-
-_KEYSTAT_PATTERNS = [
-    (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
-    (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
-    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
-    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
-    (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
-    (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
-    (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
-]
 
 
 def _parse_form_from_keystat(soup):
@@ -1400,10 +1472,16 @@ def _parse_form_from_keystat(soup):
                 vals[key] = int(m.group(i + 1))
             if len(mapping) == 2:
                 window = _extract_window_size(text, default=sum(vals.values()))
-                inferred = window - vals["w"] - vals["l"]
-                if inferred < 0:
+                known = vals["w"] + vals["d"] + vals["l"]
+                missing = window - known
+                if missing < 0:
                     continue
-                vals["d"] = inferred
+                if "w" not in mapping:
+                    vals["w"] = missing
+                elif "d" not in mapping:
+                    vals["d"] = missing
+                else:
+                    vals["l"] = missing
             total = sum(vals.values())
             if total < 5 or total > 15:
                 continue
@@ -1460,6 +1538,19 @@ def _parse_form(soup, home_sents, away_sents, f):
             _apply_form(f, "away", ks_away, source="keystat")
             f["_parse_warnings"].append("away form sourced from keystat block")
 
+    # Last-resort: any sentence tagged to the team, no window filtering
+    if "home_form_ppg" not in f:
+        loose = _parse_form_from_sentences(home_sents) if home_sents else None
+        if loose:
+            _apply_form(f, "home", loose, source="loose-prose")
+            f["_parse_warnings"].append("home form sourced from loose prose")
+
+    if "away_form_ppg" not in f:
+        loose = _parse_form_from_sentences(away_sents) if away_sents else None
+        if loose:
+            _apply_form(f, "away", loose, source="loose-prose")
+            f["_parse_warnings"].append("away form sourced from loose prose")
+
 
 def _team_sentences(aliases, sentences):
     if not aliases:
@@ -1487,9 +1578,15 @@ def _team_sentences(aliases, sentences):
 def _parse_h2h(soup, home_term, away_term, f):
     """
     Parse the H2H section.
-    Counts wins by the *current home team* and *current away team*,
-    regardless of historical venue.
-    Structural read of team-stats-team spans + score-right children.
+
+    Reads team-stats-team spans structurally, extracts team name + score-right.
+    Matches each side's name against the current home/away team names to
+    determine which side is home and which is away, regardless of historical
+    venue.
+
+    Strict matching: requires exactly one side to match home_term and the
+    other to match away_term. When ambiguous (both sides match home_term, or
+    neither matches), falls back to the first span as home and logs a warning.
     """
     rows = []
     section = soup.find("div", id="head-to-head")
@@ -1513,6 +1610,7 @@ def _parse_h2h(soup, home_term, away_term, f):
 
     home_wins = away_wins = draws = 0
     unmatched = 0
+    ambiguous = 0
 
     for row in rows:
         sides = row.find_all("span", class_="team-stats-team")
@@ -1537,21 +1635,27 @@ def _parse_h2h(soup, home_term, away_term, f):
             continue
 
         a_is_home = _team_match(home_term, name_a)
-        b_is_away = _team_match(away_term, name_b)
-        b_is_home = _team_match(home_term, name_b)
         a_is_away = _team_match(away_term, name_a)
+        b_is_home = _team_match(home_term, name_b)
+        b_is_away = _team_match(away_term, name_b)
 
-        if a_is_home and b_is_away:
+        # Strict interpretation: exactly one side matches home, other matches away
+        if a_is_home and b_is_away and not a_is_away and not b_is_home:
+            hs, aws = score_a, score_b
+        elif b_is_home and a_is_away and not b_is_away and not a_is_home:
+            hs, aws = score_b, score_a
+        elif a_is_home and b_is_away:
+            # Both conditions met even with some ambiguity — accept
             hs, aws = score_a, score_b
         elif b_is_home and a_is_away:
             hs, aws = score_b, score_a
-        elif a_is_home or b_is_away:
-            hs, aws = score_a, score_b
-        elif b_is_home or a_is_away:
-            hs, aws = score_b, score_a
         else:
+            # Ambiguous: fall back to positional read (first span = home)
             hs, aws = score_a, score_b
-            unmatched += 1
+            if a_is_home or b_is_home or a_is_away or b_is_away:
+                ambiguous += 1
+            else:
+                unmatched += 1
 
         if hs > aws:
             home_wins += 1
@@ -1578,6 +1682,11 @@ def _parse_h2h(soup, home_term, away_term, f):
     if unmatched:
         f["_parse_warnings"].append(
             f"H2H: {unmatched} rows could not match home/away names; "
+            f"counted by position"
+        )
+    if ambiguous:
+        f["_parse_warnings"].append(
+            f"H2H: {ambiguous} rows had ambiguous name matches; "
             f"counted by position"
         )
 
