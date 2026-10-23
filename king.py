@@ -5,17 +5,17 @@ king.py — The Logic.
 Input HTML. Extract facts. Run the logic. Show the pick.
 Send to Supabase. Track pending. Settle later. See performance.
 
-CHANGES IN THIS VERSION (post-audit):
-  ── FIX ── decide() returns opposing_signal and neutral_signal in addition
-            to dissent_signal (kept for backward compat).
+POST-AUDIT CHANGES:
+  ── FIX ── decide() returns opposing_signal and neutral_signal.
+  ── FIX ── dissent_signal is None on ALL branches (backward-compat column,
+            deprecated; never populated by new extractions).
   ── FIX ── _is_accumulator_eligible() reads opposing_signal, not dissent_signal.
-            This corrects the 62→79 accumulator count.
-  ── FIX ── build_row() and decision_columns() pass the new fields through.
+  ── FIX ── build_row() and decision_columns() pass new fields through.
   ── FIX ── db_insert() calls _reconcile_decision() and logs mismatches.
-  ── FIX ── _parse_h2h() sets h2h_present so "nothing" can be distinguished
-            between tied and missing.
-  ── FIX ── decide() handles unanimous-with-nothing-count case by forcing split
-            to 4-0 / 0-4 (matches the corrected stored data).
+  ── FIX ── _parse_h2h() sets h2h_present (True/False); warning distinguishes
+            "missing" from "prose-only" H2H.
+  ── FIX ── decide() forces split to 4-0/0-4 when all four signals are
+            unanimous (handles split-disagreement edge cases).
   No changes to pick direction, stake, split, or accumulator rule logic.
 """
 
@@ -196,7 +196,6 @@ def db_backfill_missing(existing: dict, fresh: dict,
         "away_away_wins", "away_away_draws", "away_away_losses",
     }
 
-    # ── FIX ── opposing_signal and neutral_signal are derived fields
     DERIVED_FIELDS = {
         "signal_table", "signal_form", "signal_venue", "signal_h2h",
         "agreement_split", "agreement_home_count", "agreement_away_count",
@@ -284,7 +283,7 @@ def db_delete(match_id: int):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# RECONCILIATION AUDIT  ── FIX ── new function
+# RECONCILIATION AUDIT
 # ═══════════════════════════════════════════════════════════════════
 
 def _reconcile_decision(row: dict) -> dict:
@@ -340,6 +339,13 @@ def _reconcile_decision(row: dict) -> dict:
         mismatches["neutral_signal"] = {
             "stored": row.get("neutral_signal"),
             "recomputed": recomputed_decision.get("neutral_signal"),
+        }
+    # ── FIX ── also check dissent_signal (should be None on all branches)
+    if row.get("dissent_signal") is not None:
+        mismatches["dissent_signal"] = {
+            "stored": row.get("dissent_signal"),
+            "recomputed": None,
+            "note": "dissent_signal is deprecated and should be NULL on all rows",
         }
 
     if mismatches:
@@ -764,7 +770,7 @@ def _pick_goal_gap(profile, direction):
     return None
 
 
-# ── FIX ── new helper that splits dissent into opposing/neutral ──────────
+# ── FIX ── helper that splits dissent into opposing/neutral
 def _split_dissent(signals: dict, direction: str) -> tuple:
     """
     Returns (opposing_signal, neutral_signal).
@@ -792,9 +798,9 @@ def _split_dissent(signals: dict, direction: str) -> tuple:
 
 
 # ── FIX ── decide() rewritten to return opposing/neutral, split forced to
-#          4-0/0-4 when all four signals are unanimous (handles the 4 edge
-#          cases where stored split disagrees with unanimous signals).
-#          Pick direction, stake, and split rules are otherwise unchanged.
+#          4-0/0-4 when all four signals are unanimous. dissent_signal is
+#          None on ALL branches (deprecated; the migration moved its content
+#          into opposing_signal / neutral_signal).
 def decide(signals: dict, facts: dict = None) -> dict:
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
@@ -803,8 +809,6 @@ def decide(signals: dict, facts: dict = None) -> dict:
     table_leader_value = table_leader if table_leader != "nothing" else None
 
     # ── FIX ── correct split when unanimous signals have a spurious nothing count
-    # (handles the 4 edge cases 11, 47, 54, 142: stored split was 3-0-1/0-3-1
-    #  but all four signals are identical — force to 4-0/0-4)
     if home == 4 and nothing == 0:
         split_str = "4-0"
     elif away == 4 and nothing == 0:
@@ -846,7 +850,7 @@ def decide(signals: dict, facts: dict = None) -> dict:
         opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "full", "qualifying": 1,
-            "dissent_signal": opposing,
+            "dissent_signal": None,          # ← FIX: always None
             "opposing_signal": opposing,
             "neutral_signal": neutral,
             "split": split_str,
@@ -858,7 +862,7 @@ def decide(signals: dict, facts: dict = None) -> dict:
         opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "half", "qualifying": 1,
-            "dissent_signal": opposing,
+            "dissent_signal": None,          # ← FIX: always None
             "opposing_signal": opposing,
             "neutral_signal": neutral,
             "split": split_str,
@@ -870,7 +874,7 @@ def decide(signals: dict, facts: dict = None) -> dict:
         opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "half", "qualifying": 1,
-            "dissent_signal": opposing,
+            "dissent_signal": None,          # ← FIX: always None
             "opposing_signal": opposing,
             "neutral_signal": neutral,
             "split": split_str,
@@ -882,7 +886,7 @@ def decide(signals: dict, facts: dict = None) -> dict:
         opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "full", "qualifying": 1,
-            "dissent_signal": neutral,
+            "dissent_signal": None,          # ← FIX: was `neutral`; now None
             "opposing_signal": opposing,
             "neutral_signal": neutral,
             "split": split_str,
@@ -894,7 +898,7 @@ def decide(signals: dict, facts: dict = None) -> dict:
         opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "full", "qualifying": 1,
-            "dissent_signal": neutral,
+            "dissent_signal": None,          # ← FIX: was `neutral`; now None
             "opposing_signal": opposing,
             "neutral_signal": neutral,
             "split": split_str,
@@ -916,7 +920,7 @@ def decide(signals: dict, facts: dict = None) -> dict:
         opposing, neutral = _split_dissent(signals, direction)
         base_decision = {
             "direction": direction, "stake": "half", "qualifying": 1,
-            "dissent_signal": opposing,
+            "dissent_signal": None,          # ← FIX: always None
             "opposing_signal": opposing,
             "neutral_signal": neutral,
             "split": split_str,
@@ -1740,9 +1744,12 @@ def _parse_h2h(soup, home_term, away_term, f):
                 break
 
     if not rows:
-        # ── FIX ── explicit h2h_present = False (distinguishes "missing" from "tied")
+        # ── FIX ── distinguish "missing" from "prose-only" in the warning
         f["h2h_present"] = False
-        f["_parse_warnings"].append("H2H: no rows found (missing, not tied)")
+        f["_parse_warnings"].append(
+            "H2H: no structured rows found in the head-to-head container. "
+            "H2H may exist in prose; not currently parsed."
+        )
         return
 
     home_wins = away_wins = draws = 0
@@ -1802,7 +1809,7 @@ def _parse_h2h(soup, home_term, away_term, f):
     f["h2h_away_wins"] = away_wins
     f["h2h_draws"] = draws
     f["h2h_total"] = home_wins + away_wins + draws
-    # ── FIX ── explicit h2h_present (tied vs missing distinction)
+    # ── FIX ── explicit h2h_present
     f["h2h_present"] = f["h2h_total"] > 0
 
     if f["h2h_total"] < 10:
@@ -2128,12 +2135,11 @@ def signals_to_columns(signals):
 
 
 def decision_columns(d):
-    # ── FIX ── include opposing_signal and neutral_signal
     return {
         "direction":               d["direction"],
         "stake":                   d["stake"],
         "qualifying":              d["qualifying"],
-        "dissent_signal":          d.get("dissent_signal"),
+        "dissent_signal":          None,             # deprecated: always None
         "opposing_signal":         d.get("opposing_signal"),
         "neutral_signal":          d.get("neutral_signal"),
         "agreement_split":         d["split"],
@@ -2177,10 +2183,9 @@ def build_row(facts, signals, decision):
     )
 
     row["would_have_skipped_away_table"] = (
-        direction == "away" and decision.get("dissent_signal") == "table"
+        direction == "away" and decision.get("opposing_signal") == "table"
     )
 
-    # ── FIX ── h2h_present allowed through
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
         "home_team", "away_team",
@@ -2196,12 +2201,12 @@ def build_row(facts, signals, decision):
         "away_form_wins", "away_form_draws", "away_form_losses", "away_form_pts",
         "away_form_ppg",
         "h2h_total", "h2h_home_wins", "h2h_away_wins", "h2h_draws",
-        "h2h_present",                       # ← FIX
+        "h2h_present",
         "signal_table", "signal_form", "signal_venue", "signal_h2h",
         "agreement_split", "agreement_home_count", "agreement_away_count",
         "agreement_nothing_count", "table_leader", "dissent_signal",
-        "opposing_signal",                   # ← FIX
-        "neutral_signal",                    # ← FIX
+        "opposing_signal",
+        "neutral_signal",
         "direction", "stake", "qualifying",
         "extracted_at", "extracted_at_ts",
         "accumulator",
@@ -2441,7 +2446,6 @@ with tab_new:
         if venue_opposition:
             st.warning(f"⚠️ Venue Opposition: Venue={venue.upper()}, Pick={direction.upper()} (tracking only)")
 
-        # ── FIX ── surface the new opposing/neutral fields in the UI
         if decision.get("opposing_signal"):
             st.info(f"Opposing signal: **{decision['opposing_signal'].upper()}**")
         if decision.get("neutral_signal"):
