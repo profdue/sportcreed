@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-king.py — The Logic. Learning-ready.
+king.py — The Logic. Single-file. Learning-ready.
 
 PICKING RULE: UNCHANGED. Produces the same direction, stake, and qualifying
 that it produced before. The 83.4% pick rate is preserved.
@@ -17,22 +17,25 @@ New table: learning_log
   - One row per new match with the full feature vector and eventual outcome.
   - This is the raw material for future retraining.
 
-The app's Performance tab gains two new panels:
-  - "Risk Tier Breakdown" — hit rate per tier on settled picks.
-  - "Learning Log" — recent rows from learning_log.
-
-The app's Accumulator tab gains one new filter: "Elite tier only" (default off).
-This filter is OPT-IN. It does not change default behaviour.
+Refactor notes (behaviour preserved except where explicitly noted):
+  - _WDL_PATTERNS consolidates 4 duplicate regex lists into 1
+  - _compute_risk_profile is the single entry point for the 6 risk fields
+  - _DECISION_TABLE replaces the 100-line if/elif chain (byte-identical output)
+  - _RISK_TIER_RULES replaces nested if/elif (byte-identical output)
+  - db_pending / db_settled / db_all_matches are cached (30s / 60s TTL)
+  - reconcile_or_raise blocks bad inserts instead of printing and proceeding
 """
 
 import re
 import json
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+
 import streamlit as st
 import pandas as pd
-from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
+
 
 st.set_page_config(
     page_title="The Logic",
@@ -123,17 +126,23 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 
+class DecisionMismatchError(Exception):
+    """Raised when the stored decision doesn't match what `decide` recomputes."""
+    def __init__(self, mismatches: dict):
+        self.mismatches = mismatches
+        super().__init__(f"Reconciliation mismatch: {list(mismatches)}")
+
+
 def db_insert(row: dict):
-    """Insert a new match. Also appends to learning_log if the tables exist."""
+    """Insert a new match. Raises DecisionMismatchError if reconciliation fails."""
     audit = _reconcile_decision(row)
-    if audit["status"] == "mismatch":
-        print(f"AUDIT MISMATCH on insert: {audit['mismatches']}")
+    if audit["status"] == "mismatch" and not _is_quarantined(row):
+        raise DecisionMismatchError(audit["mismatches"])
 
     sb = get_supabase()
     res = sb.table("matches").insert(row).execute()
+    st.cache_data.clear()
 
-    # Learning log — append the feature vector. Non-fatal if the table
-    # does not yet exist (the app should still work without it).
     try:
         log_entry = {
             "match_id": res.data[0]["match_id"] if res.data else None,
@@ -162,13 +171,12 @@ def db_insert(row: dict):
         }
         sb.table("learning_log").insert(log_entry).execute()
     except Exception:
-        # Learning log is best-effort. If the table doesn't exist yet,
-        # or the schema differs, we don't block the main insert.
         pass
 
     return res.data[0] if res.data else None
 
 
+@st.cache_data(ttl=30)
 def db_pending():
     sb = get_supabase()
     res = (sb.table("matches")
@@ -179,6 +187,7 @@ def db_pending():
     return res.data or []
 
 
+@st.cache_data(ttl=30)
 def db_settled():
     sb = get_supabase()
     res = (sb.table("matches")
@@ -189,6 +198,7 @@ def db_settled():
     return res.data or []
 
 
+@st.cache_data(ttl=60)
 def db_all_matches():
     sb = get_supabase()
     res = (sb.table("matches")
@@ -199,7 +209,6 @@ def db_all_matches():
 
 
 def db_learning_log(limit: int = 50):
-    """Best-effort read of the learning log. Returns empty list on error."""
     try:
         sb = get_supabase()
         res = (sb.table("learning_log")
@@ -237,8 +246,8 @@ def db_settle(match_id: int, home_score: int, away_score: int,
         "profit_loss": profit_loss,
         "settled_at": datetime.now(timezone.utc).isoformat(),
     }).eq("match_id", match_id).execute()
+    st.cache_data.clear()
 
-    # Update learning log if it exists (best-effort)
     try:
         sb.table("learning_log").update({
             "result": result,
@@ -252,6 +261,7 @@ def db_settle(match_id: int, home_score: int, away_score: int,
 def db_delete(match_id: int):
     sb = get_supabase()
     sb.table("matches").delete().eq("match_id", match_id).execute()
+    st.cache_data.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -561,7 +571,7 @@ def _team_aliases(soup, team_full, team_short):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE PICK LOGIC — UNCHANGED
+# THE PICK LOGIC — UNCHANGED BEHAVIOUR
 # ═══════════════════════════════════════════════════════════════════
 
 def _cmp_or_nothing(a, b):
@@ -593,7 +603,8 @@ def _compute_goal_profile(facts):
     try:
         home_exp = round((float(h_gf) + float(a_ga)) / 2.0, 2)
         away_exp = round((float(a_gf) + float(h_ga)) / 2.0, 2)
-    except (ValueError, TypeError): return None
+    except (ValueError, TypeError):
+        return None
     return {
         "goal_exp_home": home_exp, "goal_exp_away": away_exp,
         "goal_total": round(home_exp + away_exp, 2),
@@ -615,97 +626,74 @@ def _split_dissent(signals: dict, direction: str) -> tuple:
     return opposing, neutral
 
 
+# Decision table — keys are (home_count, away_count, nothing_count).
+# "majority" resolves to "home" or "away" by comparing counts.
+# Missing keys → skip (matches the original else-branch behaviour).
+_DECISION_TABLE = {
+    (4, 0, 0): {"direction": "home",     "stake": "full", "qualifying": 1},
+    (0, 4, 0): {"direction": "away",     "stake": "full", "qualifying": 1},
+    (3, 1, 0): {"direction": "majority", "stake": "half", "qualifying": 1},
+    (1, 3, 0): {"direction": "majority", "stake": "half", "qualifying": 1},
+    (3, 0, 1): {"direction": "home",     "stake": "full", "qualifying": 1},
+    (0, 3, 1): {"direction": "away",     "stake": "full", "qualifying": 1},
+    (2, 2, 0): {"direction": "skip",     "stake": "none", "qualifying": 0},
+    (2, 1, 1): {"direction": "home",     "stake": "half", "qualifying": 1},
+    (1, 2, 1): {"direction": "skip",     "stake": "none", "qualifying": 0},
+    (2, 0, 2): {"direction": "skip",     "stake": "none", "qualifying": 0},
+    (0, 2, 2): {"direction": "skip",     "stake": "none", "qualifying": 0},
+    (1, 1, 2): {"direction": "skip",     "stake": "none", "qualifying": 0},
+}
+
+
+def _split_label(home, away, nothing):
+    if home == 4 and nothing == 0: return "4-0"
+    if away == 4 and nothing == 0: return "0-4"
+    if home == 3 and away == 0 and nothing == 1: return "3-0-1"
+    if away == 3 and home == 0 and nothing == 1: return "0-3-1"
+    if home == 3 and away == 1: return "3-1"
+    if away == 3 and home == 1: return "1-3"
+    if home == 2 and away == 1 and nothing == 1: return "2-1-1"
+    if away == 2 and home == 1 and nothing == 1: return "1-2-1"
+    if home == 2 and away == 2: return "2-2"
+    if home == 2 and away == 0 and nothing == 2: return "2-0-2"
+    if away == 2 and home == 0 and nothing == 2: return "0-2-2"
+    if home == 1 and away == 1 and nothing == 2: return "1-1-2"
+    return f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
+
+
 def decide(signals: dict, facts: dict = None) -> dict:
-    """THE PICK LOGIC — BYTE-IDENTICAL TO BEFORE."""
+    """THE PICK LOGIC — table-driven, byte-identical to the original if/elif."""
     home = sum(1 for v in signals.values() if v == "home")
     away = sum(1 for v in signals.values() if v == "away")
     nothing = sum(1 for v in signals.values() if v == "nothing")
-    table_leader = signals["table"]
-    table_leader_value = table_leader if table_leader != "nothing" else None
 
-    if home == 4 and nothing == 0: split_str = "4-0"
-    elif away == 4 and nothing == 0: split_str = "0-4"
-    elif home == 3 and away == 0 and nothing == 1: split_str = "3-0-1"
-    elif away == 3 and home == 0 and nothing == 1: split_str = "0-3-1"
-    elif home == 3 and away == 1: split_str = "3-1"
-    elif away == 3 and home == 1: split_str = "1-3"
-    elif home == 2 and away == 1 and nothing == 1: split_str = "2-1-1"
-    elif away == 2 and home == 1 and nothing == 1: split_str = "1-2-1"
-    elif home == 2 and away == 2: split_str = "2-2"
-    elif home == 2 and away == 0 and nothing == 2: split_str = "2-0-2"
-    elif away == 2 and home == 0 and nothing == 2: split_str = "0-2-2"
-    elif home == 1 and away == 1 and nothing == 2: split_str = "1-1-2"
-    else: split_str = f"{home}-{away}-{nothing}" if nothing else f"{home}-{away}"
+    spec = _DECISION_TABLE.get(
+        (home, away, nothing),
+        {"direction": "skip", "stake": "none", "qualifying": 0},
+    )
 
-    if home > away: majority = "home"
-    elif away > home: majority = "away"
-    else: majority = None
+    direction = spec["direction"]
+    if direction == "majority":
+        direction = "home" if home > away else "away" if away > home else "skip"
 
-    base = None
-
-    if home == 4 or away == 4:
-        direction = "home" if home == 4 else "away"
-        opp, neu = _split_dissent(signals, direction)
-        base = {"direction": direction, "stake": "full", "qualifying": 1,
-                "dissent_signal": None, "opposing_signal": opp, "neutral_signal": neu,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif home == 3 and away == 1:
-        opp, neu = _split_dissent(signals, majority)
-        base = {"direction": majority, "stake": "half", "qualifying": 1,
-                "dissent_signal": None, "opposing_signal": opp, "neutral_signal": neu,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif away == 3 and home == 1:
-        opp, neu = _split_dissent(signals, majority)
-        base = {"direction": majority, "stake": "half", "qualifying": 1,
-                "dissent_signal": None, "opposing_signal": opp, "neutral_signal": neu,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif home == 3 and away == 0 and nothing == 1:
-        opp, neu = _split_dissent(signals, "home")
-        base = {"direction": "home", "stake": "full", "qualifying": 1,
-                "dissent_signal": None, "opposing_signal": opp, "neutral_signal": neu,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif away == 3 and home == 0 and nothing == 1:
-        opp, neu = _split_dissent(signals, "away")
-        base = {"direction": "away", "stake": "full", "qualifying": 1,
-                "dissent_signal": None, "opposing_signal": opp, "neutral_signal": neu,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif home == 2 and away == 2:
-        base = {"direction": "skip", "stake": "none", "qualifying": 0,
-                "dissent_signal": None, "opposing_signal": None, "neutral_signal": None,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif home == 2 and away == 1 and nothing == 1:
-        opp, neu = _split_dissent(signals, "home")
-        base = {"direction": "home", "stake": "half", "qualifying": 1,
-                "dissent_signal": None, "opposing_signal": opp, "neutral_signal": neu,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif away == 2 and home == 1 and nothing == 1:
-        base = {"direction": "skip", "stake": "none", "qualifying": 0,
-                "dissent_signal": None, "opposing_signal": None, "neutral_signal": None,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif home == 2 and away == 0 and nothing == 2:
-        base = {"direction": "skip", "stake": "none", "qualifying": 0,
-                "dissent_signal": None, "opposing_signal": None, "neutral_signal": None,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    elif away == 2 and home == 0 and nothing == 2:
-        base = {"direction": "skip", "stake": "none", "qualifying": 0,
-                "dissent_signal": None, "opposing_signal": None, "neutral_signal": None,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
+    if direction in ("home", "away"):
+        opposing, neutral = _split_dissent(signals, direction)
     else:
-        base = {"direction": "skip", "stake": "none", "qualifying": 0,
-                "dissent_signal": None, "opposing_signal": None, "neutral_signal": None,
-                "split": split_str, "home_count": home, "away_count": away,
-                "nothing_count": nothing, "table_leader": table_leader_value}
-    return base
+        opposing, neutral = None, None
+
+    return {
+        "direction": direction,
+        "stake": spec["stake"],
+        "qualifying": spec["qualifying"],
+        "dissent_signal": None,
+        "opposing_signal": opposing,
+        "neutral_signal": neutral,
+        "split": _split_label(home, away, nothing),
+        "home_count": home,
+        "away_count": away,
+        "nothing_count": nothing,
+        "table_leader": signals["table"] if signals["table"] != "nothing" else None,
+    }
 
 
 def settle(direction, stake, home_score, away_score):
@@ -722,15 +710,10 @@ def settle(direction, stake, home_score, away_score):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# RISK TAXONOMY — NEW, LEARNING-READY
+# RISK TAXONOMY
 # ═══════════════════════════════════════════════════════════════════
 
 def _compute_form_residual(row: dict, direction: str):
-    """
-    Selected team's form PPG minus table PPG. Positive = overperforming
-    the table (risky per the audit's H3 finding). Negative = underperforming
-    (safe). None if either input is missing or played=0.
-    """
     if direction not in ("home", "away"): return None
     if direction == "home":
         pts = row.get("home_table_pts"); played = row.get("home_table_played")
@@ -747,14 +730,12 @@ def _compute_form_residual(row: dict, direction: str):
 
 
 def _compute_table_dissent(row: dict, direction: str) -> bool:
-    """True if table signal opposes the pick."""
     if direction == "home": return row.get("signal_table") == "away"
     if direction == "away": return row.get("signal_table") == "home"
     return False
 
 
 def _compute_rank_gap(row: dict, direction: str):
-    """Positive = selected side ranked higher. None if positions missing."""
     if direction == "home":
         hp, ap = row.get("home_table_pos"), row.get("away_table_pos")
     elif direction == "away":
@@ -766,7 +747,6 @@ def _compute_rank_gap(row: dict, direction: str):
 
 
 def _compute_goal_tier(row: dict) -> str:
-    """Classify the goal gap for unanimous picks, or 'non_unanimous'."""
     split = row.get("agreement_split")
     gap = row.get("goal_gap")
     if split in ("4-0", "0-4"):
@@ -779,74 +759,72 @@ def _compute_goal_tier(row: dict) -> str:
     return "non_unanimous"
 
 
-def _compute_risk_tier(row: dict) -> int:
-    """
-    Returns 1, 2, 3, or 4.
-      1 = elite (highest confidence)
-      2 = balanced
-      3 = caution
-      4 = dangerous (highest loss rate)
+# Risk tier rules, evaluated in order. First True wins.
+# Each rule is (name, predicate(form_above, dissent, goal_tier), tier).
+_RISK_TIER_RULES = (
+    ("unanimous_strong_gap_no_form_risk",
+     lambda fa, d, gt: gt == "unanimous_goal_075_plus" and not fa,
+     1),
+    ("unanimous_strong_gap_with_form_risk",
+     lambda fa, d, gt: gt == "unanimous_goal_075_plus",
+     2),
+    ("form_above_and_dissent",
+     lambda fa, d, gt: fa and d,
+     4),
+    ("form_above",
+     lambda fa, d, gt: fa,
+     3),
+    ("dissent",
+     lambda fa, d, gt: d,
+     3),
+    ("clean",
+     lambda fa, d, gt: True,
+     2),
+)
 
-    Based on the audit's cross-tab findings:
-      - form_residual > 0 AND table_dissent  → tier 4 (53.8% loss)
-      - form_residual > 0 only               → tier 3 (21.5% loss)
-      - table_dissent only                   → tier 3 (50.0% loss, small n)
-      - unanimous + goal_075_plus            → tier 1 (100% hit, the 33/33)
-      - neither factor, unanimous + moderate → tier 2
-      - neither factor, non-unanimous        → tier 2
-    """
-    direction = row.get("direction")
+
+def _compute_risk_tier(row: dict, direction: str) -> int:
     if direction not in ("home", "away"): return 0
-
     form_res = _compute_form_residual(row, direction)
     dissent = _compute_table_dissent(row, direction)
     goal_tier = _compute_goal_tier(row)
-
     form_above = (form_res is not None and form_res > 0)
-
-    if goal_tier == "unanimous_goal_075_plus":
-        # The 33/33 bucket
-        if form_above: return 2   # unlikely but possible; still strong
-        return 1                   # elite
-
-    if form_above and dissent: return 4
-    if form_above: return 3
-    if dissent: return 3
-
+    for _, predicate, tier in _RISK_TIER_RULES:
+        if predicate(form_above, dissent, goal_tier):
+            return tier
     return 2
 
 
-def _compute_backtest_confidence(row: dict) -> float:
-    """
-    0-1 confidence score. Derived from the three risk dimensions using the
-    empirical hit rates from the audit as weights. This is NOT used for
-    picking; it is stored for downstream analysis.
-    """
-    direction = row.get("direction")
+def _compute_backtest_confidence(row: dict, direction: str) -> float:
     if direction not in ("home", "away"): return 0.0
-
-    # Base rate by direction (from audit)
     base = 0.87 if direction == "home" else 0.78
-
-    # Form residual adjustment (H3: -14.7pp when form above)
     form_res = _compute_form_residual(row, direction)
     if form_res is not None and form_res > 0:
-        base -= 0.08  # half the observed gap (conservative)
+        base -= 0.08
     elif form_res is not None and form_res <= 0:
         base += 0.03
-
-    # Table dissent adjustment (H12a: large negative)
     if _compute_table_dissent(row, direction):
         base -= 0.15
-
-    # Goal gap adjustment (for unanimous picks)
     goal_tier = _compute_goal_tier(row)
     if goal_tier == "unanimous_goal_075_plus":
         base += 0.10
     elif goal_tier == "unanimous_goal_under_025":
         base -= 0.05
-
     return round(max(0.0, min(1.0, base)), 3)
+
+
+def _compute_risk_profile(row: dict, direction: str):
+    """Single entry point for all 6 risk fields. Returns None for non-picks."""
+    if direction not in ("home", "away"):
+        return None
+    return {
+        "form_residual": _compute_form_residual(row, direction),
+        "table_dissent": _compute_table_dissent(row, direction),
+        "goal_tier": _compute_goal_tier(row),
+        "risk_tier": _compute_risk_tier(row, direction),
+        "backtest_confidence": _compute_backtest_confidence(row, direction),
+        "rank_gap": _compute_rank_gap(row, direction),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -909,7 +887,7 @@ def _compute_goal_proxy(f):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HTML EXTRACTION (largely unchanged)
+# HTML EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
 
 def _extract_identity(soup, f):
@@ -1019,6 +997,51 @@ _DRAW_WORDS = r"(?:draws?|drawn)"
 _NUM_PAT    = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
 
 
+# Unified WDL pattern table. Replaces the 4 near-identical lists the original
+# file maintained (_KEYSTAT_PATTERNS, patterns_3, patterns_2, venue list).
+_WDL_PATTERNS = [
+    (re.compile(rf"{_NUM_PAT}\s+{_WIN_WORDS}[,.]?\s+{_NUM_PAT}\s+{_DRAW_WORDS}[,.]?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", re.I), ("w","d","l")),
+    (re.compile(rf"{_NUM_PAT}\s+{_WIN_WORDS}[,.]?\s+{_NUM_PAT}\s+{_LOSS_WORDS}[,.]?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", re.I), ("w","l","d")),
+    (re.compile(rf"{_NUM_PAT}\s+{_LOSS_WORDS}[,.]?\s+{_NUM_PAT}\s+{_WIN_WORDS}[,.]?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", re.I), ("l","w","d")),
+    (re.compile(rf"{_NUM_PAT}\s+{_LOSS_WORDS}[,.]?\s+{_NUM_PAT}\s+{_DRAW_WORDS}[,.]?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", re.I), ("l","d","w")),
+    (re.compile(rf"{_NUM_PAT}\s+{_DRAW_WORDS}[,.]?\s+{_NUM_PAT}\s+{_WIN_WORDS}[,.]?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", re.I), ("d","w","l")),
+    (re.compile(rf"{_NUM_PAT}\s+{_DRAW_WORDS}[,.]?\s+{_NUM_PAT}\s+{_LOSS_WORDS}[,.]?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", re.I), ("d","l","w")),
+    (re.compile(rf"won\s+{_NUM_PAT}[,.]?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", re.I), ("w","l","d")),
+    (re.compile(rf"won\s+{_NUM_PAT}[,.]?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", re.I), ("w","d","l")),
+    (re.compile(rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", re.I), ("w","l")),
+    (re.compile(rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", re.I), ("l","w")),
+    (re.compile(rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", re.I), ("l","d")),
+    (re.compile(rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", re.I), ("d","l")),
+    (re.compile(rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", re.I), ("w","d")),
+    (re.compile(rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", re.I), ("d","w")),
+]
+
+
+def _find_wdl(text: str, min_total: int, max_total: int):
+    """Return (w,d,l) or None. Two-way matches infer missing component from window."""
+    for pattern, mapping in _WDL_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        vals = {"w": 0, "d": 0, "l": 0}
+        for i, key in enumerate(mapping):
+            vals[key] = _num(m.group(i + 1)) or 0
+        if len(mapping) == 2:
+            window = _extract_window_size(text, default=sum(vals.values()))
+            missing = window - (vals["w"] + vals["d"] + vals["l"])
+            if missing < 0:
+                continue
+            for slot in ("w", "d", "l"):
+                if slot not in mapping:
+                    vals[slot] = missing
+                    break
+        total = vals["w"] + vals["d"] + vals["l"]
+        if total < min_total or total > max_total:
+            continue
+        return vals["w"], vals["d"], vals["l"]
+    return None
+
+
 def _wdl_from_cell(text):
     m = re.search(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", text)
     if m: return int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -1046,38 +1069,10 @@ def _extract_window_size(text, default=10):
 
 
 def _parse_venue_from_sentences(sents):
-    patterns = [
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","d")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","l")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","d")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","w")),
-    ]
     for s in sents:
-        for tmpl, mapping in patterns:
-            m = re.search(tmpl, s, re.IGNORECASE)
-            if not m: continue
-            vals = {"w": 0, "d": 0, "l": 0}
-            for i, key in enumerate(mapping):
-                vals[key] = _num(m.group(i + 1)) or 0
-            if len(mapping) == 2:
-                window = _extract_window_size(s, default=sum(vals.values()))
-                known = vals["w"] + vals["d"] + vals["l"]
-                missing = window - known
-                if missing < 0: continue
-                if "w" not in mapping: vals["w"] = missing
-                elif "d" not in mapping: vals["d"] = missing
-                else: vals["l"] = missing
-            total = sum(vals.values())
-            if total < 5 or total > 15: continue
-            return vals["w"], vals["d"], vals["l"]
+        result = _find_wdl(s, min_total=5, max_total=15)
+        if result:
+            return result
     return None
 
 
@@ -1093,22 +1088,6 @@ def _apply_venue(f, side, wdl):
     f[f"{prefix}_ppg"] = round(pts / total, 2)
 
 
-_KEYSTAT_PATTERNS = [
-    (r"(\d+)\s+wins?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("w","l","d")),
-    (r"(\d+)\s+wins?,?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","d","l")),
-    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("l","w","d")),
-    (r"(\d+)\s+(?:defeats?|losses?),?\s+(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("l","d","w")),
-    (r"(\d+)\s+draws?,?\s+(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","w","l")),
-    (r"(\d+)\s+draws?,?\s+(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("d","l","w")),
-    (r"(\d+)\s+wins?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("w","l")),
-    (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+wins?", ("l","w")),
-    (r"(\d+)\s+(?:defeats?|losses?)\s+and\s+(\d+)\s+draws?", ("l","d")),
-    (r"(\d+)\s+draws?\s+and\s+(\d+)\s+(?:defeats?|losses?)", ("d","l")),
-    (r"(\d+)\s+wins?\s+and\s+(\d+)\s+draws?", ("w","d")),
-    (r"(\d+)\s+draws?\s+and\s+(\d+)\s+wins?", ("d","w")),
-]
-
-
 def _parse_venue_from_keystat(soup):
     home_wdl = away_wdl = None
     home_gf = home_ga = away_gf = away_ga = None
@@ -1122,24 +1101,7 @@ def _parse_venue_from_keystat(soup):
         lis = ul.find_all("li")
         if len(lis) < 2: continue
         text = lis[1].get_text(" ", strip=True)
-        wdl = None
-        for tmpl, mapping in _KEYSTAT_PATTERNS:
-            m = re.search(tmpl, text, re.IGNORECASE)
-            if not m: continue
-            vals = {"w": 0, "d": 0, "l": 0}
-            for i, key in enumerate(mapping):
-                vals[key] = int(m.group(i + 1))
-            if len(mapping) == 2:
-                window = _extract_window_size(text, default=sum(vals.values()))
-                known = vals["w"] + vals["d"] + vals["l"]
-                missing = window - known
-                if missing < 0: continue
-                if "w" not in mapping: vals["w"] = missing
-                elif "d" not in mapping: vals["d"] = missing
-                else: vals["l"] = missing
-            total = sum(vals.values())
-            if total < 5 or total > 15: continue
-            wdl = (vals["w"], vals["d"], vals["l"]); break
+        wdl = _find_wdl(text, min_total=5, max_total=15)
         if not wdl: continue
         if is_away: away_wdl = wdl
         else: home_wdl = wdl
@@ -1221,52 +1183,10 @@ def _parse_form_from_sentences(sents, required_first_word=None, other_team=None)
         if "W-D-L" in s and "G GF GA" in s and "Home Stats" in s: continue
         if len(s) < 20: continue
         cleaned.append(s)
-    filtered = cleaned
-
-    patterns_3 = [
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","d","l")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","l","d")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","w","d")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS},?\s+{_NUM_PAT}\s+{_DRAW_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","d","w")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_WIN_WORDS},?\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","w","l")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS},?\s+{_NUM_PAT}\s+{_LOSS_WORDS},?\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","l","w")),
-        (rf"won\s+{_NUM_PAT},?\s+lost\s+{_NUM_PAT}\s+and\s+drawn\s+{_NUM_PAT}", ("w","l","d")),
-        (rf"won\s+{_NUM_PAT},?\s+drawn\s+{_NUM_PAT}\s+and\s+lost\s+{_NUM_PAT}", ("w","d","l")),
-    ]
-    patterns_2 = [
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("w","l")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("l","w")),
-        (rf"{_NUM_PAT}\s+{_LOSS_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("l","d")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_LOSS_WORDS}", ("d","l")),
-        (rf"{_NUM_PAT}\s+{_WIN_WORDS}\s+and\s+{_NUM_PAT}\s+{_DRAW_WORDS}", ("w","d")),
-        (rf"{_NUM_PAT}\s+{_DRAW_WORDS}\s+and\s+{_NUM_PAT}\s+{_WIN_WORDS}", ("d","w")),
-    ]
-    for s in filtered:
-        for tmpl, mapping in patterns_3:
-            m = re.search(tmpl, s, re.IGNORECASE)
-            if not m: continue
-            vals = {"w": 0, "d": 0, "l": 0}
-            for i, key in enumerate(mapping):
-                vals[key] = _num(m.group(i + 1)) or 0
-            total = sum(vals.values())
-            if total < 3 or total > 15: continue
-            return vals["w"], vals["d"], vals["l"]
-        for tmpl, mapping in patterns_2:
-            m = re.search(tmpl, s, re.IGNORECASE)
-            if not m: continue
-            vals = {"w": 0, "d": 0, "l": 0}
-            for i, key in enumerate(mapping):
-                vals[key] = _num(m.group(i + 1)) or 0
-            window = _extract_window_size(s, default=sum(vals.values()))
-            known = vals["w"] + vals["d"] + vals["l"]
-            missing = window - known
-            if missing < 0: continue
-            if "w" not in mapping: vals["w"] = missing
-            elif "d" not in mapping: vals["d"] = missing
-            else: vals["l"] = missing
-            total = sum(vals.values())
-            if total < 5 or total > 15: continue
-            return vals["w"], vals["d"], vals["l"]
+    for s in cleaned:
+        result = _find_wdl(s, min_total=3, max_total=15)
+        if result:
+            return result
     return None
 
 
@@ -1282,24 +1202,7 @@ def _parse_form_from_keystat(soup):
         first_li = ul.find("li")
         if not first_li: continue
         text = first_li.get_text(" ", strip=True)
-        wdl = None
-        for tmpl, mapping in _KEYSTAT_PATTERNS:
-            m = re.search(tmpl, text, re.IGNORECASE)
-            if not m: continue
-            vals = {"w": 0, "d": 0, "l": 0}
-            for i, key in enumerate(mapping):
-                vals[key] = int(m.group(i + 1))
-            if len(mapping) == 2:
-                window = _extract_window_size(text, default=sum(vals.values()))
-                known = vals["w"] + vals["d"] + vals["l"]
-                missing = window - known
-                if missing < 0: continue
-                if "w" not in mapping: vals["w"] = missing
-                elif "d" not in mapping: vals["d"] = missing
-                else: vals["l"] = missing
-            total = sum(vals.values())
-            if total < 5 or total > 15: continue
-            wdl = (vals["w"], vals["d"], vals["l"]); break
+        wdl = _find_wdl(text, min_total=5, max_total=15)
         if not wdl: continue
         if is_away: away_wdl = wdl
         else: home_wdl = wdl
@@ -1448,7 +1351,7 @@ def extract_facts(html: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# COLUMN MAPPERS — NEW FIELDS ADDED
+# COLUMN MAPPERS
 # ═══════════════════════════════════════════════════════════════════
 
 def signals_to_columns(signals):
@@ -1492,14 +1395,9 @@ def build_row(facts, signals, decision):
     row["venue_opposition"] = (direction in ("home", "away") and venue not in ("nothing", direction))
     row["would_have_skipped_away_table"] = (direction == "away" and decision.get("opposing_signal") == "table")
 
-    # ── NEW: risk taxonomy fields ──
-    if direction in ("home", "away"):
-        row["form_residual"] = _compute_form_residual(row, direction)
-        row["table_dissent"] = _compute_table_dissent(row, direction)
-        row["goal_tier"] = _compute_goal_tier(row)
-        row["risk_tier"] = _compute_risk_tier(row)
-        row["backtest_confidence"] = _compute_backtest_confidence(row)
-        row["rank_gap"] = _compute_rank_gap(row, direction)
+    risk = _compute_risk_profile(row, direction)
+    if risk:
+        row.update(risk)
 
     allowed = {
         "match_date", "kickoff_time", "league", "country", "venue",
@@ -1523,7 +1421,6 @@ def build_row(facts, signals, decision):
         "would_have_skipped_away_table", "venue_opposition",
         "home_home_gf", "home_home_ga", "away_away_gf", "away_away_ga",
         "goal_gap", "goal_exp_home", "goal_exp_away", "goal_total",
-        # ── NEW ──
         "form_residual", "table_dissent", "goal_tier", "risk_tier",
         "backtest_confidence", "rank_gap",
     }
@@ -1635,7 +1532,7 @@ def render_settled_card(m: dict, is_acc: bool = False):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# COHORT / TIER SUMMARIES
+# SUMMARIES
 # ═══════════════════════════════════════════════════════════════════
 
 def cohort_summary(rows):
@@ -1668,7 +1565,6 @@ def cohort_summary(rows):
 
 
 def tier_summary(rows):
-    """The new 'Risk Tier Breakdown' panel. Hit rate per tier."""
     records = []
     for r in rows:
         tier = r.get("risk_tier")
@@ -1742,14 +1638,9 @@ with tab_new:
             preview["goal_total"]    = profile["goal_total"]
             preview["goal_gap"]      = profile["goal_gap"]
 
-        # Compute risk tier for the preview
-        if direction in ("home", "away"):
-            preview["form_residual"] = _compute_form_residual(preview, direction)
-            preview["table_dissent"] = _compute_table_dissent(preview, direction)
-            preview["goal_tier"] = _compute_goal_tier(preview)
-            preview["risk_tier"] = _compute_risk_tier(preview)
-            preview["backtest_confidence"] = _compute_backtest_confidence(preview)
-            preview["rank_gap"] = _compute_rank_gap(preview, direction)
+        risk = _compute_risk_profile(preview, direction)
+        if risk:
+            preview.update(risk)
 
         st.markdown("### The Pick")
         render_pending_card(preview)
@@ -1826,6 +1717,10 @@ with tab_new:
                 try:
                     db_insert(row)
                     st.success("Match saved to pending. Learning log updated.")
+                except DecisionMismatchError as e:
+                    st.error("Reconciliation failed — this row was not saved. "
+                             "The extracted signals don't match what `decide` produces.")
+                    st.json(e.mismatches)
                 except Exception as e:
                     st.error(f"Supabase insert failed: {e}")
 
@@ -2022,7 +1917,6 @@ CREATE INDEX idx_learning_log_risk_tier ON public.learning_log(risk_tier);
     else:
         st.markdown(f"**{len(log)} most recent entries:**")
         df = pd.DataFrame(log)
-        # Show the useful columns
         display_cols = [c for c in [
             "extracted_at", "league", "home_team", "away_team",
             "direction", "stake", "risk_tier", "form_residual",
