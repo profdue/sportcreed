@@ -9,11 +9,12 @@ Classifier: 2 stats — consecutive wins + consecutive unbeaten.
     LIGHT CLEAR HOME   home leader, U == W               -> 1X
     NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
 
-  STUDY (simple_qualifying=0, kept for pattern analysis):
+  STUDY (simple_qualifying=0, rejected matches kept for analysis):
     HOME_LEADER_NO_PADDING, AWAY_LEADER_NO_SOLID,
     NOT_BEATEN_GAP_LOW, BOTH_HAVE_WINS, MISSING
 
 Every parsed row inserts. Qualifying bets go to Pending. No-bets go to Study.
+Study rows record the actual final score; no hypothetical bets, no predictions.
 One table: public.matches.
 """
 
@@ -134,7 +135,11 @@ def db_find_existing(row: dict):
 
 
 def db_settle(match_id: int, home_score: int, away_score: int,
-              result: str, dc_hit, profit_loss: float):
+              result: str, dc_hit, profit_loss):
+    """
+    Records the final score. dc_hit and profit_loss are only meaningful for
+    qualifying bets — study rows pass None/None.
+    """
     sb = get_supabase()
     sb.table("matches").update({
         "home_score": home_score, "away_score": away_score,
@@ -189,7 +194,7 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CLASSIFIER — returns category / pick / bet / qualifying / reason / code
+# CLASSIFIER
 # ═══════════════════════════════════════════════════════════════════
 
 NOT_BEATEN_MIN_GAP = 3
@@ -717,9 +722,9 @@ with tab_perf:
 
 # ─── TAB 4 — STUDY ────────────────────────────────────────────────
 with tab_study:
-    st.markdown("### 📚 Study — no-bet matches")
-    st.caption("Every parsed match that fell outside the file. Kept for pattern "
-               "study, not betting. Never appears in Pending or Performance.")
+    st.markdown("### 📚 Study — no-bet matches with actual results")
+    st.caption("Every parsed match the classifier rejected, plus the actual final score. "
+               "Raw data only — no hypotheticals, no predicted bets.")
 
     try:
         study = db_study()
@@ -730,33 +735,118 @@ with tab_study:
     if not study:
         st.info("No study rows yet. Paste a no-bet match into New Match to populate.")
     else:
-        st.metric("Study rows", len(study))
+        settled = [m for m in study if m.get("home_score") is not None]
+        unsettled = [m for m in study if m.get("home_score") is None]
 
-        codes_df = pd.DataFrame([
-            {"rejection_code": m.get("simple_rejection_code") or "(none)",
-             "reason": m.get("simple_reason") or "",
-             "home_team": m.get("home_team"),
-             "away_team": m.get("away_team"),
-             "home_w": m.get("home_consecutive_wins"),
-             "away_w": m.get("away_consecutive_wins"),
-             "home_u": m.get("home_consecutive_unbeaten"),
-             "away_u": m.get("away_consecutive_unbeaten")}
-            for m in study
-        ])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Study rows", len(study))
+        c2.metric("Settled", len(settled))
+        c3.metric("Awaiting result", len(unsettled))
 
-        st.markdown("### Counts by rejection code")
-        counts = (codes_df.groupby("rejection_code")
-                  .size().reset_index(name="count")
-                  .sort_values("count", ascending=False))
-        st.dataframe(counts, use_container_width=True, hide_index=True)
+        # ── Actual outcome counts by rejection code ──
+        if settled:
+            st.markdown("### Actual outcome counts by rejection code")
+            rows = []
+            for m in settled:
+                rows.append({
+                    "rejection_code": m.get("simple_rejection_code") or "(none)",
+                    "result": m.get("result") or "(unknown)",
+                })
+            df = pd.DataFrame(rows)
+            pivot = (df.groupby(["rejection_code", "result"])
+                     .size().unstack(fill_value=0))
+            for col in ("home_win", "draw", "away_win"):
+                if col not in pivot.columns:
+                    pivot[col] = 0
+            pivot = pivot[["home_win", "draw", "away_win"]]
+            pivot["total"] = pivot.sum(axis=1)
+            pivot = pivot.reset_index().sort_values("total", ascending=False)
+            st.dataframe(pivot, use_container_width=True, hide_index=True)
 
-        st.markdown("### Filter")
-        all_codes = sorted(codes_df["rejection_code"].unique())
-        selected = st.multiselect("Rejection code", all_codes, default=all_codes)
+            # ── Unbeaten gap vs actual outcome (NOT-BEATEN cases) ──
+            nb_rows = []
+            for m in settled:
+                if m.get("simple_rejection_code") != "NOT_BEATEN_GAP_LOW":
+                    continue
+                hu = m.get("home_consecutive_unbeaten") or 0
+                au = m.get("away_consecutive_unbeaten") or 0
+                higher = "home" if hu > au else ("away" if au > hu else "tie")
+                nb_rows.append({
+                    "home_team": m.get("home_team"),
+                    "away_team": m.get("away_team"),
+                    "home_u": hu,
+                    "away_u": au,
+                    "gap": abs(hu - au),
+                    "higher_unbeaten_side": higher,
+                    "result": m.get("result"),
+                })
+            if nb_rows:
+                st.markdown("### Unbeaten gap vs actual outcome (NOT-BEATEN cases)")
+                st.caption("For rows where both teams had 0 wins. The gap is the "
+                           "absolute difference in consecutive unbeaten.")
+                st.dataframe(pd.DataFrame(nb_rows), use_container_width=True,
+                             hide_index=True)
 
-        filtered = codes_df[codes_df["rejection_code"].isin(selected)] if selected else codes_df
-        st.markdown(f"### Rows ({len(filtered)})")
-        st.dataframe(filtered, use_container_width=True, hide_index=True)
+        # ── Individual rows with settle form ──
+        st.markdown("### Rows")
+        all_codes = sorted({m.get("simple_rejection_code") or "(none)" for m in study})
+        selected = st.multiselect("Filter by rejection code", all_codes,
+                                   default=all_codes, key="study_filter")
+
+        for m in study:
+            code = m.get("simple_rejection_code") or "(none)"
+            if code not in selected:
+                continue
+
+            st.markdown(_card_html(m, settled=(m.get("home_score") is not None)),
+                        unsafe_allow_html=True)
+
+            if m.get("home_score") is not None:
+                result_lbl = {"home_win": "Home win",
+                              "away_win": "Away win",
+                              "draw": "Draw"}.get(m.get("result"),
+                                                   m.get("result") or "—")
+                st.caption(f"Final: **{m['home_score']}–{m['away_score']}** · {result_lbl}")
+                with st.expander("Correct result"):
+                    c1, c2, c3 = st.columns([1, 1, 2])
+                    with c1:
+                        hs = st.number_input("Home", min_value=0, step=1,
+                                              value=int(m["home_score"]),
+                                              key=f"ch_{m['match_id']}")
+                    with c2:
+                        aws = st.number_input("Away", min_value=0, step=1,
+                                               value=int(m["away_score"]),
+                                               key=f"ca_{m['match_id']}")
+                    with c3:
+                        st.write(""); st.write("")
+                        if st.button("Update", key=f"cu_{m['match_id']}"):
+                            if hs > aws:     result = "home_win"
+                            elif aws > hs:   result = "away_win"
+                            else:            result = "draw"
+                            db_settle(m["match_id"], int(hs), int(aws),
+                                      result, None, None)
+                            st.success("Updated.")
+                            st.rerun()
+            else:
+                with st.expander("Enter final score"):
+                    c1, c2, c3 = st.columns([1, 1, 2])
+                    with c1:
+                        hs = st.number_input("Home", min_value=0, step=1,
+                                              key=f"sh_{m['match_id']}")
+                    with c2:
+                        aws = st.number_input("Away", min_value=0, step=1,
+                                               key=f"sa_{m['match_id']}")
+                    with c3:
+                        st.write(""); st.write("")
+                        if st.button("Save result", key=f"ss_{m['match_id']}",
+                                     type="primary"):
+                            if hs > aws:     result = "home_win"
+                            elif aws > hs:   result = "away_win"
+                            else:            result = "draw"
+                            db_settle(m["match_id"], int(hs), int(aws),
+                                      result, None, None)
+                            st.success("Result saved.")
+                            st.rerun()
 
         with st.expander("Manage rows"):
             ids = st.multiselect("Select match_id to delete",
