@@ -2,23 +2,13 @@
 """
 king.py — The Logic (text-dump only, header-driven home/away)
 
-Input: a text dump that contains a "Pre-match HOME vs AWAY" line plus:
-    Match information / venue
-    Recent form / results
-    Consecutive scoring / wins / unbeaten
-    H2H last matches
-
 Classifier: 2 stats — consecutive wins + consecutive unbeaten.
+  SOLID CLEAR        leader U >= 2, opponent 0/0      -> 1X / X2
+  LIGHT CLEAR HOME   home leader, U == W               -> 1X
+  NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
+  outside the file   anything else                     -> no bet
 
-    SOLID CLEAR        home or away leader, U >= 2, opponent 0/0  -> 1X / X2
-    LIGHT CLEAR HOME   home leader, U == W                         -> 1X
-    NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3              -> 1X / X2
-    outside the file   anything else                               -> no bet
-
-Qualifying bets are inserted into Pending automatically — no save button.
-No-bets are shown on screen but not stored.
-
-One table: public.matches. No learning log, no accumulator, no legacy engine.
+Qualifying bets auto-insert to Pending. No-bets render but don't save.
 """
 
 import re
@@ -164,17 +154,22 @@ def _to_int_or_none(v):
         return None
 
 
+def _clean_line(s: str) -> str:
+    """Strip whitespace and common invisible characters from a line."""
+    return s.strip().strip("\ufeff\u200b\u200c\u200d\u00a0 ")
+
+
 def _strip_lines(text: str) -> list:
     return [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
 
 
 def _next_nonblank(lines, start):
     i = start
-    while i < len(lines) and lines[i].strip() == "":
+    while i < len(lines) and not _clean_line(lines[i]):
         i += 1
     if i >= len(lines):
         return None, i
-    return lines[i].strip(), i + 1
+    return _clean_line(lines[i]), i + 1
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -273,8 +268,15 @@ _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
 
-# "Pre-match Leeds United vs Tottenham Hotspur" — also tolerates missing prefix.
+# "Pre-match Leeds United vs Tottenham Hotspur" — also tolerates bare "X vs Y".
 _VS_HEADER = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
+
+_ODDS_GLYPHS = "➜➔→•€$£"
+
+_STRUCTURAL_LABELS = {
+    "match information", "recent form", "general stats",
+    "pre-match odds", "h2h last matches", "odds", "advertisement",
+}
 
 
 def _looks_like_text_dump(text: str) -> bool:
@@ -284,29 +286,38 @@ def _looks_like_text_dump(text: str) -> bool:
     return "recent form" in low and "consecutive" in low
 
 
+def _looks_like_odds_line(s: str) -> bool:
+    """Reject lines that are clearly odds or ad rows, not a team-vs-team header."""
+    if any(sym in s for sym in _ODDS_GLYPHS):
+        return True
+    decimals = re.findall(r"\b\d+\.\d+\b", s)
+    if len(decimals) >= 2:
+        return True
+    return False
+
+
 def _teams_from_header(lines):
     """
-    Scan the first few non-blank lines for 'Pre-match HOME vs AWAY'
-    (or bare 'HOME vs AWAY'). Returns (home, away) or (None, None).
-    Rejects lines containing digits or odds glyphs.
+    Scan ALL lines for 'Pre-match HOME vs AWAY' (or bare 'HOME vs AWAY').
+    Team names may contain digits ('Mainz 05', '1. FC Köln', '1899 Hoffenheim').
+    Returns (home, away) or (None, None).
     """
-    for ln in lines[:8]:
-        s = ln.strip()
+    for ln in lines:
+        s = _clean_line(ln)
         if not s:
             continue
-        low = s.lower()
-        if low in ("match information", "recent form", "general stats",
-                   "pre-match odds", "h2h last matches", "odds"):
+        if s.lower() in _STRUCTURAL_LABELS:
+            continue
+        if _looks_like_odds_line(s):
             continue
         m = _VS_HEADER.match(s)
         if not m:
             continue
-        home, away = m.group(1).strip(), m.group(2).strip()
+        home, away = _clean_line(m.group(1)), _clean_line(m.group(2))
         if not home or not away:
             continue
-        if any(ch.isdigit() for ch in home + away):
-            continue
-        if any(sym in home + away for sym in "➜➔→•/"):
+        # Reject bare numeric sides (e.g. "1 vs 2").
+        if home.isdigit() or away.isdigit():
             continue
         return home, away
     return None, None
@@ -314,14 +325,14 @@ def _teams_from_header(lines):
 
 def _parse_match_information(lines, f):
     for i, ln in enumerate(lines):
-        if ln.strip().lower() != "match information":
+        if _clean_line(ln).lower() != "match information":
             continue
         val, j = _next_nonblank(lines, i + 1)
         if not val:
             return
         entries = []
-        while val and val.strip().lower() != "recent form" and len(entries) < 4:
-            entries.append(val.strip())
+        while val and val.lower() != "recent form" and len(entries) < 4:
+            entries.append(val)
             val, j = _next_nonblank(lines, j)
         if entries:
             f["venue"] = entries[0]
@@ -329,10 +340,10 @@ def _parse_match_information(lines, f):
 
 
 def _teams_frequency_fallback(lines):
-    """Fallback when no 'Pre-match X vs Y' header exists. Best-effort only."""
+    """Fallback when no header exists. Best-effort only — home/away may be swapped."""
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
-                      if ln.strip().lower() == "recent form")
+                      if _clean_line(ln).lower() == "recent form")
     except StopIteration:
         return None, None
 
@@ -348,7 +359,7 @@ def _teams_frequency_fallback(lines):
         score, i = _next_nonblank(lines, i)
         if not team or not score or not _SCORE_LINE.match(score):
             break
-        names.append(team.strip())
+        names.append(team)
         cur, i = _next_nonblank(lines, i)
         if not cur or not _FORM_RESULT.match(cur):
             break
@@ -394,7 +405,7 @@ def parse_recent_form_dump(text: str) -> dict:
                 "frequency. Home/away may be swapped.")
 
     for i, ln in enumerate(lines):
-        m = _CONSEC_HEADER.match(ln.strip())
+        m = _CONSEC_HEADER.match(_clean_line(ln))
         if not m:
             continue
         kind = m.group(1).lower()
@@ -415,7 +426,7 @@ def parse_recent_form_dump(text: str) -> dict:
 
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
-                      if ln.strip().lower() == "recent form")
+                      if _clean_line(ln).lower() == "recent form")
     except StopIteration:
         rf_idx = -1
     if rf_idx >= 0:
@@ -430,7 +441,7 @@ def parse_recent_form_dump(text: str) -> dict:
             if not team or not score or not _SCORE_LINE.match(score):
                 break
             f["recent_form_triplets"].append(
-                {"result": cur.upper(), "team": team.strip(), "score": score.strip()}
+                {"result": cur.upper(), "team": team, "score": score}
             )
             cur, i = _next_nonblank(lines, i)
             if not cur or not _FORM_RESULT.match(cur):
@@ -542,12 +553,11 @@ tab_new, tab_pending, tab_perf, tab_lab = st.tabs(
 # ─── TAB 1 — NEW MATCH ────────────────────────────────────────────
 with tab_new:
     st.markdown("### Paste the match data")
-    st.caption("Include the `Pre-match HOME vs AWAY` header — that is what decides "
-               "which side is home. Then the four consecutive stats decide the pick.")
+    st.caption("Include the `Pre-match HOME vs AWAY` header — that decides home/away.")
 
     raw_in = st.text_area("Input", height=320, label_visibility="collapsed",
-                          placeholder="Pre-match Leeds United vs Tottenham Hotspur\\n"
-                                      "Match information\\nElland Road\\n...")
+                          placeholder="Pre-match Mainz 05 vs Bayern München\\n"
+                                      "Match information\\nMewa Arena\\n...")
     run = st.button("Run the Logic", type="primary")
 
     if run and raw_in.strip():
@@ -581,7 +591,6 @@ with tab_new:
                 for w in warnings:
                     st.write(f"- {w}")
 
-        # Auto-insert: qualifying bets go to Pending. No-bets stay out.
         has_required = (
             facts.get("home_team") and facts.get("away_team")
             and simple.get("home_consecutive_wins") is not None
@@ -700,8 +709,7 @@ with tab_perf:
 # ─── TAB 4 — LAB ──────────────────────────────────────────────────
 with tab_lab:
     st.markdown("### 🧪 Lab")
-    st.caption("Parse a dump without saving. Inspect the extracted values "
-               "and the classifier's decision.")
+    st.caption("Parse a dump without saving.")
 
     text_in = st.text_area("Text dump", height=320, label_visibility="collapsed",
                            key="lab_input")
