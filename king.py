@@ -8,12 +8,15 @@ Input: a text dump that contains a "Pre-match HOME vs AWAY" line plus:
     Consecutive scoring / wins / unbeaten
     H2H last matches
 
-Classifier (only logic): 2 stats — consecutive wins + consecutive unbeaten.
+Classifier: 2 stats — consecutive wins + consecutive unbeaten.
 
     SOLID CLEAR        home or away leader, U >= 2, opponent 0/0  -> 1X / X2
     LIGHT CLEAR HOME   home leader, U == W                         -> 1X
     NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3              -> 1X / X2
     outside the file   anything else                               -> no bet
+
+Qualifying bets are inserted into Pending automatically — no save button.
+No-bets are shown on screen but not stored.
 
 One table: public.matches. No learning log, no accumulator, no legacy engine.
 """
@@ -271,7 +274,6 @@ _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
 
 # "Pre-match Leeds United vs Tottenham Hotspur" — also tolerates missing prefix.
-# Requires whitespace around "vs" so team names containing "vs" aren't broken.
 _VS_HEADER = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
 
 
@@ -284,15 +286,14 @@ def _looks_like_text_dump(text: str) -> bool:
 
 def _teams_from_header(lines):
     """
-    Scan the first non-blank lines for 'Pre-match HOME vs AWAY' (or bare
-    'HOME vs AWAY'). Returns (home, away) or (None, None).
+    Scan the first few non-blank lines for 'Pre-match HOME vs AWAY'
+    (or bare 'HOME vs AWAY'). Returns (home, away) or (None, None).
     Rejects lines containing digits or odds glyphs.
     """
     for ln in lines[:8]:
         s = ln.strip()
         if not s:
             continue
-        # Ignore "Match information" and similar structural labels.
         low = s.lower()
         if low in ("match information", "recent form", "general stats",
                    "pre-match odds", "h2h last matches", "odds"):
@@ -328,11 +329,7 @@ def _parse_match_information(lines, f):
 
 
 def _teams_frequency_fallback(lines):
-    """
-    If no 'Pre-match X vs Y' header exists, derive teams from the recent-form
-    block's most frequent team names. This is best-effort: the source does not
-    guarantee which of the two is home. Use only when header is absent.
-    """
+    """Fallback when no 'Pre-match X vs Y' header exists. Best-effort only."""
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
                       if ln.strip().lower() == "recent form")
@@ -385,7 +382,6 @@ def parse_recent_form_dump(text: str) -> dict:
 
     _parse_match_information(lines, f)
 
-    # Teams: header is authoritative; frequency is a fallback for legacy dumps.
     header_home, header_away = _teams_from_header(lines)
     if header_home and header_away:
         f["home_team"], f["away_team"] = header_home, header_away
@@ -397,7 +393,6 @@ def parse_recent_form_dump(text: str) -> dict:
                 "No 'Pre-match X vs Y' header — team order guessed from recent-form "
                 "frequency. Home/away may be swapped.")
 
-    # Consecutive blocks — skip any run of "(Record N)" between the two values.
     for i, ln in enumerate(lines):
         m = _CONSEC_HEADER.match(ln.strip())
         if not m:
@@ -418,7 +413,6 @@ def parse_recent_form_dump(text: str) -> dict:
         elif kind == "unbeaten":
             f["home_consecutive_unbeaten"], f["away_consecutive_unbeaten"] = hv, av
 
-    # Recent form as raw triplets — cosmetic, not used by the classifier.
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
                       if ln.strip().lower() == "recent form")
@@ -587,6 +581,7 @@ with tab_new:
                 for w in warnings:
                     st.write(f"- {w}")
 
+        # Auto-insert: qualifying bets go to Pending. No-bets stay out.
         has_required = (
             facts.get("home_team") and facts.get("away_team")
             and simple.get("home_consecutive_wins") is not None
@@ -596,21 +591,25 @@ with tab_new:
         )
 
         if not has_required:
-            st.warning("Missing required fields (team names or streaks) — cannot save.")
+            st.warning("Missing required fields (team names or streaks) — not saved.")
         elif not simple["simple_qualifying"]:
-            st.warning("No bet — this match is outside the file. Nothing to save.")
+            st.info("No bet — outside the file. Not saved to Pending.")
         else:
             row = build_row(facts)
-            existing = db_find_existing(row)
+            try:
+                existing = db_find_existing(row)
+            except Exception as e:
+                existing = None
+                st.warning(f"Duplicate check failed: {e}")
+
             if existing:
-                st.info(f"Already stored (match_id **{existing['match_id']}**). Not re-saved.")
+                st.info(f"Already in Pending (match_id **{existing['match_id']}**).")
             else:
-                if st.button("Save to database", type="primary"):
-                    try:
-                        db_insert(row)
-                        st.success("Saved.")
-                    except Exception as e:
-                        st.error(f"Insert failed: {e}")
+                try:
+                    db_insert(row)
+                    st.success("Saved to Pending.")
+                except Exception as e:
+                    st.error(f"Insert failed: {e}")
 
 
 # ─── TAB 2 — PENDING ──────────────────────────────────────────────
