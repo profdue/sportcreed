@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-king.py — The Logic (text-dump only)
+king.py — The Logic (text-dump only, header-driven home/away)
 
-Input: recent-form text dump containing:
+Input: a text dump that contains a "Pre-match HOME vs AWAY" line plus:
     Match information / venue
     Recent form / results
     Consecutive scoring / wins / unbeaten
     H2H last matches
 
-Classifier (the ONLY logic): 2 stats — consecutive wins + consecutive unbeaten.
+Classifier (only logic): 2 stats — consecutive wins + consecutive unbeaten.
 
     SOLID CLEAR        home or away leader, U >= 2, opponent 0/0  -> 1X / X2
     LIGHT CLEAR HOME   home leader, U == W                         -> 1X
@@ -175,7 +175,7 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# THE CLASSIFIER
+# CLASSIFIER
 # ═══════════════════════════════════════════════════════════════════
 
 NOT_BEATEN_MIN_GAP = 3
@@ -268,13 +268,47 @@ def settle_simple(simple_bet: str, home_score: int, away_score: int):
 _CONSEC_HEADER = re.compile(r"^Consecutive\s+(scoring|wins|unbeaten)\s*$", re.I)
 _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
-_H2H_TAIL      = re.compile(r"^(\d+)\s+Wins?\s*$", re.I)
 _FORM_RESULT   = re.compile(r"^[WDL]$")
+
+# "Pre-match Leeds United vs Tottenham Hotspur" — also tolerates missing prefix.
+# Requires whitespace around "vs" so team names containing "vs" aren't broken.
+_VS_HEADER = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
 
 
 def _looks_like_text_dump(text: str) -> bool:
     low = text.lower()
+    if "pre-match" in low and " vs " in low:
+        return True
     return "recent form" in low and "consecutive" in low
+
+
+def _teams_from_header(lines):
+    """
+    Scan the first non-blank lines for 'Pre-match HOME vs AWAY' (or bare
+    'HOME vs AWAY'). Returns (home, away) or (None, None).
+    Rejects lines containing digits or odds glyphs.
+    """
+    for ln in lines[:8]:
+        s = ln.strip()
+        if not s:
+            continue
+        # Ignore "Match information" and similar structural labels.
+        low = s.lower()
+        if low in ("match information", "recent form", "general stats",
+                   "pre-match odds", "h2h last matches", "odds"):
+            continue
+        m = _VS_HEADER.match(s)
+        if not m:
+            continue
+        home, away = m.group(1).strip(), m.group(2).strip()
+        if not home or not away:
+            continue
+        if any(ch.isdigit() for ch in home + away):
+            continue
+        if any(sym in home + away for sym in "➜➔→•/"):
+            continue
+        return home, away
+    return None, None
 
 
 def _parse_match_information(lines, f):
@@ -293,12 +327,23 @@ def _parse_match_information(lines, f):
         return
 
 
-def _parse_teams_from_recent_form(lines, rf_idx):
-    # Frequency over triplet team names, or H2H header as authoritative.
+def _teams_frequency_fallback(lines):
+    """
+    If no 'Pre-match X vs Y' header exists, derive teams from the recent-form
+    block's most frequent team names. This is best-effort: the source does not
+    guarantee which of the two is home. Use only when header is absent.
+    """
+    try:
+        rf_idx = next(i for i, ln in enumerate(lines)
+                      if ln.strip().lower() == "recent form")
+    except StopIteration:
+        return None, None
+
     _, i = _next_nonblank(lines, rf_idx + 1)
     nxt, i = _next_nonblank(lines, i)
     if nxt and not _FORM_RESULT.match(nxt):
         nxt, i = _next_nonblank(lines, i)
+
     cur = nxt
     names = []
     while cur and _FORM_RESULT.match(cur):
@@ -309,14 +354,6 @@ def _parse_teams_from_recent_form(lines, rf_idx):
         names.append(team.strip())
         cur, i = _next_nonblank(lines, i)
         if not cur or not _FORM_RESULT.match(cur):
-            break
-
-    for i, ln in enumerate(lines):
-        if ln.strip().lower().startswith("h2h last matches"):
-            a, j = _next_nonblank(lines, i + 1)
-            b, _ = _next_nonblank(lines, j)
-            if a and b and not _SCORE_LINE.match(a) and not _SCORE_LINE.match(b):
-                return a.strip(), b.strip()
             break
 
     from collections import Counter
@@ -348,6 +385,18 @@ def parse_recent_form_dump(text: str) -> dict:
 
     _parse_match_information(lines, f)
 
+    # Teams: header is authoritative; frequency is a fallback for legacy dumps.
+    header_home, header_away = _teams_from_header(lines)
+    if header_home and header_away:
+        f["home_team"], f["away_team"] = header_home, header_away
+    else:
+        h, a = _teams_frequency_fallback(lines)
+        f["home_team"], f["away_team"] = h, a
+        if h and a:
+            f["_parse_warnings"].append(
+                "No 'Pre-match X vs Y' header — team order guessed from recent-form "
+                "frequency. Home/away may be swapped.")
+
     # Consecutive blocks — skip any run of "(Record N)" between the two values.
     for i, ln in enumerate(lines):
         m = _CONSEC_HEADER.match(ln.strip())
@@ -369,15 +418,13 @@ def parse_recent_form_dump(text: str) -> dict:
         elif kind == "unbeaten":
             f["home_consecutive_unbeaten"], f["away_consecutive_unbeaten"] = hv, av
 
-    # Teams from H2H header (or frequency fallback); recent form as raw triplets.
+    # Recent form as raw triplets — cosmetic, not used by the classifier.
     try:
-        rf_idx = next(i for i, ln in enumerate(lines) if ln.strip().lower() == "recent form")
+        rf_idx = next(i for i, ln in enumerate(lines)
+                      if ln.strip().lower() == "recent form")
     except StopIteration:
         rf_idx = -1
     if rf_idx >= 0:
-        home_name, away_name = _parse_teams_from_recent_form(lines, rf_idx)
-        f["home_team"], f["away_team"] = home_name, away_name
-
         _, i = _next_nonblank(lines, rf_idx + 1)
         nxt, i = _next_nonblank(lines, i)
         if nxt and not _FORM_RESULT.match(nxt):
@@ -437,7 +484,7 @@ def build_row(facts: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CARD RENDERERS
+# CARD RENDERER
 # ═══════════════════════════════════════════════════════════════════
 
 def _card_html(m: dict, settled: bool = False) -> str:
@@ -474,10 +521,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
     else:
         verdict_html = ""
 
-    if cat:
-        badge_text = f"{cat} · {bet} {pick_lbl}"
-    else:
-        badge_text = "NO BET"
+    badge_text = f"{cat} · {bet} {pick_lbl}" if cat else "NO BET"
 
     return f"""
     <div class="match-card {card_cls}">
@@ -504,17 +548,19 @@ tab_new, tab_pending, tab_perf, tab_lab = st.tabs(
 # ─── TAB 1 — NEW MATCH ────────────────────────────────────────────
 with tab_new:
     st.markdown("### Paste the match data")
-    st.caption("Recent-form text dump: 'Match information', 'Recent form', "
-               "'Consecutive scoring/wins/unbeaten', 'H2H last matches'.")
+    st.caption("Include the `Pre-match HOME vs AWAY` header — that is what decides "
+               "which side is home. Then the four consecutive stats decide the pick.")
 
-    raw_in = st.text_area("Input", height=280, label_visibility="collapsed",
-                          placeholder="Match information\\nEstadio ...\\nRecent form\\n...")
+    raw_in = st.text_area("Input", height=320, label_visibility="collapsed",
+                          placeholder="Pre-match Leeds United vs Tottenham Hotspur\\n"
+                                      "Match information\\nElland Road\\n...")
     run = st.button("Run the Logic", type="primary")
 
     if run and raw_in.strip():
         raw = raw_in.strip()
         if not _looks_like_text_dump(raw):
-            st.error("Input must contain 'Recent form' and 'Consecutive' sections.")
+            st.error("Input must contain 'Pre-match X vs Y' or "
+                     "'Recent form' + 'Consecutive' sections.")
             st.stop()
 
         try:
@@ -532,6 +578,8 @@ with tab_new:
             st.success(simple["simple_reason"])
         elif simple.get("home_consecutive_wins") is not None:
             st.info(simple["simple_reason"])
+        else:
+            st.warning("Missing streak values — cannot classify.")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
@@ -546,19 +594,23 @@ with tab_new:
             and simple.get("home_consecutive_unbeaten") is not None
             and simple.get("away_consecutive_unbeaten") is not None
         )
+
         if not has_required:
             st.warning("Missing required fields (team names or streaks) — cannot save.")
+        elif not simple["simple_qualifying"]:
+            st.warning("No bet — this match is outside the file. Nothing to save.")
         else:
             row = build_row(facts)
             existing = db_find_existing(row)
             if existing:
                 st.info(f"Already stored (match_id **{existing['match_id']}**). Not re-saved.")
             else:
-                try:
-                    db_insert(row)
-                    st.success("Saved.")
-                except Exception as e:
-                    st.error(f"Insert failed: {e}")
+                if st.button("Save to database", type="primary"):
+                    try:
+                        db_insert(row)
+                        st.success("Saved.")
+                    except Exception as e:
+                        st.error(f"Insert failed: {e}")
 
 
 # ─── TAB 2 — PENDING ──────────────────────────────────────────────
@@ -649,14 +701,16 @@ with tab_perf:
 # ─── TAB 4 — LAB ──────────────────────────────────────────────────
 with tab_lab:
     st.markdown("### 🧪 Lab")
-    st.caption("Parse a text dump without saving. Inspect the extracted values "
+    st.caption("Parse a dump without saving. Inspect the extracted values "
                "and the classifier's decision.")
 
-    text_in = st.text_area("Text dump", height=320, label_visibility="collapsed")
+    text_in = st.text_area("Text dump", height=320, label_visibility="collapsed",
+                           key="lab_input")
 
     if text_in.strip():
         if not _looks_like_text_dump(text_in):
-            st.error("Input must contain 'Recent form' and 'Consecutive' sections.")
+            st.error("Input must contain 'Pre-match X vs Y' or "
+                     "'Recent form' + 'Consecutive' sections.")
             st.stop()
         try:
             facts = parse_recent_form_dump(text_in)
