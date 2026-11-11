@@ -3,12 +3,18 @@
 king.py — The Logic (text-dump only, header-driven home/away)
 
 Classifier: 2 stats — consecutive wins + consecutive unbeaten.
-  SOLID CLEAR        leader U >= 2, opponent 0/0      -> 1X / X2
-  LIGHT CLEAR HOME   home leader, U == W               -> 1X
-  NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
-  outside the file   anything else                     -> no bet
 
-Qualifying bets auto-insert to Pending. No-bets render but don't save.
+  QUALIFYING (simple_qualifying=1):
+    SOLID CLEAR        leader U >= 2, opponent 0/0      -> 1X / X2
+    LIGHT CLEAR HOME   home leader, U == W               -> 1X
+    NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
+
+  STUDY (simple_qualifying=0, kept for pattern analysis):
+    HOME_LEADER_NO_PADDING, AWAY_LEADER_NO_SOLID,
+    NOT_BEATEN_GAP_LOW, BOTH_HAVE_WINS, MISSING
+
+Every parsed row inserts. Qualifying bets go to Pending. No-bets go to Study.
+One table: public.matches.
 """
 
 import re
@@ -93,6 +99,7 @@ def db_insert(row: dict):
 def db_pending():
     sb = get_supabase()
     res = (sb.table("matches").select("*")
+             .eq("simple_qualifying", 1)
              .is_("home_score", "null")
              .order("extracted_at", desc=True).execute())
     return res.data or []
@@ -102,8 +109,18 @@ def db_pending():
 def db_settled():
     sb = get_supabase()
     res = (sb.table("matches").select("*")
+             .eq("simple_qualifying", 1)
              .not_.is_("home_score", "null")
              .order("settled_at", desc=True).execute())
+    return res.data or []
+
+
+@st.cache_data(ttl=30)
+def db_study():
+    sb = get_supabase()
+    res = (sb.table("matches").select("*")
+             .eq("simple_qualifying", 0)
+             .order("extracted_at", desc=True).execute())
     return res.data or []
 
 
@@ -155,7 +172,6 @@ def _to_int_or_none(v):
 
 
 def _clean_line(s: str) -> str:
-    """Strip whitespace and common invisible characters from a line."""
     return s.strip().strip("\ufeff\u200b\u200c\u200d\u00a0 ")
 
 
@@ -173,7 +189,7 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CLASSIFIER
+# CLASSIFIER — returns category / pick / bet / qualifying / reason / code
 # ═══════════════════════════════════════════════════════════════════
 
 NOT_BEATEN_MIN_GAP = 3
@@ -185,47 +201,45 @@ def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten):
     hu = _to_int_or_none(home_unbeaten)
     au = _to_int_or_none(away_unbeaten)
 
+    def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
+        return {"category": category, "pick_team": pick, "bet": bet,
+                "qualifying": qualifying, "reason": reason, "rejection_code": code}
+
     if None in (hw, aw, hu, au):
-        return {"category": None, "pick_team": None, "bet": None, "qualifying": 0,
-                "reason": "Missing one or more streak inputs."}
+        return result(reason="Missing one or more streak inputs.", code="MISSING")
 
     home_has, away_has = hw > 0, aw > 0
 
     if home_has and not away_has:
         if hu >= 2 and au == 0:
-            return {"category": "SOLID CLEAR", "pick_team": "home", "bet": "1X",
-                    "qualifying": 1,
-                    "reason": f"Home {hw}W/{hu}U vs Away {aw}W/{au}U — SOLID (opponent 0/0)."}
+            return result("SOLID CLEAR", "home", "1X", 1,
+                          f"Home {hw}W/{hu}U vs Away {aw}W/{au}U — SOLID (opponent 0/0).")
         if hu == hw:
-            return {"category": "LIGHT CLEAR HOME", "pick_team": "home", "bet": "1X",
-                    "qualifying": 1,
-                    "reason": f"Home {hw}W/{hu}U (unbeaten = wins) vs Away {aw}W/{au}U — LIGHT-HOME."}
-        return {"category": None, "pick_team": None, "bet": None, "qualifying": 0,
-                "reason": f"Home leader {hw}W/{hu}U but unbeaten != wins and SOLID not met."}
+            return result("LIGHT CLEAR HOME", "home", "1X", 1,
+                          f"Home {hw}W/{hu}U (unbeaten = wins) vs Away {aw}W/{au}U — LIGHT-HOME.")
+        return result(reason=f"Home leader {hw}W/{hu}U but unbeaten != wins and SOLID not met.",
+                      code="HOME_LEADER_NO_PADDING")
 
     if away_has and not home_has:
         if au >= 2 and hu == 0:
-            return {"category": "SOLID CLEAR", "pick_team": "away", "bet": "X2",
-                    "qualifying": 1,
-                    "reason": f"Away {aw}W/{au}U vs Home {hw}W/{hu}U — SOLID (opponent 0/0)."}
-        return {"category": None, "pick_team": None, "bet": None, "qualifying": 0,
-                "reason": f"Away leader {aw}W/{au}U — LIGHT-away removed; SOLID not met."}
+            return result("SOLID CLEAR", "away", "X2", 1,
+                          f"Away {aw}W/{au}U vs Home {hw}W/{hu}U — SOLID (opponent 0/0).")
+        return result(reason=f"Away leader {aw}W/{au}U — LIGHT-away removed; SOLID not met.",
+                      code="AWAY_LEADER_NO_SOLID")
 
     if not home_has and not away_has:
         gap = abs(hu - au)
         if gap < NOT_BEATEN_MIN_GAP:
-            return {"category": None, "pick_team": None, "bet": None, "qualifying": 0,
-                    "reason": f"Both 0 wins, unbeaten gap {gap} < {NOT_BEATEN_MIN_GAP}."}
+            return result(reason=f"Both 0 wins, unbeaten gap {gap} < {NOT_BEATEN_MIN_GAP}.",
+                          code="NOT_BEATEN_GAP_LOW")
         if hu > au:
-            return {"category": "NOT-BEATEN SIGNAL", "pick_team": "home", "bet": "1X",
-                    "qualifying": 1,
-                    "reason": f"Both 0W; Home unbeaten {hu} vs Away {au} (gap {gap} >= {NOT_BEATEN_MIN_GAP})."}
-        return {"category": "NOT-BEATEN SIGNAL", "pick_team": "away", "bet": "X2",
-                "qualifying": 1,
-                "reason": f"Both 0W; Away unbeaten {au} vs Home {hu} (gap {gap} >= {NOT_BEATEN_MIN_GAP})."}
+            return result("NOT-BEATEN SIGNAL", "home", "1X", 1,
+                          f"Both 0W; Home unbeaten {hu} vs Away {au} (gap {gap} >= {NOT_BEATEN_MIN_GAP}).")
+        return result("NOT-BEATEN SIGNAL", "away", "X2", 1,
+                      f"Both 0W; Away unbeaten {au} vs Home {hu} (gap {gap} >= {NOT_BEATEN_MIN_GAP}).")
 
-    return {"category": None, "pick_team": None, "bet": None, "qualifying": 0,
-            "reason": f"Both teams have wins ({hw} vs {aw}) — outside the file."}
+    return result(reason=f"Both teams have wins ({hw} vs {aw}) — outside the file.",
+                  code="BOTH_HAVE_WINS")
 
 
 def compute_simple_row(facts: dict) -> dict:
@@ -236,11 +250,12 @@ def compute_simple_row(facts: dict) -> dict:
         facts.get("away_consecutive_unbeaten"),
     )
     return {
-        "simple_category":     c["category"],
-        "simple_pick_team":    c["pick_team"],
-        "simple_bet":          c["bet"],
-        "simple_qualifying":   c["qualifying"],
-        "simple_reason":       c["reason"],
+        "simple_category":       c["category"],
+        "simple_pick_team":      c["pick_team"],
+        "simple_bet":            c["bet"],
+        "simple_qualifying":     c["qualifying"],
+        "simple_reason":         c["reason"],
+        "simple_rejection_code": c["rejection_code"],
         "home_consecutive_wins":     _to_int_or_none(facts.get("home_consecutive_wins")),
         "away_consecutive_wins":     _to_int_or_none(facts.get("away_consecutive_wins")),
         "home_consecutive_unbeaten": _to_int_or_none(facts.get("home_consecutive_unbeaten")),
@@ -267,9 +282,7 @@ _CONSEC_HEADER = re.compile(r"^Consecutive\s+(scoring|wins|unbeaten)\s*$", re.I)
 _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
-
-# "Pre-match Leeds United vs Tottenham Hotspur" — also tolerates bare "X vs Y".
-_VS_HEADER = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
+_VS_HEADER     = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
 
 _ODDS_GLYPHS = "➜➔→•€$£"
 
@@ -287,7 +300,6 @@ def _looks_like_text_dump(text: str) -> bool:
 
 
 def _looks_like_odds_line(s: str) -> bool:
-    """Reject lines that are clearly odds or ad rows, not a team-vs-team header."""
     if any(sym in s for sym in _ODDS_GLYPHS):
         return True
     decimals = re.findall(r"\b\d+\.\d+\b", s)
@@ -297,11 +309,6 @@ def _looks_like_odds_line(s: str) -> bool:
 
 
 def _teams_from_header(lines):
-    """
-    Scan ALL lines for 'Pre-match HOME vs AWAY' (or bare 'HOME vs AWAY').
-    Team names may contain digits ('Mainz 05', '1. FC Köln', '1899 Hoffenheim').
-    Returns (home, away) or (None, None).
-    """
     for ln in lines:
         s = _clean_line(ln)
         if not s:
@@ -316,7 +323,6 @@ def _teams_from_header(lines):
         home, away = _clean_line(m.group(1)), _clean_line(m.group(2))
         if not home or not away:
             continue
-        # Reject bare numeric sides (e.g. "1 vs 2").
         if home.isdigit() or away.isdigit():
             continue
         return home, away
@@ -340,7 +346,6 @@ def _parse_match_information(lines, f):
 
 
 def _teams_frequency_fallback(lines):
-    """Fallback when no header exists. Best-effort only — home/away may be swapped."""
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
                       if _clean_line(ln).lower() == "recent form")
@@ -477,11 +482,12 @@ def build_row(facts: dict) -> dict:
         "home_consecutive_unbeaten": simple["home_consecutive_unbeaten"],
         "away_consecutive_unbeaten": simple["away_consecutive_unbeaten"],
 
-        "simple_category":     simple["simple_category"],
-        "simple_pick_team":    simple["simple_pick_team"],
-        "simple_bet":          simple["simple_bet"],
-        "simple_qualifying":   simple["simple_qualifying"],
-        "simple_reason":       simple["simple_reason"],
+        "simple_category":       simple["simple_category"],
+        "simple_pick_team":      simple["simple_pick_team"],
+        "simple_bet":            simple["simple_bet"],
+        "simple_qualifying":     simple["simple_qualifying"],
+        "simple_reason":         simple["simple_reason"],
+        "simple_rejection_code": simple["simple_rejection_code"],
 
         "extracted_at": now_iso,
     }
@@ -545,8 +551,8 @@ def _card_html(m: dict, settled: bool = False) -> str:
 # TABS
 # ═══════════════════════════════════════════════════════════════════
 
-tab_new, tab_pending, tab_perf, tab_lab = st.tabs(
-    ["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"]
+tab_new, tab_pending, tab_perf, tab_study, tab_lab = st.tabs(
+    ["➕ New Match", "⏳ Pending", "📊 Performance", "📚 Study", "🧪 Lab"]
 )
 
 
@@ -578,10 +584,10 @@ with tab_new:
         preview = {**facts, **simple}
         st.markdown(_card_html(preview, settled=False), unsafe_allow_html=True)
 
-        if simple["simple_category"]:
+        if simple["simple_qualifying"]:
             st.success(simple["simple_reason"])
         elif simple.get("home_consecutive_wins") is not None:
-            st.info(simple["simple_reason"])
+            st.info(f"No bet [{simple['simple_rejection_code']}] — {simple['simple_reason']}")
         else:
             st.warning("Missing streak values — cannot classify.")
 
@@ -601,8 +607,6 @@ with tab_new:
 
         if not has_required:
             st.warning("Missing required fields (team names or streaks) — not saved.")
-        elif not simple["simple_qualifying"]:
-            st.info("No bet — outside the file. Not saved to Pending.")
         else:
             row = build_row(facts)
             try:
@@ -612,11 +616,15 @@ with tab_new:
                 st.warning(f"Duplicate check failed: {e}")
 
             if existing:
-                st.info(f"Already in Pending (match_id **{existing['match_id']}**).")
+                st.info(f"Already stored (match_id **{existing['match_id']}**, "
+                        f"qualifying={existing.get('simple_qualifying')}).")
             else:
                 try:
                     db_insert(row)
-                    st.success("Saved to Pending.")
+                    if simple["simple_qualifying"]:
+                        st.success("Saved to Pending.")
+                    else:
+                        st.success("Saved to Study (no bet).")
                 except Exception as e:
                     st.error(f"Insert failed: {e}")
 
@@ -624,6 +632,7 @@ with tab_new:
 # ─── TAB 2 — PENDING ──────────────────────────────────────────────
 with tab_pending:
     st.markdown("### Pending matches")
+    st.caption("Qualifying bets awaiting settlement.")
 
     try:
         pending = db_pending()
@@ -659,6 +668,7 @@ with tab_pending:
 # ─── TAB 3 — PERFORMANCE ──────────────────────────────────────────
 with tab_perf:
     st.markdown("### Performance")
+    st.caption("Qualifying bets only.")
 
     try:
         settled = db_settled()
@@ -669,8 +679,7 @@ with tab_perf:
     if not settled:
         st.info("No settled matches yet.")
     else:
-        bets = [m for m in settled
-                if m.get("simple_qualifying") == 1 and m.get("dc_hit") is not None]
+        bets = [m for m in settled if m.get("dc_hit") is not None]
         n = len(bets)
         wins = sum(1 for m in bets if m.get("dc_hit") == 1)
         losses = n - wins
@@ -706,7 +715,60 @@ with tab_perf:
             st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
 
 
-# ─── TAB 4 — LAB ──────────────────────────────────────────────────
+# ─── TAB 4 — STUDY ────────────────────────────────────────────────
+with tab_study:
+    st.markdown("### 📚 Study — no-bet matches")
+    st.caption("Every parsed match that fell outside the file. Kept for pattern "
+               "study, not betting. Never appears in Pending or Performance.")
+
+    try:
+        study = db_study()
+    except Exception as e:
+        st.error(f"Could not load study rows: {e}")
+        study = []
+
+    if not study:
+        st.info("No study rows yet. Paste a no-bet match into New Match to populate.")
+    else:
+        st.metric("Study rows", len(study))
+
+        codes_df = pd.DataFrame([
+            {"rejection_code": m.get("simple_rejection_code") or "(none)",
+             "reason": m.get("simple_reason") or "",
+             "home_team": m.get("home_team"),
+             "away_team": m.get("away_team"),
+             "home_w": m.get("home_consecutive_wins"),
+             "away_w": m.get("away_consecutive_wins"),
+             "home_u": m.get("home_consecutive_unbeaten"),
+             "away_u": m.get("away_consecutive_unbeaten")}
+            for m in study
+        ])
+
+        st.markdown("### Counts by rejection code")
+        counts = (codes_df.groupby("rejection_code")
+                  .size().reset_index(name="count")
+                  .sort_values("count", ascending=False))
+        st.dataframe(counts, use_container_width=True, hide_index=True)
+
+        st.markdown("### Filter")
+        all_codes = sorted(codes_df["rejection_code"].unique())
+        selected = st.multiselect("Rejection code", all_codes, default=all_codes)
+
+        filtered = codes_df[codes_df["rejection_code"].isin(selected)] if selected else codes_df
+        st.markdown(f"### Rows ({len(filtered)})")
+        st.dataframe(filtered, use_container_width=True, hide_index=True)
+
+        with st.expander("Manage rows"):
+            ids = st.multiselect("Select match_id to delete",
+                                 [m["match_id"] for m in study])
+            if ids and st.button("Delete selected"):
+                for mid in ids:
+                    db_delete(mid)
+                st.success(f"Deleted {len(ids)}.")
+                st.rerun()
+
+
+# ─── TAB 5 — LAB ──────────────────────────────────────────────────
 with tab_lab:
     st.markdown("### 🧪 Lab")
     st.caption("Parse a dump without saving.")
@@ -734,7 +796,11 @@ with tab_lab:
         cC.metric("Category", simple.get("simple_category") or "—")
         cD.metric("Bet", simple.get("simple_bet") or "—")
 
-        st.caption(simple.get("simple_reason") or "")
+        if simple["simple_qualifying"]:
+            st.success(simple.get("simple_reason") or "")
+        else:
+            st.info(f"No bet [{simple.get('simple_rejection_code')}] — "
+                    f"{simple.get('simple_reason')}")
 
         with st.expander("Parsed fields"):
             st.json({k: v for k, v in facts.items()
