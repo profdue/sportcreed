@@ -7,11 +7,12 @@ Classifier: 2 stats — consecutive wins + consecutive unbeaten.
   LIGHT CLEAR HOME   home leader, U == W               -> 1X
   NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
 
-Market veto: pick survives only if the moneyline favourite matches the pick.
+Market veto: pick survives only if moneyline favourite == pick side.
   Otherwise rejected as MARKET_DISAGREES, kept in Study.
 
-Odds: read only the FIRST bookmaker's 1/X/2 from the paste. Arrow glyph is
-optional and handles ➜ / ➔ / → / -> / => / > variants, or no arrow at all.
+Header tolerance: accepts "Pre-match X vs Y", "Pre match X vs Y",
+"Pre–match X vs Y", "re-match X vs Y", "e-match X vs Y", "match X vs Y",
+or bare "X vs Y".
 """
 
 import re
@@ -187,7 +188,7 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ODDS PARSER — tolerant, first bookmaker only
+# ODDS PARSER
 # ═══════════════════════════════════════════════════════════════════
 
 _ARROWS = {"➜", "➔", "→", "->", "=>", ">", "➡", "⬈", "⬊"}
@@ -196,38 +197,27 @@ _MARKET_MAP = {"1": "1", "X": "X", "x": "X", "2": "2", "×": "X", "✕": "X"}
 _ODDS_STOP_LABELS = {
     "general stats", "match information", "recent form",
     "h2h last matches", "consecutive scoring", "consecutive wins",
-    "consecutive unbeaten", "betking", "bet9ja", "betway", "sportybet",
-    "bet365", "pinnacle", "1xbet ",  # note: '1xbet' with trailing space won't fire normally
+    "consecutive unbeaten",
 }
+
 _OTHER_BOOKMAKERS = {"betking", "bet9ja", "betway", "sportybet",
                      "bet365", "pinnacle", "1xbet"}
 
 
 def _find_odds_header(lines):
-    """Return the index AFTER the 'Pre-match odds' header, or None."""
     for i, raw in enumerate(lines):
         s = _clean_line(raw)
         if not s:
             continue
         low = s.lower()
-        # Exact match
         if low == "pre-match odds":
             return i + 1
-        # Loose match: any line with 'pre' + 'match' + 'odds'
         if "odds" in low and "pre" in low and "match" in low:
             return i + 1
     return None
 
 
 def _parse_odds_block(lines):
-    """
-    Read the first bookmaker's 1/X/2 after 'Pre-match odds'.
-    Arrow between marker and price is optional.
-    Stops when:
-      - a market marker repeats (second bookmaker)
-      - a known other bookmaker name appears (Betking, Bet9ja, etc.)
-      - a structural label appears (General stats, etc.)
-    """
     start = _find_odds_header(lines)
     if start is None:
         return {}
@@ -243,12 +233,8 @@ def _parse_odds_block(lines):
             continue
 
         low = s.lower()
-
-        # Stop at structural sections
         if low in _ODDS_STOP_LABELS:
             break
-
-        # Stop at second bookmaker (we already have the first)
         if out and low in _OTHER_BOOKMAKERS:
             break
 
@@ -256,21 +242,16 @@ def _parse_odds_block(lines):
             market = _MARKET_MAP[s]
             if market in out:
                 break
-
             nxt, j = _next_nonblank(lines, i + 1)
             if nxt is None:
                 i += 1
                 continue
-
             if nxt in _ARROWS:
-                # Arrow present → price on the line after
                 price, k = _next_nonblank(lines, j)
                 i = k
             else:
-                # Arrow missing → next line is the price
                 price, k = nxt, j
                 i = k
-
             if price:
                 try:
                     out[market] = float(price)
@@ -412,7 +393,13 @@ _CONSEC_HEADER = re.compile(r"^Consecutive\s+(scoring|wins|unbeaten)\s*$", re.I)
 _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
-_VS_HEADER     = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
+
+# Tolerant header prefix: Pre-match / Pre match / Pre–match / re-match /
+# e-match / match / bare "X vs Y"
+_VS_HEADER = re.compile(
+    r"^(?:(?:pre|re|e)[-–— ]?match\s+|match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$",
+    re.I,
+)
 
 _ODDS_GLYPHS = "➜➔→➡•€$£"
 
@@ -421,10 +408,21 @@ _STRUCTURAL_LABELS = {
     "pre-match odds", "h2h last matches", "odds", "advertisement",
 }
 
+# Prefix markers that should never appear at the start of a team name.
+# Applied defensively in case the regex missed a variant.
+_HEADER_JUNK_PREFIXES = (
+    "pre-match ", "pre match ", "pre–match ", "pre—match ",
+    "re-match ", "re match ", "re–match ", "re—match ",
+    "e-match ", "e match ", "e–match ", "e—match ",
+    "match ",
+)
+
 
 def _looks_like_text_dump(text: str) -> bool:
     low = text.lower()
     if "pre-match" in low and " vs " in low:
+        return True
+    if "re-match" in low and " vs " in low:
         return True
     return "recent form" in low and "consecutive" in low
 
@@ -433,6 +431,15 @@ def _looks_like_odds_line(s: str) -> bool:
     if any(sym in s for sym in _ODDS_GLYPHS):
         return True
     return len(re.findall(r"\b\d+\.\d+\b", s)) >= 2
+
+
+def _strip_header_prefix(name: str) -> str:
+    """Remove any leftover 'pre-match ', 're-match ', 'match ' etc. from a team name."""
+    low = name.lower()
+    for marker in _HEADER_JUNK_PREFIXES:
+        if low.startswith(marker):
+            return name[len(marker):].strip()
+    return name
 
 
 def _teams_from_header(lines):
@@ -447,7 +454,8 @@ def _teams_from_header(lines):
         m = _VS_HEADER.match(s)
         if not m:
             continue
-        home, away = _clean_line(m.group(1)), _clean_line(m.group(2))
+        home = _strip_header_prefix(_clean_line(m.group(1)))
+        away = _strip_header_prefix(_clean_line(m.group(2)))
         if not home or not away:
             continue
         if home.isdigit() or away.isdigit():
@@ -717,7 +725,7 @@ tab_new, tab_pending, tab_perf, tab_study, tab_lab = st.tabs(
 with tab_new:
     st.markdown("### Paste the match data")
     st.caption("Include `Pre-match HOME vs AWAY` header and the `Pre-match odds` block. "
-               "Qualifying bets go to Pending; rejections (including market veto) go to Study.")
+               "Truncated prefixes like `re-match` or `e-match` are tolerated.")
 
     raw_in = st.text_area("Input", height=340, label_visibility="collapsed",
                           placeholder="Pre-match Real Zaragoza vs Huesca\\n"
