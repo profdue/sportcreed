@@ -7,17 +7,11 @@ Classifier: 2 stats — consecutive wins + consecutive unbeaten.
   LIGHT CLEAR HOME   home leader, U == W               -> 1X
   NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
 
-Market veto (after streak decision):
-  Pick survives if moneyline favourite == pick side.
+Market veto: pick survives only if the moneyline favourite matches the pick.
   Otherwise rejected as MARKET_DISAGREES, kept in Study.
 
-Odds: read only the FIRST bookmaker's 1/X/2 from the paste.
-      (Market favourite is the same across bookmakers, so one is enough.)
-
-Rejection codes:
-  MISSING, HOME_LEADER_NO_PADDING, AWAY_LEADER_NO_SOLID,
-  NOT_BEATEN_GAP_LOW, BOTH_HAVE_WINS,
-  MARKET_DISAGREES, MARKET_UNAVAILABLE
+Odds: read only the FIRST bookmaker's 1/X/2 from the paste. Arrow glyph is
+optional and handles ➜ / ➔ / → / -> / => / > variants, or no arrow at all.
 """
 
 import re
@@ -193,67 +187,95 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ODDS PARSER — first bookmaker only
+# ODDS PARSER — tolerant, first bookmaker only
 # ═══════════════════════════════════════════════════════════════════
 
-_ODDS_GLYPHS = "➜➔→•€$£"
+_ARROWS = {"➜", "➔", "→", "->", "=>", ">", "➡", "⬈", "⬊"}
+_MARKET_MAP = {"1": "1", "X": "X", "x": "X", "2": "2", "×": "X", "✕": "X"}
+
+_ODDS_STOP_LABELS = {
+    "general stats", "match information", "recent form",
+    "h2h last matches", "consecutive scoring", "consecutive wins",
+    "consecutive unbeaten", "betking", "bet9ja", "betway", "sportybet",
+    "bet365", "pinnacle", "1xbet ",  # note: '1xbet' with trailing space won't fire normally
+}
+_OTHER_BOOKMAKERS = {"betking", "bet9ja", "betway", "sportybet",
+                     "bet365", "pinnacle", "1xbet"}
+
+
+def _find_odds_header(lines):
+    """Return the index AFTER the 'Pre-match odds' header, or None."""
+    for i, raw in enumerate(lines):
+        s = _clean_line(raw)
+        if not s:
+            continue
+        low = s.lower()
+        # Exact match
+        if low == "pre-match odds":
+            return i + 1
+        # Loose match: any line with 'pre' + 'match' + 'odds'
+        if "odds" in low and "pre" in low and "match" in low:
+            return i + 1
+    return None
 
 
 def _parse_odds_block(lines):
     """
     Read the first bookmaker's 1/X/2 after 'Pre-match odds'.
-
-    Structure:
-        Pre-match odds
-        1xBet        <- bookmaker (skipped; we just need prices)
-        1
-        ➜
-        1.93         <- home
-        x
-        ➜
-        3.36         <- draw
-        2
-        ➜
-        4.44         <- away
-        (blank)
-        Betking      <- another bookmaker; we stop here
-
-    Stops as soon as we see a market marker that's already been captured
-    (i.e. the second bookmaker's '1'/'X'/'2'). Returns {"1": .., "X": .., "2": ..}
-    or {} if not found.
+    Arrow between marker and price is optional.
+    Stops when:
+      - a market marker repeats (second bookmaker)
+      - a known other bookmaker name appears (Betking, Bet9ja, etc.)
+      - a structural label appears (General stats, etc.)
     """
-    out = {}
-    try:
-        start = next(i for i, ln in enumerate(lines)
-                     if _clean_line(ln).lower() == "pre-match odds")
-    except StopIteration:
-        return out
+    start = _find_odds_header(lines)
+    if start is None:
+        return {}
 
-    i = start + 1
+    out = {}
+    i = start
     guard = 0
-    while i < len(lines) and guard < 100:
+    while i < len(lines) and guard < 200:
         guard += 1
         s = _clean_line(lines[i])
         if not s:
             i += 1
             continue
 
-        if s in ("1", "X", "x", "2"):
-            market = s.upper()
+        low = s.lower()
+
+        # Stop at structural sections
+        if low in _ODDS_STOP_LABELS:
+            break
+
+        # Stop at second bookmaker (we already have the first)
+        if out and low in _OTHER_BOOKMAKERS:
+            break
+
+        if s in _MARKET_MAP:
+            market = _MARKET_MAP[s]
             if market in out:
-                # Second bookmaker's market — we've already read the first book.
                 break
-            arrow, j = _next_nonblank(lines, i + 1)
-            if arrow and arrow not in ("➜", "➔", "→"):
+
+            nxt, j = _next_nonblank(lines, i + 1)
+            if nxt is None:
                 i += 1
                 continue
-            price, k = _next_nonblank(lines, j + 1)
+
+            if nxt in _ARROWS:
+                # Arrow present → price on the line after
+                price, k = _next_nonblank(lines, j)
+                i = k
+            else:
+                # Arrow missing → next line is the price
+                price, k = nxt, j
+                i = k
+
             if price:
                 try:
                     out[market] = float(price)
                 except (TypeError, ValueError):
                     pass
-            i = k
             continue
 
         i += 1
@@ -262,7 +284,6 @@ def _parse_odds_block(lines):
 
 
 def _market_favourite(odds):
-    """odds: {"1": 1.93, "X": 3.36, "2": 4.44} → 'home' / 'away' / 'tie' / None."""
     h, a = odds.get("1"), odds.get("2")
     if h is None or a is None:
         return None
@@ -392,6 +413,8 @@ _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
 _VS_HEADER     = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
+
+_ODDS_GLYPHS = "➜➔→➡•€$£"
 
 _STRUCTURAL_LABELS = {
     "match information", "recent form", "general stats",
@@ -1004,7 +1027,7 @@ with tab_study:
 # ─── TAB 5 — LAB ──────────────────────────────────────────────────
 with tab_lab:
     st.markdown("### 🧪 Lab")
-    st.caption("Parse a dump without saving.")
+    st.caption("Parse a dump without saving. Includes a debug panel for the odds block.")
 
     text_in = st.text_area("Text dump", height=340, label_visibility="collapsed",
                            key="lab_input")
@@ -1037,11 +1060,30 @@ with tab_lab:
 
         odds = facts.get("odds", {})
         if odds:
-            st.markdown(f"**Parsed odds (first bookmaker):** "
+            st.markdown(f"**Parsed odds (first bookmaker):**  "
                         f"1 = {odds.get('1')} · X = {odds.get('X')} · 2 = {odds.get('2')}  ·  "
                         f"Market favourite = **{facts.get('market_favourite')}**")
         else:
             st.warning("No odds block parsed. Market check will not run.")
+
+        st.markdown("### 🔍 Debug odds")
+        if st.button("Show what the parser sees", key="dbg_odds"):
+            dbg = _strip_lines(text_in)
+            hits = [(i, _clean_line(l)) for i, l in enumerate(dbg)
+                    if "odds" in _clean_line(l).lower()]
+            if not hits:
+                st.error("No line in this paste contains 'odds'.")
+            else:
+                st.write("**Lines containing 'odds':**")
+                st.code("\n".join(f"{i:03d}: {repr(s)}" for i, s in hits),
+                        language=None)
+            for i, s in hits:
+                if s.lower() == "pre-match odds":
+                    st.write(f"**15 lines after index {i}:**")
+                    block = dbg[i+1:i+16]
+                    st.code("\n".join(f"{i+1+j:03d}: {repr(_clean_line(x))}"
+                                       for j, x in enumerate(block)), language=None)
+                    break
 
         with st.expander("Parsed fields"):
             st.json({k: v for k, v in facts.items()
