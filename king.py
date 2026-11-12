@@ -10,9 +10,9 @@ Classifier: 2 stats — consecutive wins + consecutive unbeaten.
 Market veto: pick survives only if moneyline favourite == pick side.
   Otherwise rejected as MARKET_DISAGREES, kept in Study.
 
-Header tolerance: accepts "Pre-match X vs Y", "Pre match X vs Y",
-"Pre–match X vs Y", "re-match X vs Y", "e-match X vs Y", "match X vs Y",
-or bare "X vs Y".
+Study tab analysis now includes Market Alignment:
+  For every rejection, it checks what the classifier *wanted* to bet,
+  what the market *wanted* to bet, and what actually happened.
 """
 
 import re
@@ -393,10 +393,7 @@ _CONSEC_HEADER = re.compile(r"^Consecutive\s+(scoring|wins|unbeaten)\s*$", re.I)
 _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
-
-# Tolerant header prefix: Pre-match / Pre match / Pre–match / re-match /
-# e-match / match / bare "X vs Y"
-_VS_HEADER = re.compile(
+_VS_HEADER     = re.compile(
     r"^(?:(?:pre|re|e)[-–— ]?match\s+|match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$",
     re.I,
 )
@@ -415,8 +412,6 @@ _HEADER_JUNK_PREFIXES = (
     "match ",
 )
 
-# Stadium keywords — if any of these appear in a "Match information" entry,
-# it's almost certainly the venue.
 _STADIUM_KEYWORDS = (
     "stadium", "arena", "park", "ground", "field",
     "centre", "center", "stadion", "estadio", "estádio",
@@ -441,7 +436,6 @@ def _looks_like_odds_line(s: str) -> bool:
 
 
 def _looks_like_person_name(s: str) -> bool:
-    """2–4 alphabetic tokens, each starting with a capital letter."""
     tokens = s.split()
     if len(tokens) < 2 or len(tokens) > 4:
         return False
@@ -488,12 +482,6 @@ def _teams_from_header(lines):
 
 
 def _parse_match_information(lines, f):
-    """
-    Find 'Match information' block. Extract venue using this priority:
-      1. Any entry containing a stadium keyword.
-      2. First entry if it doesn't look like a person name.
-      3. If all entries look like person names (3+ of them), no venue — leave None.
-    """
     for i, ln in enumerate(lines):
         if _clean_line(ln).lower() != "match information":
             continue
@@ -520,8 +508,7 @@ def _parse_match_information(lines, f):
             f["venue"] = entries[0]
             return
 
-        # Priority 3: if 3+ entries and all person names → no venue in this paste
-        # (leave f["venue"] as None)
+        # Priority 3: no venue (all entries are person names)
         return
 
 
@@ -769,8 +756,7 @@ tab_new, tab_pending, tab_perf, tab_study, tab_lab = st.tabs(
 # ─── TAB 1 — NEW MATCH ────────────────────────────────────────────
 with tab_new:
     st.markdown("### Paste the match data")
-    st.caption("Include `Pre-match HOME vs AWAY` header and the `Pre-match odds` block. "
-               "Truncated prefixes like `re-match` or `e-match` are tolerated.")
+    st.caption("Include `Pre-match HOME vs AWAY` header and the `Pre-match odds` block.")
 
     raw_in = st.text_area("Input", height=340, label_visibility="collapsed",
                           placeholder="Pre-match Real Zaragoza vs Huesca\\n"
@@ -930,8 +916,7 @@ with tab_perf:
 # ─── TAB 4 — STUDY ────────────────────────────────────────────────
 with tab_study:
     st.markdown("### 📚 Study — rejected matches with actual results")
-    st.caption("Every parsed match the classifier rejected (including market veto). "
-               "Raw data only — no hypotheticals.")
+    st.caption("Raw data only. Now includes Market Alignment analysis.")
 
     try:
         study = db_study()
@@ -951,6 +936,7 @@ with tab_study:
         c3.metric("Awaiting result", len(unsettled))
 
         if settled:
+            # ── 1. Actual outcome counts ──
             st.markdown("### Actual outcome counts by rejection code")
             rows = [{"rejection_code": m.get("simple_rejection_code") or "(none)",
                      "result": m.get("result") or "(unknown)"} for m in settled]
@@ -965,6 +951,67 @@ with tab_study:
             pivot = pivot.reset_index().sort_values("total", ascending=False)
             st.dataframe(pivot, use_container_width=True, hide_index=True)
 
+            # ── 2. Market Alignment Analysis ──
+            st.markdown("### Market Alignment (Rejected Rows Only)")
+            st.caption(
+                "Did the market agree with the classifier's preferred side? "
+                "If the market agreed and the pick still hit, the filter was too strict. "
+                "If the market disagreed and the pick missed, the filter saved you."
+            )
+
+            align_rows = []
+            for m in settled:
+                code = m.get("simple_rejection_code")
+                if code == "MARKET_DISAGREES":
+                    continue
+
+                hw = m.get("home_consecutive_wins") or 0
+                aw = m.get("away_consecutive_wins") or 0
+                hu = m.get("home_consecutive_unbeaten") or 0
+                au = m.get("away_consecutive_unbeaten") or 0
+
+                implied_pick = None
+                if hw > 0 and aw == 0:
+                    implied_pick = "home"
+                elif aw > 0 and hw == 0:
+                    implied_pick = "away"
+                elif hw == 0 and aw == 0:
+                    if hu > au: implied_pick = "home"
+                    elif au > hu: implied_pick = "away"
+
+                mf = m.get("market_favourite")
+                agrees = "—"
+                if implied_pick and mf:
+                    agrees = "YES" if implied_pick == mf else "NO"
+                elif not implied_pick and mf:
+                    agrees = "(no pick)"
+
+                res = m.get("result")
+                implied_hit = "—"
+                if implied_pick == "home":
+                    implied_hit = "YES" if res in ("home_win", "draw") else "NO"
+                elif implied_pick == "away":
+                    implied_hit = "YES" if res in ("away_win", "draw") else "NO"
+
+                align_rows.append({
+                    "code": code,
+                    "implied_pick": implied_pick or "—",
+                    "market_fav": mf or "—",
+                    "market_agrees": agrees,
+                    "actual_result": res,
+                    "implied_pick_hit_dc": implied_hit,
+                })
+
+            if align_rows:
+                adf = pd.DataFrame(align_rows)
+                ag_summary = (adf.groupby(["code", "market_agrees", "implied_pick_hit_dc"])
+                              .size().reset_index(name="count"))
+                st.dataframe(ag_summary, use_container_width=True, hide_index=True)
+
+                with st.expander("Detail (Rejected Rows)"):
+                    st.dataframe(adf, use_container_width=True, hide_index=True)
+
+            # ── 3. NOT-BEATEN gap study ──
             nb_rows = []
             for m in settled:
                 if m.get("simple_rejection_code") != "NOT_BEATEN_GAP_LOW":
@@ -978,17 +1025,17 @@ with tab_study:
                     "home_u": hu, "away_u": au,
                     "gap": abs(hu - au),
                     "higher_unbeaten_side": higher,
+                    "market_fav": m.get("market_favourite") or "—",
                     "result": m.get("result"),
                 })
             if nb_rows:
                 st.markdown("### NOT-BEATEN gap vs actual outcome")
                 st.dataframe(pd.DataFrame(nb_rows), use_container_width=True, hide_index=True)
 
+            # ── 4. MARKET_DISAGREES study ──
             mkt = [m for m in settled if m.get("simple_rejection_code") == "MARKET_DISAGREES"]
             if mkt:
                 st.markdown("### MARKET_DISAGREES — classifier pick vs market favourite")
-                st.caption("If classifier_pick wins more than market_favourite, the veto "
-                           "costs you. If market_favourite wins more, it saves you.")
                 mkt_rows = []
                 for m in mkt:
                     pick = m.get("simple_pick_team")
@@ -1009,20 +1056,51 @@ with tab_study:
                     })
                 st.dataframe(pd.DataFrame(mkt_rows), use_container_width=True, hide_index=True)
 
+        # ── Individual Rows (Split) ──
         st.markdown("### Rows")
         all_codes = sorted({m.get("simple_rejection_code") or "(none)" for m in study})
         selected = st.multiselect("Filter by rejection code", all_codes,
                                    default=all_codes, key="study_filter")
 
-        for m in study:
-            code = m.get("simple_rejection_code") or "(none)"
-            if code not in selected:
-                continue
+        filtered_study = [m for m in study
+                          if (m.get("simple_rejection_code") or "(none)") in selected]
 
-            st.markdown(_card_html(m, settled=(m.get("home_score") is not None)),
-                        unsafe_allow_html=True)
+        pending_rows = [m for m in filtered_study if m.get("home_score") is None]
+        settled_rows = [m for m in filtered_study if m.get("home_score") is not None]
 
-            if m.get("home_score") is not None:
+        # ⏳ Awaiting Result
+        st.markdown(f"#### ⏳ Awaiting Result ({len(pending_rows)})")
+        if not pending_rows:
+            st.caption("None pending with the current filter.")
+        else:
+            for m in pending_rows:
+                st.markdown(_card_html(m, settled=False), unsafe_allow_html=True)
+                with st.expander("Enter final score"):
+                    c1, c2, c3 = st.columns([1, 1, 2])
+                    with c1:
+                        hs = st.number_input("Home", min_value=0, step=1,
+                                              key=f"sh_{m['match_id']}")
+                    with c2:
+                        aws = st.number_input("Away", min_value=0, step=1,
+                                               key=f"sa_{m['match_id']}")
+                    with c3:
+                        st.write(""); st.write("")
+                        if st.button("Save result", key=f"ss_{m['match_id']}",
+                                     type="primary"):
+                            if hs > aws:     result = "home_win"
+                            elif aws > hs:   result = "away_win"
+                            else:            result = "draw"
+                            db_settle(m["match_id"], int(hs), int(aws), result, None, None)
+                            st.success("Result saved.")
+                            st.rerun()
+
+        # ✅ Settled
+        st.markdown(f"#### ✅ Settled ({len(settled_rows)})")
+        if not settled_rows:
+            st.caption("None settled with the current filter.")
+        else:
+            for m in settled_rows:
+                st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
                 result_lbl = {"home_win": "Home win",
                               "away_win": "Away win",
                               "draw": "Draw"}.get(m.get("result"),
@@ -1046,25 +1124,6 @@ with tab_study:
                             else:            result = "draw"
                             db_settle(m["match_id"], int(hs), int(aws), result, None, None)
                             st.success("Updated.")
-                            st.rerun()
-            else:
-                with st.expander("Enter final score"):
-                    c1, c2, c3 = st.columns([1, 1, 2])
-                    with c1:
-                        hs = st.number_input("Home", min_value=0, step=1,
-                                              key=f"sh_{m['match_id']}")
-                    with c2:
-                        aws = st.number_input("Away", min_value=0, step=1,
-                                               key=f"sa_{m['match_id']}")
-                    with c3:
-                        st.write(""); st.write("")
-                        if st.button("Save result", key=f"ss_{m['match_id']}",
-                                     type="primary"):
-                            if hs > aws:     result = "home_win"
-                            elif aws > hs:   result = "away_win"
-                            else:            result = "draw"
-                            db_settle(m["match_id"], int(hs), int(aws), result, None, None)
-                            st.success("Result saved.")
                             st.rerun()
 
         with st.expander("Manage rows"):
