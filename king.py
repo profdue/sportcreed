@@ -190,10 +190,33 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ODDS PARSER
+# ODDS PARSER (hardened)
 # ═══════════════════════════════════════════════════════════════════
 
-_BOOKMAKER_NAMES = {"1xBet", "Betking", "Bet9ja"}
+_BOOKMAKER_NAMES = {"1xBet", "Betking", "Bet9ja", "Betway", "SportyBet",
+                    "1xbet", "betking", "bet9ja", "Bet365", "Pinnacle"}
+
+_ODDS_GLYPHS = "➜➔→•€$£"
+
+_ODDS_STOP_LABELS = {"general stats", "match information", "recent form",
+                     "h2h last matches", "consecutive scoring",
+                     "consecutive wins", "consecutive unbeaten"}
+
+
+def _is_valid_bookmaker_name(s: str) -> bool:
+    """A line that could be a bookmaker name: short, no digits, no glyphs, no spaces."""
+    if not s or len(s) > 20:
+        return False
+    if " " in s:
+        return False
+    if any(c.isdigit() for c in s):
+        return False
+    if any(g in s for g in _ODDS_GLYPHS):
+        return False
+    # Reject obvious structural words
+    if s.lower() in _ODDS_STOP_LABELS or s.lower() in ("odds", "advertisement"):
+        return False
+    return True
 
 
 def _parse_odds_block(lines):
@@ -204,18 +227,22 @@ def _parse_odds_block(lines):
         1xBet
         1
         ➜
-        9.10
+        1.63
         x
         ➜
-        6.61
+        3.78
         2
         ➜
-        1.28
+        5.25
         (blank)
         Betking
         ...
 
-    Returns {"1xBet": {"1": 9.10, "X": 6.61, "2": 1.28}, "Betking": {...}, ...}
+    Hardened:
+      - Stops at structural labels (General stats, Match information, etc.)
+      - Rejects article headlines as bookmaker names
+      - Discards bookmakers with no prices captured
+      - Hard cap of 200 iterations
     """
     out = {}
     try:
@@ -226,18 +253,23 @@ def _parse_odds_block(lines):
 
     i = start + 1
     current = None
-    while i < len(lines):
+    guard = 0
+
+    while i < len(lines) and guard < 200:
+        guard += 1
         s = _clean_line(lines[i])
         if not s:
             i += 1
             continue
 
+        low = s.lower()
+        if low in _ODDS_STOP_LABELS:
+            break
+
         if s in ("1", "X", "x", "2"):
             market = s.upper()
             arrow, j = _next_nonblank(lines, i + 1)
             if arrow and arrow not in ("➜", "➔", "→"):
-                current = s
-                out.setdefault(current, {})
                 i += 1
                 continue
             price, k = _next_nonblank(lines, j + 1)
@@ -249,12 +281,14 @@ def _parse_odds_block(lines):
             i = k
             continue
 
-        if not re.match(r"^\d+\.\d+$", s):
+        if _is_valid_bookmaker_name(s):
             current = s
             out.setdefault(current, {})
 
         i += 1
 
+    # Discard bookmakers with no prices captured
+    out = {b: m for b, m in out.items() if m}
     return out
 
 
@@ -269,7 +303,6 @@ def _best_per_market(odds_by_book):
 
 
 def _market_favourite(best):
-    """'home' if best 1-odds < best 2-odds, 'away' if reverse, 'tie' if within 0.05."""
     h, a = best.get("1"), best.get("2")
     if h is None or a is None:
         return None
@@ -286,7 +319,6 @@ NOT_BEATEN_MIN_GAP = 3
 
 
 def _classify_streaks(hw, aw, hu, au):
-    """Pure streak classifier — no market check."""
     def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
         return {"category": category, "pick_team": pick, "bet": bet,
                 "qualifying": qualifying, "reason": reason, "rejection_code": code}
@@ -401,8 +433,6 @@ _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
 _VS_HEADER     = re.compile(r"^(?:Pre-?match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
 
-_ODDS_GLYPHS = "➜➔→•€$£"
-
 _STRUCTURAL_LABELS = {
     "match information", "recent form", "general stats",
     "pre-match odds", "h2h last matches", "odds", "advertisement",
@@ -419,8 +449,7 @@ def _looks_like_text_dump(text: str) -> bool:
 def _looks_like_odds_line(s: str) -> bool:
     if any(sym in s for sym in _ODDS_GLYPHS):
         return True
-    decimals = re.findall(r"\b\d+\.\d+\b", s)
-    return len(decimals) >= 2
+    return len(re.findall(r"\b\d+\.\d+\b", s)) >= 2
 
 
 def _teams_from_header(lines):
@@ -585,7 +614,9 @@ def parse_recent_form_dump(text: str) -> dict:
     if not f["away_team"]:
         f["_parse_warnings"].append("away_team not found in text dump")
     if f["market_favourite"] is None:
-        f["_parse_warnings"].append("Odds not parsed — market check will reject as MARKET_UNAVAILABLE")
+        f["_parse_warnings"].append(
+            "Odds block missing or unparseable — streak-based picks will fall into "
+            "MARKET_UNAVAILABLE. Streak-based rejections are unaffected.")
 
     return f
 
@@ -938,10 +969,9 @@ with tab_study:
             # MARKET_DISAGREES study
             mkt = [m for m in settled if m.get("simple_rejection_code") == "MARKET_DISAGREES"]
             if mkt:
-                st.markdown("### MARKET_DISAGREES — what the classifier wanted vs what happened")
-                st.caption("Tells you whether the market veto is right. "
-                           "If classifier_pick wins more than market_favourite, "
-                           "the veto is costing you. If market_favourite wins more, it's saving you.")
+                st.markdown("### MARKET_DISAGREES — classifier pick vs market favourite")
+                st.caption("If classifier_pick wins more than market_favourite, the veto "
+                           "costs you. If market_favourite wins more, it saves you.")
                 mkt_rows = []
                 for m in mkt:
                     pick = m.get("simple_pick_team")
@@ -1072,6 +1102,8 @@ with tab_lab:
             odds_df = pd.DataFrame(odds).T.reset_index()
             odds_df.columns = ["bookmaker", "1", "X", "2"]
             st.dataframe(odds_df, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No odds block parsed. Market check will not run.")
 
         with st.expander("Parsed fields"):
             st.json({k: v for k, v in facts.items()
