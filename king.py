@@ -11,6 +11,9 @@ Market veto (after streak decision):
   Pick survives if moneyline favourite == pick side.
   Otherwise rejected as MARKET_DISAGREES, kept in Study.
 
+Odds: read only the FIRST bookmaker's 1/X/2 from the paste.
+      (Market favourite is the same across bookmakers, so one is enough.)
+
 Rejection codes:
   MISSING, HOME_LEADER_NO_PADDING, AWAY_LEADER_NO_SOLID,
   NOT_BEATEN_GAP_LOW, BOTH_HAVE_WINS,
@@ -190,59 +193,34 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ODDS PARSER (hardened)
+# ODDS PARSER — first bookmaker only
 # ═══════════════════════════════════════════════════════════════════
 
-_BOOKMAKER_NAMES = {"1xBet", "Betking", "Bet9ja", "Betway", "SportyBet",
-                    "1xbet", "betking", "bet9ja", "Bet365", "Pinnacle"}
-
 _ODDS_GLYPHS = "➜➔→•€$£"
-
-_ODDS_STOP_LABELS = {"general stats", "match information", "recent form",
-                     "h2h last matches", "consecutive scoring",
-                     "consecutive wins", "consecutive unbeaten"}
-
-
-def _is_valid_bookmaker_name(s: str) -> bool:
-    """A line that could be a bookmaker name: short, no digits, no glyphs, no spaces."""
-    if not s or len(s) > 20:
-        return False
-    if " " in s:
-        return False
-    if any(c.isdigit() for c in s):
-        return False
-    if any(g in s for g in _ODDS_GLYPHS):
-        return False
-    # Reject obvious structural words
-    if s.lower() in _ODDS_STOP_LABELS or s.lower() in ("odds", "advertisement"):
-        return False
-    return True
 
 
 def _parse_odds_block(lines):
     """
-    Parse the 'Pre-match odds' block. Structure:
+    Read the first bookmaker's 1/X/2 after 'Pre-match odds'.
 
+    Structure:
         Pre-match odds
-        1xBet
+        1xBet        <- bookmaker (skipped; we just need prices)
         1
         ➜
-        1.63
+        1.93         <- home
         x
         ➜
-        3.78
+        3.36         <- draw
         2
         ➜
-        5.25
+        4.44         <- away
         (blank)
-        Betking
-        ...
+        Betking      <- another bookmaker; we stop here
 
-    Hardened:
-      - Stops at structural labels (General stats, Match information, etc.)
-      - Rejects article headlines as bookmaker names
-      - Discards bookmakers with no prices captured
-      - Hard cap of 200 iterations
+    Stops as soon as we see a market marker that's already been captured
+    (i.e. the second bookmaker's '1'/'X'/'2'). Returns {"1": .., "X": .., "2": ..}
+    or {} if not found.
     """
     out = {}
     try:
@@ -252,58 +230,40 @@ def _parse_odds_block(lines):
         return out
 
     i = start + 1
-    current = None
     guard = 0
-
-    while i < len(lines) and guard < 200:
+    while i < len(lines) and guard < 100:
         guard += 1
         s = _clean_line(lines[i])
         if not s:
             i += 1
             continue
 
-        low = s.lower()
-        if low in _ODDS_STOP_LABELS:
-            break
-
         if s in ("1", "X", "x", "2"):
             market = s.upper()
+            if market in out:
+                # Second bookmaker's market — we've already read the first book.
+                break
             arrow, j = _next_nonblank(lines, i + 1)
             if arrow and arrow not in ("➜", "➔", "→"):
                 i += 1
                 continue
             price, k = _next_nonblank(lines, j + 1)
-            if price and current:
+            if price:
                 try:
-                    out[current][market] = float(price)
+                    out[market] = float(price)
                 except (TypeError, ValueError):
                     pass
             i = k
             continue
 
-        if _is_valid_bookmaker_name(s):
-            current = s
-            out.setdefault(current, {})
-
         i += 1
 
-    # Discard bookmakers with no prices captured
-    out = {b: m for b, m in out.items() if m}
     return out
 
 
-def _best_per_market(odds_by_book):
-    best = {"1": None, "X": None, "2": None}
-    for m in odds_by_book.values():
-        for k in ("1", "X", "2"):
-            v = m.get(k)
-            if v is not None and (best[k] is None or v > best[k]):
-                best[k] = v
-    return best
-
-
-def _market_favourite(best):
-    h, a = best.get("1"), best.get("2")
+def _market_favourite(odds):
+    """odds: {"1": 1.93, "X": 3.36, "2": 4.44} → 'home' / 'away' / 'tie' / None."""
+    h, a = odds.get("1"), odds.get("2")
     if h is None or a is None:
         return None
     if abs(h - a) < 0.05:
@@ -534,8 +494,7 @@ def parse_recent_form_dump(text: str) -> dict:
         "home_consecutive_scoring": None, "away_consecutive_scoring": None,
         "home_consecutive_wins": None,    "away_consecutive_wins": None,
         "home_consecutive_unbeaten": None, "away_consecutive_unbeaten": None,
-        "odds_by_book": {}, "best_odds_1": None, "best_odds_x": None, "best_odds_2": None,
-        "market_favourite": None,
+        "odds": {}, "market_favourite": None,
         "recent_form_triplets": [],
         "_parse_warnings": [],
     }
@@ -555,16 +514,10 @@ def parse_recent_form_dump(text: str) -> dict:
                 "No 'Pre-match X vs Y' header — team order guessed from recent-form "
                 "frequency. Home/away may be swapped.")
 
-    # Odds
     odds = _parse_odds_block(lines)
-    f["odds_by_book"] = odds
-    best = _best_per_market(odds)
-    f["best_odds_1"] = best["1"]
-    f["best_odds_x"] = best["X"]
-    f["best_odds_2"] = best["2"]
-    f["market_favourite"] = _market_favourite(best)
+    f["odds"] = odds
+    f["market_favourite"] = _market_favourite(odds)
 
-    # Consecutive blocks
     for i, ln in enumerate(lines):
         m = _CONSEC_HEADER.match(_clean_line(ln))
         if not m:
@@ -585,7 +538,6 @@ def parse_recent_form_dump(text: str) -> dict:
         elif kind == "unbeaten":
             f["home_consecutive_unbeaten"], f["away_consecutive_unbeaten"] = hv, av
 
-    # Recent form triplets (cosmetic)
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
                       if _clean_line(ln).lower() == "recent form")
@@ -628,7 +580,7 @@ def parse_recent_form_dump(text: str) -> dict:
 def build_row(facts: dict) -> dict:
     simple = compute_simple_row(facts)
     now_iso = datetime.now(timezone.utc).isoformat()
-    odds = facts.get("odds_by_book", {})
+    odds = facts.get("odds", {})
 
     row = {
         "home_team": facts.get("home_team"),
@@ -651,18 +603,9 @@ def build_row(facts: dict) -> dict:
         "simple_reason":         simple["simple_reason"],
         "simple_rejection_code": simple["simple_rejection_code"],
 
-        "odds_1_1xbet":  odds.get("1xBet",   {}).get("1"),
-        "odds_x_1xbet":  odds.get("1xBet",   {}).get("X"),
-        "odds_2_1xbet":  odds.get("1xBet",   {}).get("2"),
-        "odds_1_betking": odds.get("Betking", {}).get("1"),
-        "odds_x_betking": odds.get("Betking", {}).get("X"),
-        "odds_2_betking": odds.get("Betking", {}).get("2"),
-        "odds_1_bet9ja": odds.get("Bet9ja",  {}).get("1"),
-        "odds_x_bet9ja": odds.get("Bet9ja",  {}).get("X"),
-        "odds_2_bet9ja": odds.get("Bet9ja",  {}).get("2"),
-        "best_odds_1": facts.get("best_odds_1"),
-        "best_odds_x": facts.get("best_odds_x"),
-        "best_odds_2": facts.get("best_odds_2"),
+        "odds_1": odds.get("1"),
+        "odds_x": odds.get("X"),
+        "odds_2": odds.get("2"),
         "market_favourite": facts.get("market_favourite"),
 
         "extracted_at": now_iso,
@@ -710,7 +653,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
 
     badge_text = f"{cat} · {bet} {pick_lbl}" if cat else "NO BET"
 
-    o1 = m.get("best_odds_1"); ox = m.get("best_odds_x"); o2 = m.get("best_odds_2")
+    o1 = m.get("odds_1"); ox = m.get("odds_x"); o2 = m.get("odds_2")
     mf = m.get("market_favourite")
     odds_row = ""
     if any(v is not None for v in (o1, ox, o2)):
@@ -946,7 +889,6 @@ with tab_study:
             pivot = pivot.reset_index().sort_values("total", ascending=False)
             st.dataframe(pivot, use_container_width=True, hide_index=True)
 
-            # NOT-BEATEN gap study
             nb_rows = []
             for m in settled:
                 if m.get("simple_rejection_code") != "NOT_BEATEN_GAP_LOW":
@@ -966,7 +908,6 @@ with tab_study:
                 st.markdown("### NOT-BEATEN gap vs actual outcome")
                 st.dataframe(pd.DataFrame(nb_rows), use_container_width=True, hide_index=True)
 
-            # MARKET_DISAGREES study
             mkt = [m for m in settled if m.get("simple_rejection_code") == "MARKET_DISAGREES"]
             if mkt:
                 st.markdown("### MARKET_DISAGREES — classifier pick vs market favourite")
@@ -975,7 +916,7 @@ with tab_study:
                 mkt_rows = []
                 for m in mkt:
                     pick = m.get("simple_pick_team")
-                    pick_odds = m.get("best_odds_1") if pick == "home" else m.get("best_odds_2")
+                    pick_odds = m.get("odds_1") if pick == "home" else m.get("odds_2")
                     pick_was_right = (
                         (pick == "home" and m.get("result") in ("home_win", "draw"))
                         or (pick == "away" and m.get("result") in ("away_win", "draw"))
@@ -992,7 +933,6 @@ with tab_study:
                     })
                 st.dataframe(pd.DataFrame(mkt_rows), use_container_width=True, hide_index=True)
 
-        # Individual rows
         st.markdown("### Rows")
         all_codes = sorted({m.get("simple_rejection_code") or "(none)" for m in study})
         selected = st.multiselect("Filter by rejection code", all_codes,
@@ -1095,13 +1035,11 @@ with tab_lab:
             st.info(f"No bet [{simple.get('simple_rejection_code')}] — "
                     f"{simple.get('simple_reason')}")
 
-        # Show parsed odds
-        odds = facts.get("odds_by_book", {})
+        odds = facts.get("odds", {})
         if odds:
-            st.markdown("**Parsed odds**")
-            odds_df = pd.DataFrame(odds).T.reset_index()
-            odds_df.columns = ["bookmaker", "1", "X", "2"]
-            st.dataframe(odds_df, use_container_width=True, hide_index=True)
+            st.markdown(f"**Parsed odds (first bookmaker):** "
+                        f"1 = {odds.get('1')} · X = {odds.get('X')} · 2 = {odds.get('2')}  ·  "
+                        f"Market favourite = **{facts.get('market_favourite')}**")
         else:
             st.warning("No odds block parsed. Market check will not run.")
 
