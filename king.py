@@ -408,13 +408,20 @@ _STRUCTURAL_LABELS = {
     "pre-match odds", "h2h last matches", "odds", "advertisement",
 }
 
-# Prefix markers that should never appear at the start of a team name.
-# Applied defensively in case the regex missed a variant.
 _HEADER_JUNK_PREFIXES = (
     "pre-match ", "pre match ", "pre–match ", "pre—match ",
     "re-match ", "re match ", "re–match ", "re—match ",
     "e-match ", "e match ", "e–match ", "e—match ",
     "match ",
+)
+
+# Stadium keywords — if any of these appear in a "Match information" entry,
+# it's almost certainly the venue.
+_STADIUM_KEYWORDS = (
+    "stadium", "arena", "park", "ground", "field",
+    "centre", "center", "stadion", "estadio", "estádio",
+    "stade", "stadio", "olympic", "olympique", "coliseum",
+    "sports complex", "sports centre", "sports center",
 )
 
 
@@ -433,8 +440,24 @@ def _looks_like_odds_line(s: str) -> bool:
     return len(re.findall(r"\b\d+\.\d+\b", s)) >= 2
 
 
+def _looks_like_person_name(s: str) -> bool:
+    """2–4 alphabetic tokens, each starting with a capital letter."""
+    tokens = s.split()
+    if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    for tok in tokens:
+        clean = (tok.replace("'", "").replace("’", "")
+                    .replace("-", "").replace(".", "").replace(" ", ""))
+        if not clean:
+            return False
+        if not clean[0].isupper():
+            return False
+        if not all(c.isalpha() for c in clean):
+            return False
+    return True
+
+
 def _strip_header_prefix(name: str) -> str:
-    """Remove any leftover 'pre-match ', 're-match ', 'match ' etc. from a team name."""
     low = name.lower()
     for marker in _HEADER_JUNK_PREFIXES:
         if low.startswith(marker):
@@ -465,6 +488,12 @@ def _teams_from_header(lines):
 
 
 def _parse_match_information(lines, f):
+    """
+    Find 'Match information' block. Extract venue using this priority:
+      1. Any entry containing a stadium keyword.
+      2. First entry if it doesn't look like a person name.
+      3. If all entries look like person names (3+ of them), no venue — leave None.
+    """
     for i, ln in enumerate(lines):
         if _clean_line(ln).lower() != "match information":
             continue
@@ -472,11 +501,27 @@ def _parse_match_information(lines, f):
         if not val:
             return
         entries = []
-        while val and val.lower() != "recent form" and len(entries) < 4:
+        while val and val.lower() != "recent form" and len(entries) < 5:
             entries.append(val)
             val, j = _next_nonblank(lines, j)
-        if entries:
+
+        if not entries:
+            return
+
+        # Priority 1: stadium keyword
+        for entry in entries:
+            low = entry.lower()
+            if any(kw in low for kw in _STADIUM_KEYWORDS):
+                f["venue"] = entry
+                return
+
+        # Priority 2: first entry that doesn't look like a person
+        if entries and not _looks_like_person_name(entries[0]):
             f["venue"] = entries[0]
+            return
+
+        # Priority 3: if 3+ entries and all person names → no venue in this paste
+        # (leave f["venue"] as None)
         return
 
 
