@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-king.py — The Logic (text-dump only, header-driven home/away)
+king.py — The Logic (text-dump only, header-driven home/away, market veto)
 
 Classifier: 2 stats — consecutive wins + consecutive unbeaten.
+  SOLID CLEAR        leader U >= 2, opponent 0/0      -> 1X / X2
+  LIGHT CLEAR HOME   home leader, U == W               -> 1X
+  NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
 
-  QUALIFYING (simple_qualifying=1):
-    SOLID CLEAR        leader U >= 2, opponent 0/0      -> 1X / X2
-    LIGHT CLEAR HOME   home leader, U == W               -> 1X
-    NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
+Market veto (after streak decision):
+  Pick survives if moneyline favourite == pick side.
+  Otherwise rejected as MARKET_DISAGREES, kept in Study.
 
-  STUDY (simple_qualifying=0, rejected matches kept for analysis):
-    HOME_LEADER_NO_PADDING, AWAY_LEADER_NO_SOLID,
-    NOT_BEATEN_GAP_LOW, BOTH_HAVE_WINS, MISSING
-
-Every parsed row inserts. Qualifying bets go to Pending. No-bets go to Study.
-Study rows record the actual final score; no hypothetical bets, no predictions.
-One table: public.matches.
+Rejection codes:
+  MISSING, HOME_LEADER_NO_PADDING, AWAY_LEADER_NO_SOLID,
+  NOT_BEATEN_GAP_LOW, BOTH_HAVE_WINS,
+  MARKET_DISAGREES, MARKET_UNAVAILABLE
 """
 
 import re
@@ -64,6 +63,7 @@ st.markdown("""
     }
     .signal-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
     .signal-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
+    .signal-pill.odds { background: #6366f115; color: #a5b4fc; border-color: #6366f140; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
         height: 44px; background-color: #1a1f2e; border-radius: 10px;
@@ -136,10 +136,6 @@ def db_find_existing(row: dict):
 
 def db_settle(match_id: int, home_score: int, away_score: int,
               result: str, dc_hit, profit_loss):
-    """
-    Records the final score. dc_hit and profit_loss are only meaningful for
-    qualifying bets — study rows pass None/None.
-    """
     sb = get_supabase()
     sb.table("matches").update({
         "home_score": home_score, "away_score": away_score,
@@ -194,24 +190,106 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ODDS PARSER
+# ═══════════════════════════════════════════════════════════════════
+
+_BOOKMAKER_NAMES = {"1xBet", "Betking", "Bet9ja"}
+
+
+def _parse_odds_block(lines):
+    """
+    Parse the 'Pre-match odds' block. Structure:
+
+        Pre-match odds
+        1xBet
+        1
+        ➜
+        9.10
+        x
+        ➜
+        6.61
+        2
+        ➜
+        1.28
+        (blank)
+        Betking
+        ...
+
+    Returns {"1xBet": {"1": 9.10, "X": 6.61, "2": 1.28}, "Betking": {...}, ...}
+    """
+    out = {}
+    try:
+        start = next(i for i, ln in enumerate(lines)
+                     if _clean_line(ln).lower() == "pre-match odds")
+    except StopIteration:
+        return out
+
+    i = start + 1
+    current = None
+    while i < len(lines):
+        s = _clean_line(lines[i])
+        if not s:
+            i += 1
+            continue
+
+        if s in ("1", "X", "x", "2"):
+            market = s.upper()
+            arrow, j = _next_nonblank(lines, i + 1)
+            if arrow and arrow not in ("➜", "➔", "→"):
+                current = s
+                out.setdefault(current, {})
+                i += 1
+                continue
+            price, k = _next_nonblank(lines, j + 1)
+            if price and current:
+                try:
+                    out[current][market] = float(price)
+                except (TypeError, ValueError):
+                    pass
+            i = k
+            continue
+
+        if not re.match(r"^\d+\.\d+$", s):
+            current = s
+            out.setdefault(current, {})
+
+        i += 1
+
+    return out
+
+
+def _best_per_market(odds_by_book):
+    best = {"1": None, "X": None, "2": None}
+    for m in odds_by_book.values():
+        for k in ("1", "X", "2"):
+            v = m.get(k)
+            if v is not None and (best[k] is None or v > best[k]):
+                best[k] = v
+    return best
+
+
+def _market_favourite(best):
+    """'home' if best 1-odds < best 2-odds, 'away' if reverse, 'tie' if within 0.05."""
+    h, a = best.get("1"), best.get("2")
+    if h is None or a is None:
+        return None
+    if abs(h - a) < 0.05:
+        return "tie"
+    return "home" if h < a else "away"
+
+
+# ═══════════════════════════════════════════════════════════════════
 # CLASSIFIER
 # ═══════════════════════════════════════════════════════════════════
 
 NOT_BEATEN_MIN_GAP = 3
 
 
-def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten):
-    hw = _to_int_or_none(home_wins)
-    aw = _to_int_or_none(away_wins)
-    hu = _to_int_or_none(home_unbeaten)
-    au = _to_int_or_none(away_unbeaten)
-
+def _classify_streaks(hw, aw, hu, au):
+    """Pure streak classifier — no market check."""
     def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
         return {"category": category, "pick_team": pick, "bet": bet,
                 "qualifying": qualifying, "reason": reason, "rejection_code": code}
-
-    if None in (hw, aw, hu, au):
-        return result(reason="Missing one or more streak inputs.", code="MISSING")
 
     home_has, away_has = hw > 0, aw > 0
 
@@ -247,12 +325,46 @@ def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten):
                   code="BOTH_HAVE_WINS")
 
 
+def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten,
+                    market_favourite=None):
+    hw = _to_int_or_none(home_wins)
+    aw = _to_int_or_none(away_wins)
+    hu = _to_int_or_none(home_unbeaten)
+    au = _to_int_or_none(away_unbeaten)
+
+    def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
+        return {"category": category, "pick_team": pick, "bet": bet,
+                "qualifying": qualifying, "reason": reason, "rejection_code": code}
+
+    if None in (hw, aw, hu, au):
+        return result(reason="Missing one or more streak inputs.", code="MISSING")
+
+    streak = _classify_streaks(hw, aw, hu, au)
+    if not streak["qualifying"]:
+        return streak
+
+    pick = streak["pick_team"]
+
+    if market_favourite is None:
+        return result(reason=f"{streak['reason']} [no odds available]",
+                      code="MARKET_UNAVAILABLE")
+    if market_favourite == "tie":
+        return streak
+    if market_favourite != pick:
+        return result(
+            reason=f"{streak['reason']} [market favourite={market_favourite}, pick={pick}]",
+            code="MARKET_DISAGREES",
+        )
+    return streak
+
+
 def compute_simple_row(facts: dict) -> dict:
     c = classify_simple(
         facts.get("home_consecutive_wins"),
         facts.get("away_consecutive_wins"),
         facts.get("home_consecutive_unbeaten"),
         facts.get("away_consecutive_unbeaten"),
+        market_favourite=facts.get("market_favourite"),
     )
     return {
         "simple_category":       c["category"],
@@ -268,7 +380,7 @@ def compute_simple_row(facts: dict) -> dict:
     }
 
 
-def settle_simple(simple_bet: str, home_score: int, away_score: int):
+def settle_simple(simple_bet, home_score, away_score):
     if home_score > away_score:     result = "home_win"
     elif away_score > home_score:   result = "away_win"
     else:                           result = "draw"
@@ -308,9 +420,7 @@ def _looks_like_odds_line(s: str) -> bool:
     if any(sym in s for sym in _ODDS_GLYPHS):
         return True
     decimals = re.findall(r"\b\d+\.\d+\b", s)
-    if len(decimals) >= 2:
-        return True
-    return False
+    return len(decimals) >= 2
 
 
 def _teams_from_header(lines):
@@ -395,6 +505,8 @@ def parse_recent_form_dump(text: str) -> dict:
         "home_consecutive_scoring": None, "away_consecutive_scoring": None,
         "home_consecutive_wins": None,    "away_consecutive_wins": None,
         "home_consecutive_unbeaten": None, "away_consecutive_unbeaten": None,
+        "odds_by_book": {}, "best_odds_1": None, "best_odds_x": None, "best_odds_2": None,
+        "market_favourite": None,
         "recent_form_triplets": [],
         "_parse_warnings": [],
     }
@@ -414,6 +526,16 @@ def parse_recent_form_dump(text: str) -> dict:
                 "No 'Pre-match X vs Y' header — team order guessed from recent-form "
                 "frequency. Home/away may be swapped.")
 
+    # Odds
+    odds = _parse_odds_block(lines)
+    f["odds_by_book"] = odds
+    best = _best_per_market(odds)
+    f["best_odds_1"] = best["1"]
+    f["best_odds_x"] = best["X"]
+    f["best_odds_2"] = best["2"]
+    f["market_favourite"] = _market_favourite(best)
+
+    # Consecutive blocks
     for i, ln in enumerate(lines):
         m = _CONSEC_HEADER.match(_clean_line(ln))
         if not m:
@@ -434,6 +556,7 @@ def parse_recent_form_dump(text: str) -> dict:
         elif kind == "unbeaten":
             f["home_consecutive_unbeaten"], f["away_consecutive_unbeaten"] = hv, av
 
+    # Recent form triplets (cosmetic)
     try:
         rf_idx = next(i for i, ln in enumerate(lines)
                       if _clean_line(ln).lower() == "recent form")
@@ -461,6 +584,8 @@ def parse_recent_form_dump(text: str) -> dict:
         f["_parse_warnings"].append("home_team not found in text dump")
     if not f["away_team"]:
         f["_parse_warnings"].append("away_team not found in text dump")
+    if f["market_favourite"] is None:
+        f["_parse_warnings"].append("Odds not parsed — market check will reject as MARKET_UNAVAILABLE")
 
     return f
 
@@ -472,6 +597,7 @@ def parse_recent_form_dump(text: str) -> dict:
 def build_row(facts: dict) -> dict:
     simple = compute_simple_row(facts)
     now_iso = datetime.now(timezone.utc).isoformat()
+    odds = facts.get("odds_by_book", {})
 
     row = {
         "home_team": facts.get("home_team"),
@@ -493,6 +619,20 @@ def build_row(facts: dict) -> dict:
         "simple_qualifying":     simple["simple_qualifying"],
         "simple_reason":         simple["simple_reason"],
         "simple_rejection_code": simple["simple_rejection_code"],
+
+        "odds_1_1xbet":  odds.get("1xBet",   {}).get("1"),
+        "odds_x_1xbet":  odds.get("1xBet",   {}).get("X"),
+        "odds_2_1xbet":  odds.get("1xBet",   {}).get("2"),
+        "odds_1_betking": odds.get("Betking", {}).get("1"),
+        "odds_x_betking": odds.get("Betking", {}).get("X"),
+        "odds_2_betking": odds.get("Betking", {}).get("2"),
+        "odds_1_bet9ja": odds.get("Bet9ja",  {}).get("1"),
+        "odds_x_bet9ja": odds.get("Bet9ja",  {}).get("X"),
+        "odds_2_bet9ja": odds.get("Bet9ja",  {}).get("2"),
+        "best_odds_1": facts.get("best_odds_1"),
+        "best_odds_x": facts.get("best_odds_x"),
+        "best_odds_2": facts.get("best_odds_2"),
+        "market_favourite": facts.get("market_favourite"),
 
         "extracted_at": now_iso,
     }
@@ -539,6 +679,20 @@ def _card_html(m: dict, settled: bool = False) -> str:
 
     badge_text = f"{cat} · {bet} {pick_lbl}" if cat else "NO BET"
 
+    o1 = m.get("best_odds_1"); ox = m.get("best_odds_x"); o2 = m.get("best_odds_2")
+    mf = m.get("market_favourite")
+    odds_row = ""
+    if any(v is not None for v in (o1, ox, o2)):
+        mf_lbl = {"home": "HOME", "away": "AWAY", "tie": "LEVEL"}.get(mf, "?")
+        odds_row = (
+            '<div class="signal-row">'
+            f'<span class="signal-pill odds">1: {o1 if o1 is not None else "—"}</span>'
+            f'<span class="signal-pill odds">X: {ox if ox is not None else "—"}</span>'
+            f'<span class="signal-pill odds">2: {o2 if o2 is not None else "—"}</span>'
+            f'<span class="signal-pill odds">Market fav: <b>{mf_lbl}</b></span>'
+            '</div>'
+        )
+
     return f"""
     <div class="match-card {card_cls}">
         <div class="match-title">{title}</div>
@@ -548,6 +702,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
             <span class="signal-pill home">Home W/U: {hw} / {hu}</span>
             <span class="signal-pill away">Away W/U: {aw} / {au}</span>
         </div>
+        {odds_row}
     </div>
     """
 
@@ -564,11 +719,13 @@ tab_new, tab_pending, tab_perf, tab_study, tab_lab = st.tabs(
 # ─── TAB 1 — NEW MATCH ────────────────────────────────────────────
 with tab_new:
     st.markdown("### Paste the match data")
-    st.caption("Include the `Pre-match HOME vs AWAY` header — that decides home/away.")
+    st.caption("Include `Pre-match HOME vs AWAY` header and the `Pre-match odds` block. "
+               "Qualifying bets go to Pending; rejections (including market veto) go to Study.")
 
-    raw_in = st.text_area("Input", height=320, label_visibility="collapsed",
-                          placeholder="Pre-match Mainz 05 vs Bayern München\\n"
-                                      "Match information\\nMewa Arena\\n...")
+    raw_in = st.text_area("Input", height=340, label_visibility="collapsed",
+                          placeholder="Pre-match Real Zaragoza vs Huesca\\n"
+                                      "Pre-match odds\\n1xBet\\n1\\n➜\\n1.63\\n...\\n"
+                                      "Match information\\n...")
     run = st.button("Run the Logic", type="primary")
 
     if run and raw_in.strip():
@@ -629,7 +786,7 @@ with tab_new:
                     if simple["simple_qualifying"]:
                         st.success("Saved to Pending.")
                     else:
-                        st.success("Saved to Study (no bet).")
+                        st.success(f"Saved to Study ({simple['simple_rejection_code']}).")
                 except Exception as e:
                     st.error(f"Insert failed: {e}")
 
@@ -722,9 +879,9 @@ with tab_perf:
 
 # ─── TAB 4 — STUDY ────────────────────────────────────────────────
 with tab_study:
-    st.markdown("### 📚 Study — no-bet matches with actual results")
-    st.caption("Every parsed match the classifier rejected, plus the actual final score. "
-               "Raw data only — no hypotheticals, no predicted bets.")
+    st.markdown("### 📚 Study — rejected matches with actual results")
+    st.caption("Every parsed match the classifier rejected (including market veto). "
+               "Raw data only — no hypotheticals.")
 
     try:
         study = db_study()
@@ -743,15 +900,10 @@ with tab_study:
         c2.metric("Settled", len(settled))
         c3.metric("Awaiting result", len(unsettled))
 
-        # ── Actual outcome counts by rejection code ──
         if settled:
             st.markdown("### Actual outcome counts by rejection code")
-            rows = []
-            for m in settled:
-                rows.append({
-                    "rejection_code": m.get("simple_rejection_code") or "(none)",
-                    "result": m.get("result") or "(unknown)",
-                })
+            rows = [{"rejection_code": m.get("simple_rejection_code") or "(none)",
+                     "result": m.get("result") or "(unknown)"} for m in settled]
             df = pd.DataFrame(rows)
             pivot = (df.groupby(["rejection_code", "result"])
                      .size().unstack(fill_value=0))
@@ -763,7 +915,7 @@ with tab_study:
             pivot = pivot.reset_index().sort_values("total", ascending=False)
             st.dataframe(pivot, use_container_width=True, hide_index=True)
 
-            # ── Unbeaten gap vs actual outcome (NOT-BEATEN cases) ──
+            # NOT-BEATEN gap study
             nb_rows = []
             for m in settled:
                 if m.get("simple_rejection_code") != "NOT_BEATEN_GAP_LOW":
@@ -774,20 +926,43 @@ with tab_study:
                 nb_rows.append({
                     "home_team": m.get("home_team"),
                     "away_team": m.get("away_team"),
-                    "home_u": hu,
-                    "away_u": au,
+                    "home_u": hu, "away_u": au,
                     "gap": abs(hu - au),
                     "higher_unbeaten_side": higher,
                     "result": m.get("result"),
                 })
             if nb_rows:
-                st.markdown("### Unbeaten gap vs actual outcome (NOT-BEATEN cases)")
-                st.caption("For rows where both teams had 0 wins. The gap is the "
-                           "absolute difference in consecutive unbeaten.")
-                st.dataframe(pd.DataFrame(nb_rows), use_container_width=True,
-                             hide_index=True)
+                st.markdown("### NOT-BEATEN gap vs actual outcome")
+                st.dataframe(pd.DataFrame(nb_rows), use_container_width=True, hide_index=True)
 
-        # ── Individual rows with settle form ──
+            # MARKET_DISAGREES study
+            mkt = [m for m in settled if m.get("simple_rejection_code") == "MARKET_DISAGREES"]
+            if mkt:
+                st.markdown("### MARKET_DISAGREES — what the classifier wanted vs what happened")
+                st.caption("Tells you whether the market veto is right. "
+                           "If classifier_pick wins more than market_favourite, "
+                           "the veto is costing you. If market_favourite wins more, it's saving you.")
+                mkt_rows = []
+                for m in mkt:
+                    pick = m.get("simple_pick_team")
+                    pick_odds = m.get("best_odds_1") if pick == "home" else m.get("best_odds_2")
+                    pick_was_right = (
+                        (pick == "home" and m.get("result") in ("home_win", "draw"))
+                        or (pick == "away" and m.get("result") in ("away_win", "draw"))
+                    )
+                    mkt_rows.append({
+                        "home_team": m.get("home_team"),
+                        "away_team": m.get("away_team"),
+                        "classifier_pick": pick,
+                        "market_favourite": m.get("market_favourite"),
+                        "pick_odds": pick_odds,
+                        "result": m.get("result"),
+                        "score": f"{m.get('home_score')}–{m.get('away_score')}",
+                        "classifier_was_right": "YES" if pick_was_right else "NO",
+                    })
+                st.dataframe(pd.DataFrame(mkt_rows), use_container_width=True, hide_index=True)
+
+        # Individual rows
         st.markdown("### Rows")
         all_codes = sorted({m.get("simple_rejection_code") or "(none)" for m in study})
         selected = st.multiselect("Filter by rejection code", all_codes,
@@ -823,8 +998,7 @@ with tab_study:
                             if hs > aws:     result = "home_win"
                             elif aws > hs:   result = "away_win"
                             else:            result = "draw"
-                            db_settle(m["match_id"], int(hs), int(aws),
-                                      result, None, None)
+                            db_settle(m["match_id"], int(hs), int(aws), result, None, None)
                             st.success("Updated.")
                             st.rerun()
             else:
@@ -843,8 +1017,7 @@ with tab_study:
                             if hs > aws:     result = "home_win"
                             elif aws > hs:   result = "away_win"
                             else:            result = "draw"
-                            db_settle(m["match_id"], int(hs), int(aws),
-                                      result, None, None)
+                            db_settle(m["match_id"], int(hs), int(aws), result, None, None)
                             st.success("Result saved.")
                             st.rerun()
 
@@ -863,7 +1036,7 @@ with tab_lab:
     st.markdown("### 🧪 Lab")
     st.caption("Parse a dump without saving.")
 
-    text_in = st.text_area("Text dump", height=320, label_visibility="collapsed",
+    text_in = st.text_area("Text dump", height=340, label_visibility="collapsed",
                            key="lab_input")
 
     if text_in.strip():
@@ -892,9 +1065,17 @@ with tab_lab:
             st.info(f"No bet [{simple.get('simple_rejection_code')}] — "
                     f"{simple.get('simple_reason')}")
 
+        # Show parsed odds
+        odds = facts.get("odds_by_book", {})
+        if odds:
+            st.markdown("**Parsed odds**")
+            odds_df = pd.DataFrame(odds).T.reset_index()
+            odds_df.columns = ["bookmaker", "1", "X", "2"]
+            st.dataframe(odds_df, use_container_width=True, hide_index=True)
+
         with st.expander("Parsed fields"):
             st.json({k: v for k, v in facts.items()
-                     if v not in (None, [], "") and k != "recent_form_triplets"})
+                     if v not in (None, [], {}, "") and k != "recent_form_triplets"})
 
         if facts.get("recent_form_triplets"):
             with st.expander("Recent form (raw, source order)"):
