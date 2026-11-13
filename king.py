@@ -663,7 +663,8 @@ def _card_html(m: dict, settled: bool = False) -> str:
             '</div>'
         )
 
-    return f"""
+    # The critical fix: strip all newlines and extra spaces from the HTML string
+    html = f"""
     <div class="match-card {card_cls}">
         <div class="match-title">{title}</div>
         <div class="match-meta">{meta}</div>
@@ -676,6 +677,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
         {odds_row}
     </div>
     """
+    return "".join(line.strip() for line in html.split("\n"))
 
 
 # ═══════════════════════════════════════════════════════════════════
