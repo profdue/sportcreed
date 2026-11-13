@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """
-king.py — The Logic (text-dump only, header-driven home/away, market veto)
+king.py — The Logic (text-dump only, header-driven, market veto, hardcoded ELO filter)
 
 Classifier: 2 stats — consecutive wins + consecutive unbeaten.
-  SOLID CLEAR        leader U >= 2, opponent 0/0      -> 1X / X2
-  LIGHT CLEAR HOME   home leader, U == W               -> 1X
-  NOT-BEATEN SIGNAL  both 0 wins, unbeaten gap >= 3    -> 1X / X2
-
-Market veto: pick survives only if moneyline favourite == pick side.
-  Otherwise rejected as MARKET_DISAGREES, kept in Study.
-
-Odds parser: reads the first bookmaker that actually has valid prices.
-  If a bookmaker shows dashes ("-") for prices, it is skipped and the
-  parser moves to the next bookmaker.
-
-Study tab analysis now includes Market Alignment.
+Vetoes:
+  1. ELO veto (pick side must have ELO >= 1650)
+  2. Market veto (pick side must be the moneyline favourite)
 """
 
 import re
@@ -23,7 +14,6 @@ from datetime import datetime, timezone
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
-
 
 st.set_page_config(page_title="The Logic", page_icon="⚽",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -64,6 +54,7 @@ st.markdown("""
     .signal-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
     .signal-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
     .signal-pill.odds { background: #6366f115; color: #a5b4fc; border-color: #6366f140; }
+    .signal-pill.elo  { background: #a855f715; color: #c084fc; border-color: #a855f740; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
         height: 44px; background-color: #1a1f2e; border-radius: 10px;
@@ -72,6 +63,127 @@ st.markdown("""
     .stTabs [aria-selected="true"] { background-color: #6366f1 !important; color: white !important; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# HARDCODED ELO DATABASE (Threshold: 1650)
+# ═══════════════════════════════════════════════════════════════════
+
+ELO_MINIMUM = 1650
+
+ELO_DB = {
+    # England
+    "arsenal": 2047, "man city": 2002, "manchester city": 2002, "liverpool": 1937,
+    "brighton": 1910, "aston villa": 1899, "bournemouth": 1892, "chelsea": 1885,
+    "newcastle": 1853, "man united": 1851, "manchester united": 1851, 
+    "brentford": 1848, "everton": 1831, "tottenham": 1814, "leeds": 1812, 
+    "leeds united": 1812, "crystal palace": 1802, "forest": 1801, 
+    "nottingham forest": 1801, "fulham": 1800, "sunderland": 1727, 
+    "west ham": 1748, "wolves": 1716, "southampton": 1709, "coventry": 1701, 
+    "ipswich": 1698, "hull": 1640, "middlesbrough": 1663, "birmingham": 1655,
+    
+    # Spain
+    "barcelona": 2033, "real madrid": 2001, "atletico": 1910, "atletico madrid": 1910,
+    "betis": 1829, "real sociedad": 1790, "villarreal": 1789, "athletic club": 1768,
+    "athletic bilbao": 1768, "celta": 1738, "valencia": 1736, "rayo vallecano": 1736,
+    "sevilla": 1720, "alaves": 1709, "levante": 1709, "osasuna": 1705,
+    "elche": 1705, "mallorca": 1719, "girona": 1713, "almeria": 1711,
+    "castellon": 1708, "eibar": 1677, "burgos": 1665, "las palmas": 1659,
+    "oviedo": 1648, "granada": 1640,
+
+    # Italy
+    "internazionale": 1949, "inter": 1949, "roma": 1865, "como": 1838, 
+    "juventus": 1830, "milan": 1820, "napoli": 1818, "lazio": 1808, 
+    "atalanta": 1777, "bologna": 1775, "fiorentina": 1717, "frosinone": 1701,
+    "torino": 1686, "genoa": 1682, "sassuolo": 1666, "udinese": 1659, 
+    "cagliari": 1659, "parma": 1645, "venezia": 1645, "palermo": 1662,
+    
+    # Germany
+    "bayern munchen": 2046, "bayern munich": 2046, "bayern": 2046,
+    "dortmund": 1899, "b. dortmund": 1899, "leverkusen": 1859, 
+    "rb leipzig": 1832, "stuttgart": 1819, "freiburg": 1793, "hoffenheim": 1739,
+    "frankfurt": 1731, "mainz": 1721, "werder": 1710, "werder bremen": 1710,
+    "augsburg": 1704, "hamburg": 1683, "elversberg": 1681, "union berlin": 1679,
+    "paderborn": 1676, "gladbach": 1663, "koln": 1651,
+    
+    # France
+    "paris sg": 1989, "psg": 1989, "monaco": 1790, "lyon": 1784, 
+    "lille": 1780, "marseille": 1780, "lens": 1779, "rennes": 1745,
+    "strasbourg": 1720, "paris fc": 1716, "toulouse": 1697, "brest": 1695,
+    "lorient": 1695, "nice": 1692,
+    
+    # Portugal
+    "benfica": 1870, "sporting": 1863, "sporting cp": 1863, "porto": 1843, 
+    "braga": 1710,
+    
+    # Netherlands
+    "psv": 1782, "ajax": 1716, "feyenoord": 1716, "twente": 1689, "az": 1681,
+    
+    # Belgium
+    "brugge": 1839, "club brugge": 1839, "st gillis": 1826, "union sg": 1826,
+    
+    # Scotland
+    "celtic": 1725, "rangers": 1710, 
+
+    # Russia
+    "zenit": 1824, "spartak moskva": 1738, "fc krasnodar": 1736, 
+    "dynamo moskva": 1702, "cska moskva": 1695,
+    
+    # Turkey
+    "galatasaray": 1824, "fenerbahce": 1779, "amed sk": 1710, "besiktas": 1705, 
+    "trabzonspor": 1700,
+    
+    # South America
+    "flamengo": 1883, "palmeiras": 1862, "cruzeiro": 1786, "fluminense": 1769,
+    "bahia": 1728, "santos": 1727, "mirassol": 1718, "vasco da gama": 1717,
+    "sao paulo": 1715, "ath paranaense": 1714, "corinthians": 1713,
+    "atletico mineiro": 1711, "botafogo": 1709, "bragantino": 1699,
+    "internacional": 1698, "gremio": 1695, "fortaleza": 1688, "juventude": 1683,
+    "criciuma": 1656, "vitoria": 1652, "boca juniors": 1791, "rosario central": 1762,
+    "river plate": 1749, "argentinos junio": 1747, "velez sarsfield": 1724,
+    "ind rivadavia": 1721, "estudiantes": 1715, "lanus": 1707, "gimnasia lp": 1703,
+    "instituto": 1701, "racing club": 1693, "independiente": 1692,
+    "belgrano": 1689, "huracan": 1679, "defensa y justic": 1659, "tigre": 1656,
+    "platense": 1653, "barracas central": 1653, "union de santa f": 1647,
+    "ind del valle": 1797, "ldu quito": 1704, "macara": 1681, "uni catolica": 1674,
+    "barcelona sc": 1640, "colo-colo": 1671, "uni de chile": 1658, "uni catolica chile": 1658,
+    "coquimbo": 1656, "penarol": 1626, "nacional potosi": 1488, "bolivar": 1696,
+    "always ready": 1626, "the strongest": 1606,
+    
+    # North/Central America
+    "cruz azul": 1734, "toluca": 1720, "america": 1707, "guadalajara": 1683,
+    "pachuca": 1658, "uanl": 1653, "tigres uanl": 1653, "monterrey": 1636,
+    "nashville": 1703, "inter miami": 1679, "vancouver": 1668, "philadelphia": 1650,
+    "lafc": 1644, "los angeles fc": 1644,
+    
+    # Asia/Africa
+    "vissel kobe": 1688, "sanfrecce hirosh": 1687, "fc tokyo": 1664, 
+    "kashiwa reysol": 1657, "al hilal": 1745, "al-hilal": 1745, 
+    "al hilal sfc": 1745, "al nassr": 1701, "al-nassr": 1701, 
+    "al ahli sfc": 1645, "al-ahli": 1645, "al ahly": 1604, "pyramids": 1601,
+    "mamelodi sundown": 1621, "mamelodi sundowns": 1621, "ES Tunis": 1555,
+    
+    # Greece/Cyprus
+    "olympiakos": 1747, "olympiacos": 1747, "aek": 1695, "panathinaikos": 1679,
+    "paok": 1658, "omonia": 1632, "larnaca": 1598, "paphos": 1576
+}
+
+def _lookup_elo(team_name):
+    if not team_name:
+        return None
+    # Normalize: lower, strip accents, remove punctuation
+    import unicodedata
+    name = unicodedata.normalize('NFKD', team_name).encode('ASCII', 'ignore').decode('utf-8').lower()
+    name = re.sub(r'[^a-z0-9 ]', '', name).strip()
+    
+    # Try direct match
+    if name in ELO_DB: return ELO_DB[name]
+    
+    # Try finding the key inside the name (e.g., "Bayern München" -> "bayern")
+    for k, v in ELO_DB.items():
+        if k in name or name in k:
+            return v
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -88,148 +200,93 @@ def get_supabase() -> Client:
         key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
 
-
 def db_insert(row: dict):
     sb = get_supabase()
     res = sb.table("matches").insert(row).execute()
     st.cache_data.clear()
     return res.data[0] if res.data else None
 
-
 @st.cache_data(ttl=30)
 def db_pending():
     sb = get_supabase()
-    res = (sb.table("matches").select("*")
-             .eq("simple_qualifying", 1)
-             .is_("home_score", "null")
-             .order("extracted_at", desc=True).execute())
-    return res.data or []
-
+    return (sb.table("matches").select("*").eq("simple_qualifying", 1).is_("home_score", "null").order("extracted_at", desc=True).execute().data or [])
 
 @st.cache_data(ttl=30)
 def db_settled():
     sb = get_supabase()
-    res = (sb.table("matches").select("*")
-             .eq("simple_qualifying", 1)
-             .not_.is_("home_score", "null")
-             .order("settled_at", desc=True).execute())
-    return res.data or []
-
+    return (sb.table("matches").select("*").eq("simple_qualifying", 1).not_.is_("home_score", "null").order("settled_at", desc=True).execute().data or [])
 
 @st.cache_data(ttl=30)
 def db_study():
     sb = get_supabase()
-    res = (sb.table("matches").select("*")
-             .eq("simple_qualifying", 0)
-             .order("extracted_at", desc=True).execute())
-    return res.data or []
-
+    return (sb.table("matches").select("*").eq("simple_qualifying", 0).order("extracted_at", desc=True).execute().data or [])
 
 def db_find_existing(row: dict):
     sb = get_supabase()
-    res = (sb.table("matches").select("*")
-             .eq("home_team", row.get("home_team"))
-             .eq("away_team", row.get("away_team"))
-             .limit(1).execute())
+    res = (sb.table("matches").select("*").eq("home_team", row.get("home_team")).eq("away_team", row.get("away_team")).limit(1).execute())
     return res.data[0] if res.data else None
 
-
-def db_settle(match_id: int, home_score: int, away_score: int,
-              result: str, dc_hit, profit_loss):
+def db_settle(match_id: int, home_score: int, away_score: int, result: str, dc_hit, profit_loss):
     sb = get_supabase()
     sb.table("matches").update({
-        "home_score": home_score, "away_score": away_score,
-        "result": result, "dc_hit": dc_hit, "profit_loss": profit_loss,
-        "settled_at": datetime.now(timezone.utc).isoformat(),
+        "home_score": home_score, "away_score": away_score, "result": result,
+        "dc_hit": dc_hit, "profit_loss": profit_loss, "settled_at": datetime.now(timezone.utc).isoformat(),
     }).eq("match_id", match_id).execute()
     st.cache_data.clear()
 
-
 def db_delete(match_id: int):
-    sb = get_supabase()
-    sb.table("matches").delete().eq("match_id", match_id).execute()
+    get_supabase().table("matches").delete().eq("match_id", match_id).execute()
     st.cache_data.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HELPERS
+# HELPERS & ODDS PARSER
 # ═══════════════════════════════════════════════════════════════════
 
 def _to_int_or_none(v):
-    if v is None:
-        return None
+    if v is None: return None
     try:
-        if v != v:
-            return None
-    except Exception:
-        pass
+        if v != v: return None
+    except Exception: pass
     s = str(v).strip()
-    if s == "" or s.lower() in ("nan", "none", "null", "na"):
-        return None
-    try:
-        return int(float(s))
-    except (TypeError, ValueError):
-        return None
-
+    if s == "" or s.lower() in ("nan", "none", "null", "na"): return None
+    try: return int(float(s))
+    except (TypeError, ValueError): return None
 
 def _clean_line(s: str) -> str:
     return s.strip().strip("\ufeff\u200b\u200c\u200d\u00a0 ")
 
-
 def _strip_lines(text: str) -> list:
     return [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
 
-
 def _next_nonblank(lines, start):
     i = start
-    while i < len(lines) and not _clean_line(lines[i]):
-        i += 1
-    if i >= len(lines):
-        return None, i
+    while i < len(lines) and not _clean_line(lines[i]): i += 1
+    if i >= len(lines): return None, i
     return _clean_line(lines[i]), i + 1
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ODDS PARSER (Resilient — skips empty bookmakers)
-# ═══════════════════════════════════════════════════════════════════
 
 _ARROWS = {"➜", "➔", "→", "->", "=>", ">", "➡", "⬈", "⬊"}
 _MARKET_MAP = {"1": "1", "X": "X", "x": "X", "2": "2", "×": "X", "✕": "X"}
 _DASHES = {"-", "–", "—", "N/A", "n/a"}
-
-_ODDS_STOP_LABELS = {
-    "general stats", "match information", "recent form",
-    "h2h last matches", "consecutive scoring", "consecutive wins",
-    "consecutive unbeaten",
-}
-
-_OTHER_BOOKMAKERS = {"betking", "bet9ja", "betway", "sportybet",
-                     "bet365", "pinnacle", "1xbet"}
-
+_ODDS_STOP_LABELS = {"general stats", "match information", "recent form", "h2h last matches", "consecutive scoring", "consecutive wins", "consecutive unbeaten"}
+_OTHER_BOOKMAKERS = {"betking", "bet9ja", "betway", "sportybet", "bet365", "pinnacle", "1xbet"}
 
 def _find_odds_header(lines):
     for i, raw in enumerate(lines):
         s = _clean_line(raw)
-        if not s:
-            continue
+        if not s: continue
         low = s.lower()
-        if low == "pre-match odds":
-            return i + 1
-        if "odds" in low and "pre" in low and "match" in low:
-            return i + 1
+        if low == "pre-match odds" or ("odds" in low and "pre" in low and "match" in low): return i + 1
     return None
-
 
 def _parse_odds_block(lines):
     start = _find_odds_header(lines)
-    if start is None:
-        return {}
+    if start is None: return {}
 
     out = {}
     current_book = {}
 
-    def has_prices(d):
-        return d.get("1") is not None or d.get("X") is not None or d.get("2") is not None
+    def has_prices(d): return d.get("1") is not None or d.get("X") is not None or d.get("2") is not None
 
     i = start
     guard = 0
@@ -241,14 +298,10 @@ def _parse_odds_block(lines):
             continue
 
         low = s.lower()
-        if low in _ODDS_STOP_LABELS:
-            break
+        if low in _ODDS_STOP_LABELS: break
 
-        # If we see a known other bookmaker AND we already have valid prices, stop.
-        # If we don't have valid prices yet, we reset the current_book and keep going.
         if low in _OTHER_BOOKMAKERS:
-            if has_prices(current_book):
-                break
+            if has_prices(current_book): break
             else:
                 current_book = {}
                 i += 1
@@ -256,22 +309,15 @@ def _parse_odds_block(lines):
 
         if s in _MARKET_MAP:
             market = _MARKET_MAP[s]
-
-            # If we've already seen this market for the current bookmaker,
-            # and we don't have prices, it means we've moved to the next bookmaker
-            # but it wasn't caught by the name check.
             if market in current_book:
-                if has_prices(current_book):
-                    break
-                else:
-                    current_book = {}
+                if has_prices(current_book): break
+                else: current_book = {}
 
             nxt, j = _next_nonblank(lines, i + 1)
             if nxt is None:
                 i += 1
                 continue
 
-            # Skip dashes (no price captured for this market)
             if nxt in _DASHES:
                 i = j
                 continue
@@ -284,26 +330,18 @@ def _parse_odds_block(lines):
                 i = k
 
             if price and price not in _DASHES:
-                try:
-                    current_book[market] = float(price)
-                except (TypeError, ValueError):
-                    pass
+                try: current_book[market] = float(price)
+                except (TypeError, ValueError): pass
             continue
-
         i += 1
 
-    if has_prices(current_book):
-        return current_book
-
+    if has_prices(current_book): return current_book
     return {}
-
 
 def _market_favourite(odds):
     h, a = odds.get("1"), odds.get("2")
-    if h is None or a is None:
-        return None
-    if abs(h - a) < 0.05:
-        return "tie"
+    if h is None or a is None: return None
+    if abs(h - a) < 0.05: return "tie"
     return "home" if h < a else "away"
 
 
@@ -313,108 +351,86 @@ def _market_favourite(odds):
 
 NOT_BEATEN_MIN_GAP = 3
 
-
 def _classify_streaks(hw, aw, hu, au):
     def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
-        return {"category": category, "pick_team": pick, "bet": bet,
-                "qualifying": qualifying, "reason": reason, "rejection_code": code}
+        return {"category": category, "pick_team": pick, "bet": bet, "qualifying": qualifying, "reason": reason, "rejection_code": code}
 
     home_has, away_has = hw > 0, aw > 0
 
     if home_has and not away_has:
-        if hu >= 2 and au == 0:
-            return result("SOLID CLEAR", "home", "1X", 1,
-                          f"Home {hw}W/{hu}U vs Away {aw}W/{au}U — SOLID (opponent 0/0).")
-        if hu == hw:
-            return result("LIGHT CLEAR HOME", "home", "1X", 1,
-                          f"Home {hw}W/{hu}U (unbeaten = wins) vs Away {aw}W/{au}U — LIGHT-HOME.")
-        return result(reason=f"Home leader {hw}W/{hu}U but unbeaten != wins and SOLID not met.",
-                      code="HOME_LEADER_NO_PADDING")
+        if hu >= 2 and au == 0: return result("SOLID CLEAR", "home", "1X", 1, f"Home {hw}W/{hu}U vs Away {aw}W/{au}U — SOLID (opponent 0/0).")
+        if hu == hw: return result("LIGHT CLEAR HOME", "home", "1X", 1, f"Home {hw}W/{hu}U (unbeaten = wins) vs Away {aw}W/{au}U — LIGHT-HOME.")
+        return result(reason=f"Home leader {hw}W/{hu}U but unbeaten != wins and SOLID not met.", code="HOME_LEADER_NO_PADDING")
 
     if away_has and not home_has:
-        if au >= 2 and hu == 0:
-            return result("SOLID CLEAR", "away", "X2", 1,
-                          f"Away {aw}W/{au}U vs Home {hw}W/{hu}U — SOLID (opponent 0/0).")
-        return result(reason=f"Away leader {aw}W/{au}U — LIGHT-away removed; SOLID not met.",
-                      code="AWAY_LEADER_NO_SOLID")
+        if au >= 2 and hu == 0: return result("SOLID CLEAR", "away", "X2", 1, f"Away {aw}W/{au}U vs Home {hw}W/{hu}U — SOLID (opponent 0/0).")
+        return result(reason=f"Away leader {aw}W/{au}U — LIGHT-away removed; SOLID not met.", code="AWAY_LEADER_NO_SOLID")
 
     if not home_has and not away_has:
         gap = abs(hu - au)
-        if gap < NOT_BEATEN_MIN_GAP:
-            return result(reason=f"Both 0 wins, unbeaten gap {gap} < {NOT_BEATEN_MIN_GAP}.",
-                          code="NOT_BEATEN_GAP_LOW")
-        if hu > au:
-            return result("NOT-BEATEN SIGNAL", "home", "1X", 1,
-                          f"Both 0W; Home unbeaten {hu} vs Away {au} (gap {gap} >= {NOT_BEATEN_MIN_GAP}).")
-        return result("NOT-BEATEN SIGNAL", "away", "X2", 1,
-                      f"Both 0W; Away unbeaten {au} vs Home {hu} (gap {gap} >= {NOT_BEATEN_MIN_GAP}).")
+        if gap < NOT_BEATEN_MIN_GAP: return result(reason=f"Both 0 wins, unbeaten gap {gap} < {NOT_BEATEN_MIN_GAP}.", code="NOT_BEATEN_GAP_LOW")
+        if hu > au: return result("NOT-BEATEN SIGNAL", "home", "1X", 1, f"Both 0W; Home unbeaten {hu} vs Away {au} (gap {gap} >= {NOT_BEATEN_MIN_GAP}).")
+        return result("NOT-BEATEN SIGNAL", "away", "X2", 1, f"Both 0W; Away unbeaten {au} vs Home {hu} (gap {gap} >= {NOT_BEATEN_MIN_GAP}).")
 
-    return result(reason=f"Both teams have wins ({hw} vs {aw}) — outside the file.",
-                  code="BOTH_HAVE_WINS")
+    return result(reason=f"Both teams have wins ({hw} vs {aw}) — outside the file.", code="BOTH_HAVE_WINS")
 
 
-def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten,
-                    market_favourite=None):
-    hw = _to_int_or_none(home_wins)
-    aw = _to_int_or_none(away_wins)
-    hu = _to_int_or_none(home_unbeaten)
-    au = _to_int_or_none(away_unbeaten)
+def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten, market_favourite=None, home_elo=None, away_elo=None):
+    hw, aw, hu, au = _to_int_or_none(home_wins), _to_int_or_none(away_wins), _to_int_or_none(home_unbeaten), _to_int_or_none(away_unbeaten)
 
     def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
-        return {"category": category, "pick_team": pick, "bet": bet,
-                "qualifying": qualifying, "reason": reason, "rejection_code": code}
+        return {"category": category, "pick_team": pick, "bet": bet, "qualifying": qualifying, "reason": reason, "rejection_code": code}
 
     if None in (hw, aw, hu, au):
         return result(reason="Missing one or more streak inputs.", code="MISSING")
 
     streak = _classify_streaks(hw, aw, hu, au)
-    if not streak["qualifying"]:
-        return streak
+    if not streak["qualifying"]: return streak
 
     pick = streak["pick_team"]
 
+    # 1. ELO Veto
+    pick_elo = home_elo if pick == "home" else away_elo
+    if pick_elo is None:
+        return result(reason=f"{streak['reason']} [ELO unknown for pick side]", code="ELO_UNKNOWN")
+    if pick_elo < ELO_MINIMUM:
+        return result(reason=f"{streak['reason']} [ELO {pick_elo} < {ELO_MINIMUM}]", code="ELO_TOO_LOW")
+
+    # 2. Market Veto
     if market_favourite is None:
-        return result(reason=f"{streak['reason']} [no odds available]",
-                      code="MARKET_UNAVAILABLE")
+        return result(reason=f"{streak['reason']} [no odds available]", code="MARKET_UNAVAILABLE")
     if market_favourite == "tie":
         return streak
     if market_favourite != pick:
-        return result(
-            reason=f"{streak['reason']} [market favourite={market_favourite}, pick={pick}]",
-            code="MARKET_DISAGREES",
-        )
+        return result(reason=f"{streak['reason']} [market favourite={market_favourite}, pick={pick}]", code="MARKET_DISAGREES")
+
     return streak
 
 
 def compute_simple_row(facts: dict) -> dict:
     c = classify_simple(
-        facts.get("home_consecutive_wins"),
-        facts.get("away_consecutive_wins"),
-        facts.get("home_consecutive_unbeaten"),
-        facts.get("away_consecutive_unbeaten"),
+        facts.get("home_consecutive_wins"), facts.get("away_consecutive_wins"),
+        facts.get("home_consecutive_unbeaten"), facts.get("away_consecutive_unbeaten"),
         market_favourite=facts.get("market_favourite"),
+        home_elo=facts.get("home_elo"), away_elo=facts.get("away_elo")
     )
     return {
-        "simple_category":       c["category"],
-        "simple_pick_team":      c["pick_team"],
-        "simple_bet":            c["bet"],
-        "simple_qualifying":     c["qualifying"],
-        "simple_reason":         c["reason"],
-        "simple_rejection_code": c["rejection_code"],
-        "home_consecutive_wins":     _to_int_or_none(facts.get("home_consecutive_wins")),
-        "away_consecutive_wins":     _to_int_or_none(facts.get("away_consecutive_wins")),
+        "simple_category": c["category"], "simple_pick_team": c["pick_team"],
+        "simple_bet": c["bet"], "simple_qualifying": c["qualifying"],
+        "simple_reason": c["reason"], "simple_rejection_code": c["rejection_code"],
+        "home_consecutive_wins": _to_int_or_none(facts.get("home_consecutive_wins")),
+        "away_consecutive_wins": _to_int_or_none(facts.get("away_consecutive_wins")),
         "home_consecutive_unbeaten": _to_int_or_none(facts.get("home_consecutive_unbeaten")),
         "away_consecutive_unbeaten": _to_int_or_none(facts.get("away_consecutive_unbeaten")),
     }
 
-
 def settle_simple(simple_bet, home_score, away_score):
-    if home_score > away_score:     result = "home_win"
-    elif away_score > home_score:   result = "away_win"
-    else:                           result = "draw"
-    if simple_bet == "1X":   hit = result in ("home_win", "draw")
+    if home_score > away_score: result = "home_win"
+    elif away_score > home_score: result = "away_win"
+    else: result = "draw"
+    if simple_bet == "1X": hit = result in ("home_win", "draw")
     elif simple_bet == "X2": hit = result in ("away_win", "draw")
-    else:                    return result, None, 0.0
+    else: return result, None, 0.0
     profit = 1.0 if hit else -1.0
     return result, (1 if hit else 0), profit
 
@@ -427,173 +443,99 @@ _CONSEC_HEADER = re.compile(r"^Consecutive\s+(scoring|wins|unbeaten)\s*$", re.I)
 _RECORD_PAREN  = re.compile(r"\(Record\s+(\d+)\)", re.I)
 _SCORE_LINE    = re.compile(r"^\d+\s*-\s*\d+$")
 _FORM_RESULT   = re.compile(r"^[WDL]$")
-_VS_HEADER     = re.compile(
-    r"^(?:(?:pre|re|e)[-–— ]?match\s+|match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$",
-    re.I,
-)
+_VS_HEADER     = re.compile(r"^(?:(?:pre|re|e)[-–— ]?match\s+|match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", re.I)
 
 _ODDS_GLYPHS = "➜➔→➡•€$£"
-
-_STRUCTURAL_LABELS = {
-    "match information", "recent form", "general stats",
-    "pre-match odds", "h2h last matches", "odds", "advertisement",
-}
-
-_HEADER_JUNK_PREFIXES = (
-    "pre-match ", "pre match ", "pre–match ", "pre—match ",
-    "re-match ", "re match ", "re–match ", "re—match ",
-    "e-match ", "e match ", "e–match ", "e—match ",
-    "match ",
-)
-
-_STADIUM_KEYWORDS = (
-    "stadium", "arena", "park", "ground", "field",
-    "centre", "center", "stadion", "estadio", "estádio",
-    "stade", "stadio", "olympic", "olympique", "coliseum",
-    "sports complex", "sports centre", "sports center",
-)
-
+_STRUCTURAL_LABELS = {"match information", "recent form", "general stats", "pre-match odds", "h2h last matches", "odds", "advertisement"}
+_HEADER_JUNK_PREFIXES = ("pre-match ", "pre match ", "pre–match ", "re-match ", "re match ", "e-match ", "e match ", "match ")
+_STADIUM_KEYWORDS = ("stadium", "arena", "park", "ground", "field", "centre", "center", "stadion", "estadio", "estádio", "stade", "stadio", "olympic", "olympique", "coliseum", "sports complex")
 
 def _looks_like_text_dump(text: str) -> bool:
     low = text.lower()
-    if "pre-match" in low and " vs " in low:
-        return True
-    if "re-match" in low and " vs " in low:
-        return True
-    return "recent form" in low and "consecutive" in low
-
+    return ("pre-match" in low and " vs " in low) or ("re-match" in low and " vs " in low) or ("recent form" in low and "consecutive" in low)
 
 def _looks_like_odds_line(s: str) -> bool:
-    if any(sym in s for sym in _ODDS_GLYPHS):
-        return True
+    if any(sym in s for sym in _ODDS_GLYPHS): return True
     return len(re.findall(r"\b\d+\.\d+\b", s)) >= 2
-
 
 def _looks_like_person_name(s: str) -> bool:
     tokens = s.split()
-    if len(tokens) < 2 or len(tokens) > 4:
-        return False
+    if len(tokens) < 2 or len(tokens) > 4: return False
     for tok in tokens:
-        clean = (tok.replace("'", "").replace("’", "")
-                    .replace("-", "").replace(".", "").replace(" ", ""))
-        if not clean:
-            return False
-        if not clean[0].isupper():
-            return False
-        if not all(c.isalpha() for c in clean):
-            return False
+        clean = tok.replace("'", "").replace("’", "").replace("-", "").replace(".", "").replace(" ", "")
+        if not clean or not clean[0].isupper() or not all(c.isalpha() for c in clean): return False
     return True
-
 
 def _strip_header_prefix(name: str) -> str:
     low = name.lower()
     for marker in _HEADER_JUNK_PREFIXES:
-        if low.startswith(marker):
-            return name[len(marker):].strip()
+        if low.startswith(marker): return name[len(marker):].strip()
     return name
-
 
 def _teams_from_header(lines):
     for ln in lines:
         s = _clean_line(ln)
-        if not s:
-            continue
-        if s.lower() in _STRUCTURAL_LABELS:
-            continue
-        if _looks_like_odds_line(s):
-            continue
+        if not s or s.lower() in _STRUCTURAL_LABELS or _looks_like_odds_line(s): continue
         m = _VS_HEADER.match(s)
-        if not m:
-            continue
+        if not m: continue
         home = _strip_header_prefix(_clean_line(m.group(1)))
         away = _strip_header_prefix(_clean_line(m.group(2)))
-        if not home or not away:
-            continue
-        if home.isdigit() or away.isdigit():
-            continue
+        if not home or not away or home.isdigit() or away.isdigit(): continue
         return home, away
     return None, None
 
-
 def _parse_match_information(lines, f):
     for i, ln in enumerate(lines):
-        if _clean_line(ln).lower() != "match information":
-            continue
+        if _clean_line(ln).lower() != "match information": continue
         val, j = _next_nonblank(lines, i + 1)
-        if not val:
-            return
+        if not val: return
         entries = []
         while val and val.lower() != "recent form" and len(entries) < 5:
-            entries.append(val)
-            val, j = _next_nonblank(lines, j)
-
-        if not entries:
-            return
-
-        # Priority 1: stadium keyword
+            entries.append(val); val, j = _next_nonblank(lines, j)
+        if not entries: return
         for entry in entries:
-            low = entry.lower()
-            if any(kw in low for kw in _STADIUM_KEYWORDS):
-                f["venue"] = entry
-                return
-
-        # Priority 2: first entry that doesn't look like a person
-        if entries and not _looks_like_person_name(entries[0]):
+            if any(kw in entry.lower() for kw in _STADIUM_KEYWORDS):
+                f["venue"] = entry; return
+        if not _looks_like_person_name(entries[0]):
             f["venue"] = entries[0]
-            return
-
-        # Priority 3: no venue (all entries are person names)
         return
-
 
 def _teams_frequency_fallback(lines):
     try:
-        rf_idx = next(i for i, ln in enumerate(lines)
-                      if _clean_line(ln).lower() == "recent form")
-    except StopIteration:
-        return None, None
-
+        rf_idx = next(i for i, ln in enumerate(lines) if _clean_line(ln).lower() == "recent form")
+    except StopIteration: return None, None
     _, i = _next_nonblank(lines, rf_idx + 1)
     nxt, i = _next_nonblank(lines, i)
-    if nxt and not _FORM_RESULT.match(nxt):
-        nxt, i = _next_nonblank(lines, i)
-
+    if nxt and not _FORM_RESULT.match(nxt): nxt, i = _next_nonblank(lines, i)
     cur = nxt
     names = []
     while cur and _FORM_RESULT.match(cur):
         team, i = _next_nonblank(lines, i)
         score, i = _next_nonblank(lines, i)
-        if not team or not score or not _SCORE_LINE.match(score):
-            break
+        if not team or not score or not _SCORE_LINE.match(score): break
         names.append(team)
         cur, i = _next_nonblank(lines, i)
-        if not cur or not _FORM_RESULT.match(cur):
-            break
-
+        if not cur or not _FORM_RESULT.match(cur): break
     from collections import Counter
-    if not names:
-        return None, None
+    if not names: return None, None
     c = Counter(names)
-    if len(c) < 2:
-        return None, None
+    if len(c) < 2: return None, None
     top = [n for n, _ in c.most_common(2)]
     first_seen = {}
-    for idx, nm in enumerate(names):
-        first_seen.setdefault(nm, idx)
+    for idx, nm in enumerate(names): first_seen.setdefault(nm, idx)
     top.sort(key=lambda nm: first_seen[nm])
     return top[0], top[1]
 
-
 def parse_recent_form_dump(text: str) -> dict:
     f = {
-        "home_team": None, "away_team": None, "venue": None,
-        "league": None, "match_date": None, "kickoff_time": None, "country": None,
+        "home_team": None, "away_team": None, "venue": None, "league": None,
+        "match_date": None, "kickoff_time": None, "country": None,
         "home_consecutive_scoring": None, "away_consecutive_scoring": None,
-        "home_consecutive_wins": None,    "away_consecutive_wins": None,
+        "home_consecutive_wins": None, "away_consecutive_wins": None,
         "home_consecutive_unbeaten": None, "away_consecutive_unbeaten": None,
         "odds": {}, "market_favourite": None,
-        "recent_form_triplets": [],
-        "_parse_warnings": [],
+        "home_elo": None, "away_elo": None,
+        "recent_form_triplets": [], "_parse_warnings": [],
     }
     lines = _strip_lines(text)
     n = len(lines)
@@ -606,10 +548,10 @@ def parse_recent_form_dump(text: str) -> dict:
     else:
         h, a = _teams_frequency_fallback(lines)
         f["home_team"], f["away_team"] = h, a
-        if h and a:
-            f["_parse_warnings"].append(
-                "No 'Pre-match X vs Y' header — team order guessed from recent-form "
-                "frequency. Home/away may be swapped.")
+        if h and a: f["_parse_warnings"].append("No 'Pre-match X vs Y' header — team order guessed.")
+
+    f["home_elo"] = _lookup_elo(f["home_team"])
+    f["away_elo"] = _lookup_elo(f["away_team"])
 
     odds = _parse_odds_block(lines)
     f["odds"] = odds
@@ -617,61 +559,42 @@ def parse_recent_form_dump(text: str) -> dict:
 
     for i, ln in enumerate(lines):
         m = _CONSEC_HEADER.match(_clean_line(ln))
-        if not m:
-            continue
+        if not m: continue
         kind = m.group(1).lower()
         home_val, j = _next_nonblank(lines, i + 1)
-        if home_val is None:
-            continue
-        while j < n and _RECORD_PAREN.search(lines[j]):
-            j += 1
+        if home_val is None: continue
+        while j < n and _RECORD_PAREN.search(lines[j]): j += 1
         away_val, _ = _next_nonblank(lines, j)
-        hv = _to_int_or_none(home_val)
-        av = _to_int_or_none(away_val)
-        if kind == "scoring":
-            f["home_consecutive_scoring"], f["away_consecutive_scoring"] = hv, av
-        elif kind == "wins":
-            f["home_consecutive_wins"], f["away_consecutive_wins"] = hv, av
-        elif kind == "unbeaten":
-            f["home_consecutive_unbeaten"], f["away_consecutive_unbeaten"] = hv, av
+        hv, av = _to_int_or_none(home_val), _to_int_or_none(away_val)
+        if kind == "scoring": f["home_consecutive_scoring"], f["away_consecutive_scoring"] = hv, av
+        elif kind == "wins": f["home_consecutive_wins"], f["away_consecutive_wins"] = hv, av
+        elif kind == "unbeaten": f["home_consecutive_unbeaten"], f["away_consecutive_unbeaten"] = hv, av
 
     try:
-        rf_idx = next(i for i, ln in enumerate(lines)
-                      if _clean_line(ln).lower() == "recent form")
-    except StopIteration:
-        rf_idx = -1
+        rf_idx = next(i for i, ln in enumerate(lines) if _clean_line(ln).lower() == "recent form")
+    except StopIteration: rf_idx = -1
     if rf_idx >= 0:
         _, i = _next_nonblank(lines, rf_idx + 1)
         nxt, i = _next_nonblank(lines, i)
-        if nxt and not _FORM_RESULT.match(nxt):
-            nxt, i = _next_nonblank(lines, i)
+        if nxt and not _FORM_RESULT.match(nxt): nxt, i = _next_nonblank(lines, i)
         cur = nxt
         while cur and _FORM_RESULT.match(cur) and len(f["recent_form_triplets"]) < 20:
             team, i = _next_nonblank(lines, i)
             score, i = _next_nonblank(lines, i)
-            if not team or not score or not _SCORE_LINE.match(score):
-                break
-            f["recent_form_triplets"].append(
-                {"result": cur.upper(), "team": team, "score": score}
-            )
+            if not team or not score or not _SCORE_LINE.match(score): break
+            f["recent_form_triplets"].append({"result": cur.upper(), "team": team, "score": score})
             cur, i = _next_nonblank(lines, i)
-            if not cur or not _FORM_RESULT.match(cur):
-                break
+            if not cur or not _FORM_RESULT.match(cur): break
 
-    if not f["home_team"]:
-        f["_parse_warnings"].append("home_team not found in text dump")
-    if not f["away_team"]:
-        f["_parse_warnings"].append("away_team not found in text dump")
-    if f["market_favourite"] is None:
-        f["_parse_warnings"].append(
-            "Odds block missing or unparseable — streak-based picks will fall into "
-            "MARKET_UNAVAILABLE. Streak-based rejections are unaffected.")
+    if not f["home_team"]: f["_parse_warnings"].append("home_team not found")
+    if not f["away_team"]: f["_parse_warnings"].append("away_team not found")
+    if f["market_favourite"] is None: f["_parse_warnings"].append("Odds block missing or unparseable.")
 
     return f
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ROW BUILDER
+# ROW BUILDER & CARD RENDERER
 # ═══════════════════════════════════════════════════════════════════
 
 def build_row(facts: dict) -> dict:
@@ -680,78 +603,48 @@ def build_row(facts: dict) -> dict:
     odds = facts.get("odds", {})
 
     row = {
-        "home_team": facts.get("home_team"),
-        "away_team": facts.get("away_team"),
-        "venue":     facts.get("venue"),
-        "league":    facts.get("league"),
-        "match_date": facts.get("match_date"),
-        "kickoff_time": facts.get("kickoff_time"),
-        "country":   facts.get("country"),
-
-        "home_consecutive_wins":     simple["home_consecutive_wins"],
-        "away_consecutive_wins":     simple["away_consecutive_wins"],
-        "home_consecutive_unbeaten": simple["home_consecutive_unbeaten"],
-        "away_consecutive_unbeaten": simple["away_consecutive_unbeaten"],
-
-        "simple_category":       simple["simple_category"],
-        "simple_pick_team":      simple["simple_pick_team"],
-        "simple_bet":            simple["simple_bet"],
-        "simple_qualifying":     simple["simple_qualifying"],
-        "simple_reason":         simple["simple_reason"],
-        "simple_rejection_code": simple["simple_rejection_code"],
-
-        "odds_1": odds.get("1"),
-        "odds_x": odds.get("X"),
-        "odds_2": odds.get("2"),
+        "home_team": facts.get("home_team"), "away_team": facts.get("away_team"),
+        "venue": facts.get("venue"), "league": facts.get("league"),
+        "match_date": facts.get("match_date"), "kickoff_time": facts.get("kickoff_time"), "country": facts.get("country"),
+        "home_consecutive_wins": simple["home_consecutive_wins"], "away_consecutive_wins": simple["away_consecutive_wins"],
+        "home_consecutive_unbeaten": simple["home_consecutive_unbeaten"], "away_consecutive_unbeaten": simple["away_consecutive_unbeaten"],
+        "simple_category": simple["simple_category"], "simple_pick_team": simple["simple_pick_team"],
+        "simple_bet": simple["simple_bet"], "simple_qualifying": simple["simple_qualifying"],
+        "simple_reason": simple["simple_reason"], "simple_rejection_code": simple["simple_rejection_code"],
+        "odds_1": odds.get("1"), "odds_x": odds.get("X"), "odds_2": odds.get("2"),
         "market_favourite": facts.get("market_favourite"),
-
+        "home_elo": facts.get("home_elo"), "away_elo": facts.get("away_elo"),
         "extracted_at": now_iso,
     }
     return {k: v for k, v in row.items() if v is not None}
 
-
-# ═══════════════════════════════════════════════════════════════════
-# CARD RENDERER
-# ═══════════════════════════════════════════════════════════════════
-
 def _card_html(m: dict, settled: bool = False) -> str:
-    home = m.get("home_team") or "?"
-    away = m.get("away_team") or "?"
-    hs = m.get("home_score"); aws = m.get("away_score")
-    dc_hit = m.get("dc_hit")
-    profit = m.get("profit_loss") or 0.0
+    home, away = m.get("home_team") or "?", m.get("away_team") or "?"
+    hs, aws = m.get("home_score"), m.get("away_score")
+    dc_hit, profit = m.get("dc_hit"), m.get("profit_loss") or 0.0
 
-    cat   = m.get("simple_category")
-    bet   = m.get("simple_bet")
-    pick  = m.get("simple_pick_team")
-    hw    = m.get("home_consecutive_wins")
-    aw    = m.get("away_consecutive_wins")
-    hu    = m.get("home_consecutive_unbeaten")
-    au    = m.get("away_consecutive_unbeaten")
+    cat, bet, pick = m.get("simple_category"), m.get("simple_bet"), m.get("simple_pick_team")
+    hw, aw = m.get("home_consecutive_wins"), m.get("away_consecutive_wins")
+    hu, au = m.get("home_consecutive_unbeaten"), m.get("away_consecutive_unbeaten")
+    helo, aelo = m.get("home_elo"), m.get("away_elo")
 
-    cat_cls = {"SOLID CLEAR": "badge-solid",
-               "LIGHT CLEAR HOME": "badge-light",
-               "NOT-BEATEN SIGNAL": "badge-notbe"}.get(cat, "badge-nobet")
+    cat_cls = {"SOLID CLEAR": "badge-solid", "LIGHT CLEAR HOME": "badge-light", "NOT-BEATEN SIGNAL": "badge-notbe"}.get(cat, "badge-nobet")
     pick_lbl = "HOME" if pick == "home" else ("AWAY" if pick == "away" else "")
     card_cls = "pick-home" if pick == "home" else ("pick-away" if pick == "away" else "skip")
 
     meta_bits = [b for b in [m.get("league"), m.get("match_date"), m.get("venue")] if b]
     meta = " · ".join(meta_bits) if meta_bits else "—"
-
     title = f"{home} {hs}–{aws} {away}" if (settled and hs is not None) else f"{home} vs {away}"
 
     if settled and dc_hit is not None:
         vcls = "badge-win" if dc_hit == 1 else "badge-loss"
-        vlabel = "WIN" if dc_hit == 1 else "LOSS"
-        verdict_html = (f'<span class="pick-badge {vcls}" style="margin-left:8px">'
-                        f'{vlabel} · {profit:+.2f}u</span>')
+        verdict_html = f'<span class="pick-badge {vcls}" style="margin-left:8px">{"WIN" if dc_hit == 1 else "LOSS"} · {profit:+.2f}u</span>'
     else:
         verdict_html = ""
 
     badge_text = f"{cat} · {bet} {pick_lbl}" if cat else "NO BET"
 
-    o1 = m.get("odds_1"); ox = m.get("odds_x"); o2 = m.get("odds_2")
-    mf = m.get("market_favourite")
+    o1, ox, o2, mf = m.get("odds_1"), m.get("odds_x"), m.get("odds_2"), m.get("market_favourite")
     odds_row = ""
     if any(v is not None for v in (o1, ox, o2)):
         mf_lbl = {"home": "HOME", "away": "AWAY", "tie": "LEVEL"}.get(mf, "?")
@@ -760,7 +653,16 @@ def _card_html(m: dict, settled: bool = False) -> str:
             f'<span class="signal-pill odds">1: {o1 if o1 is not None else "—"}</span>'
             f'<span class="signal-pill odds">X: {ox if ox is not None else "—"}</span>'
             f'<span class="signal-pill odds">2: {o2 if o2 is not None else "—"}</span>'
-            f'<span class="signal-pill odds">Market fav: <b>{mf_lbl}</b></span>'
+            f'<span class="signal-pill odds">Mkt: <b>{mf_lbl}</b></span>'
+            '</div>'
+        )
+        
+    elo_row = ""
+    if helo or aelo:
+        elo_row = (
+            '<div class="signal-row">'
+            f'<span class="signal-pill elo">Home ELO: {helo or "?"}</span>'
+            f'<span class="signal-pill elo">Away ELO: {aelo or "?"}</span>'
             '</div>'
         )
 
@@ -773,6 +675,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
             <span class="signal-pill home">Home W/U: {hw} / {hu}</span>
             <span class="signal-pill away">Away W/U: {aw} / {au}</span>
         </div>
+        {elo_row}
         {odds_row}
     </div>
     """
@@ -786,27 +689,18 @@ tab_new, tab_pending, tab_perf, tab_study, tab_lab = st.tabs(
     ["➕ New Match", "⏳ Pending", "📊 Performance", "📚 Study", "🧪 Lab"]
 )
 
-
-# ─── TAB 1 — NEW MATCH ────────────────────────────────────────────
 with tab_new:
     st.markdown("### Paste the match data")
     st.caption("Include `Pre-match HOME vs AWAY` header and the `Pre-match odds` block.")
-
-    raw_in = st.text_area("Input", height=340, label_visibility="collapsed",
-                          placeholder="Pre-match Real Zaragoza vs Huesca\\n"
-                                      "Pre-match odds\\n1xBet\\n1\\n➜\\n1.63\\n...\\n"
-                                      "Match information\\n...")
+    raw_in = st.text_area("Input", height=340, label_visibility="collapsed", placeholder="Pre-match Real Zaragoza vs Huesca\n...")
     run = st.button("Run the Logic", type="primary")
 
     if run and raw_in.strip():
-        raw = raw_in.strip()
-        if not _looks_like_text_dump(raw):
-            st.error("Input must contain 'Pre-match X vs Y' or "
-                     "'Recent form' + 'Consecutive' sections.")
+        if not _looks_like_text_dump(raw_in):
+            st.error("Input must contain 'Pre-match X vs Y' or 'Recent form' + 'Consecutive' sections.")
             st.stop()
-
         try:
-            facts = parse_recent_form_dump(raw)
+            facts = parse_recent_form_dump(raw_in.strip())
             simple = compute_simple_row(facts)
         except Exception as e:
             st.error(f"Parse failed: {e}")
@@ -816,426 +710,155 @@ with tab_new:
         preview = {**facts, **simple}
         st.markdown(_card_html(preview, settled=False), unsafe_allow_html=True)
 
-        if simple["simple_qualifying"]:
-            st.success(simple["simple_reason"])
-        elif simple.get("home_consecutive_wins") is not None:
-            st.info(f"No bet [{simple['simple_rejection_code']}] — {simple['simple_reason']}")
-        else:
-            st.warning("Missing streak values — cannot classify.")
+        if simple["simple_qualifying"]: st.success(simple["simple_reason"])
+        elif simple.get("home_consecutive_wins") is not None: st.info(f"No bet [{simple['simple_rejection_code']}] — {simple['simple_reason']}")
+        else: st.warning("Missing streak values — cannot classify.")
 
         warnings = facts.get("_parse_warnings", [])
         if warnings:
             with st.expander(f"⚠ Parser warnings ({len(warnings)})"):
-                for w in warnings:
-                    st.write(f"- {w}")
+                for w in warnings: st.write(f"- {w}")
 
-        has_required = (
-            facts.get("home_team") and facts.get("away_team")
-            and simple.get("home_consecutive_wins") is not None
-            and simple.get("away_consecutive_wins") is not None
-            and simple.get("home_consecutive_unbeaten") is not None
-            and simple.get("away_consecutive_unbeaten") is not None
-        )
-
-        if not has_required:
-            st.warning("Missing required fields (team names or streaks) — not saved.")
+        has_required = facts.get("home_team") and facts.get("away_team") and simple.get("home_consecutive_wins") is not None
+        if not has_required: st.warning("Missing required fields — not saved.")
         else:
             row = build_row(facts)
-            try:
-                existing = db_find_existing(row)
-            except Exception as e:
-                existing = None
-                st.warning(f"Duplicate check failed: {e}")
-
-            if existing:
-                st.info(f"Already stored (match_id **{existing['match_id']}**, "
-                        f"qualifying={existing.get('simple_qualifying')}).")
+            existing = db_find_existing(row)
+            if existing: st.info(f"Already stored (match_id **{existing['match_id']}**, qualifying={existing.get('simple_qualifying')}).")
             else:
                 try:
                     db_insert(row)
-                    if simple["simple_qualifying"]:
-                        st.success("Saved to Pending.")
-                    else:
-                        st.success(f"Saved to Study ({simple['simple_rejection_code']}).")
-                except Exception as e:
-                    st.error(f"Insert failed: {e}")
+                    if simple["simple_qualifying"]: st.success("Saved to Pending.")
+                    else: st.success(f"Saved to Study ({simple['simple_rejection_code']}).")
+                except Exception as e: st.error(f"Insert failed: {e}")
 
-
-# ─── TAB 2 — PENDING ──────────────────────────────────────────────
 with tab_pending:
     st.markdown("### Pending matches")
-    st.caption("Qualifying bets awaiting settlement.")
-
-    try:
-        pending = db_pending()
-    except Exception as e:
-        st.error(f"Could not load pending: {e}")
-        pending = []
-
-    if not pending:
-        st.info("No pending matches.")
+    pending = db_pending()
+    if not pending: st.info("No pending matches.")
     else:
         for m in pending:
             st.markdown(_card_html(m, settled=False), unsafe_allow_html=True)
             with st.expander("Enter result"):
                 c1, c2, c3 = st.columns([1, 1, 2])
-                with c1:
-                    hs = st.number_input("Home", min_value=0, step=1, key=f"h_{m['match_id']}")
-                with c2:
-                    aws = st.number_input("Away", min_value=0, step=1, key=f"a_{m['match_id']}")
+                with c1: hs = st.number_input("Home", min_value=0, step=1, key=f"h_{m['match_id']}")
+                with c2: aws = st.number_input("Away", min_value=0, step=1, key=f"a_{m['match_id']}")
                 with c3:
                     st.write(""); st.write("")
                     if st.button("Settle", key=f"s_{m['match_id']}", type="primary"):
-                        result, dc_hit, profit = settle_simple(
-                            m.get("simple_bet") or "", int(hs), int(aws))
+                        result, dc_hit, profit = settle_simple(m.get("simple_bet") or "", int(hs), int(aws))
                         db_settle(m["match_id"], int(hs), int(aws), result, dc_hit, profit)
-                        st.success("Settled.")
-                        st.rerun()
+                        st.success("Settled."); st.rerun()
                 if st.button("Delete match", key=f"d_{m['match_id']}"):
-                    db_delete(m["match_id"])
-                    st.success("Deleted.")
-                    st.rerun()
+                    db_delete(m["match_id"]); st.success("Deleted."); st.rerun()
 
-
-# ─── TAB 3 — PERFORMANCE ──────────────────────────────────────────
 with tab_perf:
     st.markdown("### Performance")
-    st.caption("Qualifying bets only.")
-
-    try:
-        settled = db_settled()
-    except Exception as e:
-        st.error(f"Could not load: {e}")
-        settled = []
-
-    if not settled:
-        st.info("No settled matches yet.")
+    settled = db_settled()
+    if not settled: st.info("No settled matches yet.")
     else:
         bets = [m for m in settled if m.get("dc_hit") is not None]
         n = len(bets)
         wins = sum(1 for m in bets if m.get("dc_hit") == 1)
-        losses = n - wins
         net = sum((m.get("profit_loss") or 0.0) for m in bets)
-        hit = (wins / n * 100) if n else 0.0
-
+        
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Bets", n)
-        c2.metric("Wins", wins)
-        c3.metric("Losses", losses)
-        c4.metric("Hit %", f"{hit:.1f}%")
-        c5.metric("Net P/L", f"{net:+.2f}u")
+        c1.metric("Bets", n); c2.metric("Wins", wins); c3.metric("Losses", n - wins)
+        c4.metric("Hit %", f"{(wins / n * 100) if n else 0:.1f}%"); c5.metric("Net P/L", f"{net:+.2f}u")
 
         if bets:
-            st.markdown("### By category")
-            df = pd.DataFrame([
-                {"category": m.get("simple_category"),
-                 "bet": m.get("simple_bet"),
-                 "hit": int(m["dc_hit"]),
-                 "pl": float(m.get("profit_loss") or 0.0)}
-                for m in bets
-            ])
-            out = df.groupby(["category", "bet"]).agg(
-                n=("hit", "count"), wins=("hit", "sum"), net_pl=("pl", "sum")
-            ).reset_index()
-            out["losses"] = out["n"] - out["wins"]
+            df = pd.DataFrame([{"category": m.get("simple_category"), "bet": m.get("simple_bet"), "hit": int(m["dc_hit"]), "pl": float(m.get("profit_loss") or 0.0)} for m in bets])
+            out = df.groupby(["category", "bet"]).agg(n=("hit", "count"), wins=("hit", "sum"), net_pl=("pl", "sum")).reset_index()
             out["hit_pct"] = (out["wins"] / out["n"] * 100).round(1)
-            st.dataframe(out[["category", "bet", "n", "wins", "losses", "hit_pct", "net_pl"]],
-                         use_container_width=True, hide_index=True)
+            st.dataframe(out[["category", "bet", "n", "wins", "hit_pct", "net_pl"]], use_container_width=True, hide_index=True)
 
         st.markdown("### All settled")
-        for m in settled:
-            st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
+        for m in settled: st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
 
-
-# ─── TAB 4 — STUDY ────────────────────────────────────────────────
 with tab_study:
-    st.markdown("### 📚 Study — rejected matches with actual results")
-    st.caption("Raw data only. Now includes Market Alignment analysis.")
-
-    try:
-        study = db_study()
-    except Exception as e:
-        st.error(f"Could not load study rows: {e}")
-        study = []
-
-    if not study:
-        st.info("No study rows yet. Paste a no-bet match into New Match to populate.")
+    st.markdown("### 📚 Study — rejected matches")
+    study = db_study()
+    if not study: st.info("No study rows yet.")
     else:
         settled = [m for m in study if m.get("home_score") is not None]
         unsettled = [m for m in study if m.get("home_score") is None]
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Study rows", len(study))
-        c2.metric("Settled", len(settled))
-        c3.metric("Awaiting result", len(unsettled))
+        c1.metric("Study rows", len(study)); c2.metric("Settled", len(settled)); c3.metric("Pending result", len(unsettled))
 
         if settled:
-            # ── 1. Actual outcome counts ──
             st.markdown("### Actual outcome counts by rejection code")
-            rows = [{"rejection_code": m.get("simple_rejection_code") or "(none)",
-                     "result": m.get("result") or "(unknown)"} for m in settled]
+            rows = [{"rejection_code": m.get("simple_rejection_code") or "(none)", "result": m.get("result") or "(unknown)"} for m in settled]
             df = pd.DataFrame(rows)
-            pivot = (df.groupby(["rejection_code", "result"])
-                     .size().unstack(fill_value=0))
+            pivot = df.groupby(["rejection_code", "result"]).size().unstack(fill_value=0)
             for col in ("home_win", "draw", "away_win"):
-                if col not in pivot.columns:
-                    pivot[col] = 0
+                if col not in pivot.columns: pivot[col] = 0
             pivot = pivot[["home_win", "draw", "away_win"]]
             pivot["total"] = pivot.sum(axis=1)
-            pivot = pivot.reset_index().sort_values("total", ascending=False)
-            st.dataframe(pivot, use_container_width=True, hide_index=True)
+            st.dataframe(pivot.reset_index().sort_values("total", ascending=False), use_container_width=True, hide_index=True)
 
-            # ── 2. Market Alignment Analysis ──
-            st.markdown("### Market Alignment (Rejected Rows Only)")
-            st.caption(
-                "Did the market agree with the classifier's preferred side? "
-                "If the market agreed and the pick still hit, the filter was too strict. "
-                "If the market disagreed and the pick missed, the filter saved you."
-            )
-
-            align_rows = []
-            for m in settled:
-                code = m.get("simple_rejection_code")
-                if code == "MARKET_DISAGREES":
-                    continue
-
-                hw = m.get("home_consecutive_wins") or 0
-                aw = m.get("away_consecutive_wins") or 0
-                hu = m.get("home_consecutive_unbeaten") or 0
-                au = m.get("away_consecutive_unbeaten") or 0
-
-                implied_pick = None
-                if hw > 0 and aw == 0:
-                    implied_pick = "home"
-                elif aw > 0 and hw == 0:
-                    implied_pick = "away"
-                elif hw == 0 and aw == 0:
-                    if hu > au: implied_pick = "home"
-                    elif au > hu: implied_pick = "away"
-
-                mf = m.get("market_favourite")
-                agrees = "—"
-                if implied_pick and mf:
-                    agrees = "YES" if implied_pick == mf else "NO"
-                elif not implied_pick and mf:
-                    agrees = "(no pick)"
-
-                res = m.get("result")
-                implied_hit = "—"
-                if implied_pick == "home":
-                    implied_hit = "YES" if res in ("home_win", "draw") else "NO"
-                elif implied_pick == "away":
-                    implied_hit = "YES" if res in ("away_win", "draw") else "NO"
-
-                align_rows.append({
-                    "code": code,
-                    "implied_pick": implied_pick or "—",
-                    "market_fav": mf or "—",
-                    "market_agrees": agrees,
-                    "actual_result": res,
-                    "implied_pick_hit_dc": implied_hit,
-                })
-
-            if align_rows:
-                adf = pd.DataFrame(align_rows)
-                ag_summary = (adf.groupby(["code", "market_agrees", "implied_pick_hit_dc"])
-                              .size().reset_index(name="count"))
-                st.dataframe(ag_summary, use_container_width=True, hide_index=True)
-
-                with st.expander("Detail (Rejected Rows)"):
-                    st.dataframe(adf, use_container_width=True, hide_index=True)
-
-            # ── 3. NOT-BEATEN gap study ──
-            nb_rows = []
-            for m in settled:
-                if m.get("simple_rejection_code") != "NOT_BEATEN_GAP_LOW":
-                    continue
-                hu = m.get("home_consecutive_unbeaten") or 0
-                au = m.get("away_consecutive_unbeaten") or 0
-                higher = "home" if hu > au else ("away" if au > hu else "tie")
-                nb_rows.append({
-                    "home_team": m.get("home_team"),
-                    "away_team": m.get("away_team"),
-                    "home_u": hu, "away_u": au,
-                    "gap": abs(hu - au),
-                    "higher_unbeaten_side": higher,
-                    "market_fav": m.get("market_favourite") or "—",
-                    "result": m.get("result"),
-                })
-            if nb_rows:
-                st.markdown("### NOT-BEATEN gap vs actual outcome")
-                st.dataframe(pd.DataFrame(nb_rows), use_container_width=True, hide_index=True)
-
-            # ── 4. MARKET_DISAGREES study ──
-            mkt = [m for m in settled if m.get("simple_rejection_code") == "MARKET_DISAGREES"]
-            if mkt:
-                st.markdown("### MARKET_DISAGREES — classifier pick vs market favourite")
-                mkt_rows = []
-                for m in mkt:
-                    pick = m.get("simple_pick_team")
-                    pick_odds = m.get("odds_1") if pick == "home" else m.get("odds_2")
-                    pick_was_right = (
-                        (pick == "home" and m.get("result") in ("home_win", "draw"))
-                        or (pick == "away" and m.get("result") in ("away_win", "draw"))
-                    )
-                    mkt_rows.append({
-                        "home_team": m.get("home_team"),
-                        "away_team": m.get("away_team"),
-                        "classifier_pick": pick,
-                        "market_favourite": m.get("market_favourite"),
-                        "pick_odds": pick_odds,
-                        "result": m.get("result"),
-                        "score": f"{m.get('home_score')}–{m.get('away_score')}",
-                        "classifier_was_right": "YES" if pick_was_right else "NO",
-                    })
-                st.dataframe(pd.DataFrame(mkt_rows), use_container_width=True, hide_index=True)
-
-        # ── Individual Rows (Split) ──
         st.markdown("### Rows")
         all_codes = sorted({m.get("simple_rejection_code") or "(none)" for m in study})
-        selected = st.multiselect("Filter by rejection code", all_codes,
-                                   default=all_codes, key="study_filter")
+        selected = st.multiselect("Filter by rejection code", all_codes, default=all_codes, key="study_filter")
 
-        filtered_study = [m for m in study
-                          if (m.get("simple_rejection_code") or "(none)") in selected]
-
+        filtered_study = [m for m in study if (m.get("simple_rejection_code") or "(none)") in selected]
         pending_rows = [m for m in filtered_study if m.get("home_score") is None]
         settled_rows = [m for m in filtered_study if m.get("home_score") is not None]
 
-        # ⏳ Awaiting Result
         st.markdown(f"#### ⏳ Awaiting Result ({len(pending_rows)})")
-        if not pending_rows:
-            st.caption("None pending with the current filter.")
+        if not pending_rows: st.caption("None pending with the current filter.")
         else:
             for m in pending_rows:
                 st.markdown(_card_html(m, settled=False), unsafe_allow_html=True)
                 with st.expander("Enter final score"):
                     c1, c2, c3 = st.columns([1, 1, 2])
-                    with c1:
-                        hs = st.number_input("Home", min_value=0, step=1,
-                                              key=f"sh_{m['match_id']}")
-                    with c2:
-                        aws = st.number_input("Away", min_value=0, step=1,
-                                               key=f"sa_{m['match_id']}")
+                    with c1: hs = st.number_input("Home", min_value=0, step=1, key=f"sh_{m['match_id']}")
+                    with c2: aws = st.number_input("Away", min_value=0, step=1, key=f"sa_{m['match_id']}")
                     with c3:
                         st.write(""); st.write("")
-                        if st.button("Save result", key=f"ss_{m['match_id']}",
-                                     type="primary"):
-                            if hs > aws:     result = "home_win"
-                            elif aws > hs:   result = "away_win"
-                            else:            result = "draw"
+                        if st.button("Save result", key=f"ss_{m['match_id']}", type="primary"):
+                            if hs > aws: result = "home_win"
+                            elif aws > hs: result = "away_win"
+                            else: result = "draw"
                             db_settle(m["match_id"], int(hs), int(aws), result, None, None)
-                            st.success("Result saved.")
-                            st.rerun()
+                            st.success("Result saved."); st.rerun()
 
-        # ✅ Settled
         st.markdown(f"#### ✅ Settled ({len(settled_rows)})")
-        if not settled_rows:
-            st.caption("None settled with the current filter.")
+        if not settled_rows: st.caption("None settled with the current filter.")
         else:
             for m in settled_rows:
                 st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
-                result_lbl = {"home_win": "Home win",
-                              "away_win": "Away win",
-                              "draw": "Draw"}.get(m.get("result"),
-                                                   m.get("result") or "—")
-                st.caption(f"Final: **{m['home_score']}–{m['away_score']}** · {result_lbl}")
+                st.caption(f"Final: **{m['home_score']}–{m['away_score']}**")
                 with st.expander("Correct result"):
                     c1, c2, c3 = st.columns([1, 1, 2])
-                    with c1:
-                        hs = st.number_input("Home", min_value=0, step=1,
-                                              value=int(m["home_score"]),
-                                              key=f"ch_{m['match_id']}")
-                    with c2:
-                        aws = st.number_input("Away", min_value=0, step=1,
-                                               value=int(m["away_score"]),
-                                               key=f"ca_{m['match_id']}")
+                    with c1: hs = st.number_input("Home", min_value=0, step=1, value=int(m["home_score"]), key=f"ch_{m['match_id']}")
+                    with c2: aws = st.number_input("Away", min_value=0, step=1, value=int(m["away_score"]), key=f"ca_{m['match_id']}")
                     with c3:
                         st.write(""); st.write("")
                         if st.button("Update", key=f"cu_{m['match_id']}"):
-                            if hs > aws:     result = "home_win"
-                            elif aws > hs:   result = "away_win"
-                            else:            result = "draw"
+                            if hs > aws: result = "home_win"
+                            elif aws > hs: result = "away_win"
+                            else: result = "draw"
                             db_settle(m["match_id"], int(hs), int(aws), result, None, None)
-                            st.success("Updated.")
-                            st.rerun()
+                            st.success("Updated."); st.rerun()
 
-        with st.expander("Manage rows"):
-            ids = st.multiselect("Select match_id to delete",
-                                 [m["match_id"] for m in study])
-            if ids and st.button("Delete selected"):
-                for mid in ids:
-                    db_delete(mid)
-                st.success(f"Deleted {len(ids)}.")
-                st.rerun()
-
-
-# ─── TAB 5 — LAB ──────────────────────────────────────────────────
 with tab_lab:
     st.markdown("### 🧪 Lab")
-    st.caption("Parse a dump without saving. Includes a debug panel for the odds block.")
-
-    text_in = st.text_area("Text dump", height=340, label_visibility="collapsed",
-                           key="lab_input")
-
+    text_in = st.text_area("Text dump", height=340, label_visibility="collapsed", key="lab_input")
     if text_in.strip():
-        if not _looks_like_text_dump(text_in):
-            st.error("Input must contain 'Pre-match X vs Y' or "
-                     "'Recent form' + 'Consecutive' sections.")
-            st.stop()
         try:
             facts = parse_recent_form_dump(text_in)
             simple = compute_simple_row(facts)
+            cA, cB, cC, cD = st.columns(4)
+            cA.metric("Home W / U", f"{simple.get('home_consecutive_wins')} / {simple.get('home_consecutive_unbeaten')}")
+            cB.metric("Away W / U", f"{simple.get('away_consecutive_wins')} / {simple.get('away_consecutive_unbeaten')}")
+            cC.metric("Category", simple.get("simple_category") or "—")
+            cD.metric("Bet", simple.get("simple_bet") or "—")
+            
+            if simple["simple_qualifying"]: st.success(simple.get("simple_reason") or "")
+            else: st.info(f"No bet [{simple.get('simple_rejection_code')}] — {simple.get('simple_reason')}")
+
+            with st.expander("Parsed fields"):
+                st.json({k: v for k, v in facts.items() if v not in (None, [], {}, "") and k != "recent_form_triplets"})
         except Exception as e:
             st.error(f"Parse failed: {e}")
-            st.stop()
-
-        cA, cB, cC, cD = st.columns(4)
-        cA.metric("Home W / U",
-                  f"{simple.get('home_consecutive_wins')} / {simple.get('home_consecutive_unbeaten')}")
-        cB.metric("Away W / U",
-                  f"{simple.get('away_consecutive_wins')} / {simple.get('away_consecutive_unbeaten')}")
-        cC.metric("Category", simple.get("simple_category") or "—")
-        cD.metric("Bet", simple.get("simple_bet") or "—")
-
-        if simple["simple_qualifying"]:
-            st.success(simple.get("simple_reason") or "")
-        else:
-            st.info(f"No bet [{simple.get('simple_rejection_code')}] — "
-                    f"{simple.get('simple_reason')}")
-
-        odds = facts.get("odds", {})
-        if odds:
-            st.markdown(f"**Parsed odds (first available bookmaker):**  "
-                        f"1 = {odds.get('1')} · X = {odds.get('X')} · 2 = {odds.get('2')}  ·  "
-                        f"Market favourite = **{facts.get('market_favourite')}**")
-        else:
-            st.warning("No odds block parsed. Market check will not run.")
-
-        st.markdown("### 🔍 Debug odds")
-        if st.button("Show what the parser sees", key="dbg_odds"):
-            dbg = _strip_lines(text_in)
-            hits = [(i, _clean_line(l)) for i, l in enumerate(dbg)
-                    if "odds" in _clean_line(l).lower()]
-            if not hits:
-                st.error("No line in this paste contains 'odds'.")
-            else:
-                st.write("**Lines containing 'odds':**")
-                st.code("\n".join(f"{i:03d}: {repr(s)}" for i, s in hits),
-                        language=None)
-            for i, s in hits:
-                if s.lower() == "pre-match odds":
-                    st.write(f"**15 lines after index {i}:**")
-                    block = dbg[i+1:i+16]
-                    st.code("\n".join(f"{i+1+j:03d}: {repr(_clean_line(x))}"
-                                       for j, x in enumerate(block)), language=None)
-                    break
-
-        with st.expander("Parsed fields"):
-            st.json({k: v for k, v in facts.items()
-                     if v not in (None, [], {}, "") and k != "recent_form_triplets"})
-
-        if facts.get("recent_form_triplets"):
-            with st.expander("Recent form (raw, source order)"):
-                st.dataframe(pd.DataFrame(facts["recent_form_triplets"]),
-                             use_container_width=True, hide_index=True)
