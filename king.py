@@ -10,9 +10,11 @@ Classifier: 2 stats — consecutive wins + consecutive unbeaten.
 Market veto: pick survives only if moneyline favourite == pick side.
   Otherwise rejected as MARKET_DISAGREES, kept in Study.
 
-Study tab analysis now includes Market Alignment:
-  For every rejection, it checks what the classifier *wanted* to bet,
-  what the market *wanted* to bet, and what actually happened.
+Odds parser: reads the first bookmaker that actually has valid prices.
+  If a bookmaker shows dashes ("-") for prices, it is skipped and the
+  parser moves to the next bookmaker.
+
+Study tab analysis now includes Market Alignment.
 """
 
 import re
@@ -188,11 +190,12 @@ def _next_nonblank(lines, start):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ODDS PARSER
+# ODDS PARSER (Resilient — skips empty bookmakers)
 # ═══════════════════════════════════════════════════════════════════
 
 _ARROWS = {"➜", "➔", "→", "->", "=>", ">", "➡", "⬈", "⬊"}
 _MARKET_MAP = {"1": "1", "X": "X", "x": "X", "2": "2", "×": "X", "✕": "X"}
+_DASHES = {"-", "–", "—", "N/A", "n/a"}
 
 _ODDS_STOP_LABELS = {
     "general stats", "match information", "recent form",
@@ -223,6 +226,11 @@ def _parse_odds_block(lines):
         return {}
 
     out = {}
+    current_book = {}
+
+    def has_prices(d):
+        return d.get("1") is not None or d.get("X") is not None or d.get("2") is not None
+
     i = start
     guard = 0
     while i < len(lines) and guard < 200:
@@ -235,33 +243,59 @@ def _parse_odds_block(lines):
         low = s.lower()
         if low in _ODDS_STOP_LABELS:
             break
-        if out and low in _OTHER_BOOKMAKERS:
-            break
+
+        # If we see a known other bookmaker AND we already have valid prices, stop.
+        # If we don't have valid prices yet, we reset the current_book and keep going.
+        if low in _OTHER_BOOKMAKERS:
+            if has_prices(current_book):
+                break
+            else:
+                current_book = {}
+                i += 1
+                continue
 
         if s in _MARKET_MAP:
             market = _MARKET_MAP[s]
-            if market in out:
-                break
+
+            # If we've already seen this market for the current bookmaker,
+            # and we don't have prices, it means we've moved to the next bookmaker
+            # but it wasn't caught by the name check.
+            if market in current_book:
+                if has_prices(current_book):
+                    break
+                else:
+                    current_book = {}
+
             nxt, j = _next_nonblank(lines, i + 1)
             if nxt is None:
                 i += 1
                 continue
+
+            # Skip dashes (no price captured for this market)
+            if nxt in _DASHES:
+                i = j
+                continue
+
             if nxt in _ARROWS:
                 price, k = _next_nonblank(lines, j)
                 i = k
             else:
                 price, k = nxt, j
                 i = k
-            if price:
+
+            if price and price not in _DASHES:
                 try:
-                    out[market] = float(price)
+                    current_book[market] = float(price)
                 except (TypeError, ValueError):
                     pass
             continue
 
         i += 1
 
-    return out
+    if has_prices(current_book):
+        return current_book
+
+    return {}
 
 
 def _market_favourite(odds):
@@ -1172,7 +1206,7 @@ with tab_lab:
 
         odds = facts.get("odds", {})
         if odds:
-            st.markdown(f"**Parsed odds (first bookmaker):**  "
+            st.markdown(f"**Parsed odds (first available bookmaker):**  "
                         f"1 = {odds.get('1')} · X = {odds.get('X')} · 2 = {odds.get('2')}  ·  "
                         f"Market favourite = **{facts.get('market_favourite')}**")
         else:
