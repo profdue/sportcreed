@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-king.py — The Logic (text-dump only, header-driven, market veto, hardcoded ELO filter)
+king.py — The Logic (text-dump only, header-driven, market veto, ELO soft warning)
 
 Classifier: 2 stats — consecutive wins + consecutive unbeaten.
-Vetoes:
-  1. ELO veto (pick side must have ELO >= 1650)
-  2. Market veto (pick side must be the moneyline favourite)
+Filters:
+  - Market veto (hard): pick side must be the moneyline favourite
+  - ELO check (soft): if pick ELO < 1650 or unknown, warn but do not reject
 """
 
 import re
@@ -56,6 +56,12 @@ st.markdown("""
     .signal-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
     .signal-pill.odds { background: #6366f115; color: #a5b4fc; border-color: #6366f140; }
     .signal-pill.elo  { background: #a855f715; color: #c084fc; border-color: #a855f740; }
+    .elo-warning {
+        background: #ef444422; color: #fca5a5;
+        padding: 8px 12px; border-radius: 8px; margin-top: 10px;
+        font-size: 0.85rem; font-weight: 600;
+        border: 1px solid #ef444455;
+    }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
         height: 44px; background-color: #1a1f2e; border-radius: 10px;
@@ -162,24 +168,45 @@ ELO_DB = {
     "kashiwa reysol": 1657, "al hilal": 1745, "al-hilal": 1745, 
     "al hilal sfc": 1745, "al nassr": 1701, "al-nassr": 1701, 
     "al ahli sfc": 1645, "al-ahli": 1645, "al ahly": 1604, "pyramids": 1601,
-    "mamelodi sundown": 1621, "mamelodi sundowns": 1621, "ES Tunis": 1555,
+    "mamelodi sundown": 1621, "mamelodi sundowns": 1621,
     
     # Greece/Cyprus
     "olympiakos": 1747, "olympiacos": 1747, "aek": 1695, "panathinaikos": 1679,
     "paok": 1658, "omonia": 1632, "larnaca": 1598, "paphos": 1576
 }
 
+def _normalize_team_name(name: str) -> str:
+    if not name:
+        return ""
+    name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8').lower()
+    name = re.sub(r'[^a-z0-9 ]', '', name).strip()
+    return name
+
 def _lookup_elo(team_name):
+    """
+    Exact match first, then word-boundary match.
+    Fixes the bug where 'Mozambique' fuzzy-matched 'Club Brugge'.
+    """
     if not team_name:
         return None
-    # Normalize: lower, strip accents, remove punctuation
-    name = unicodedata.normalize('NFKD', team_name).encode('ASCII', 'ignore').decode('utf-8').lower()
-    name = re.sub(r'[^a-z0-9 ]', '', name).strip()
-    
-    if name in ELO_DB: return ELO_DB[name]
+    name = _normalize_team_name(team_name)
+    if not name:
+        return None
+
+    # Exact match
+    if name in ELO_DB:
+        return ELO_DB[name]
+
+    # Word-boundary match: the DB key must appear as a whole word in the team name
+    # (or vice versa), not just as a substring.
+    name_words = set(name.split())
     for k, v in ELO_DB.items():
-        if k in name or name in k:
+        k_words = set(k.split())
+        # Any shared word of length >= 4 is a strong signal
+        shared = {w for w in name_words & k_words if len(w) >= 4}
+        if shared:
             return v
+
     return None
 
 
@@ -343,7 +370,7 @@ def _market_favourite(odds):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CLASSIFIER
+# CLASSIFIER — ELO IS NOW A WARNING, NOT A VETO
 # ═══════════════════════════════════════════════════════════════════
 
 NOT_BEATEN_MIN_GAP = 3
@@ -372,7 +399,8 @@ def _classify_streaks(hw, aw, hu, au):
     return result(reason=f"Both teams have wins ({hw} vs {aw}) — outside the file.", code="BOTH_HAVE_WINS")
 
 
-def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten, market_favourite=None, home_elo=None, away_elo=None):
+def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten,
+                    market_favourite=None, home_elo=None, away_elo=None):
     hw, aw, hu, au = _to_int_or_none(home_wins), _to_int_or_none(away_wins), _to_int_or_none(home_unbeaten), _to_int_or_none(away_unbeaten)
 
     def result(category=None, pick=None, bet=None, qualifying=0, reason="", code=None):
@@ -386,22 +414,25 @@ def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten, market_f
 
     pick = streak["pick_team"]
 
-    # 1. ELO Veto
+    # ── ELO CHECK (SOFT WARNING) ──
+    # We do NOT reject here. We append a warning to the reason string.
     pick_elo = home_elo if pick == "home" else away_elo
+    elo_warning = ""
     if pick_elo is None:
-        return result(reason=f"{streak['reason']} [ELO unknown for pick side]", code="ELO_UNKNOWN")
-    if pick_elo < ELO_MINIMUM:
-        return result(reason=f"{streak['reason']} [ELO {pick_elo} < {ELO_MINIMUM}]", code="ELO_TOO_LOW")
+        elo_warning = " | ⚠️ ELO UNKNOWN"
+    elif pick_elo < ELO_MINIMUM:
+        elo_warning = f" | ⚠️ ELO {pick_elo} < {ELO_MINIMUM}"
 
-    # 2. Market Veto
+    # ── MARKET CHECK (HARD VETO) ──
     if market_favourite is None:
-        return result(reason=f"{streak['reason']} [no odds available]", code="MARKET_UNAVAILABLE")
-    if market_favourite == "tie":
-        return streak
-    if market_favourite != pick:
-        return result(reason=f"{streak['reason']} [market favourite={market_favourite}, pick={pick}]", code="MARKET_DISAGREES")
+        return result(reason=f"{streak['reason']}{elo_warning} [no odds available]", code="MARKET_UNAVAILABLE")
+    if market_favourite != "tie" and market_favourite != pick:
+        return result(reason=f"{streak['reason']}{elo_warning} [market favourite={market_favourite}, pick={pick}]", code="MARKET_DISAGREES")
 
-    return streak
+    # Qualified. Attach the ELO warning to the reason.
+    qualified = dict(streak)
+    qualified["reason"] = f"{streak['reason']}{elo_warning}"
+    return qualified
 
 
 def compute_simple_row(facts: dict) -> dict:
@@ -615,6 +646,32 @@ def build_row(facts: dict) -> dict:
     }
     return {k: v for k, v in row.items() if v is not None}
 
+
+def _compute_elo_warning_from_row(m: dict) -> str:
+    """
+    Compute the ELO warning on the fly for rows loaded from the DB.
+    This makes old rows (which may have been saved before the soft warning
+    logic existed) show the warning even though their `simple_reason` does not
+    contain the string "ELO".
+    """
+    pick = m.get("simple_pick_team")
+    if pick == "home":
+        pick_elo = m.get("home_elo")
+    elif pick == "away":
+        pick_elo = m.get("away_elo")
+    else:
+        return ""
+
+    if pick_elo is None:
+        return "⚠️ ELO UNKNOWN"
+    try:
+        if float(pick_elo) < ELO_MINIMUM:
+            return f"⚠️ ELO {int(pick_elo)} < {ELO_MINIMUM}"
+    except (TypeError, ValueError):
+        return "⚠️ ELO UNKNOWN"
+    return ""
+
+
 def _card_html(m: dict, settled: bool = False) -> str:
     home, away = m.get("home_team") or "?", m.get("away_team") or "?"
     hs, aws = m.get("home_score"), m.get("away_score")
@@ -641,6 +698,15 @@ def _card_html(m: dict, settled: bool = False) -> str:
 
     badge_text = f"{cat} · {bet} {pick_lbl}" if cat else "NO BET"
 
+    # ELO warning banner — computed on the fly from the row's ELO columns,
+    # so it appears on both new and existing DB rows regardless of what's
+    # in the reason string.
+    elo_warning_html = ""
+    if cat:  # only for actual picks
+        warn_text = _compute_elo_warning_from_row(m)
+        if warn_text:
+            elo_warning_html = f'<div class="elo-warning">{warn_text}</div>'
+
     o1, ox, o2, mf = m.get("odds_1"), m.get("odds_x"), m.get("odds_2"), m.get("market_favourite")
     odds_row = ""
     if any(v is not None for v in (o1, ox, o2)):
@@ -663,12 +729,12 @@ def _card_html(m: dict, settled: bool = False) -> str:
             '</div>'
         )
 
-    # The critical fix: strip all newlines and extra spaces from the HTML string
     html = f"""
     <div class="match-card {card_cls}">
         <div class="match-title">{title}</div>
         <div class="match-meta">{meta}</div>
         <span class="pick-badge {cat_cls}">{badge_text}</span>{verdict_html}
+        {elo_warning_html}
         <div class="signal-row">
             <span class="signal-pill home">Home W/U: {hw} / {hu}</span>
             <span class="signal-pill away">Away W/U: {aw} / {au}</span>
