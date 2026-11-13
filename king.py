@@ -9,6 +9,7 @@ Vetoes:
 """
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -172,14 +173,10 @@ def _lookup_elo(team_name):
     if not team_name:
         return None
     # Normalize: lower, strip accents, remove punctuation
-    import unicodedata
     name = unicodedata.normalize('NFKD', team_name).encode('ASCII', 'ignore').decode('utf-8').lower()
     name = re.sub(r'[^a-z0-9 ]', '', name).strip()
     
-    # Try direct match
     if name in ELO_DB: return ELO_DB[name]
-    
-    # Try finding the key inside the name (e.g., "Bayern München" -> "bayern")
     for k, v in ELO_DB.items():
         if k in name or name in k:
             return v
