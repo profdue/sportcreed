@@ -79,7 +79,7 @@ st.markdown("""
 ELO_MINIMUM = 1650
 
 ELO_DB = {
-    # England
+    # England Clubs
     "arsenal": 2047, "man city": 2002, "manchester city": 2002, "liverpool": 1937,
     "brighton": 1910, "aston villa": 1899, "bournemouth": 1892, "chelsea": 1885,
     "newcastle": 1853, "man united": 1851, "manchester united": 1851, 
@@ -89,7 +89,7 @@ ELO_DB = {
     "west ham": 1748, "wolves": 1716, "southampton": 1709, "coventry": 1701, 
     "ipswich": 1698, "hull": 1640, "middlesbrough": 1663, "birmingham": 1655,
     
-    # Spain
+    # Spain Clubs
     "barcelona": 2033, "real madrid": 2001, "atletico": 1910, "atletico madrid": 1910,
     "betis": 1829, "real sociedad": 1790, "villarreal": 1789, "athletic club": 1768,
     "athletic bilbao": 1768, "celta": 1738, "valencia": 1736, "rayo vallecano": 1736,
@@ -98,14 +98,14 @@ ELO_DB = {
     "castellon": 1708, "eibar": 1677, "burgos": 1665, "las palmas": 1659,
     "oviedo": 1648, "granada": 1640,
 
-    # Italy
+    # Italy Clubs
     "internazionale": 1949, "inter": 1949, "roma": 1865, "como": 1838, 
     "juventus": 1830, "milan": 1820, "napoli": 1818, "lazio": 1808, 
     "atalanta": 1777, "bologna": 1775, "fiorentina": 1717, "frosinone": 1701,
     "torino": 1686, "genoa": 1682, "sassuolo": 1666, "udinese": 1659, 
     "cagliari": 1659, "parma": 1645, "venezia": 1645, "palermo": 1662,
     
-    # Germany
+    # Germany Clubs
     "bayern munchen": 2046, "bayern munich": 2046, "bayern": 2046,
     "dortmund": 1899, "b. dortmund": 1899, "leverkusen": 1859, 
     "rb leipzig": 1832, "stuttgart": 1819, "freiburg": 1793, "hoffenheim": 1739,
@@ -113,34 +113,34 @@ ELO_DB = {
     "augsburg": 1704, "hamburg": 1683, "elversberg": 1681, "union berlin": 1679,
     "paderborn": 1676, "gladbach": 1663, "koln": 1651,
     
-    # France
+    # France Clubs
     "paris sg": 1989, "psg": 1989, "monaco": 1790, "lyon": 1784, 
     "lille": 1780, "marseille": 1780, "lens": 1779, "rennes": 1745,
     "strasbourg": 1720, "paris fc": 1716, "toulouse": 1697, "brest": 1695,
     "lorient": 1695, "nice": 1692,
     
-    # Portugal
+    # Portugal Clubs
     "benfica": 1870, "sporting": 1863, "sporting cp": 1863, "porto": 1843, 
     "braga": 1710,
     
-    # Netherlands
+    # Netherlands Clubs
     "psv": 1782, "ajax": 1716, "feyenoord": 1716, "twente": 1689, "az": 1681,
     
-    # Belgium
+    # Belgium Clubs
     "brugge": 1839, "club brugge": 1839, "st gillis": 1826, "union sg": 1826,
     
-    # Scotland
+    # Scotland Clubs
     "celtic": 1725, "rangers": 1710, 
 
-    # Russia
+    # Russia Clubs
     "zenit": 1824, "spartak moskva": 1738, "fc krasnodar": 1736, 
     "dynamo moskva": 1702, "cska moskva": 1695,
     
-    # Turkey
+    # Turkey Clubs
     "galatasaray": 1824, "fenerbahce": 1779, "amed sk": 1710, "besiktas": 1705, 
     "trabzonspor": 1700,
     
-    # South America
+    # South America Clubs
     "flamengo": 1883, "palmeiras": 1862, "cruzeiro": 1786, "fluminense": 1769,
     "bahia": 1728, "santos": 1727, "mirassol": 1718, "vasco da gama": 1717,
     "sao paulo": 1715, "ath paranaense": 1714, "corinthians": 1713,
@@ -157,22 +157,57 @@ ELO_DB = {
     "coquimbo": 1656, "penarol": 1626, "nacional potosi": 1488, "bolivar": 1696,
     "always ready": 1626, "the strongest": 1606,
     
-    # North/Central America
+    # North/Central America Clubs
     "cruz azul": 1734, "toluca": 1720, "america": 1707, "guadalajara": 1683,
     "pachuca": 1658, "uanl": 1653, "tigres uanl": 1653, "monterrey": 1636,
     "nashville": 1703, "inter miami": 1679, "vancouver": 1668, "philadelphia": 1650,
     "lafc": 1644, "los angeles fc": 1644,
     
-    # Asia/Africa
+    # Asia/Africa Clubs
     "vissel kobe": 1688, "sanfrecce hirosh": 1687, "fc tokyo": 1664, 
     "kashiwa reysol": 1657, "al hilal": 1745, "al-hilal": 1745, 
     "al hilal sfc": 1745, "al nassr": 1701, "al-nassr": 1701, 
     "al ahli sfc": 1645, "al-ahli": 1645, "al ahly": 1604, "pyramids": 1601,
     "mamelodi sundown": 1621, "mamelodi sundowns": 1621,
     
-    # Greece/Cyprus
+    # Greece/Cyprus Clubs
     "olympiakos": 1747, "olympiacos": 1747, "aek": 1695, "panathinaikos": 1679,
-    "paok": 1658, "omonia": 1632, "larnaca": 1598, "paphos": 1576
+    "paok": 1658, "omonia": 1632, "larnaca": 1598, "paphos": 1576,
+
+    # ── NATIONAL TEAMS (from Elo Ratings text) ──
+    "spain": 2290, "argentina": 2175, "england": 2150, "france": 2066, "portugal": 2055,
+    "brazil": 2001, "colombia": 1990, "switzerland": 1975, "netherlands": 1974, "belgium": 1971,
+    "italy": 1948, "norway": 1901, "japan": 1897, "morocco": 1896, "germany": 1895,
+    "mexico": 1868, "denmark": 1861, "croatia": 1852, "uruguay": 1851, "ecuador": 1849,
+    "austria": 1841, "paraguay": 1838, "senegal": 1808, "greece": 1804, "australia": 1794,
+    "united states": 1792, "usa": 1792, "russia": 1787, "sweden": 1774, "turkey": 1753,
+    "algeria": 1744, "canada": 1739, "iran": 1738, "venezuela": 1732, "ivory coast": 1728,
+    "hungary": 1725, "ukraine": 1724, "chile": 1723, "scotland": 1718, "slovenia": 1718,
+    "south korea": 1717, "egypt": 1716, "nigeria": 1714, "ireland": 1711, "kosovo": 1710,
+    "dr congo": 1691, "poland": 1685, "serbia": 1683, "peru": 1681, "wales": 1681,
+    "slovakia": 1678, "northern ireland": 1672, "bosnia/herzegovina": 1672, "czechia": 1653,
+    "czech republic": 1653, "saudi arabia": 1652, "panama": 1650,
+    # (Below 1650 threshold, kept for warning display)
+    "uzbekistan": 1636, "mali": 1629, "georgia": 1628, "albania": 1628, "cameroon": 1627,
+    "jordan": 1622, "israel": 1619, "bolivia": 1613, "iceland": 1597, "costa rica": 1586,
+    "south africa": 1580, "uae": 1570, "cape verde": 1566, "haiti": 1563, "angola": 1562,
+    "new zealand": 1561, "romania": 1554, "jamaica": 1543, "belarus": 1539, "iraq": 1534,
+    "north macedonia": 1533, "burkina faso": 1529, "guatemala": 1524, "honduras": 1520,
+    "ghana": 1514, "finland": 1514, "palestine": 1511, "curacao": 1495, "montenegro": 1494,
+    "tunisia": 1485, "oman": 1469, "guinea": 1468, "gambia": 1464, "qatar": 1461,
+    "syria": 1457, "suriname": 1453, "uganda": 1452, "bulgaria": 1450, "benin": 1448,
+    "libya": 1442, "gabon": 1429, "estonia": 1406, "vietnam": 1400, "faroe islands": 1397,
+    "equatorial guinea": 1391, "rwanda": 1387, "luxembourg": 1383, "zimbabwe": 1382,
+    "zambia": 1381, "thailand": 1379, "madagascar": 1371, "niger": 1370, "kazakhstan": 1367,
+    "togo": 1366, "comoros": 1364, "kenya": 1360, "guinea-bissau": 1355, "mozambique": 1353,
+    "cyprus": 1352, "armenia": 1348, "trinidad and tobago": 1344, "china": 1344,
+    "sudan": 1337, "malaysia": 1331, "mauritania": 1329, "indonesia": 1328,
+    "guyana": 1327, "azerbaijan": 1326, "el salvador": 1324, "bahrain": 1314,
+    "kyrgyzstan": 1313, "kuwait": 1311, "moldova": 1308, "sierra leone": 1303,
+    "burundi": 1302, "namibia": 1301, "ethiopia": 1299, "botswana": 1295, "tajikistan": 1290,
+    "lebanon": 1288, "lithuania": 1280, "tanzania": 1273, "liberia": 1270, "malta": 1258,
+    "nicaragua": 1255, "cuba": 1250, "malawi": 1242, "yemen": 1242, "latvia": 1241,
+    "congo": 1220, "turkmenistan": 1209, "eritrea": 1201
 }
 
 def _normalize_team_name(name: str) -> str:
@@ -415,7 +450,6 @@ def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten,
     pick = streak["pick_team"]
 
     # ── ELO CHECK (SOFT WARNING) ──
-    # We do NOT reject here. We append a warning to the reason string.
     pick_elo = home_elo if pick == "home" else away_elo
     elo_warning = ""
     if pick_elo is None:
@@ -429,7 +463,6 @@ def classify_simple(home_wins, away_wins, home_unbeaten, away_unbeaten,
     if market_favourite != "tie" and market_favourite != pick:
         return result(reason=f"{streak['reason']}{elo_warning} [market favourite={market_favourite}, pick={pick}]", code="MARKET_DISAGREES")
 
-    # Qualified. Attach the ELO warning to the reason.
     qualified = dict(streak)
     qualified["reason"] = f"{streak['reason']}{elo_warning}"
     return qualified
@@ -648,27 +681,15 @@ def build_row(facts: dict) -> dict:
 
 
 def _compute_elo_warning_from_row(m: dict) -> str:
-    """
-    Compute the ELO warning on the fly for rows loaded from the DB.
-    This makes old rows (which may have been saved before the soft warning
-    logic existed) show the warning even though their `simple_reason` does not
-    contain the string "ELO".
-    """
     pick = m.get("simple_pick_team")
-    if pick == "home":
-        pick_elo = m.get("home_elo")
-    elif pick == "away":
-        pick_elo = m.get("away_elo")
-    else:
-        return ""
+    if pick == "home": pick_elo = m.get("home_elo")
+    elif pick == "away": pick_elo = m.get("away_elo")
+    else: return ""
 
-    if pick_elo is None:
-        return "⚠️ ELO UNKNOWN"
+    if pick_elo is None: return "⚠️ ELO UNKNOWN"
     try:
-        if float(pick_elo) < ELO_MINIMUM:
-            return f"⚠️ ELO {int(pick_elo)} < {ELO_MINIMUM}"
-    except (TypeError, ValueError):
-        return "⚠️ ELO UNKNOWN"
+        if float(pick_elo) < ELO_MINIMUM: return f"⚠️ ELO {int(pick_elo)} < {ELO_MINIMUM}"
+    except (TypeError, ValueError): return "⚠️ ELO UNKNOWN"
     return ""
 
 
@@ -698,14 +719,10 @@ def _card_html(m: dict, settled: bool = False) -> str:
 
     badge_text = f"{cat} · {bet} {pick_lbl}" if cat else "NO BET"
 
-    # ELO warning banner — computed on the fly from the row's ELO columns,
-    # so it appears on both new and existing DB rows regardless of what's
-    # in the reason string.
     elo_warning_html = ""
-    if cat:  # only for actual picks
+    if cat:
         warn_text = _compute_elo_warning_from_row(m)
-        if warn_text:
-            elo_warning_html = f'<div class="elo-warning">{warn_text}</div>'
+        if warn_text: elo_warning_html = f'<div class="elo-warning">{warn_text}</div>'
 
     o1, ox, o2, mf = m.get("odds_1"), m.get("odds_x"), m.get("odds_2"), m.get("market_favourite")
     odds_row = ""
