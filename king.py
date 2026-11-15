@@ -408,7 +408,6 @@ def parse_recent_form_dump(text: str) -> dict:
         "home_consecutive_unbeaten": None, "away_consecutive_unbeaten": None,
         "home_consecutive_wins_record": None, "away_consecutive_wins_record": None,
         "home_consecutive_unbeaten_record": None, "away_consecutive_unbeaten_record": None,
-        "home_consecutive_scoring_record": None, "away_consecutive_scoring_record": None,
         "odds": {}, "market_favourite": None,
         "recent_form_triplets": [], "_parse_warnings": [],
     }
@@ -458,7 +457,6 @@ def parse_recent_form_dump(text: str) -> dict:
 
         if kind == "scoring":
             f["home_consecutive_scoring"], f["away_consecutive_scoring"] = hv, av
-            f["home_consecutive_scoring_record"], f["away_consecutive_scoring_record"] = home_rec_val, away_rec_val
         elif kind == "wins":
             f["home_consecutive_wins"], f["away_consecutive_wins"] = hv, av
             f["home_consecutive_wins_record"], f["away_consecutive_wins_record"] = home_rec_val, away_rec_val
@@ -514,16 +512,23 @@ def build_row(facts: dict) -> dict:
         "match_date": facts.get("match_date"), "kickoff_time": facts.get("kickoff_time"), "country": facts.get("country"),
         "home_consecutive_wins": simple["home_consecutive_wins"], "away_consecutive_wins": simple["away_consecutive_wins"],
         "home_consecutive_unbeaten": simple["home_consecutive_unbeaten"], "away_consecutive_unbeaten": simple["away_consecutive_unbeaten"],
-        "home_consecutive_wins_record": facts.get("home_consecutive_wins_record"), "away_consecutive_wins_record": facts.get("away_consecutive_wins_record"),
-        "home_consecutive_unbeaten_record": facts.get("home_consecutive_unbeaten_record"), "away_consecutive_unbeaten_record": facts.get("away_consecutive_unbeaten_record"),
-        "home_consecutive_scoring": facts.get("home_consecutive_scoring"), "away_consecutive_scoring": facts.get("away_consecutive_scoring"),
-        "home_consecutive_scoring_record": facts.get("home_consecutive_scoring_record"), "away_consecutive_scoring_record": facts.get("away_consecutive_scoring_record"),
+        
+        "home_consecutive_wins_record": facts.get("home_consecutive_wins_record"), 
+        "away_consecutive_wins_record": facts.get("away_consecutive_wins_record"),
+        "home_consecutive_unbeaten_record": facts.get("home_consecutive_unbeaten_record"), 
+        "away_consecutive_unbeaten_record": facts.get("away_consecutive_unbeaten_record"),
+        
+        "home_consecutive_scoring": facts.get("home_consecutive_scoring"), 
+        "away_consecutive_scoring": facts.get("away_consecutive_scoring"),
         "monitor_pattern": _compute_monitor_pattern(facts),
+        
         "simple_category": simple["simple_category"], "simple_pick_team": simple["simple_pick_team"],
         "simple_bet": simple["simple_bet"], "simple_qualifying": simple["simple_qualifying"],
         "simple_reason": simple["simple_reason"], "simple_rejection_code": simple["simple_rejection_code"],
+        
         "odds_1": odds.get("1"), "odds_x": odds.get("X"), "odds_2": odds.get("2"),
         "market_favourite": facts.get("market_favourite"),
+        
         "extracted_at": now_iso,
     }
     return {k: v for k, v in row.items() if v is not None}
@@ -565,8 +570,6 @@ def _card_html(m: dict, settled: bool = False) -> str:
     
     hsc = m.get("home_consecutive_scoring")
     asc = m.get("away_consecutive_scoring")
-    hs_r = m.get("home_consecutive_scoring_record")
-    as_r = m.get("away_consecutive_scoring_record")
     
     monitor = m.get("monitor_pattern")
 
@@ -621,7 +624,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
     if hsc is not None or asc is not None:
         score_pill = (
             '<div class="signal-row">'
-            f'<span class="signal-pill" style="color:#c084fc; border-color:#a855f755">Scoring: {hsc or 0} / {asc or 0} {f"({hs_r}/{as_r})" if hs_r or as_r else ""}</span>'
+            f'<span class="signal-pill" style="color:#c084fc; border-color:#a855f755">Scoring: {hsc or 0} / {asc or 0}</span>'
             '</div>'
         )
 
