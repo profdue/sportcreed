@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-king.py — The Logic (text-dump only, header-driven, market veto, Unproven Streak warning)
-
-Classifier: 2 stats — consecutive wins + consecutive unbeaten.
-Filters:
-  - Market veto (hard): pick side must be the moneyline favourite
-  - Unproven Streak check (soft): if current win streak == all-time record (and >= 3), warn
+king.py — The Logic (text-dump only, header-driven, market veto, unproven streak, monitor patterns)
 """
 
 import re
@@ -45,6 +40,8 @@ st.markdown("""
     .badge-nobet  { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
     .badge-win    { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
     .badge-loss   { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
+    .badge-high   { background: #6366f122; color: #a5b4fc; border: 1px solid #6366f155; }
+    .badge-low    { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
     .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     .signal-pill {
         font-size: 0.8rem; padding: 5px 11px; border-radius: 8px;
@@ -54,6 +51,8 @@ st.markdown("""
     .signal-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
     .signal-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
     .signal-pill.odds { background: #6366f115; color: #a5b4fc; border-color: #6366f140; }
+    .signal-pill.mon-high { background: #a855f715; color: #c084fc; border-color: #a855f740; }
+    .signal-pill.mon-low  { background: #64748b15; color: #94a3b8; border-color: #64748b40; }
     .elo-warning {
         background: #ef444422; color: #fca5a5;
         padding: 8px 12px; border-radius: 8px; margin-top: 10px;
@@ -409,6 +408,7 @@ def parse_recent_form_dump(text: str) -> dict:
         "home_consecutive_unbeaten": None, "away_consecutive_unbeaten": None,
         "home_consecutive_wins_record": None, "away_consecutive_wins_record": None,
         "home_consecutive_unbeaten_record": None, "away_consecutive_unbeaten_record": None,
+        "home_consecutive_scoring_record": None, "away_consecutive_scoring_record": None,
         "odds": {}, "market_favourite": None,
         "recent_form_triplets": [], "_parse_warnings": [],
     }
@@ -458,6 +458,7 @@ def parse_recent_form_dump(text: str) -> dict:
 
         if kind == "scoring":
             f["home_consecutive_scoring"], f["away_consecutive_scoring"] = hv, av
+            f["home_consecutive_scoring_record"], f["away_consecutive_scoring_record"] = home_rec_val, away_rec_val
         elif kind == "wins":
             f["home_consecutive_wins"], f["away_consecutive_wins"] = hv, av
             f["home_consecutive_wins_record"], f["away_consecutive_wins_record"] = home_rec_val, away_rec_val
@@ -492,6 +493,16 @@ def parse_recent_form_dump(text: str) -> dict:
 # ROW BUILDER & CARD RENDERER
 # ═══════════════════════════════════════════════════════════════════
 
+def _compute_monitor_pattern(facts):
+    hs = facts.get("home_consecutive_scoring")
+    aws = facts.get("away_consecutive_scoring")
+    
+    if hs is not None and aws is not None:
+        if hs >= 5 and aws >= 5: return "HIGH_EVENT"
+        if hs <= 2 and aws <= 2: return "LOW_EVENT"
+    
+    return None
+
 def build_row(facts: dict) -> dict:
     simple = compute_simple_row(facts)
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -505,6 +516,9 @@ def build_row(facts: dict) -> dict:
         "home_consecutive_unbeaten": simple["home_consecutive_unbeaten"], "away_consecutive_unbeaten": simple["away_consecutive_unbeaten"],
         "home_consecutive_wins_record": facts.get("home_consecutive_wins_record"), "away_consecutive_wins_record": facts.get("away_consecutive_wins_record"),
         "home_consecutive_unbeaten_record": facts.get("home_consecutive_unbeaten_record"), "away_consecutive_unbeaten_record": facts.get("away_consecutive_unbeaten_record"),
+        "home_consecutive_scoring": facts.get("home_consecutive_scoring"), "away_consecutive_scoring": facts.get("away_consecutive_scoring"),
+        "home_consecutive_scoring_record": facts.get("home_consecutive_scoring_record"), "away_consecutive_scoring_record": facts.get("away_consecutive_scoring_record"),
+        "monitor_pattern": _compute_monitor_pattern(facts),
         "simple_category": simple["simple_category"], "simple_pick_team": simple["simple_pick_team"],
         "simple_bet": simple["simple_bet"], "simple_qualifying": simple["simple_qualifying"],
         "simple_reason": simple["simple_reason"], "simple_rejection_code": simple["simple_rejection_code"],
@@ -548,6 +562,13 @@ def _card_html(m: dict, settled: bool = False) -> str:
     hwr, awr = m.get("home_consecutive_wins_record"), m.get("away_consecutive_wins_record")
     hu, au = m.get("home_consecutive_unbeaten"), m.get("away_consecutive_unbeaten")
     hur, aur = m.get("home_consecutive_unbeaten_record"), m.get("away_consecutive_unbeaten_record")
+    
+    hsc = m.get("home_consecutive_scoring")
+    asc = m.get("away_consecutive_scoring")
+    hs_r = m.get("home_consecutive_scoring_record")
+    as_r = m.get("away_consecutive_scoring_record")
+    
+    monitor = m.get("monitor_pattern")
 
     cat_cls = {"SOLID CLEAR": "badge-solid", "LIGHT CLEAR HOME": "badge-light", "NOT-BEATEN SIGNAL": "badge-notbe"}.get(cat, "badge-nobet")
     pick_lbl = "HOME" if pick == "home" else ("AWAY" if pick == "away" else "")
@@ -572,6 +593,13 @@ def _card_html(m: dict, settled: bool = False) -> str:
         if trap_warn:
             warn_html = f'<div class="elo-warning">{trap_warn}</div>'
 
+    # MONITOR PATTERN
+    monitor_html = ""
+    if monitor == "HIGH_EVENT":
+        monitor_html = '<span class="pick-badge badge-high">🎯 HIGH EVENT (BTTS/Over)</span>'
+    elif monitor == "LOW_EVENT":
+        monitor_html = '<span class="pick-badge badge-low">🛡️ LOW EVENT (Under/Grind)</span>'
+
     o1, ox, o2, mf = m.get("odds_1"), m.get("odds_x"), m.get("odds_2"), m.get("market_favourite")
     odds_row = ""
     if any(v is not None for v in (o1, ox, o2)):
@@ -588,17 +616,26 @@ def _card_html(m: dict, settled: bool = False) -> str:
     # SHOW RECORDS IN PILLS
     win_pill = f'<span class="signal-pill home">Home W/U: {hw} / {hu} {f"({hwr}/{hur})" if hwr or hur else ""}</span>'
     away_pill = f'<span class="signal-pill away">Away W/U: {aw} / {au} {f"({awr}/{aur})" if awr or aur else ""}</span>'
+    
+    score_pill = ""
+    if hsc is not None or asc is not None:
+        score_pill = (
+            '<div class="signal-row">'
+            f'<span class="signal-pill" style="color:#c084fc; border-color:#a855f755">Scoring: {hsc or 0} / {asc or 0} {f"({hs_r}/{as_r})" if hs_r or as_r else ""}</span>'
+            '</div>'
+        )
 
     html = f"""
     <div class="match-card {card_cls}">
         <div class="match-title">{title}</div>
         <div class="match-meta">{meta}</div>
-        <span class="pick-badge {cat_cls}">{badge_text}</span>{verdict_html}
+        <span class="pick-badge {cat_cls}">{badge_text}</span>{monitor_html}{verdict_html}
         {warn_html}
         <div class="signal-row">
             {win_pill}
             {away_pill}
         </div>
+        {score_pill}
         {odds_row}
     </div>
     """
@@ -631,7 +668,7 @@ with tab_new:
             st.stop()
 
         st.markdown("### The Pick")
-        preview = {**facts, **simple}
+        preview = {**facts, **simple, "monitor_pattern": _compute_monitor_pattern(facts)}
         st.markdown(_card_html(preview, settled=False), unsafe_allow_html=True)
 
         if simple["simple_qualifying"]: st.success(simple["simple_reason"])
@@ -691,10 +728,41 @@ with tab_perf:
         c4.metric("Hit %", f"{(wins / n * 100) if n else 0:.1f}%"); c5.metric("Net P/L", f"{net:+.2f}u")
 
         if bets:
+            st.markdown("### By Category (1X/X2 Logic)")
             df = pd.DataFrame([{"category": m.get("simple_category"), "bet": m.get("simple_bet"), "hit": int(m["dc_hit"]), "pl": float(m.get("profit_loss") or 0.0)} for m in bets])
             out = df.groupby(["category", "bet"]).agg(n=("hit", "count"), wins=("hit", "sum"), net_pl=("pl", "sum")).reset_index()
             out["hit_pct"] = (out["wins"] / out["n"] * 100).round(1)
             st.dataframe(out[["category", "bet", "n", "wins", "hit_pct", "net_pl"]], use_container_width=True, hide_index=True)
+
+            st.markdown("### Monitored Patterns (R&D)")
+            st.caption("Tracking the High Event (BTTS/Over) and Low Event (Grind) outcome of all settled matches.")
+            
+            monitor_data = []
+            for m in settled:
+                mon = m.get("monitor_pattern")
+                if not mon: continue
+                hs = m.get("home_score")
+                aws = m.get("away_score")
+                if hs is None or aws is None: continue
+                
+                total_goals = hs + aws
+                btts = 1 if (hs > 0 and aws > 0) else 0
+                over25 = 1 if total_goals > 2.5 else 0
+                
+                monitor_data.append({"pattern": mon, "btts": btts, "over25": over25})
+                
+            if monitor_data:
+                mdf = pd.DataFrame(monitor_data)
+                out_m = mdf.groupby("pattern").agg(
+                    n=("btts", "count"), 
+                    btts_wins=("btts", "sum"), 
+                    over_wins=("over25", "sum")
+                ).reset_index()
+                out_m["btts_pct"] = (out_m["btts_wins"] / out_m["n"] * 100).round(1)
+                out_m["over_pct"] = (out_m["over_wins"] / out_m["n"] * 100).round(1)
+                st.dataframe(out_m, use_container_width=True, hide_index=True)
+            else:
+                st.info("No settled matches with scoring pattern data yet.")
 
         st.markdown("### All settled")
         for m in settled: st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
