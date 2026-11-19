@@ -6,7 +6,8 @@ Classifier: 2 stats for DC — consecutive wins + consecutive unbeaten.
 Analytical Flags:
   - Market veto (hard): DC pick must match moneyline favourite
   - Unproven Streak (soft): warns if current win streak == all-time record
-  - BTTS Signal (soft): flags if both teams scoring streak >= 3
+  - BTTS Signal (hard prediction): flags if both teams scoring streak >= 3 AND odds <= 4.00
+  - LIGHT CLEAR HOME: now requires at least 2 wins to qualify.
 """
 
 import re
@@ -246,8 +247,8 @@ def _classify_streaks(hw, aw, hu, au):
 
     if home_has and not away_has:
         if hu >= 2 and au == 0: return result("SOLID CLEAR", "home", "1X", 1, f"Home {hw}W/{hu}U vs Away {aw}W/{au}U — SOLID (opponent 0/0).")
-        if hu == hw: return result("LIGHT CLEAR HOME", "home", "1X", 1, f"Home {hw}W/{hu}U (unbeaten = wins) vs Away {aw}W/{au}U — LIGHT-HOME.")
-        return result(reason=f"Home leader {hw}W/{hu}U but unbeaten != wins and SOLID not met.", code="HOME_LEADER_NO_PADDING")
+        if hu == hw and hw >= 2: return result("LIGHT CLEAR HOME", "home", "1X", 1, f"Home {hw}W/{hu}U (unbeaten = wins) vs Away {aw}W/{au}U — LIGHT-HOME.")
+        return result(reason=f"Home leader {hw}W/{hu}U but unbeaten != wins or < 2 wins and SOLID not met.", code="HOME_LEADER_NO_PADDING")
 
     if away_has and not home_has:
         if au >= 2 and hu == 0: return result("SOLID CLEAR", "away", "X2", 1, f"Away {aw}W/{au}U vs Home {hw}W/{hu}U — SOLID (opponent 0/0).")
@@ -557,6 +558,26 @@ def _compute_double_trap_warning(m: dict) -> str:
             return "⚠️ DOUBLE TRAP: Both teams are at peak win records. Danger zone for DC."
     return ""
 
+def _compute_btts_signal(m: dict) -> bool:
+    hsc = m.get("home_consecutive_scoring")
+    asc = m.get("away_consecutive_scoring")
+    o1 = m.get("odds_1")
+    o2 = m.get("odds_2")
+    
+    if hsc is None or asc is None or o1 is None or o2 is None:
+        return False
+        
+    try:
+        hsc = int(hsc)
+        asc = int(asc)
+        max_odds = max(float(o1), float(o2))
+    except (TypeError, ValueError):
+        return False
+        
+    if hsc >= 3 and asc >= 3 and max_odds <= 4.00:
+        return True
+    return False
+
 
 def _card_html(m: dict, settled: bool = False) -> str:
     home, away = m.get("home_team") or "?", m.get("away_team") or "?"
@@ -588,7 +609,7 @@ def _card_html(m: dict, settled: bool = False) -> str:
     
     # BTTS Badge
     btts_badge = ""
-    if hsc is not None and asc is not None and hsc >= 3 and asc >= 3:
+    if _compute_btts_signal(m):
         btts_badge = '<span class="pick-badge badge-btts" style="margin-left:8px">🎯 BTTS YES</span>'
 
     # COMPUTE WARNINGS
