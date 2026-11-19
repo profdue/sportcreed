@@ -429,14 +429,21 @@ with tab_new:
             with st.expander(f"⚠ Parser warnings ({len(warnings)})"):
                 for w in warnings: st.write(f"- {w}")
         has_required = facts.get("home_team") and facts.get("away_team") and simple.get("home_consecutive_wins") is not None
-        if not has_required: st.warning("Missing required fields — not saved.")
-        elif not simple["simple_qualifying"] and not btts["btts_qualifying"]: st.info("Not saved — no DC bet and no BTTS prediction.")
-        elif not simple["simple_qualifying"]: st.info("No DC bet — saving for BTTS prediction only.")
+        if not has_required:
+            st.warning("Missing required fields — not saved.")
+        elif not simple["simple_qualifying"] and not btts["btts_qualifying"]:
+            st.info("Not saved — no DC bet and no BTTS prediction.")
         else:
+            # DC-only, BTTS-only, or both all reach here and actually save.
+            if not simple["simple_qualifying"]:
+                st.info("No DC bet — saving for BTTS prediction only.")
             row = build_row(facts); existing = db_find_existing(row)
             if existing: st.info(f"Already stored (match_id **{existing['match_id']}**, DC={existing.get('simple_qualifying')}, BTTS={existing.get('btts_qualifying')}).")
             else:
-                try: db_insert(row); st.success("Saved to Pending.")
+                try:
+                    saved = db_insert(row)
+                    if saved: st.success(f"Saved to Pending (match_id {saved.get('match_id')}).")
+                    else: st.error("Insert returned no row — not saved. Check Supabase logs.")
                 except Exception as e: st.error(f"Insert failed: {e}")
 with tab_pending:
     st.markdown("### Pending matches"); pending = db_pending()
