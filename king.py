@@ -57,7 +57,17 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 def db_insert(row: dict):
-    sb = get_supabase(); res = sb.table("matches").insert(row).execute(); st.cache_data.clear()
+    sb = get_supabase()
+    try:
+        res = sb.table("matches").insert(row).execute()
+    except Exception as e:
+        # If Supabase doesn't have the BTTS columns yet (PGRST204), retry without them so the DC pick still saves.
+        if "btts" in str(e).lower():
+            row = {k: v for k, v in row.items() if not k.startswith("btts")}
+            res = sb.table("matches").insert(row).execute()
+        else:
+            raise
+    st.cache_data.clear()
     return res.data[0] if res.data else None
 
 @st.cache_data(ttl=30)
@@ -81,7 +91,15 @@ def db_settle(match_id: int, home_score: int, away_score: int, result: str, dc_h
     # BTTS columns: add these columns in Supabase (btts_hit int, btts_profit float, btts_qualifying int, btts_pick text). If columns don't exist yet, settle still works for DC — wrap BTTS update separately.
     if btts_hit is not None:
         payload["btts_hit"] = btts_hit; payload["btts_profit"] = btts_profit
-    sb.table("matches").update(payload).eq("match_id", match_id).execute(); st.cache_data.clear()
+    try:
+        sb.table("matches").update(payload).eq("match_id", match_id).execute()
+    except Exception as e:
+        if "btts" in str(e).lower():
+            payload = {k: v for k, v in payload.items() if not k.startswith("btts")}
+            sb.table("matches").update(payload).eq("match_id", match_id).execute()
+        else:
+            raise
+    st.cache_data.clear()
 
 def db_delete(match_id: int):
     get_supabase().table("matches").delete().eq("match_id", match_id).execute(); st.cache_data.clear()
