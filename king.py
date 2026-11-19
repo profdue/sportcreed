@@ -7,7 +7,7 @@ Analytical Flags:
   - Unproven Streak (soft): warns if current win streak == all-time record
   - BTTS Prediction (hard prediction): BTTS YES if both teams scoring streak >= 3 AND max(odds_1, odds_2) <= 4.00. Settled like DC: hit if both teams score.
   - LIGHT CLEAR HOME: requires hu == hw AND hw >= 2.
-No learning / no Study tab. Non-qualifying matches are NOT saved.
+No learning / no Study tab. Save if DC qualifies OR BTTS qualifies. Matches with neither are NOT saved.
 """
 import re
 from datetime import datetime, timezone
@@ -61,7 +61,6 @@ def db_insert(row: dict):
     try:
         res = sb.table("matches").insert(row).execute()
     except Exception as e:
-        # If Supabase doesn't have the BTTS columns yet (PGRST204), retry without them so the DC pick still saves.
         if "btts" in str(e).lower():
             row = {k: v for k, v in row.items() if not k.startswith("btts")}
             res = sb.table("matches").insert(row).execute()
@@ -73,12 +72,12 @@ def db_insert(row: dict):
 @st.cache_data(ttl=30)
 def db_pending():
     sb = get_supabase()
-    return (sb.table("matches").select("*").eq("simple_qualifying", 1).is_("home_score", "null").order("extracted_at", desc=True).execute().data or [])
+    return (sb.table("matches").select("*").or_("simple_qualifying.eq.1,btts_qualifying.eq.1").is_("home_score", "null").order("extracted_at", desc=True).execute().data or [])
 
 @st.cache_data(ttl=30)
 def db_settled():
     sb = get_supabase()
-    return (sb.table("matches").select("*").eq("simple_qualifying", 1).not_.is_("home_score", "null").order("settled_at", desc=True).execute().data or [])
+    return (sb.table("matches").select("*").or_("simple_qualifying.eq.1,btts_qualifying.eq.1").not_.is_("home_score", "null").order("settled_at", desc=True).execute().data or [])
 
 def db_find_existing(row: dict):
     sb = get_supabase()
@@ -431,12 +430,13 @@ with tab_new:
                 for w in warnings: st.write(f"- {w}")
         has_required = facts.get("home_team") and facts.get("away_team") and simple.get("home_consecutive_wins") is not None
         if not has_required: st.warning("Missing required fields — not saved.")
-        elif not simple["simple_qualifying"]: st.info("Not saved — no DC bet. (Rejected matches are no longer stored.)")
+        elif not simple["simple_qualifying"] and not btts["btts_qualifying"]: st.info("Not saved — no DC bet and no BTTS prediction.")
+        elif not simple["simple_qualifying"]: st.info("No DC bet — saving for BTTS prediction only.")
         else:
             row = build_row(facts); existing = db_find_existing(row)
-            if existing: st.info(f"Already stored (match_id **{existing['match_id']}**, qualifying={existing.get('simple_qualifying')}).")
+            if existing: st.info(f"Already stored (match_id **{existing['match_id']}**, DC={existing.get('simple_qualifying')}, BTTS={existing.get('btts_qualifying')}).")
             else:
-                try: db_insert(row); st.success("Saved to Pending (DC + BTTS prediction if any).")
+                try: db_insert(row); st.success("Saved to Pending.")
                 except Exception as e: st.error(f"Insert failed: {e}")
 with tab_pending:
     st.markdown("### Pending matches"); pending = db_pending()
@@ -451,7 +451,9 @@ with tab_pending:
                 with c3:
                     st.write(""); st.write("")
                     if st.button("Settle", key=f"s_{m['match_id']}", type="primary"):
-                        result, dc_hit, profit = settle_simple(m.get("simple_bet") or "", int(hs), int(aws)); btts_hit, btts_profit = settle_btts(int(hs), int(aws), m.get("btts_qualifying"))
+                        result, dc_hit, profit = settle_simple(m.get("simple_bet") or "", int(hs), int(aws))
+                        if not m.get("simple_qualifying"): dc_hit, profit = None, None
+                        btts_hit, btts_profit = settle_btts(int(hs), int(aws), m.get("btts_qualifying"))
                         db_settle(m["match_id"], int(hs), int(aws), result, dc_hit, profit, btts_hit, btts_profit); st.success("Settled."); st.rerun()
                 if st.button("Delete match", key=f"d_{m['match_id']}"):
                     db_delete(m["match_id"]); st.success("Deleted."); st.rerun()
