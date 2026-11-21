@@ -175,7 +175,7 @@ def parse_dump(text: str):
     """Best-effort parser for the dump format you paste.
     Extracts, in order, the two teams' blocks:
       Shots Avg, Blocked, ON%, Scored Avg, Conceded Avg, Scored%
-    Falls back to manual inputs if parsing fails — never invents numbers."""
+    Never invents numbers — if a field is missing, it errors."""
     t = text.replace("\r\n", "\n")
     # Team codes: look for "Played games" section — two 2-4 letter codes
     codes = []
@@ -202,7 +202,7 @@ def parse_dump(text: str):
     out = {"home_code": codes[0] if len(codes) > 0 else "", "away_code": codes[1] if len(codes) > 1 else "", "_warnings": []}
     def pick(arr, idx, name):
         if len(arr) > idx: return _f(arr[idx])
-        out["_warnings"].append(f"Missing {name} for {'home' if idx==0 else 'away'} — fill manually.")
+        out["_warnings"].append(f"Missing {name} for {'home' if idx==0 else 'away'} — paste the full dump.")
         return None
     out["home"] = {
         "shots": pick(shots_avgs, 0, "Shots"), "on_pct": pick(on_pcts, 0, "ON%"),
@@ -241,59 +241,44 @@ st.caption("Home/Away only. 6 votes. 4+ = TAKE leader Win/Draw. 3-3 = LEAN only.
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 
 with tab_new:
-    st.markdown("### Paste the dump (optional) — or fill manually below")
-    raw_in = st.text_area("Dump", height=220, label_visibility="collapsed", placeholder="Paste Besoccer Overall / Home-Away dump here...")
-    parsed = None
-    if raw_in.strip():
+    st.markdown("### Paste the match data")
+    st.caption("Include the Overall / Home-Away dump — Shots, ON target, Blocked, Goals, Scored a goal.")
+    raw_in = st.text_area("Input", height=340, label_visibility="collapsed", placeholder="Paste the match data\n...")
+    run = st.button("Run the Logic", type="primary")
+    if run and raw_in.strip():
         try:
             parsed = parse_dump(raw_in.strip())
-            if parsed["_warnings"]:
+            h, a = parsed["home"], parsed["away"]
+            missing = [k for k in h if h[k] is None] + [k for k in a if a[k] is None]
+            if missing:
+                st.error(f"Parse failed — could not find: {', '.join(sorted(set(missing)))}. Paste the full dump.")
+                st.stop()
+            home_team = parsed["home_code"] or "HOME"
+            away_team = parsed["away_code"] or "AWAY"
+            hv, av, br = compute_votes(h, a)
+            dec, pick, reason = decide(hv, av)
+            d = {"home_team": home_team, "away_team": away_team, "home_votes": hv, "away_votes": av, "vote_decision": dec, "vote_pick": pick or "", "breakdown": br}
+            st.markdown("### The Pick")
+            st.markdown(_card_html(d), unsafe_allow_html=True)
+            if dec == "TAKE":
+                st.success(reason)
+            elif dec == "LEAN":
+                st.info(reason)
+            else:
+                st.info(reason)
+            if parsed.get("_warnings"):
                 with st.expander(f"Parser warnings ({len(parsed['_warnings'])})"):
                     for w in parsed["_warnings"]: st.write(f"- {w}")
-        except Exception as e:
-            st.error(f"Parse failed: {e} — fill manually below.")
-    def _val(team, key, default=0.0):
-        if parsed and parsed.get(team, {}).get(key) is not None:
-            return float(parsed[team][key])
-        return default
-    c1, c2 = st.columns(2)
-    with c1:
-        home_team = st.text_input("Home team", value=(parsed["home_code"] if parsed else ""))
-        h_shots = st.number_input("Home Shots", value=_val("home","shots"), step=0.01, key="h_shots")
-        h_on = st.number_input("Home ON%", value=_val("home","on_pct"), step=0.1, key="h_on")
-        h_blocked = st.number_input("Home Blocked", value=_val("home","blocked"), step=0.01, key="h_blocked")
-        h_scored = st.number_input("Home Scored Avg", value=_val("home","scored_avg"), step=0.01, key="h_scored")
-        h_conc = st.number_input("Home Conceded Avg", value=_val("home","conceded_avg"), step=0.01, key="h_conc")
-        h_pct = st.number_input("Home Scored%", value=_val("home","scored_pct"), step=0.1, key="h_pct")
-    with c2:
-        away_team = st.text_input("Away team", value=(parsed["away_code"] if parsed else ""))
-        a_shots = st.number_input("Away Shots", value=_val("away","shots"), step=0.01, key="a_shots")
-        a_on = st.number_input("Away ON%", value=_val("away","on_pct"), step=0.1, key="a_on")
-        a_blocked = st.number_input("Away Blocked", value=_val("away","blocked"), step=0.01, key="a_blocked")
-        a_scored = st.number_input("Away Scored Avg", value=_val("away","scored_avg"), step=0.01, key="a_scored")
-        a_conc = st.number_input("Away Conceded Avg", value=_val("away","conceded_avg"), step=0.01, key="a_conc")
-        a_pct = st.number_input("Away Scored%", value=_val("away","scored_pct"), step=0.1, key="a_pct")
-    if st.button("Run 6 Votes", type="primary"):
-        if not home_team or not away_team:
-            st.error("Enter both team names."); st.stop()
-        h = {"shots": h_shots, "on_pct": h_on, "blocked": h_blocked, "scored_avg": h_scored, "conceded_avg": h_conc, "scored_pct": h_pct}
-        a = {"shots": a_shots, "on_pct": a_on, "blocked": a_blocked, "scored_avg": a_scored, "conceded_avg": a_conc, "scored_pct": a_pct}
-        hv, av, br = compute_votes(h, a)
-        dec, pick, reason = decide(hv, av)
-        d = {"home_team": home_team, "away_team": away_team, "home_votes": hv, "away_votes": av, "vote_decision": dec, "vote_pick": pick or "", "breakdown": br}
-        st.markdown(_card_html(d), unsafe_allow_html=True)
-        if dec == "TAKE": st.success(f"{reason} — TAKE {pick} Win/Draw")
-        elif dec == "LEAN": st.info(reason)
-        else: st.info(reason)
-        if dec == "TAKE":
-            row = {"home_team": home_team, "away_team": away_team, "home_votes": hv, "away_votes": av, "vote_decision": dec, "vote_pick": pick, "simple_qualifying": 1, "simple_category": "6-VOTE", "simple_bet": f"{pick} Win/Draw", "extracted_at": datetime.now(timezone.utc).isoformat()}
-            existing = db_find_existing(home_team, away_team)
-            if existing: st.info(f"Already stored (match_id {existing.get('match_id')}).")
+            if dec == "TAKE":
+                row = {"home_team": home_team, "away_team": away_team, "home_votes": hv, "away_votes": av, "vote_decision": dec, "vote_pick": pick, "simple_qualifying": 1, "simple_category": "6-VOTE", "simple_bet": f"{pick} Win/Draw", "extracted_at": datetime.now(timezone.utc).isoformat()}
+                existing = db_find_existing(home_team, away_team)
+                if existing:
+                    st.info(f"Already stored (match_id {existing.get('match_id')}).")
+                else:
+                    try: db_insert(row); st.success("Saved to Pending.")
+                    except Exception as e: st.error(f"Insert failed: {e}")
             else:
-                try: db_insert(row); st.success("Saved to Pending.")
-                except Exception as e: st.error(f"Insert failed: {e} (DB may need vote_* columns)")
-        else:
-            st.info("Not saved — LEAN / SKIP are not bets.")
+                st.info("Not saved — LEAN / SKIP are not bets.")
 
 with tab_pending:
     st.markdown("### Pending — TAKE only")
@@ -332,14 +317,14 @@ with tab_perf:
             st.markdown(_card_html(d, settled=True), unsafe_allow_html=True)
 
 with tab_lab:
-    st.markdown("### Lab — paste dump, see votes, no save")
-    text_in = st.text_area("Text dump", height=300, label_visibility="collapsed", key="lab_input")
+    st.markdown("### Lab")
+    text_in = st.text_area("Input", height=300, label_visibility="collapsed", key="lab_input")
     if text_in.strip():
         try:
             p = parse_dump(text_in)
             h, a = p["home"], p["away"]
             if any(v is None for v in list(h.values())+list(a.values())):
-                st.warning("Some fields missing — parser could not find them. Fill manually in New Match tab.")
+                st.warning("Some fields missing — parser could not find them. Paste the full dump.")
             else:
                 hv, av, br = compute_votes(h, a)
                 dec, pick, reason = decide(hv, av)
