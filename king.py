@@ -197,12 +197,19 @@ def _card_html(d, settled=False):
     else: badge='<span style="background:#64748b22;color:#94a3b8;border:1px solid #64748b55;padding:6px 14px;border-radius:999px;font-weight:700">SKIP</span>'; cls="skip"
     verdict=""
     if settled and d.get("home_score") is not None:
-        verdict=f'<div style="margin-top:10px;"><span style="background:#10b98122;color:#10b981;padding:6px 12px;border-radius:999px">Result {d.get("home_score")}-{d.get("away_score")} — {"HIT" if d.get("dc_hit")==1 else "MISS"}</span></div>'
+        _is_hit = d.get("dc_hit")==1
+        _bg = "#10b98122" if _is_hit else "#ef444422"
+        _fg = "#10b981" if _is_hit else "#ef4444"
+        verdict=f'<div style="margin-top:10px;"><span style="background:{_bg};color:{_fg};border:1px solid {_fg}55;padding:6px 12px;border-radius:999px;font-weight:700">Result {d.get("home_score")}-{d.get("away_score")} — {"HIT" if _is_hit else "MISS"}</span></div>'
+        # Settled card border follows RESULT, not pre-match pick. Mardin 5-1 TAKE that lost 1-2 must NOT stay green.
+        if d.get("vote_decision")=="TAKE" and d.get("dc_hit") is not None:
+            cls = "pick-home" if _is_hit else "pick-loss"
     pills=""
     for label,w,hval,aval in d.get("breakdown",[]):
         cls2="home" if w=="HOME" else ("away" if w=="AWAY" else "tie")
         pills+=f'<span style="font-size:0.8rem;padding:5px 11px;border-radius:8px;background:#0f172a;color:#cbd5e1;border:1px solid #1e293b;font-family:monospace">{label}: {hval} vs {aval} → {w}</span>'
-    return f'<div style="background:#1a1f2e;border-radius:16px;padding:22px 26px;margin-bottom:16px;border-left:4px solid #6366f1"><div style="font-size:1.25rem;font-weight:700;color:#f1f5f9">{title}</div><div style="font-size:0.82rem;color:#94a3b8;margin-bottom:14px">{meta}</div>{badge}{verdict}<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">{pills}</div></div>'
+    _border = "#ef4444" if cls=="pick-loss" else ("#10b981" if cls=="pick-home" else ("#f59e0b" if cls=="pick-away" else "#6366f1"))
+    return f'<div style="background:#1a1f2e;border-radius:16px;padding:22px 26px;margin-bottom:16px;border-left:4px solid {_border}"><div style="font-size:1.25rem;font-weight:700;color:#f1f5f9">{title}</div><div style="font-size:0.82rem;color:#94a3b8;margin-bottom:14px">{meta}</div>{badge}{verdict}<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">{pills}</div></div>'
 
 st.title("King — 6 Votes")
 st.caption("Home/Away only. 6 votes. 4+ = TAKE leader Win/Draw. 3-3 = LEAN only. ALL data stored.")
@@ -250,7 +257,14 @@ with tab_new:
             if existing: st.info(f"Already stored (match_id {existing.get('match_id')}).")
             else:
                 try: db_insert(row); st.success(f"Saved — ALL data stored ({dec}). Full dump + all metrics in DB.")
-                except Exception as e: st.error(f"Insert failed: {e} — run the ALTER TABLE SQL for new columns.")
+                except Exception as e:
+                    _msg = str(e)
+                    if "42501" in _msg or "row-level security" in _msg.lower() or "row level security" in _msg.lower():
+                        st.error(f"Insert failed: RLS is blocking the insert (code 42501). This is NOT a missing column. Run this in Supabase SQL Editor: ALTER TABLE public.matches DISABLE ROW LEVEL SECURITY; — then retry.")
+                    elif "column" in _msg.lower() and "does not exist" in _msg.lower():
+                        st.error(f"Insert failed: {e} — run the ALTER TABLE SQL for new columns.")
+                    else:
+                        st.error(f"Insert failed: {e}")
         except Exception as e:
             st.error(f"Parse failed: {e}")
 
