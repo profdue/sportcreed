@@ -167,7 +167,9 @@ def parse_dump(text: str):
         try: return float(str(x).replace(",",".").strip().rstrip("%"))
         except Exception: return None
     def pick(arr, idx): return _f(arr[idx]) if len(arr)>idx else None
-    played = re.findall(r"Played games\s*\n+\s*[A-Z]{2,4}\s*\n\s*(\d+)", t)
+    # Played: "Played games\n\nMAR\n7\n\nBAN\n6" — two CODE+number pairs in that section
+    _played_sec = re.search(r"Played games(.{0,200})", t, re.S)
+    played = re.findall(r"[A-Z]{2,4}\s*\n\s*(\d+)", _played_sec.group(1) if _played_sec else "")
     scored_tot = re.findall(r"Scored\s*\n\s*([\d.]+)\s*\n\s*Avg\.", t)
     scored_avgs = re.findall(r"Scored\s*\n\s*[\d.]+\s*\n\s*Avg\.\s*\n\s*per game\s*\n\s*([\d.]+)", t)
     conceded_tot = re.findall(r"Conceded\s*\n\s*([\d.]+)\s*\n\s*Avg\.", t)
@@ -186,7 +188,34 @@ def parse_dump(text: str):
         return re.findall(r"[A-Z][a-zA-Z ]+\s*\n\s*\d+\s*\n\s*Avg\.\s*\n\s*([\d.]+)", m.group(1))
     total_attacks=_attack_avgs("Total attacks")
     dangerous_attacks=_attack_avgs("Dangerous attacks")
-    btts = re.findall(r"Both scored.*?Yes\s*\n\s*\d+\s*\n\s*(\d+)%", t, re.S)
+    # BTTS: "Both scored (Yes/No)\n\nYes\n3\n43%57%\nNo\n4\nYes\n3\n50%50%\nNo\n3"
+    # Yes% = first % in "43%57%", No% = second %. Two blocks: home then away.
+    _btts_sec = re.search(r"Both scored(.{0,400})", t, re.S)
+    btts = []
+    if _btts_sec:
+        for mm in re.finditer(r"Yes\s*\n\s*\d+\s*\n\s*(\d+)%\s*\d+%", _btts_sec.group(1)):
+            btts.append(mm.group(1))
+    # Under/Over: text blocks after "Under/Over" — format varies:
+    # "3\n4\n43%57%\n1.5" (home, line present) vs "1\n5\n17%83%" (away, no line) vs "7\n0\n100%\n3.5" (100% = only one %)
+    # Order in dump: home 1.5, away 1.5, home 2.5, away 2.5, home 3.5, away 3.5
+    _uo = []
+    for _chunk in re.split(r"Under/Over", t)[1:]:
+        _lines = [ln.strip() for ln in _chunk.strip().split("\n") if ln.strip()!=""]
+        # _lines: [under_n, over_n, "43%57%" or "100%", (optional) line, ...]
+        if len(_lines) >= 3 and _lines[0].isdigit() and _lines[1].isdigit():
+            _pct = _lines[2]
+            _m = re.findall(r"(\d+)%", _pct)
+            _under_pct = _m[0] if len(_m)>=1 else None
+            _over_pct = _m[1] if len(_m)>=2 else ("0" if _under_pct=="100" else None)
+            _line = None
+            if len(_lines)>=4 and re.fullmatch(r"[\d.]+", _lines[3]):
+                _line = _lines[3]
+            _uo.append((_lines[0], _lines[1], _under_pct, _over_pct, _line))
+    # Fill line labels by position: 0=home1.5,1=away1.5,2=home2.5,3=away2.5,4=home3.5,5=away3.5
+    _lines_map = ["1.5","1.5","2.5","2.5","3.5","3.5"]
+    _uo = [(u[0],u[1],u[2],u[3], u[4] or (_lines_map[i] if i<len(_lines_map) else None)) for i,u in enumerate(_uo)]
+    # _uo order in dump: home 1.5, away 1.5, home 2.5, away 2.5, home 3.5, away 3.5
+    under_over = _uo  # list of (under_n, over_n, under_pct, over_pct, line)
     warnings=[]
     def need(arr, idx, name):
         if len(arr)<=idx: warnings.append(f"Missing {name} — paste the full dump.")
@@ -198,7 +227,7 @@ def parse_dump(text: str):
         "scored_pct":need(scored_pcts,0,"Scored% home"),"played":need(played,0,"Played home"),
         "possession":need(possessions,0,"Possession home"),"pass_acc":need(pass_accs,0,"Pass Acc home"),
         "total_attacks":need(total_attacks,0,"Total attacks home"),"dangerous_attacks":need(dangerous_attacks,0,"Dangerous attacks home"),
-        "btts_yes_pct":need(btts,0,"BTTS Yes% home")}
+        "btts_yes_pct":need(btts,0,"BTTS Yes% home"),"under_over_1_5":under_over[0] if len(under_over)>0 else None,"under_over_2_5":under_over[2] if len(under_over)>2 else None,"under_over_3_5":under_over[4] if len(under_over)>4 else None}
     away={"shots":need(shots_avgs,1,"Shots away"),"shots_total":need(shots_tot,1,"Shots total away"),
         "on_pct":need(on_pcts,1,"ON% away"),"blocked":need(blocked_avgs,1,"Blocked away"),"blocked_total":need(blocked_tot,1,"Blocked total away"),
         "scored_avg":need(scored_avgs,1,"Scored Avg away"),"scored_total":need(scored_tot,1,"Scored total away"),
@@ -206,7 +235,7 @@ def parse_dump(text: str):
         "scored_pct":need(scored_pcts,1,"Scored% away"),"played":need(played,1,"Played away"),
         "possession":need(possessions,1,"Possession away"),"pass_acc":need(pass_accs,1,"Pass Acc away"),
         "total_attacks":need(total_attacks,1,"Total attacks away"),"dangerous_attacks":need(dangerous_attacks,1,"Dangerous attacks away"),
-        "btts_yes_pct":need(btts,1,"BTTS Yes% away")}
+        "btts_yes_pct":need(btts,1,"BTTS Yes% away"),"under_over_1_5":under_over[1] if len(under_over)>1 else None,"under_over_2_5":under_over[3] if len(under_over)>3 else None,"under_over_3_5":under_over[5] if len(under_over)>5 else None}
     return {"home_code":home_name,"away_code":away_name,"home":home,"away":away,"_warnings":warnings,"raw_dump":text}
 
 def _card_html(d, settled=False):
@@ -233,6 +262,7 @@ with tab_new:
     st.markdown("### Paste the match data")
     st.caption("Include the full dump — Shots, ON target, Blocked, Goals, Scored a goal, Passes, Attacks, Others, Disciplinary. Everything is stored.")
     raw_in = st.text_area("Input", height=340, label_visibility="collapsed", placeholder="Paste the match data\n...")
+
     run = st.button("Run the Logic", type="primary")
     if run and raw_in.strip():
         try:
@@ -268,7 +298,7 @@ with tab_new:
                    "home_scored_pct":h.get("scored_pct"),"away_scored_pct":a.get("scored_pct"),
                    "home_possession":h.get("possession"),"away_possession":a.get("possession"),
                    "home_total_attacks":h.get("total_attacks"),"away_total_attacks":a.get("total_attacks"),
-                   "home_dangerous_attacks":h.get("dangerous_attacks"),"away_dangerous_attacks":a.get("dangerous_attacks")}
+                   "home_dangerous_attacks":h.get("dangerous_attacks"),"away_dangerous_attacks":a.get("dangerous_attacks"),"home_btts_yes_pct":h.get("btts_yes_pct"),"away_btts_yes_pct":a.get("btts_yes_pct"),"home_under_over_2_5":str(h.get("under_over_2_5")) if h.get("under_over_2_5") else None,"away_under_over_2_5":str(a.get("under_over_2_5")) if a.get("under_over_2_5") else None}
             existing = db_find_existing(home_team, away_team)
             if existing: st.info(f"Already stored (match_id {existing.get('match_id')}).")
             else:
