@@ -279,6 +279,8 @@ with tab_new:
                     except Exception as e: st.error(f"Insert failed: {e}")
             else:
                 st.info("Not saved — LEAN / SKIP are not bets.")
+        except Exception as e:
+            st.error(f"Parse failed: {e}")
 
 with tab_pending:
     st.markdown("### Pending — TAKE only")
