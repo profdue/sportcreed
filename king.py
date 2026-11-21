@@ -2,8 +2,15 @@
 """
 king.py — 6-Vote Logic, ALL DATA STORED
 Paste-only. No manual inputs. No image upload.
-6 votes (Home/Away only): Shots, ON%, Blocked (lower), Scored Avg, Conceded Avg (lower), Scored%
+6 votes (Home/Away only): Shots, ON%, Blocked (lower wins), Scored Avg, Conceded Avg (lower wins), Scored%
 4+ = TAKE leader Win/Draw, 3-3 = LEAN ONLY, <=2 = SKIP
+FIXES INCLUDED:
+- Parser reads Played, BTTS Yes%, Under/Over from TEXT (no image upload)
+- Under/Over stored as clean text "Under 6 / Over 1 (86%/14%)", NOT str(tuple)
+- db_insert never sends match_id (Supabase generates it)
+- Insert error distinguishes RLS 42501 vs missing column
+- Settled card: HIT green / MISS red, border follows RESULT not pre-match pick
+- Vote pills: HOME green, AWAY amber, TIE grey, MISSING red
 """
 import re, json
 from datetime import datetime, timezone
@@ -11,6 +18,30 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="King — 6 Votes", page_icon="⚽", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""
+<style>
+    .main { background-color: #0e1117; }
+    h1, h2, h3 { font-family: 'Poppins', sans-serif; letter-spacing: -0.02em; }
+    .match-card { background: linear-gradient(135deg, #1a1f2e 0%, #232a3d 100%); border-radius: 16px; padding: 22px 26px; margin-bottom: 16px; border-left: 4px solid #6366f1; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
+    .match-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin: 0 0 4px 0; }
+    .match-meta { font-size: 0.82rem; color: #94a3b8; margin-bottom: 14px; }
+    .pick-badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
+    .badge-take { background: #06d6a022; color: #06d6a0; border: 1px solid #06d6a055; }
+    .badge-lean { background: #fbbf2422; color: #fbbf24; border: 1px solid #fbbf2455; }
+    .badge-skip { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
+    .badge-win { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
+    .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
+    .vote-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .vote-pill { font-size: 0.8rem; padding: 5px 11px; border-radius: 8px; background: #0f172a; color: #cbd5e1; border: 1px solid #1e293b; font-family: monospace; }
+    .vote-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
+    .vote-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
+    .vote-pill.tie { background: #64748b22; color: #94a3b8; border-color: #64748b55; }
+    .vote-pill.missing { background: #ef444422; color: #fca5a5; border-color: #ef444455; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { height: 44px; background-color: #1a1f2e; border-radius: 10px; padding: 0 18px; color: #94a3b8; }
+    .stTabs [aria-selected="true"] { background-color: #6366f1 !important; color: white !important; }
+</style>
+""", unsafe_allow_html=True)
 
 def get_supabase():
     try:
@@ -26,7 +57,6 @@ def get_supabase():
 def db_insert(row: dict):
     sb = get_supabase()
     if sb is None: return None
-    # NEVER send match_id — Supabase generates it. Sending it causes the 11-conflict you saw.
     row.pop("match_id", None)
     res = sb.table("matches").insert(row).execute(); st.cache_data.clear()
     return res.data[0] if res.data else None
@@ -97,9 +127,7 @@ def result_str(hs, aws):
     return "1" if hs>aws else ("2" if hs<aws else "X")
 
 def fmt_uo(uo):
-    """FIX: was str(tuple) -> '(''6'',''1''...'. Now clean text."""
     if not uo: return None
-    # uo = (under_n, over_n, under_pct, over_pct, line)
     return f"Under {uo[0]} / Over {uo[1]} ({uo[2]}%/{uo[3]}%)"
 
 def parse_dump(text: str):
@@ -192,30 +220,30 @@ def _card_html(d, settled=False):
     hv,av=d.get("home_votes",0),d.get("away_votes",0); dec=d.get("vote_decision","LEAN"); pick=d.get("vote_pick","")
     title=f"{d.get('home_team','?')} vs {d.get('away_team','?')}"
     meta=f"{hv}-{av} &nbsp;·&nbsp; {dec}"+(f" &nbsp;·&nbsp; {pick} Win/Draw" if pick else "")
-    if dec=="TAKE": badge=f'<span style="background:#06d6a022;color:#06d6a0;border:1px solid #06d6a055;padding:6px 14px;border-radius:999px;font-weight:700">TAKE {pick} Win/Draw</span>'; cls="pick-home" if pick=="HOME" else "pick-away"
-    elif dec=="LEAN": badge='<span style="background:#fbbf2422;color:#fbbf24;border:1px solid #fbbf2455;padding:6px 14px;border-radius:999px;font-weight:700">LEAN ONLY — NO BET</span>'; cls="skip"
-    else: badge='<span style="background:#64748b22;color:#94a3b8;border:1px solid #64748b55;padding:6px 14px;border-radius:999px;font-weight:700">SKIP</span>'; cls="skip"
+    if dec=="TAKE": badge=f'<span class="pick-badge badge-take">TAKE {pick} Win/Draw</span>'; cls="pick-home" if pick=="HOME" else "pick-away"
+    elif dec=="LEAN": badge='<span class="pick-badge badge-lean">LEAN ONLY — NO BET</span>'; cls="skip"
+    else: badge='<span class="pick-badge badge-skip">SKIP</span>'; cls="skip"
     verdict=""
     if settled and d.get("home_score") is not None:
         _is_hit = d.get("dc_hit")==1
         _bg = "#10b98122" if _is_hit else "#ef444422"
         _fg = "#10b981" if _is_hit else "#ef4444"
         verdict=f'<div style="margin-top:10px;"><span style="background:{_bg};color:{_fg};border:1px solid {_fg}55;padding:6px 12px;border-radius:999px;font-weight:700">Result {d.get("home_score")}-{d.get("away_score")} — {"HIT" if _is_hit else "MISS"}</span></div>'
-        # Settled card border follows RESULT, not pre-match pick. Mardin 5-1 TAKE that lost 1-2 must NOT stay green.
         if d.get("vote_decision")=="TAKE" and d.get("dc_hit") is not None:
             cls = "pick-home" if _is_hit else "pick-loss"
     pills=""
     for label,w,hval,aval in d.get("breakdown",[]):
-        cls2="home" if w=="HOME" else ("away" if w=="AWAY" else "tie")
-        pills+=f'<span style="font-size:0.8rem;padding:5px 11px;border-radius:8px;background:#0f172a;color:#cbd5e1;border:1px solid #1e293b;font-family:monospace">{label}: {hval} vs {aval} → {w}</span>'
+        _pill_style = {"HOME": "background:#10b98115; color:#34d399; border:1px solid #10b98140","AWAY": "background:#f59e0b15; color:#fbbf24; border:1px solid #f59e0b40","TIE": "background:#64748b22; color:#94a3b8; border:1px solid #64748b55","MISSING": "background:#ef444422; color:#fca5a5; border:1px solid #ef444455"}.get(w, "background:#64748b22; color:#94a3b8; border:1px solid #64748b55")
+        pills+=f'<span style="font-size:0.8rem; padding:5px 11px; border-radius:8px; font-family:monospace; {_pill_style}">{label}: {hval} vs {aval} → {w}</span>'
     _border = "#ef4444" if cls=="pick-loss" else ("#10b981" if cls=="pick-home" else ("#f59e0b" if cls=="pick-away" else "#6366f1"))
     return f'<div style="background:#1a1f2e;border-radius:16px;padding:22px 26px;margin-bottom:16px;border-left:4px solid {_border}"><div style="font-size:1.25rem;font-weight:700;color:#f1f5f9">{title}</div><div style="font-size:0.82rem;color:#94a3b8;margin-bottom:14px">{meta}</div>{badge}{verdict}<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">{pills}</div></div>'
 
 st.title("King — 6 Votes")
-st.caption("Home/Away only. 6 votes. 4+ = TAKE leader Win/Draw. 3-3 = LEAN only. ALL data stored.")
+st.caption("Home/Away only. 6 votes. 4+ = TAKE leader Win/Draw. 3-3 = LEAN only. ALL data stored: TAKE + LEAN + SKIP, full dump + all metrics.")
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 with tab_new:
     st.markdown("### Paste the match data")
+    st.caption("Include the full dump — Shots, ON target, Blocked, Goals, Scored a goal, Passes, Attacks, Others, Disciplinary. Everything is stored.")
     raw_in = st.text_area("Input", height=340, label_visibility="collapsed", placeholder="Paste the match data\n...")
     run = st.button("Run the Logic", type="primary")
     if run and raw_in.strip():
@@ -260,7 +288,7 @@ with tab_new:
                 except Exception as e:
                     _msg = str(e)
                     if "42501" in _msg or "row-level security" in _msg.lower() or "row level security" in _msg.lower():
-                        st.error(f"Insert failed: RLS is blocking the insert (code 42501). This is NOT a missing column. Run this in Supabase SQL Editor: ALTER TABLE public.matches DISABLE ROW LEVEL SECURITY; — then retry.")
+                        st.error(f"Insert failed: RLS is blocking the insert (code 42501). This is NOT a missing column. Run in Supabase SQL Editor: ALTER TABLE public.matches DISABLE ROW LEVEL SECURITY; — then retry.")
                     elif "column" in _msg.lower() and "does not exist" in _msg.lower():
                         st.error(f"Insert failed: {e} — run the ALTER TABLE SQL for new columns.")
                     else:
@@ -306,6 +334,7 @@ with tab_perf:
         bets=[m for m in settled if m.get("vote_decision")=="TAKE" and m.get("dc_hit") is not None]
         n=len(bets); wins=sum(1 for m in bets if m.get("dc_hit")==1); net=sum((m.get("profit_loss") or 0.0) for m in bets)
         c1,c2,c3,c4,c5=st.columns(5); c1.metric("TAKE Bets",n); c2.metric("Wins",wins); c3.metric("Losses",n-wins); c4.metric("Hit %",f"{(wins/n*100) if n else 0:.1f}%"); c5.metric("Net P/L",f"{net:+.2f}u")
+        st.caption("LEAN / SKIP are stored but NOT counted as bets. A 4+ team that loses is a LOSS, not a SKIP.")
         for m in settled:
             d=dict(m); d["breakdown"]=[]
             st.markdown(_card_html(d, settled=True), unsafe_allow_html=True)
