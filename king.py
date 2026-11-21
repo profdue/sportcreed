@@ -199,7 +199,32 @@ def parse_dump(text: str):
     blocked_avgs = re.findall(r"Blocked\s*\n\s*[\d.]+\s*\n\s*([\d.]+)", t)
     # ON% : "<x>%ON target" — two blocks
     on_pcts = re.findall(r"(\d+)%ON target", t)
-    out = {"home_code": codes[0] if len(codes) > 0 else "", "away_code": codes[1] if len(codes) > 1 else "", "_warnings": []}
+    # Full names: they appear in Total attacks / Dangerous attacks, e.g.
+    # "Total attacks\n\nGAZ\nGenclerbirligi\n455\nAvg.\n75.83\nGaziantep\n334..."
+    # Codes (GNC/GAZ) are NOT team names — never use them as team names.
+    full_names = []
+    m_att = re.search(r"Total attacks(.{0,1200})", t, re.S)
+    if m_att:
+        sec = m_att.group(1)
+        # Full name = line of letters/spaces (3+ chars, not all caps) followed by a number line
+        for mm in re.finditer(r"\n\s*([A-Z][a-zA-Z\u00C0-\u017F ]{2,40})\s*\n\s*\d+\s*\n\s*Avg\.", sec):
+            nm = mm.group(1).strip()
+            if nm.upper() not in codes and nm not in full_names and len(nm) >= 3:
+                full_names.append(nm)
+            if len(full_names) >= 2: break
+    # Fallback: Dangerous attacks section has the same two names
+    if len(full_names) < 2:
+        m_d = re.search(r"Dangerous attacks(.{0,1200})", t, re.S)
+        if m_d:
+            sec = m_d.group(1)
+            for mm in re.finditer(r"\n\s*([A-Z][a-zA-Z\u00C0-\u017F ]{2,40})\s*\n\s*\d+\s*\n\s*Avg\.", sec):
+                nm = mm.group(1).strip()
+                if nm.upper() not in codes and nm not in full_names and len(nm) >= 3:
+                    full_names.append(nm)
+                if len(full_names) >= 2: break
+    home_name = full_names[0] if len(full_names) > 0 else (codes[0] if len(codes) > 0 else "")
+    away_name = full_names[1] if len(full_names) > 1 else (codes[1] if len(codes) > 1 else "")
+    out = {"home_code": home_name, "away_code": away_name, "_warnings": []}
     def pick(arr, idx, name):
         if len(arr) > idx: return _f(arr[idx])
         out["_warnings"].append(f"Missing {name} for {'home' if idx==0 else 'away'} — paste the full dump.")
