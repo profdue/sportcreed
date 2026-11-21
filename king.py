@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 """
 king.py — 6-Vote Logic, ALL DATA STORED
-Paste-only. No manual inputs.
-
-6 votes (Home/Away only):
- 1 More Shots, 2 Higher ON%, 3 Lower Blocked, 4 Higher Scored Avg,
- 5 Lower Conceded Avg, 6 Higher Scored%
-Decision PRE-match:
-  Leader 6-0,5-1,4-2 -> TAKE leader Win/Draw
-  3-3 -> LEAN ONLY, NO BET
-  Leader <=2 -> SKIP
-
-STORAGE: ALL decisions saved (TAKE + LEAN + SKIP), not just TAKE.
-ALL data saved: raw_dump (full paste) + all_data (JSON of every parsed field)
-+ individual columns for every metric, so nothing is thrown away.
+Paste-only. No manual inputs. No image upload.
+6 votes (Home/Away only): Shots, ON%, Blocked (lower), Scored Avg, Conceded Avg (lower), Scored%
+4+ = TAKE leader Win/Draw, 3-3 = LEAN ONLY, <=2 = SKIP
 """
 import re, json
 from datetime import datetime, timezone
@@ -21,32 +11,6 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="King — 6 Votes", page_icon="⚽", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""
-<style>
-    .main { background-color: #0e1117; }
-    h1, h2, h3 { font-family: 'Poppins', sans-serif; letter-spacing: -0.02em; }
-    .match-card { background: linear-gradient(135deg, #1a1f2e 0%, #232a3d 100%); border-radius: 16px; padding: 22px 26px; margin-bottom: 16px; border-left: 4px solid #6366f1; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
-    .match-card.pick-home { border-left-color: #10b981; }
-    .match-card.pick-away { border-left-color: #f59e0b; }
-    .match-card.skip { border-left-color: #64748b; opacity: 0.9; }
-    .match-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin: 0 0 4px 0; }
-    .match-meta { font-size: 0.82rem; color: #94a3b8; margin-bottom: 14px; }
-    .pick-badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
-    .badge-take { background: #06d6a022; color: #06d6a0; border: 1px solid #06d6a055; }
-    .badge-lean { background: #fbbf2422; color: #fbbf24; border: 1px solid #fbbf2455; }
-    .badge-skip { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
-    .badge-win { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
-    .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
-    .vote-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-    .vote-pill { font-size: 0.8rem; padding: 5px 11px; border-radius: 8px; background: #0f172a; color: #cbd5e1; border: 1px solid #1e293b; font-family: monospace; }
-    .vote-pill.home { background: #10b98115; color: #34d399; border-color: #10b98140; }
-    .vote-pill.away { background: #f59e0b15; color: #fbbf24; border-color: #f59e0b40; }
-    .vote-pill.tie { background: #64748b22; color: #94a3b8; border-color: #64748b55; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { height: 44px; background-color: #1a1f2e; border-radius: 10px; padding: 0 18px; color: #94a3b8; }
-    .stTabs [aria-selected="true"] { background-color: #6366f1 !important; color: white !important; }
-</style>
-""", unsafe_allow_html=True)
 
 def get_supabase():
     try:
@@ -62,6 +26,8 @@ def get_supabase():
 def db_insert(row: dict):
     sb = get_supabase()
     if sb is None: return None
+    # NEVER send match_id — Supabase generates it. Sending it causes the 11-conflict you saw.
+    row.pop("match_id", None)
     res = sb.table("matches").insert(row).execute(); st.cache_data.clear()
     return res.data[0] if res.data else None
 
@@ -100,16 +66,8 @@ def db_delete(match_id):
     if sb is None: return
     sb.table("matches").delete().eq("match_id", match_id).execute(); st.cache_data.clear()
 
-# ---------- 6-Vote Core ----------
 def compute_votes(h, a):
-    tests = [
-        ("Shots", h["shots"], a["shots"], "higher"),
-        ("ON%", h["on_pct"], a["on_pct"], "higher"),
-        ("Blocked", h["blocked"], a["blocked"], "lower"),
-        ("Scored Avg", h["scored_avg"], a["scored_avg"], "higher"),
-        ("Conceded Avg", h["conceded_avg"], a["conceded_avg"], "lower"),
-        ("Scored%", h["scored_pct"], a["scored_pct"], "higher"),
-    ]
+    tests = [("Shots", h["shots"], a["shots"], "higher"),("ON%", h["on_pct"], a["on_pct"], "higher"),("Blocked", h["blocked"], a["blocked"], "lower"),("Scored Avg", h["scored_avg"], a["scored_avg"], "higher"),("Conceded Avg", h["conceded_avg"], a["conceded_avg"], "lower"),("Scored%", h["scored_pct"], a["scored_pct"], "higher")]
     hv = av = 0; breakdown = []
     for label, hv_val, av_val, direction in tests:
         if hv_val is None or av_val is None:
@@ -138,18 +96,19 @@ def settle_vote(pick, hs, aws):
 def result_str(hs, aws):
     return "1" if hs>aws else ("2" if hs<aws else "X")
 
-# ---------- Full-Data Parser ----------
+def fmt_uo(uo):
+    """FIX: was str(tuple) -> '(''6'',''1''...'. Now clean text."""
+    if not uo: return None
+    # uo = (under_n, over_n, under_pct, over_pct, line)
+    return f"Under {uo[0]} / Over {uo[1]} ({uo[2]}%/{uo[3]}%)"
+
 def parse_dump(text: str):
-    """Parses EVERYTHING in the paste. Never invents.
-    Returns home/away dicts with all fields + raw_dump.
-    Missing fields stay None — raw_dump preserves the full paste."""
     t = text.replace("\r\n","\n")
     lines = [ln.strip() for ln in t.split("\n")]
     codes=[]
     for i,ln in enumerate(lines):
         if re.fullmatch(r"[A-Z]{2,4}", ln) and i+1<len(lines) and re.fullmatch(r"\d+", lines[i+1]):
             if ln not in codes: codes.append(ln)
-    # Full names from Total attacks / Dangerous attacks — never codes as names
     full_names=[]
     for sec_name in ["Total attacks","Dangerous attacks"]:
         m = re.search(sec_name+r"(.{0,1500})", t, re.S)
@@ -167,7 +126,6 @@ def parse_dump(text: str):
         try: return float(str(x).replace(",",".").strip().rstrip("%"))
         except Exception: return None
     def pick(arr, idx): return _f(arr[idx]) if len(arr)>idx else None
-    # Played: "Played games\n\nMAR\n7\n\nBAN\n6" — two CODE+number pairs in that section
     _played_sec = re.search(r"Played games(.{0,200})", t, re.S)
     played = re.findall(r"[A-Z]{2,4}\s*\n\s*(\d+)", _played_sec.group(1) if _played_sec else "")
     scored_tot = re.findall(r"Scored\s*\n\s*([\d.]+)\s*\n\s*Avg\.", t)
@@ -188,20 +146,14 @@ def parse_dump(text: str):
         return re.findall(r"[A-Z][a-zA-Z ]+\s*\n\s*\d+\s*\n\s*Avg\.\s*\n\s*([\d.]+)", m.group(1))
     total_attacks=_attack_avgs("Total attacks")
     dangerous_attacks=_attack_avgs("Dangerous attacks")
-    # BTTS: "Both scored (Yes/No)\n\nYes\n3\n43%57%\nNo\n4\nYes\n3\n50%50%\nNo\n3"
-    # Yes% = first % in "43%57%", No% = second %. Two blocks: home then away.
     _btts_sec = re.search(r"Both scored(.{0,400})", t, re.S)
     btts = []
     if _btts_sec:
         for mm in re.finditer(r"Yes\s*\n\s*\d+\s*\n\s*(\d+)%\s*\d+%", _btts_sec.group(1)):
             btts.append(mm.group(1))
-    # Under/Over: text blocks after "Under/Over" — format varies:
-    # "3\n4\n43%57%\n1.5" (home, line present) vs "1\n5\n17%83%" (away, no line) vs "7\n0\n100%\n3.5" (100% = only one %)
-    # Order in dump: home 1.5, away 1.5, home 2.5, away 2.5, home 3.5, away 3.5
     _uo = []
     for _chunk in re.split(r"Under/Over", t)[1:]:
         _lines = [ln.strip() for ln in _chunk.strip().split("\n") if ln.strip()!=""]
-        # _lines: [under_n, over_n, "43%57%" or "100%", (optional) line, ...]
         if len(_lines) >= 3 and _lines[0].isdigit() and _lines[1].isdigit():
             _pct = _lines[2]
             _m = re.findall(r"(\d+)%", _pct)
@@ -211,11 +163,9 @@ def parse_dump(text: str):
             if len(_lines)>=4 and re.fullmatch(r"[\d.]+", _lines[3]):
                 _line = _lines[3]
             _uo.append((_lines[0], _lines[1], _under_pct, _over_pct, _line))
-    # Fill line labels by position: 0=home1.5,1=away1.5,2=home2.5,3=away2.5,4=home3.5,5=away3.5
     _lines_map = ["1.5","1.5","2.5","2.5","3.5","3.5"]
     _uo = [(u[0],u[1],u[2],u[3], u[4] or (_lines_map[i] if i<len(_lines_map) else None)) for i,u in enumerate(_uo)]
-    # _uo order in dump: home 1.5, away 1.5, home 2.5, away 2.5, home 3.5, away 3.5
-    under_over = _uo  # list of (under_n, over_n, under_pct, over_pct, line)
+    under_over = _uo
     warnings=[]
     def need(arr, idx, name):
         if len(arr)<=idx: warnings.append(f"Missing {name} — paste the full dump.")
@@ -242,33 +192,29 @@ def _card_html(d, settled=False):
     hv,av=d.get("home_votes",0),d.get("away_votes",0); dec=d.get("vote_decision","LEAN"); pick=d.get("vote_pick","")
     title=f"{d.get('home_team','?')} vs {d.get('away_team','?')}"
     meta=f"{hv}-{av} &nbsp;·&nbsp; {dec}"+(f" &nbsp;·&nbsp; {pick} Win/Draw" if pick else "")
-    if dec=="TAKE": badge=f'<span class="pick-badge badge-take">TAKE {pick} Win/Draw</span>'; cls="pick-home" if pick=="HOME" else "pick-away"
-    elif dec=="LEAN": badge='<span class="pick-badge badge-lean">LEAN ONLY — NO BET</span>'; cls="skip"
-    else: badge='<span class="pick-badge badge-skip">SKIP</span>'; cls="skip"
+    if dec=="TAKE": badge=f'<span style="background:#06d6a022;color:#06d6a0;border:1px solid #06d6a055;padding:6px 14px;border-radius:999px;font-weight:700">TAKE {pick} Win/Draw</span>'; cls="pick-home" if pick=="HOME" else "pick-away"
+    elif dec=="LEAN": badge='<span style="background:#fbbf2422;color:#fbbf24;border:1px solid #fbbf2455;padding:6px 14px;border-radius:999px;font-weight:700">LEAN ONLY — NO BET</span>'; cls="skip"
+    else: badge='<span style="background:#64748b22;color:#94a3b8;border:1px solid #64748b55;padding:6px 14px;border-radius:999px;font-weight:700">SKIP</span>'; cls="skip"
     verdict=""
     if settled and d.get("home_score") is not None:
-        verdict=f'<div style="margin-top:10px;"><span class="pick-badge {"badge-win" if d.get("dc_hit")==1 else "badge-loss"}">Result {d.get("home_score")}-{d.get("away_score")} — {"HIT" if d.get("dc_hit")==1 else "MISS"}</span></div>'
+        verdict=f'<div style="margin-top:10px;"><span style="background:#10b98122;color:#10b981;padding:6px 12px;border-radius:999px">Result {d.get("home_score")}-{d.get("away_score")} — {"HIT" if d.get("dc_hit")==1 else "MISS"}</span></div>'
     pills=""
     for label,w,hval,aval in d.get("breakdown",[]):
         cls2="home" if w=="HOME" else ("away" if w=="AWAY" else "tie")
-        pills+=f'<span class="vote-pill {cls2}">{label}: {hval} vs {aval} → {w}</span>'
-    return f'<div class="match-card {cls}"><div class="match-title">{title}</div><div class="match-meta">{meta}</div>{badge}{verdict}<div class="vote-row">{pills}</div></div>'
+        pills+=f'<span style="font-size:0.8rem;padding:5px 11px;border-radius:8px;background:#0f172a;color:#cbd5e1;border:1px solid #1e293b;font-family:monospace">{label}: {hval} vs {aval} → {w}</span>'
+    return f'<div style="background:#1a1f2e;border-radius:16px;padding:22px 26px;margin-bottom:16px;border-left:4px solid #6366f1"><div style="font-size:1.25rem;font-weight:700;color:#f1f5f9">{title}</div><div style="font-size:0.82rem;color:#94a3b8;margin-bottom:14px">{meta}</div>{badge}{verdict}<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">{pills}</div></div>'
 
 st.title("King — 6 Votes")
-st.caption("Home/Away only. 6 votes. 4+ = TAKE leader Win/Draw. 3-3 = LEAN only. ALL data stored: TAKE + LEAN + SKIP, full dump + all metrics.")
-
+st.caption("Home/Away only. 6 votes. 4+ = TAKE leader Win/Draw. 3-3 = LEAN only. ALL data stored.")
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 with tab_new:
     st.markdown("### Paste the match data")
-    st.caption("Include the full dump — Shots, ON target, Blocked, Goals, Scored a goal, Passes, Attacks, Others, Disciplinary. Everything is stored.")
     raw_in = st.text_area("Input", height=340, label_visibility="collapsed", placeholder="Paste the match data\n...")
-
     run = st.button("Run the Logic", type="primary")
     if run and raw_in.strip():
         try:
             parsed = parse_dump(raw_in.strip())
             h,a = parsed["home"], parsed["away"]
-            # Only 6 vote fields are required to decide. Other fields may be None — raw_dump still saves them.
             req = ["shots","on_pct","blocked","scored_avg","conceded_avg","scored_pct"]
             missing = [k for k in req if h[k] is None] + [k for k in req if a[k] is None]
             if missing:
@@ -284,7 +230,6 @@ with tab_new:
             if parsed.get("_warnings"):
                 with st.expander(f"Parser warnings ({len(parsed['_warnings'])})"):
                     for w in parsed["_warnings"]: st.write(f"- {w}")
-            # ALL DATA STORED: TAKE + LEAN + SKIP, full dump + all metrics
             row = {"home_team":home_team,"away_team":away_team,"home_votes":hv,"away_votes":av,"vote_decision":dec,"vote_pick":pick or "",
                    "simple_qualifying":1 if dec=="TAKE" else 0,"simple_category":"6-VOTE","simple_bet":f"{pick} Win/Draw" if pick else "LEAN/SKIP",
                    "extracted_at":datetime.now(timezone.utc).isoformat(),
@@ -298,7 +243,9 @@ with tab_new:
                    "home_scored_pct":h.get("scored_pct"),"away_scored_pct":a.get("scored_pct"),
                    "home_possession":h.get("possession"),"away_possession":a.get("possession"),
                    "home_total_attacks":h.get("total_attacks"),"away_total_attacks":a.get("total_attacks"),
-                   "home_dangerous_attacks":h.get("dangerous_attacks"),"away_dangerous_attacks":a.get("dangerous_attacks"),"home_btts_yes_pct":h.get("btts_yes_pct"),"away_btts_yes_pct":a.get("btts_yes_pct"),"home_under_over_2_5":str(h.get("under_over_2_5")) if h.get("under_over_2_5") else None,"away_under_over_2_5":str(a.get("under_over_2_5")) if a.get("under_over_2_5") else None}
+                   "home_dangerous_attacks":h.get("dangerous_attacks"),"away_dangerous_attacks":a.get("dangerous_attacks"),
+                   "home_btts_yes_pct":h.get("btts_yes_pct"),"away_btts_yes_pct":a.get("btts_yes_pct"),
+                   "home_under_over_2_5":fmt_uo(h.get("under_over_2_5")),"away_under_over_2_5":fmt_uo(a.get("under_over_2_5"))}
             existing = db_find_existing(home_team, away_team)
             if existing: st.info(f"Already stored (match_id {existing.get('match_id')}).")
             else:
@@ -315,7 +262,6 @@ with tab_pending:
         for m in pending:
             d=dict(m); d["breakdown"]=[]
             st.markdown(_card_html(d), unsafe_allow_html=True)
-            # Show stored full data if present
             if m.get("all_data"):
                 with st.expander("Stored full data"):
                     try: st.json(json.loads(m["all_data"]))
@@ -332,7 +278,6 @@ with tab_pending:
                     if st.button("Settle", key=f"s_{m['match_id']}", type="primary"):
                         pick = m.get("vote_pick") or ("HOME" if "HOME" in str(m.get("simple_bet","")) else "AWAY" if "AWAY" in str(m.get("simple_bet","")) else None)
                         hit,prof = settle_vote(pick, int(hs), int(aws))
-                        # LEAN/SKIP have no pick — settling still stores result, hit stays None for non-TAKE
                         if m.get("vote_decision")!="TAKE":
                             hit,prof = None, 0.0
                         db_settle(m["match_id"], int(hs), int(aws), result_str(int(hs), int(aws)), hit, prof); st.success("Settled."); st.rerun()
@@ -347,7 +292,6 @@ with tab_perf:
         bets=[m for m in settled if m.get("vote_decision")=="TAKE" and m.get("dc_hit") is not None]
         n=len(bets); wins=sum(1 for m in bets if m.get("dc_hit")==1); net=sum((m.get("profit_loss") or 0.0) for m in bets)
         c1,c2,c3,c4,c5=st.columns(5); c1.metric("TAKE Bets",n); c2.metric("Wins",wins); c3.metric("Losses",n-wins); c4.metric("Hit %",f"{(wins/n*100) if n else 0:.1f}%"); c5.metric("Net P/L",f"{net:+.2f}u")
-        st.caption("LEAN / SKIP are stored but NOT counted as bets. A 4+ team that loses is a LOSS, not a SKIP.")
         for m in settled:
             d=dict(m); d["breakdown"]=[]
             st.markdown(_card_html(d, settled=True), unsafe_allow_html=True)
