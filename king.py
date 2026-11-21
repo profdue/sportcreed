@@ -171,7 +171,10 @@ def parse_dump(text: str):
     def _attack_avgs(section):
         m=re.search(section+r"(.{0,1500})", t, re.S)
         if not m: return []
-        return re.findall(r"[A-Z][a-zA-Z ]+\s*\n\s*\d+\s*\n\s*Avg\.\s*\n\s*([\d.]+)", m.group(1))
+        # FIX: was [A-Z][a-zA-Z ]+ — ASCII only, so "Nürnberg" (ü) never matched.
+        # It skipped Nürnberg, shifted Braunschweig 40.4 into HOME, left AWAY empty -> "Missing Dangerous attacks away".
+        # Now includes Latin Extended (ü, ö, ä, ß, é, etc.)
+        return re.findall(r"[A-Z\u00C0-\u017F][a-zA-Z\u00C0-\u017F ]+\s*\n\s*\d+\s*\n\s*Avg\.\s*\n\s*([\d.]+)", m.group(1))
     total_attacks=_attack_avgs("Total attacks")
     dangerous_attacks=_attack_avgs("Dangerous attacks")
     _btts_sec = re.search(r"Both scored(.{0,400})", t, re.S)
