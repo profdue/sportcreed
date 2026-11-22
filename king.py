@@ -210,7 +210,10 @@ def parse_dump(text: str):
     # Teams: "Marseille vs Le Mans" first such line
     m = re.search(r"^([A-ZÀ-Þ][A-Za-zÀ-ÿ' \-\.]{2,40})\s+vs\s+([A-ZÀ-Þ][A-Za-zÀ-ÿ' \-\.]{2,40})", t, re.M)
     if m:
-        f["home_team"] = m.group(1).strip(); f["away_team"] = m.group(2).strip()
+        f["home_team"] = m.group(1).strip().removesuffix(" predictions").strip(); f["away_team"] = m.group(2).strip().removesuffix(" predictions").strip()
+        # Also strip trailing " predictions" if regex grabbed it inside the name (e.g. "Hamburger SV predictions")
+        f["away_team"] = f["away_team"].replace(" predictions", "").strip()
+        f["home_team"] = f["home_team"].replace(" predictions", "").strip()
     else:
         # Fallback: "Marseille vs Le Mans" in title line
         m2 = re.search(r"([A-Z][A-Za-z ]+)\s+vs\s+([A-Z][A-Za-z ]+)", t)
@@ -300,6 +303,10 @@ def parse_dump(text: str):
     # If fav is home by ELO (higher ELO = fav), use that as fallback
     if f.get("home_is_fav") is None and f.get("home_elo") is not None and f.get("away_elo") is not None:
         f["home_is_fav"] = f["home_elo"] >= f["away_elo"]
+    # Safety: never let " predictions" stay in a team name — it breaks the "Matches\n<away>" split and Last 5
+    if f.get("home_team"): f["home_team"] = f["home_team"].replace(" predictions", "").strip()
+    if f.get("away_team"): f["away_team"] = f["away_team"].replace(" predictions", "").strip()
+    if f.get("fav_team"): f["fav_team"] = f["fav_team"].replace(" predictions", "").strip()
     # --- BeSoccer raw format fallbacks (this exact paste) ---
     # ELO: "88  ELO  77" / "88 ELO 77"
     if f.get("home_elo") is None:
