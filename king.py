@@ -368,8 +368,17 @@ def parse_dump(text: str):
             _away_names = [f.get("away_team") or "", (f.get("away_team") or "").split()[-1] if f.get("away_team") else "", "HSV" if "Hamburger" in (f.get("away_team") or "") else ""]
             _mar = _count_wdl(_mar_part, [x for x in _home_names if x])
             _lm = _count_wdl(_lm_part, [x for x in _away_names if x])
-            if _mar: f["fav_last5"] = (_mar[0], _mar[1], _mar[2]); f["fav_last5_team"] = "Olympique Marseille"
-            if _lm: f["und_last5"] = (_lm[0], _lm[1], _lm[2]); f["und_last5_team"] = "Le Mans"
+            # FIX: _mar = HOME counts, _lm = AWAY counts. Fav/Und depends on who is fav, not position.
+            # Werder: home=Werder (underdog), away=Hamburg (fav) -> old code put Werder in fav slot = SWAPPED.
+            _home_c = (_mar[0], _mar[1], _mar[2]) if _mar else None
+            _away_c = (_lm[0], _lm[1], _lm[2]) if _lm else None
+            _home_is_fav = (f.get("fav_team") or "").strip() == (f.get("home_team") or "").strip() if f.get("fav_team") and f.get("home_team") else True
+            if _home_is_fav:
+                if _home_c: f["fav_last5"] = _home_c; f["fav_last5_team"] = f.get("home_team")
+                if _away_c: f["und_last5"] = _away_c; f["und_last5_team"] = f.get("away_team")
+            else:
+                if _away_c: f["fav_last5"] = _away_c; f["fav_last5_team"] = f.get("away_team")
+                if _home_c: f["und_last5"] = _home_c; f["und_last5_team"] = f.get("home_team")
     # Underdog draws details from Matches Le Mans section: "Le Mans 1 - 1 Monaco  MON 14% 21% 66%  77 89 12" -> Gap 12, X% 21%
     # and "Auxerre 1 - 1 Le Mans  LMU 49% 25% 26%  77 81 4" -> Gap 4, X% 25%
     # Fallback if underdog_draws empty: parse draw lines in Le Mans part
