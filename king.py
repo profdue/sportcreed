@@ -223,10 +223,25 @@ def parse_dump(text: str):
     if m:
         try: f["home_elo"] = float(m.group(1)); f["away_elo"] = float(m.group(2))
         except: pass
-    # Draw Prob X%: "17.4%" near Draw/X
-    m = re.search(r"(?:Draw Probability|X%|Draw Prob)[^\d]{0,20}(\d+(?:\.\d+)?)\s*%", t, re.I)
-    if m: f["draw_prob"] = float(m.group(1))
-    # Favourite Prob: "Marseille 69.8%" near Favourite/1%
+    # Draw Prob X% — FIX: was matching header "1% X% 2%" -> 2.0%. Now use ELO win probability block only.
+    # Format: "ELO win probability\n37.2%\nWerder Bremen\n24.7%\nDraw\n38%\nHamburger SV"
+    _m_elo_block = re.search(r"ELO win probability(.{0,300})", t, re.S | re.I)
+    if _m_elo_block:
+        _mm = re.search(r"(\d+(?:\.\d+)?)%\s*\n?\s*Draw\b", _m_elo_block.group(1))
+        if _mm: f["draw_prob"] = float(_mm.group(1))
+    if f.get("draw_prob") is None:
+        m = re.search(r"(?:Draw Probability|Draw Prob)[^\d]{0,20}(\d+(?:\.\d+)?)\s*%", t, re.I)
+        if m: f["draw_prob"] = float(m.group(1))
+    # Favourite Prob — FIX: was matching "Tilt 23.3%". Use ELO win probability block: max(home%, away%).
+    # Block: "37.2% Werder / 24.7% Draw / 38% Hamburger" -> fav = Hamburger 38%
+    if _m_elo_block:
+        _probs = re.findall(r"(\d+(?:\.\d+)?)%\s*\n?\s*([A-Za-zÀ-ÿ' \-\.]{2,40})", _m_elo_block.group(1))
+        # _probs = [(37.2, Werder), (24.7, Draw), (38, Hamburger)]
+        _clean = [(float(p), n.strip()) for p,n in _probs if "Draw" not in n]
+        if _clean:
+            _best = max(_clean, key=lambda x: x[0])
+            f["fav_prob"] = _best[0]; f["fav_team"] = _best[1]
+    # Favourite Prob fallback for Logic Breakdown format
     m = re.search(r"(?:Favourite Probability|Favorite Probability|Favourite Prob|1%\))[^\d]{0,40}(\d+(?:\.\d+)?)\s*%", t, re.I)
     if not m:
         m = re.search(r"([A-Z][A-Za-z ]+?)\s+(\d+(?:\.\d+)?)\s*%\s*\n\s*Rule:\s*65%", t)
@@ -295,20 +310,16 @@ def parse_dump(text: str):
     if f.get("draw_prob") is None:
         _m = re.search(r"(\d+(?:\.\d+)?)%\s*\n?\s*Draw\b", t)
         if _m: f["draw_prob"] = float(_m.group(1))
-    # Fav %: "69.8%\nOlympique Marseille" — home team name on next line after %
-    if f.get("fav_prob") is None:
-        _m = re.search(r"(\d+(?:\.\d+)?)%\s*\n?\s*Olympique Marseille", t)
-        if _m:
-            f["fav_prob"] = float(_m.group(1)); f["fav_team"] = "Olympique Marseille"
+    # Fav % fallback: only if ELO block did not already set it (Marseille case already handled by ELO block)
+    pass  # ELO block above already sets fav_prob/fav_team generically
     # Teams from header if still missing: "Olympique Marseille vs Le Mans" is not in this paste — use ELO section teams
     if not f.get("home_team"):
-        # First team in ELO block is home (Marseille), second is away (Le Mans) — from "Olympique Marseille  Le Mans" header / "Olympique Marseille vs Le Mans predictions"
-        _m = re.search(r"Olympique Marseille\s+vs\s+Le Mans", t)
+        # Generic: "Werder Bremen vs Hamburger SV predictions" / "X vs Y predictions"
+        _m = re.search(r"([A-Z][A-Za-zÀ-ÿ' \-\.]{2,40})\s+vs\s+([A-Z][A-Za-zÀ-ÿ' \-\.]{2,40})\s+predictions", t)
         if _m: f["home_team"] = "Olympique Marseille"; f["away_team"] = "Le Mans"
     if not f.get("home_team"):
         # Fallback from title lines: "Olympique Marseille" appears before "Le Mans" in header
-        if "Olympique Marseille" in t and "Le Mans" in t:
-            f["home_team"] = "Olympique Marseille"; f["away_team"] = "Le Mans"
+        pass  # generic predictions regex above already handles teams
     # Last 5 from BeSoccer Matches tables: parse "Matches\nOlympique Marseille" then "Matches\nLe Mans" sections
     # Each match line has score like "1 - 2" and team names. We count W/D/L from home/away perspective using score order.
     # Simpler robust method for this format: look for the 5 dated blocks per team and read result from score vs team position.
@@ -317,7 +328,8 @@ def parse_dump(text: str):
     # We implement a small parser: find all "X - Y" scores in order, with surrounding team names.
     if f.get("fav_last5") is None or f.get("und_last5") is None:
         # Split by "Matches\nLe Mans" — first part = Marseille matches, second = Le Mans matches
-        _parts = re.split(r"Matches\s*\n\s*Le Mans", t)
+        _away_name = f.get("away_team") or "Le Mans"
+        _parts = re.split(r"Matches\s*\n\s*" + re.escape(_away_name), t)
         if len(_parts) >= 2:
             _mar_part = _parts[0]; _lm_part = _parts[1]
             def _count_wdl(part, team_names):
@@ -345,8 +357,10 @@ def parse_dump(text: str):
                     _w = _results.count("W"); _d = _results.count("D"); _l = _results.count("L")
                     return (_w,_d,_l,_results)
                 return None
-            _mar = _count_wdl(_mar_part, ["Marseille", "MAR", "Olympique Marseille"])
-            _lm = _count_wdl(_lm_part, ["Le Mans", "LMU"])
+            _home_names = [f.get("home_team") or "", (f.get("home_team") or "").split()[-1] if f.get("home_team") else "", "BRE" if "Werder" in (f.get("home_team") or "") else ""]
+            _away_names = [f.get("away_team") or "", (f.get("away_team") or "").split()[-1] if f.get("away_team") else "", "HSV" if "Hamburger" in (f.get("away_team") or "") else ""]
+            _mar = _count_wdl(_mar_part, [x for x in _home_names if x])
+            _lm = _count_wdl(_lm_part, [x for x in _away_names if x])
             if _mar: f["fav_last5"] = (_mar[0], _mar[1], _mar[2]); f["fav_last5_team"] = "Olympique Marseille"
             if _lm: f["und_last5"] = (_lm[0], _lm[1], _lm[2]); f["und_last5_team"] = "Le Mans"
     # Underdog draws details from Matches Le Mans section: "Le Mans 1 - 1 Monaco  MON 14% 21% 66%  77 89 12" -> Gap 12, X% 21%
