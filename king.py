@@ -90,7 +90,8 @@ def parse_dump(t: str) -> dict:
 # ---------- CHECKS ----------
 def evaluate(f: dict):
     checks = []
-    gap = (f.get("home_elo") or 0) - (f.get("away_elo") or 0)
+    # Gap = |home - away| = fav ELO - und ELO. Was home-away, so away-fav gave -12 and failed wrongly.
+    gap = abs((f.get("home_elo") or 0) - (f.get("away_elo") or 0))
     checks.append({"name": "1. Gap (dELO)", "status": "PASS" if gap >= 10 else "FAIL",
                    "detail": f"{f.get('home_elo')} vs {f.get('away_elo')} = {gap} — needs 10+"})
     x = f.get("draw_prob")
