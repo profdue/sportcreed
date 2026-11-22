@@ -118,7 +118,8 @@ def evaluate(f: dict):
     n_warn = sum(1 for c in checks if c["status"] == "WARNING")
     n_fail = sum(1 for c in checks if c["status"] == "FAIL")
     n_miss = sum(1 for c in checks if c["status"] == "MISSING")
-    decision = "NO DRAW" if (n_pass == 5 and n_warn == 1 and n_fail == 0 and n_miss == 0) else "NO BET"
+    # NO DRAW if NO fail, NO missing, at most 1 warning. 6 Pass = NO DRAW, 5 Pass + 1 Warning = NO DRAW.
+    decision = "NO DRAW" if (n_fail == 0 and n_miss == 0 and n_warn <= 1) else "NO BET"
     return checks, decision, (n_pass, n_warn, n_fail, n_miss)
 
 # ---------- UI ----------
@@ -186,6 +187,18 @@ with tab3:
         data = get_supabase().table("matches").select("*").not_.is_("home_score", "null").order("settled_at", desc=True).execute().data or []
     except Exception as e:
         data = []; st.error(str(e))
-    if not data: st.info("No settled matches yet.")
-    for m in data:
-        st.write(f"{m.get('home_team')} {m.get('home_score')}-{m.get('away_score')} {m.get('away_team')} · {m.get('decision')} · {m.get('result')} · NO DRAW hit: {m.get('nodraw_hit')}")
+    # Performance = ONLY settled NO DRAW picks. NO BET rows never had a bet, so they tell nothing.
+    nodraw = [m for m in data if m.get("decision") == "NO DRAW"]
+    nobet = [m for m in data if m.get("decision") != "NO DRAW"]
+    if not nodraw:
+        st.info(f"No settled NO DRAW picks yet. ({len(nobet)} settled NO BET rows hidden — they had no bet.)")
+    else:
+        hits = sum(1 for m in nodraw if m.get("result") != "DRAW")
+        draws = len(nodraw) - hits
+        st.metric("NO DRAW picks settled", len(nodraw))
+        st.metric("NO DRAW hit (not a draw)", f"{hits} / {len(nodraw)} = {round(hits/len(nodraw)*100,1)}%")
+        st.metric("Lost to draw", draws)
+        st.metric("NO BET settled (hidden from hit rate)", len(nobet))
+        for m in nodraw:
+            hit = "✅ HIT — not a draw" if m.get("result") != "DRAW" else "❌ LOST — draw"
+            st.write(f"{m.get('home_team')} {m.get('home_score')}-{m.get('away_score')} {m.get('away_team')} · {m.get('result')} · {hit}")
