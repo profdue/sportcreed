@@ -237,28 +237,92 @@ with tab1:
             else: sb.table("matches").insert(row).execute(); st.success("Saved — Step 1/2/3 + gaps + tier + script stored.")
         except Exception as e: st.error(f"Insert failed: {e}")
 with tab2:
+    st.subheader("⏳ Pending — waiting for result")
     try: data = get_supabase().table("matches").select("*").is_("home_score","null").order("extracted_at", desc=True).execute().data or []
     except Exception as e: data=[]; st.error(str(e))
     if not data: st.info("No pending matches.")
     for m in data:
         p = m.get("parsed") or {}
-        st.markdown(f"**{m.get('home_team')} vs {m.get('away_team')}** · {p.get('tier','?')} · {p.get('confidence','?')}")
-        st.write(p.get("script",""))
-        c1,c2,c3 = st.columns(3)
-        hs=c1.number_input("Home",min_value=0,step=1,key=f"h_{m['match_id']}")
-        aws=c2.number_input("Away",min_value=0,step=1,key=f"a_{m['match_id']}")
-        if c3.button("Settle",key=f"s_{m['match_id']}"):
+        _tier = p.get("tier") or m.get("tier") or "?"
+        _conf = p.get("confidence") or m.get("confidence") or "?"
+        _winner = p.get("total_winner") or "?"
+        _wname = m.get("home_team") if _winner=="HOME" else (m.get("away_team") if _winner=="AWAY" else "No winner")
+        _sugg = f"BET: NO DRAW — {_wname}" if _tier in ("LOCK","LEAN") else "NO BET — SKIP"
+        _bg = "#0f5132" if _tier=="LOCK" else ("#664d03" if _tier=="LEAN" else "#842029")
+        _bd = "#198754" if _tier=="LOCK" else ("#ffc107" if _tier=="LEAN" else "#dc3545")
+        _steps = p.get("steps") or []
+        _steps_txt = " &nbsp;•&nbsp; ".join([f"{x.get('label','?')}: {x.get('home')}% vs {x.get('away')}% → {x.get('winner') or 'TIE'}" for x in _steps]) if _steps else "Steps not stored"
+        _veto = "🚨 VETO" if p.get("veto") else "No veto"
+        _lown = "⚠️ LOW-N" if p.get("low_n") else "Sample OK"
+        st.markdown(f"""
+        <div style="border:2px solid {_bd}; border-radius:14px; padding:14px 16px; background:{_bg}; color:white; margin:10px 0;">
+          <div style="font-size:12px; letter-spacing:1.5px; opacity:0.85;">SUGGESTION &nbsp;•&nbsp; {m.get('home_team')} vs {m.get('away_team')}</div>
+          <div style="font-size:24px; font-weight:900; margin:6px 0 2px 0;">{_tier} — {_sugg}</div>
+          <div style="font-size:14px; margin-bottom:8px;">Winner: {_wname} ({_winner}) &nbsp;•&nbsp; Total: {p.get('total_home')} vs {p.get('total_away')} &nbsp;•&nbsp; Net {p.get('net')} &nbsp;•&nbsp; Confidence: {_conf}</div>
+          <div style="font-size:13px; opacity:0.95;">{_steps_txt}</div>
+          <div style="font-size:13px; margin-top:6px;"><b>Script:</b> {p.get('script','')}</div>
+          <div style="font-size:13px;"><b>Shape:</b> {p.get('shape','')} &nbsp;•&nbsp; {_veto} &nbsp;•&nbsp; {_lown}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        c1,c2,c3,c4 = st.columns([1,1,1,1])
+        hs=c1.number_input("Home score",min_value=0,step=1,key=f"h_{m['match_id']}")
+        aws=c2.number_input("Away score",min_value=0,step=1,key=f"a_{m['match_id']}")
+        if c3.button("✅ Settle",key=f"s_{m['match_id']}"):
             res="HOME" if hs>aws else ("AWAY" if aws>hs else "DRAW")
             get_supabase().table("matches").update({"home_score":int(hs),"away_score":int(aws),"result":res,"settled_at":now_iso()}).eq("match_id",m["match_id"]).execute(); st.rerun()
-        if st.button("Delete",key=f"d_{m['match_id']}"):
+        if c4.button("🗑 Delete",key=f"d_{m['match_id']}"):
             get_supabase().table("matches").delete().eq("match_id",m["match_id"]).execute(); st.rerun()
 with tab3:
+    st.subheader("📊 Performance — did the suggestion work?")
+    st.caption("How we track it — frozen, no post-loss tuning: LOCK/LEAN = suggestion BET NO DRAW on the total winner. HIT = result is NOT a draw AND result = total winner. NO-DRAW HIT = result is NOT a draw (bet would have won even if winner was wrong). DRAW / NO BET = suggestion SKIP — never counted as win/loss, but we track what NO DRAW would have done, so we can see if the veto is costing us.")
     try: data = get_supabase().table("matches").select("*").not_.is_("home_score","null").order("settled_at",desc=True).execute().data or []
     except Exception as e: data=[]; st.error(str(e))
-    picks=[m for m in data if (m.get("parsed") or {}).get("tier") in ("LOCK","LEAN")]
-    if not picks: st.info("No settled LOCK/LEAN picks yet.")
+    if not data: st.info("No settled matches yet.")
     else:
-        st.metric("LOCK/LEAN settled", len(picks))
-        for m in picks:
+        def _tier_of(m):
+            return (m.get("parsed") or {}).get("tier") or m.get("tier") or "?"
+        def _winner_of(m):
+            return (m.get("parsed") or {}).get("total_winner") or "?"
+        # --- Summary ---
+        _bets = [m for m in data if _tier_of(m) in ("LOCK","LEAN")]
+        _lock = [m for m in _bets if _tier_of(m)=="LOCK"]
+        _lean = [m for m in _bets if _tier_of(m)=="LEAN"]
+        _nobet = [m for m in data if _tier_of(m) in ("DRAW / NO BET","NO BET")]
+        def _hit(m): return m.get("result")!="DRAW" and m.get("result")==_winner_of(m)
+        def _nodraw_hit(m): return m.get("result")!="DRAW"
+        def _rate(lst, fn): return f"{sum(1 for m in lst if fn(m))}/{len(lst)} ({round(100*sum(1 for m in lst if fn(m))/len(lst)) if lst else 0}%)" if lst else "—"
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("LOCK/LEAN settled", len(_bets))
+        c2.metric("WINNER HIT (result = winner)", _rate(_bets, _hit))
+        c3.metric("NO-DRAW HIT (result ≠ DRAW)", _rate(_bets, _nodraw_hit))
+        c4.metric("NO BET settled (skipped)", len(_nobet))
+        # By tier
+        st.markdown("**By tier**")
+        for _t, _lst in [("LOCK",_lock),("LEAN",_lean)]:
+            if _lst:
+                st.write(f"**{_t}:** {len(_lst)} settled · Winner hit {_rate(_lst,_hit)} · No-draw hit {_rate(_lst,_nodraw_hit)}")
+        if _nobet:
+            st.write(f"**DRAW / NO BET (skipped):** {len(_nobet)} settled · NO DRAW would have hit {_rate(_nobet,_nodraw_hit)} · Of those, {sum(1 for m in _nobet if m.get('result')=='DRAW')} ended DRAW (skip was right), {sum(1 for m in _nobet if m.get('result')!='DRAW')} ended NOT DRAW (skip missed a NO DRAW win).")
+            st.caption("That last number is the veto cost — if it keeps growing, the veto is costing more than it saves.")
+        st.markdown("---")
+        st.markdown("**All settled — one card per match, suggestion vs actual**")
+        for m in data:
             p=m.get("parsed") or {}
-            st.write(f"{m.get('home_team')} {m.get('home_score')}-{m.get('away_score')} {m.get('away_team')} · {p.get('tier')} · {p.get('confidence')} · Result {m.get('result')} · Script: {p.get('script','')}")
+            _tier=_tier_of(m); _winner=_winner_of(m)
+            _wname=m.get("home_team") if _winner=="HOME" else (m.get("away_team") if _winner=="AWAY" else "No winner")
+            _sugg=f"BET: NO DRAW — {_wname}" if _tier in ("LOCK","LEAN") else "NO BET — SKIP"
+            _res=m.get("result"); _score=f"{m.get('home_score')}-{m.get('away_score')}"
+            if _tier in ("LOCK","LEAN"):
+                _verdict = "✅ HIT — winner + no draw" if _hit(m) else ("🟡 HALF — no draw, wrong winner" if _nodraw_hit(m) else "❌ MISS — ended DRAW")
+                _bg="#0f5132" if _hit(m) else ("#664d03" if _nodraw_hit(m) else "#842029")
+            else:
+                _verdict = "✅ SKIP RIGHT — ended DRAW" if _res=="DRAW" else "⏭️ SKIPPED — ended NOT DRAW (would-have-won)"
+                _bg="#1a1a2e" if _res=="DRAW" else "#4a4a4a"
+            st.markdown(f"""
+            <div style="border:1px solid #444; border-radius:12px; padding:12px 14px; background:{_bg}; color:white; margin:8px 0;">
+              <div style="font-size:13px; opacity:0.85;">{_tier} &nbsp;•&nbsp; {_sugg} &nbsp;•&nbsp; Confidence: {p.get('confidence') or m.get('confidence') or '?'}</div>
+              <div style="font-size:18px; font-weight:800; margin:4px 0;">{m.get('home_team')} {_score} {m.get('away_team')} — Result: {_res} &nbsp;•&nbsp; {_verdict}</div>
+              <div style="font-size:13px;"><b>Suggested script:</b> {p.get('script','')}</div>
+              <div style="font-size:13px;"><b>Steps:</b> Total {p.get('total_home')} vs {p.get('total_away')} · Net {p.get('net')} &nbsp;•&nbsp; Shape: {p.get('shape','')} &nbsp;•&nbsp; Veto: {'YES' if p.get('veto') else 'No'} &nbsp;•&nbsp; Low-n: {'YES' if p.get('low_n') else 'No'}</div>
+            </div>
+            """, unsafe_allow_html=True)
