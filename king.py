@@ -89,7 +89,7 @@ def parse_dump(t: str) -> dict:
     # In this dump Contextual table is transposed, so fall back to explicit Home vs Away Stats table:
     # "Clean sheets 20% 0%" and "Failed to score 20% 20%" under "Home vs Away Stats"
     hvs_idx = t.find("Home vs Away Stats")
-    hvs = t[hvs_idx:hvs_idx+2000] if hvs_idx >= 0 else ""
+    hvs = t[hvs_idx:hvs_idx+4000] if hvs_idx >= 0 else ""
     def two_pcts(block, pat):
         m = re.search(pat, block, re.I | re.S)
         if not m: return None, None
@@ -99,29 +99,100 @@ def parse_dump(t: str) -> dict:
     cs_h, cs_a = two_pcts(hvs, r"Clean sheets")
     fs_h, fs_a = two_pcts(hvs, r"Failed to score")
     f["cs_home"], f["cs_away"], f["fts_home"], f["fts_away"] = cs_h, cs_a, fs_h, fs_a
-    # PPG split — tie-breaker ONLY, never a pick. From Comparison block "points per game".
-    # Format there is: points per game <home> <league> / <away> <league> — take first two numbers in that block.
-    try:
-        _cmp_idx = t.find("Comparison with league average")
-        if _cmp_idx >= 0:
-            _cmp = t[_cmp_idx:_cmp_idx+1500]
-            _mppg = re.search(r"points per game\s*(\d+(?:\.\d+)?)", _cmp, re.I)
-            if _mppg:
-                # First number after "points per game" is the home team's PPG in that block;
-                # search a second occurrence for away. Keep it best-effort: only set if two values found.
-                _allppg = re.findall(r"points per game\s*(\d+(?:\.\d+)?)", _cmp, re.I)
-                if len(_allppg) >= 2:
-                    f["ppg_home"], f["ppg_away"] = float(_allppg[0]), float(_allppg[1])
-    except Exception:
-        pass
-    # Veto: conceded per game in split — from "Comparison with league average" / "Goals conceded per game"
-    # Monza home 1.80, Fiorentina away 2.40 in this dump
-    m = re.search(r"Goals conceded per game\s*(\d+(?:\.\d+)?)\s*\n?\s*(\d+(?:\.\d+)?)", t)
-    if m:
-        f["conceded_home"], f["conceded_away"] = float(m.group(1)), float(m.group(2))
-    else:
+    # --- Comparison blocks, split PER TEAM (fixes conceded_away / PPG bugs) ---
+    # The old code did re.search("Goals conceded per game ...", whole_dump) and took
+    # the FIRST two numbers in the whole dump: Internacional 1.00 + LEAGUE 1.12,
+    # and stored league 1.12 as Vitoria's conceded_away. Same risk for PPG.
+    # Correct source: "Comparison with league average" has one block per team:
+    #   "Internacional (17 home matches) vs league average AT HOME" -> home block
+    #   "Vitoria (17 away matches) vs league average AWAY"           -> away block
+    # Parse each team's numbers ONLY inside its own block.
+    def _comparison_blocks(text, home_name, away_name):
+        idx = text.find("Comparison with league average")
+        if idx < 0:
+            return "", ""
+        cmp_text = text[idx:]
+        # Cut at the next major section after Comparison, if present.
+        for stop in ("\nGoal times", "\nLeading and Trailing", "\nResults table"):
+            j = cmp_text.find(stop)
+            if j > 0:
+                cmp_text = cmp_text[:j]
+                break
+        def _block_for(name):
+            if not name:
+                return ""
+            # Find "<Name> (<n> ... matches)" inside Comparison.
+            m = re.search(re.escape(name) + r"\s*\(\d+[^)]*matches\)", cmp_text)
+            if not m:
+                # Fallback: first bare occurrence of the team name in Comparison.
+                m = re.search(re.escape(name), cmp_text)
+                if not m:
+                    return ""
+            start = m.start()
+            # Block ends at the OTHER team's block start, or end of Comparison.
+            other = away_name if name == home_name else home_name
+            m2 = re.search(re.escape(other) + r"\s*\(\d+[^)]*matches\)", cmp_text[start + 1:]) if other else None
+            end = start + 1 + m2.start() if m2 else len(cmp_text)
+            return cmp_text[start:end]
+        return _block_for(home_name), _block_for(away_name)
+
+    def _first_num(block, pat):
+        m = re.search(pat, block, re.I | re.S)
+        if not m:
+            return None
+        seg = block[m.end():m.end() + 300]
+        n = re.search(r"(\d+(?:\.\d+)?)", seg)
+        return float(n.group(1)) if n else None
+
+    def _first_pct(block, pat):
+        m = re.search(pat, block, re.I | re.S)
+        if not m:
+            return None
+        seg = block[m.end():m.end() + 300]
+        n = re.search(r"(\d+(?:\.\d+)?)\s*%", seg)
+        return float(n.group(1)) if n else None
+
+    _cmp_home, _cmp_away = _comparison_blocks(t, f.get("home_team"), f.get("away_team"))
+    # PPG — tie-breaker ONLY, never a pick. Per-team Comparison block.
+    _ppg_h = _first_num(_cmp_home, r"points per game")
+    _ppg_a = _first_num(_cmp_away, r"points per game")
+    if _ppg_h is not None:
+        f["ppg_home"] = _ppg_h
+    if _ppg_a is not None:
+        f["ppg_away"] = _ppg_a
+    # Veto inputs — per-team Comparison block. NEVER the first two numbers in the dump.
+    _conc_h = _first_num(_cmp_home, r"Goals conceded per game")
+    _conc_a = _first_num(_cmp_away, r"Goals conceded per game")
+    if _conc_h is not None:
+        f["conceded_home"] = _conc_h
+    if _conc_a is not None:
+        f["conceded_away"] = _conc_a
+    # Fallbacks if Comparison block is absent: use "Avg Conceded" in Contextual averages
+    # (home team's Avg Conceded, away team's Avg Scored are transposed there — do NOT
+    # reuse them for the away side). Only fill what is still missing.
+    if f.get("conceded_home") is None or f.get("conceded_away") is None:
         m2 = re.search(r"Avg Conceded\s*(\d+(?:\.\d+)?)", t)
-        if m2: f["conceded_home"] = float(m2.group(1))
+        if m2 and f.get("conceded_home") is None:
+            f["conceded_home"] = float(m2.group(1))
+    # Step 4 fallback: if Home vs Away Stats gave nothing, use per-team Comparison
+    # "% Clean sheets" / "% Failed To Score" (first value = team's own, second = league).
+    if f.get("cs_home") is None:
+        v = _first_pct(_cmp_home, r"% Clean sheets")
+        if v is not None:
+            f["cs_home"] = v
+    if f.get("cs_away") is None:
+        v = _first_pct(_cmp_away, r"% Clean sheets")
+        if v is not None:
+            f["cs_away"] = v
+    if f.get("fts_home") is None:
+        v = _first_pct(_cmp_home, r"% Failed To Score")
+        if v is not None:
+            f["fts_home"] = v
+    if f.get("fts_away") is None:
+        v = _first_pct(_cmp_away, r"% Failed To Score")
+        if v is not None:
+            f["fts_away"] = v
+    return f
     return f
 
 # ---------- EVALUATION ----------
@@ -214,8 +285,18 @@ def evaluate(f: dict):
             ppg_pick = "HOME" if ph > pa else "AWAY"
             total_winner = ppg_pick
             fav_team = home if ppg_pick == "HOME" else away
-            tier = "LEAN"; tier_reason += f" PPG tie-breaker only: Home PPG {ph} vs Away PPG {pa} -> {fav_team}. Lean, never Lock."
-            conf = "Low"
+            # PPG pick is NOT exempt from the veto: re-check favourite's conceded.
+            _ppg_conc = f.get("conceded_home") if ppg_pick == "HOME" else f.get("conceded_away")
+            if _ppg_conc is not None and _ppg_conc > 1.60:
+                veto = True
+                fav_conceded = _ppg_conc
+                tier = "DRAW / NO BET"
+                tier_reason += f" PPG tie-breaker only: Home PPG {ph} vs Away PPG {pa} -> {fav_team}, BUT VETO: {fav_team} concedes {_ppg_conc}/game (>1.60) — no bet."
+                conf = "No bet"
+            else:
+                fav_conceded = _ppg_conc
+                tier = "LEAN"; tier_reason += f" PPG tie-breaker only: Home PPG {ph} vs Away PPG {pa} -> {fav_team}. Lean, never Lock."
+                conf = "Low"
     # Predicted script — from steps, not from PPG / total alone
     s1w = next((s for s in steps if s["step"]==1), {})
     s2w = next((s for s in steps if s["step"]==2), {})
@@ -235,6 +316,8 @@ def evaluate(f: dict):
     else:
         script += "No clear second phase. "
     script += f"{shape}."
+    if ppg_pick:
+        script += f" (PPG tie-breaker only: {ppg_pick}.)"
     return {"steps": steps, "total_home": round(total_home,1), "total_away": round(total_away,1),
             "net": net, "total_winner": total_winner, "tier": tier, "tier_reason": tier_reason,
             "veto": veto, "fav_conceded": fav_conceded, "low_n": low_n, "confidence": conf,
@@ -283,14 +366,47 @@ with tab1:
             st.markdown(f"<div style='border-left:4px solid {_wc}; padding:6px 10px; margin:4px 0; background:#f8f9fa; border-radius:6px;'><b>{s['label']}</b> — Home {s['home']}% vs Away {s['away']}% → <b>{_w}</b> · Gap {s['gap']}</div>", unsafe_allow_html=True)
         st.write(f"**Tier reason:** {r['tier_reason']}")
         st.write(f"**Step 4 detail:** CS Home {f.get('cs_home')}% / Away {f.get('cs_away')}% · FTS Home {f.get('fts_home')}% / Away {f.get('fts_away')}%")
-        row = {"home_team": f.get("home_team"), "away_team": f.get("away_team"),
-               "tier": r["tier"],
-               "confidence": r["confidence"],
-               "decision": "NO DRAW" if r["tier"] in ("LOCK","LEAN") else "NO BET",
-               "checks": [{"name": s["label"], "status": s["winner"] or "MISSING", "detail": f"Home {s['home']}% vs Away {s['away']}% · Gap {s['gap']}"} for s in r["steps"]],
-               "parsed": {**f, **r}, "raw_dump": dump,
-               "all_data": {"parsed": f, "result": r, "tier": r["tier"], "confidence": r["confidence"]},
-               "extracted_at": now_iso()}
+        # ---- build_row: flat columns AND parsed, from the same f / r ----
+        # Flat columns are the queryable record. parsed / all_data are the audit trail.
+        # They must agree: both are built from the same f and r, never hand-typed.
+        _steps_by_n = {s["step"]: s for s in r["steps"]}
+        def _step_field(n, key):
+            s = _steps_by_n.get(n) or {}
+            v = s.get(key)
+            return v
+        row = {
+            "home_team": f.get("home_team"), "away_team": f.get("away_team"),
+            "league": None,
+            # Step 1
+            "step1_home": f.get("step1_home"), "step1_away": f.get("step1_away"),
+            "step1_winner": _step_field(1, "winner"), "step1_gap": _step_field(1, "gap"),
+            # Step 2
+            "step2_home": f.get("step2_home"), "step2_away": f.get("step2_away"),
+            "step2_winner": _step_field(2, "winner"), "step2_gap": _step_field(2, "gap"),
+            "leads_home": f.get("leads_home"), "leads_away": f.get("leads_away"),
+            # Step 3
+            "step3_home": f.get("step3_home"), "step3_away": f.get("step3_away"),
+            "step3_winner": _step_field(3, "winner"), "step3_gap": _step_field(3, "gap"),
+            "trails_home": f.get("trails_home"), "trails_away": f.get("trails_away"),
+            # Totals / decision
+            "total_home": r["total_home"], "total_away": r["total_away"],
+            "net_gap": r["net"], "total_winner": r["total_winner"],
+            # Step 4 + veto inputs (per-team, not league averages)
+            "cs_home": f.get("cs_home"), "cs_away": f.get("cs_away"),
+            "fts_home": f.get("fts_home"), "fts_away": f.get("fts_away"),
+            "shape": r["shape"],
+            "fav_team": r["fav_team"], "fav_conceded": r["fav_conceded"],
+            "conceded_home": f.get("conceded_home"), "conceded_away": f.get("conceded_away"),
+            "ppg_home": f.get("ppg_home"), "ppg_away": f.get("ppg_away"),
+            "veto": r["veto"], "low_n": r["low_n"],
+            "tier": r["tier"], "confidence": r["confidence"],
+            "tier_reason": r["tier_reason"], "script": r["script"],
+            "decision": "NO DRAW" if r["tier"] in ("LOCK","LEAN") else "NO BET",
+            "simple_qualifying": 1 if r["tier"] in ("LOCK","LEAN") else 0,
+            "checks": [{"name": s["label"], "status": s["winner"] or s.get("status") or "MISSING", "detail": f"Home {s['home']}% vs Away {s['away']}% · Gap {s['gap']}"} for s in r["steps"]],
+            "parsed": {**f, **r}, "raw_dump": dump,
+            "all_data": {"parsed": f, "result": r, "tier": r["tier"], "confidence": r["confidence"]},
+            "extracted_at": now_iso()}
         row = {k: v for k, v in row.items() if v is not None}
         try:
             sb = get_supabase()
@@ -298,32 +414,54 @@ with tab1:
             if ex.data: st.info(f"Already stored (match_id {ex.data[0]['match_id']}). Delete first to re-save.")
             else: sb.table("matches").insert(row).execute(); st.success("Saved — Step 1/2/3 + gaps + tier + script stored.")
         except Exception as e: st.error(f"Insert failed: {e}")
+
+def _field(m, name):
+    """Flat column first, parsed JSON as fallback — so old rows (parsed-only)
+    and new rows (flat + parsed) both display, and flat/parsed can never silently disagree."""
+    v = m.get(name)
+    if v is not None:
+        return v
+    p = m.get("parsed") or {}
+    return p.get(name)
+
+def _steps_of(m):
+    p = m.get("parsed") or {}
+    steps = p.get("steps")
+    if steps:
+        return steps
+    # Fallback for rows without parsed.steps: rebuild from flat step columns.
+    out = []
+    for i, label in [(1, "Step 1 — Scores first"), (2, "Step 2 — Holds lead"), (3, "Step 3 — Comes back")]:
+        out.append({"step": i, "label": label,
+                    "home": m.get(f"step{i}_home"), "away": m.get(f"step{i}_away"),
+                    "winner": m.get(f"step{i}_winner"), "gap": m.get(f"step{i}_gap")})
+    return out
+
 with tab2:
     st.subheader("⏳ Pending — waiting for result")
     try: data = get_supabase().table("matches").select("*").is_("home_score","null").order("extracted_at", desc=True).execute().data or []
     except Exception as e: data=[]; st.error(str(e))
     if not data: st.info("No pending matches.")
     for m in data:
-        p = m.get("parsed") or {}
-        _tier = p.get("tier") or m.get("tier") or "?"
-        _conf = p.get("confidence") or m.get("confidence") or "?"
-        _winner = p.get("total_winner") or "?"
+        _tier = _field(m, "tier") or "?"
+        _conf = _field(m, "confidence") or "?"
+        _winner = _field(m, "total_winner") or "?"
         _wname = m.get("home_team") if _winner=="HOME" else (m.get("away_team") if _winner=="AWAY" else "No winner")
         _sugg = f"BET: NO DRAW — {_wname}" if _tier in ("LOCK","LEAN") else "NO BET — SKIP"
         _bg = "#0f5132" if _tier=="LOCK" else ("#664d03" if _tier=="LEAN" else "#842029")
         _bd = "#198754" if _tier=="LOCK" else ("#ffc107" if _tier=="LEAN" else "#dc3545")
-        _steps = p.get("steps") or []
+        _steps = _steps_of(m)
         _steps_txt = " &nbsp;•&nbsp; ".join([f"{x.get('label','?')}: {x.get('home')}% vs {x.get('away')}% → {x.get('winner') or 'TIE'}" for x in _steps]) if _steps else "Steps not stored"
-        _veto = "🚨 VETO" if p.get("veto") else "No veto"
-        _lown = "⚠️ LOW-N" if p.get("low_n") else "Sample OK"
+        _veto = "🚨 VETO" if _field(m, "veto") else "No veto"
+        _lown = "⚠️ LOW-N" if _field(m, "low_n") else "Sample OK"
         st.markdown(f"""
         <div style="border:2px solid {_bd}; border-radius:14px; padding:14px 16px; background:{_bg}; color:white; margin:10px 0;">
           <div style="font-size:12px; letter-spacing:1.5px; opacity:0.85;">SUGGESTION &nbsp;•&nbsp; {m.get('home_team')} vs {m.get('away_team')}</div>
           <div style="font-size:24px; font-weight:900; margin:6px 0 2px 0;">{_tier} — {_sugg}</div>
-          <div style="font-size:14px; margin-bottom:8px;">Winner: {_wname} ({_winner}) &nbsp;•&nbsp; Total: {p.get('total_home')} vs {p.get('total_away')} &nbsp;•&nbsp; Net {p.get('net')} &nbsp;•&nbsp; Confidence: {_conf}</div>
+          <div style="font-size:14px; margin-bottom:8px;">Winner: {_wname} ({_winner}) &nbsp;•&nbsp; Total: {_field(m, "total_home")} vs {_field(m, "total_away")} &nbsp;•&nbsp; Net {_field(m, "net_gap") if _field(m, "net_gap") is not None else _field(m, "net")} &nbsp;•&nbsp; Confidence: {_conf}</div>
           <div style="font-size:13px; opacity:0.95;">{_steps_txt}</div>
-          <div style="font-size:13px; margin-top:6px;"><b>Script:</b> {p.get('script','')}</div>
-          <div style="font-size:13px;"><b>Shape:</b> {p.get('shape','')} &nbsp;•&nbsp; {_veto} &nbsp;•&nbsp; {_lown}</div>
+          <div style="font-size:13px; margin-top:6px;"><b>Script:</b> {_field(m, "script") or ''}</div>
+          <div style="font-size:13px;"><b>Shape:</b> {_field(m, "shape") or ''} &nbsp;•&nbsp; {_veto} &nbsp;•&nbsp; {_lown}</div>
         </div>
         """, unsafe_allow_html=True)
         c1,c2,c3,c4 = st.columns([1,1,1,1])
@@ -342,9 +480,9 @@ with tab3:
     if not data: st.info("No settled matches yet.")
     else:
         def _tier_of(m):
-            return (m.get("parsed") or {}).get("tier") or m.get("tier") or "?"
+            return _field(m, "tier") or "?"
         def _winner_of(m):
-            return (m.get("parsed") or {}).get("total_winner") or "?"
+            return _field(m, "total_winner") or "?"
         # --- Summary ---
         _bets = [m for m in data if _tier_of(m) in ("LOCK","LEAN")]
         _lock = [m for m in _bets if _tier_of(m)=="LOCK"]
@@ -369,7 +507,6 @@ with tab3:
         st.markdown("---")
         st.markdown("**All settled — one card per match, suggestion vs actual**")
         for m in data:
-            p=m.get("parsed") or {}
             _tier=_tier_of(m); _winner=_winner_of(m)
             _wname=m.get("home_team") if _winner=="HOME" else (m.get("away_team") if _winner=="AWAY" else "No winner")
             _sugg=f"BET: NO DRAW — {_wname}" if _tier in ("LOCK","LEAN") else "NO BET — SKIP"
@@ -382,9 +519,9 @@ with tab3:
                 _bg="#1a1a2e" if _res=="DRAW" else "#4a4a4a"
             st.markdown(f"""
             <div style="border:1px solid #444; border-radius:12px; padding:12px 14px; background:{_bg}; color:white; margin:8px 0;">
-              <div style="font-size:13px; opacity:0.85;">{_tier} &nbsp;•&nbsp; {_sugg} &nbsp;•&nbsp; Confidence: {p.get('confidence') or m.get('confidence') or '?'}</div>
+              <div style="font-size:13px; opacity:0.85;">{_tier} &nbsp;•&nbsp; {_sugg} &nbsp;•&nbsp; Confidence: {_field(m, "confidence") or '?'}</div>
               <div style="font-size:18px; font-weight:800; margin:4px 0;">{m.get('home_team')} {_score} {m.get('away_team')} — Result: {_res} &nbsp;•&nbsp; {_verdict}</div>
-              <div style="font-size:13px;"><b>Suggested script:</b> {p.get('script','')}</div>
-              <div style="font-size:13px;"><b>Steps:</b> Total {p.get('total_home')} vs {p.get('total_away')} · Net {p.get('net')} &nbsp;•&nbsp; Shape: {p.get('shape','')} &nbsp;•&nbsp; Veto: {'YES' if p.get('veto') else 'No'} &nbsp;•&nbsp; Low-n: {'YES' if p.get('low_n') else 'No'}</div>
+              <div style="font-size:13px;"><b>Suggested script:</b> {_field(m, "script") or ''}</div>
+              <div style="font-size:13px;"><b>Steps:</b> Total {_field(m, "total_home")} vs {_field(m, "total_away")} · Net {_field(m, "net_gap") if _field(m, "net_gap") is not None else _field(m, "net")} &nbsp;•&nbsp; Shape: {_field(m, "shape") or ''} &nbsp;•&nbsp; Veto: {'YES' if _field(m, "veto") else 'No'} &nbsp;•&nbsp; Low-n: {'YES' if _field(m, "low_n") else 'No'}</div>
             </div>
             """, unsafe_allow_html=True)
