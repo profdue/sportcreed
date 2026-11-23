@@ -184,14 +184,43 @@ with tab1:
     dump = st.text_area("Paste the match data (Leading and Trailing + Contextual averages)", height=300)
     if st.button("Evaluate", type="primary") and dump.strip():
         f = parse_dump(dump); r = evaluate(f)
-        st.subheader(f"{f.get('home_team','?')} vs {f.get('away_team','?')} — {r['tier']} · {r['confidence']} confidence")
+        # ===== DECISION CARD — the bet, first, impossible to miss =====
+        _tier = r['tier']
+        _conf = r['confidence']
+        _winner = r['total_winner']
+        _winner_name = f.get('home_team') if _winner=='HOME' else (f.get('away_team') if _winner=='AWAY' else 'No winner')
+        if _tier == 'LOCK':
+            _bg, _border, _badge, _big, _action = '#0f5132','#198754','#198754','✅ LOCK — BET','BET: NO DRAW — ' + (_winner_name or '')
+        elif _tier == 'LEAN':
+            _bg, _border, _badge, _big, _action = '#664d03','#ffc107','#ffc107','⚠️ LEAN — SMALL BET','BET: NO DRAW — ' + (_winner_name or '')
+        elif _tier == 'DRAW / NO BET':
+            _bg, _border, _badge, _big, _action = '#842029','#dc3545','#dc3545','⛔ DRAW / NO BET','NO BET — SKIP THIS MATCH'
+        else:
+            _bg, _border, _badge, _big, _action = '#842029','#dc3545','#dc3545','⛔ NO BET','NO BET — SKIP THIS MATCH'
+        _veto_txt = f"🚨 VETO APPLIED — downgraded (fav concedes {r['fav_conceded']}/game)" if r['veto'] else "No veto"
+        _lown_txt = "⚠️ LOW-N — key % on &lt;3 leads/trails" if r['low_n'] else "Sample OK"
+        st.markdown(f'''
+        <div style="border:3px solid {_border}; border-radius:16px; padding:20px 22px; background:{_bg}; color:white; margin:8px 0 16px 0;">
+          <div style="font-size:13px; letter-spacing:2px; opacity:0.85;">BETTING DECISION &nbsp;•&nbsp; {f.get('home_team','?')} vs {f.get('away_team','?')}</div>
+          <div style="font-size:36px; font-weight:900; line-height:1.1; margin:8px 0 4px 0;">{_big}</div>
+          <div style="font-size:20px; font-weight:700; margin-bottom:10px;">{_action}</div>
+          <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+            <span style="background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:999px; font-weight:700;">Winner: {_winner_name} ({_winner})</span>
+            <span style="background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:999px; font-weight:700;">Total: {r['total_home']} vs {r['total_away']} &nbsp;•&nbsp; Net {r['net']}</span>
+            <span style="background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:999px; font-weight:700;">Confidence: {_conf}</span>
+          </div>
+          <div style="font-size:14px; line-height:1.5; opacity:0.95;">{_veto_txt} &nbsp;•&nbsp; {_lown_txt}</div>
+          <div style="font-size:14px; line-height:1.5; margin-top:6px;"><b>Script:</b> {r['script']}</div>
+          <div style="font-size:13px; line-height:1.5; margin-top:4px; opacity:0.9;"><b>Shape (Step 4):</b> {r['shape']}</div>
+        </div>
+        ''', unsafe_allow_html=True)
+        st.markdown("**Why — Steps 1/2/3**")
         for s in r["steps"]:
-            st.write(f"{'✅' if s['winner'] else '❓'} **{s['label']}**: Home {s['home']}% vs Away {s['away']}% → Winner: {s['winner'] or 'MISSING'} · Gap {s['gap']}")
-        st.write(f"**Totals:** Home {r['total_home']} vs Away {r['total_away']} · Net {r['net']} · Winner: {r['total_winner']}")
-        st.write(f"**Tier:** {r['tier']} — {r['tier_reason']}")
-        st.write(f"**Veto:** {'YES — downgraded' if r['veto'] else 'No'} (fav concedes {r['fav_conceded']}) · **Low-n flag (<3):** {r['low_n']}")
-        st.write(f"**Step 4:** {r['shape']} · CS Home {f.get('cs_home')}% / Away {f.get('cs_away')}% · FTS Home {f.get('fts_home')}% / Away {f.get('fts_away')}%")
-        st.write(f"**Predicted script:** {r['script']}")
+            _w = s['winner'] or 'MISSING'
+            _wc = '#198754' if _w=='HOME' else ('#fd7e14' if _w=='AWAY' else '#6c757d')
+            st.markdown(f"<div style='border-left:4px solid {_wc}; padding:6px 10px; margin:4px 0; background:#f8f9fa; border-radius:6px;'><b>{s['label']}</b> — Home {s['home']}% vs Away {s['away']}% → <b>{_w}</b> · Gap {s['gap']}</div>", unsafe_allow_html=True)
+        st.write(f"**Tier reason:** {r['tier_reason']}")
+        st.write(f"**Step 4 detail:** CS Home {f.get('cs_home')}% / Away {f.get('cs_away')}% · FTS Home {f.get('fts_home')}% / Away {f.get('fts_away')}%")
         row = {"home_team": f.get("home_team"), "away_team": f.get("away_team"),
                "tier": r["tier"],
                "confidence": r["confidence"],
