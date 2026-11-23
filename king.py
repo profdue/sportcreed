@@ -193,6 +193,8 @@ with tab1:
         st.write(f"**Step 4:** {r['shape']} · CS Home {f.get('cs_home')}% / Away {f.get('cs_away')}% · FTS Home {f.get('fts_home')}% / Away {f.get('fts_away')}%")
         st.write(f"**Predicted script:** {r['script']}")
         row = {"home_team": f.get("home_team"), "away_team": f.get("away_team"),
+               "tier": r["tier"],
+               "confidence": r["confidence"],
                "decision": "NO DRAW" if r["tier"] in ("LOCK","LEAN") else "NO BET",
                "checks": [{"name": s["label"], "status": s["winner"] or "MISSING", "detail": f"Home {s['home']}% vs Away {s['away']}% · Gap {s['gap']}"} for s in r["steps"]],
                "parsed": {**f, **r}, "raw_dump": dump,
