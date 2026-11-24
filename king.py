@@ -213,8 +213,8 @@ def compute_filter_rule(facts: dict) -> dict:
             reason = f"Both BELOW league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> NO"
         else:
             derived[field] = None
-            def _lbl(v, lg): return f"{v:g}% BEATS league {lg:g}%" if v > lg else f"{v:g}% BELOW league {lg:g}%" if v < lg else f"{v:g}% = league {lg:g}% (neutral)"
-            a_txt = _lbl(sec['a'], sec['league']); b_txt = _lbl(sec['b'], sec['league'])
+            a_txt = f"{sec['a']:g}% {'BEATS' if a_beats else 'BELOW' if a_beats is False else '='} league {sec['league']:g}%"
+            b_txt = f"{sec['b']:g}% {'BEATS' if b_beats else 'BELOW' if b_beats is False else '='} league {sec['league']:g}%"
             reason = f"Split: A {a_txt} | B {b_txt} -> SKIP"
         picks.append({"key": key, "label": label, "question": question, "field": field, "a": sec["a"], "b": sec["b"], "league": sec["league"], "avg": sec.get("avg"), "decision": dec, "reason": reason})
     survivors = [p for p in picks if p["decision"] in ("YES", "NO")]
@@ -304,39 +304,28 @@ if "matches" not in st.session_state:
 if "next_id" not in st.session_state:
     st.session_state.next_id = 1
 
-def _decision(m):
-    f = m['filter']; h, a = f['scoreline']
-    home, away = m.get('home_team') or 'Home', m.get('away_team') or 'Away'
-    if f['weak_test']:
-        return ('NO BET', 'Weak test - do not bet', f"Only {len(f['survivors'])}/5 signals agree. Lean: {home} {h}-{a} {away}.")
-    winner = home if h > a else (away if a > h else 'Draw')
-    return ('BET', f"{winner}  {h}-{a}", 'Strong test - surviving signals agree.')
-
-def _card_html(m, settled=False):
-    home, away = m.get('home_team') or '?', m.get('away_team') or '?'
-    f = m['filter']; picks = f['picks']; pred = f['scoreline']
-    action, action_main, action_sub = _decision(m)
-    fixture = '<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">' + home + ' <span style="font-size:0.72rem;color:#94a3b8">(HOME)</span>  vs  ' + away + ' <span style="font-size:0.72rem;color:#94a3b8">(AWAY)</span></div>'
-    if settled and m.get('home_score') is not None:
-        head = fixture + '<div style="font-size:1rem;color:#94a3b8;margin-top:6px">Result: ' + f"{home} {m['home_score']}-{m['away_score']} {away}" + '  |  Predicted: ' + f"{pred[0]}-{pred[1]}" + '</div>'
-    else:
-        banner_color = '#ef4444' if action=='NO BET' else '#10b981'
-        banner_bg = '#ef444422' if action=='NO BET' else '#10b98122'
-        head = fixture + '<div style="margin-top:10px;background:' + banner_bg + ';border:1px solid ' + banner_color + ';border-radius:12px;padding:14px 16px">' + '<div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:' + banner_color + '">DECISION: ' + action + '</div>' + '<div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">' + action_main + '</div>' + '<div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">' + action_sub + '</div></div>'
-    take_rows = ''
+def _card_html(m: dict, settled: bool = False) -> str:
+    home, away = m.get("home_team") or "?", m.get("away_team") or "?"
+    f = m["filter"]; picks = f["picks"]
+    pred = f["scoreline"]
+    title = f"{home} {m['home_score']}–{m['away_score']} {away}" if (settled and m.get("home_score") is not None) else f"{home} vs {away}"
+    meta = f"Predicted {pred[0]}-{pred[1]} · Survivors {len(f['survivors'])}/5" + (" · WEAK TEST (<3 survivors)" if f["weak_test"] else "")
+    rows = ""
     for p in picks:
-        if p['decision'] == 'SKIP': continue
-        label = {'Home Scoring Rate':'Home scores','Away Scoring Rate':'Away scores','Over 1.5 Goals':'Total over 1.5','Over 2.5 Goals':'Total over 2.5','BTTS':'Both score'}.get(p['label'], p['label'])
-        val = 'YES' if p['decision']=='YES' else 'NO'
-        take_rows += '<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">' + label + '</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">' + val + '</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">' + format(p['a'],'g') + '% vs league ' + format(p['league'],'g') + '%  |  ' + format(p['b'],'g') + '% vs league ' + format(p['league'],'g') + '%</td></tr>'
-    if not take_rows: take_rows = '<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
-    skipped = [p['label'] for p in picks if p['decision']=='SKIP']
-    skipped_line = 'Skipped (split, not used): ' + ', '.join(skipped) if skipped else 'Nothing skipped.'
-    verdict = ''
-    if settled and m.get('per_pick') is not None:
-        pp = m['per_pick']
-        verdict = '<div style="margin-top:10px;font-size:0.85rem;color:#94a3b8">Scoreline: ' + ('WIN' if pp.get('_scoreline_hit')==1 else 'LOSS') + '  |  Result: ' + ('WIN' if pp.get('_result_hit')==1 else 'LOSS') + '</div>'
-    return '<div class="match-card">' + head + '<div style="margin-top:14px;font-size:0.78rem;letter-spacing:0.06em;font-weight:700;color:#94a3b8">SIGNALS THAT AGREE</div><table style="margin-top:4px">' + take_rows + '</table><div style="margin-top:10px;font-size:0.82rem;color:#64748b">' + skipped_line + '</div>' + verdict + '</div>'
+        cls = "yes" if p["decision"] == "YES" else ("no" if p["decision"] == "NO" else "skip")
+        badge = p["decision"]
+        proven = PROVEN.get(p["key"], "")
+        extra = ""
+        if settled and m.get("per_pick") is not None:
+            hv = m["per_pick"].get(p["field"])
+            if hv is not None:
+                extra = f" → {'WIN' if hv==1 else 'LOSS'}"
+        rows += f'<span class="signal-pill {cls}">{p["label"]}: {badge} (A {p["a"]} vs Lg {p["league"]} | B {p["b"]} vs Lg {p["league"]}) [{proven}]{extra}</span>'
+    verdict = ""
+    if settled and m.get("per_pick") is not None:
+        pp = m["per_pick"]
+        verdict = f'<div class="signal-row"><span class="signal-pill">Scoreline: {"WIN" if pp.get("_scoreline_hit")==1 else "LOSS"} (pred {pred[0]}-{pred[1]})</span><span class="signal-pill">Result: {"WIN" if pp.get("_result_hit")==1 else "LOSS"}</span></div>'
+    return f'<div class="match-card"><div class="match-title">{title}</div><div class="match-meta">{meta}</div><div class="signal-row">{rows}</div><div class="match-meta" style="margin-top:10px">{f["scoreline_reason"]}</div>{verdict}</div>'
 
 # ---------------------------------------------------------------- UI
 st.title("⚽ The Filter Rule — Both Agree vs League")
@@ -345,21 +334,32 @@ st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 
 with tab_new:
-    st.markdown('### Paste the Teams scoring vs league average block')
-    st.caption('Evaluating does NOT save. Nothing is saved until you press Save to Pending.')
-    raw_in = st.text_area('Input', height=380, label_visibility='collapsed', placeholder='Teams scoring vs league average')
-    run = st.button('Run the Filter', type='primary')
+    st.markdown("### Paste the Teams scoring vs league average block")
+    st.caption("Paste the full block starting at 'Teams scoring vs league average'. Team names are read from the (A)/(B) lines.")
+    raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average\nHome scoring averages (per match)\n(A) Bragantino scored at home\n1.67\n(B) Vasco da Gama conceded away\n1.50\n...")
+    run = st.button("Run the Filter", type="primary")
     if run and raw_in.strip():
         facts = parse_filter_data(raw_in.strip())
         filt = compute_filter_rule(facts)
-        if not facts.get('home_team'): st.warning('Could not read team names from (A)/(B) lines.')
-        tmp = {'id': 0, 'home_team': facts.get('home_team'), 'away_team': facts.get('away_team'), 'filter': filt, 'home_score': None, 'away_score': None, 'per_pick': None}
-        st.markdown(_card_html(tmp, settled=False), unsafe_allow_html=True)
-        if st.button('Save to Pending', key='save_new'):
-            mid = st.session_state.next_id; st.session_state.next_id += 1
-            m = {'id': mid, 'home_team': facts.get('home_team'), 'away_team': facts.get('away_team'), 'filter': filt, 'home_score': None, 'away_score': None, 'settled_at': None, 'per_pick': None, 'created_at': datetime.now(timezone.utc).isoformat()}
-            st.session_state.matches.append(m)
-            st.success(f'Saved to Pending (id {mid}).')
+        if not facts.get("home_team"):
+            st.warning("Could not read team names from (A)/(B) lines. Check the paste includes '(A) <Team> scored...' lines.")
+        st.markdown("### The Filter Picks")
+        # show picks table
+        df = pd.DataFrame([{"Category": p["label"], "A": p["a"], "B": p["b"], "League": p["league"], "Decision": p["decision"], "Reason": p["reason"], "Proven (both agree)": PROVEN.get(p["key"], "")} for p in filt["picks"]])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        h, a = filt["scoreline"]
+        if filt["weak_test"]:
+            st.warning(f"WEAK TEST — only {len(filt['survivors'])}/5 survivors. Prediction is less reliable.")
+        st.success(f"**Predicted scoreline: {facts.get('home_team') or 'Home'} {h}-{a} {facts.get('away_team') or 'Away'}** — {filt['scoreline_reason']}")
+        for p in filt["picks"]:
+            if p["decision"] == "SKIP":
+                st.caption(f"SKIP {p['label']}: {p['reason']}")
+        # save
+        mid = st.session_state.next_id; st.session_state.next_id += 1
+        m = {"id": mid, "home_team": facts.get("home_team"), "away_team": facts.get("away_team"), "filter": filt, "home_score": None, "away_score": None, "settled_at": None, "per_pick": None, "created_at": datetime.now(timezone.utc).isoformat()}
+        # avoid duplicate unsaved? just append
+        st.session_state.matches.append(m)
+        st.success(f"Saved to Pending (id {mid}). Settle it in Pending tab.")
 
 with tab_pending:
     st.markdown("### Pending matches")
