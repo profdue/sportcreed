@@ -213,10 +213,8 @@ def compute_filter_rule(facts: dict) -> dict:
             reason = f"Both BELOW league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> NO"
         else:
             derived[field] = None
-            def _lbl(v, lg):
-                return f"{v:g}% BEATS league {lg:g}%" if v > lg else f"{v:g}% BELOW league {lg:g}%" if v < lg else f"{v:g}% = league {lg:g}% (neutral)"
-            a_txt = _lbl(sec['a'], sec['league'])
-            b_txt = _lbl(sec['b'], sec['league'])
+            def _lbl(v, lg): return f"{v:g}% BEATS league {lg:g}%" if v > lg else f"{v:g}% BELOW league {lg:g}%" if v < lg else f"{v:g}% = league {lg:g}% (neutral)"
+            a_txt = _lbl(sec['a'], sec['league']); b_txt = _lbl(sec['b'], sec['league'])
             reason = f"Split: A {a_txt} | B {b_txt} -> SKIP"
         picks.append({"key": key, "label": label, "question": question, "field": field, "a": sec["a"], "b": sec["b"], "league": sec["league"], "avg": sec.get("avg"), "decision": dec, "reason": reason})
     survivors = [p for p in picks if p["decision"] in ("YES", "NO")]
@@ -324,16 +322,25 @@ def _action_line(m):
     if d.get('over_2_5') is True: bits.append('OVER 2.5')
     elif d.get('over_2_5') is False: bits.append('UNDER 2.5')
     sub = '  |  '.join(bits) if bits else 'No surviving picks - no bet'
+    h_pred, a_pred = pred
+    implied = []
+    if h_pred > 0 and d.get('home_scores') is None: implied.append(f"{home} scores (implied by scoreline, NOT a filtered pick)")
+    if a_pred > 0 and d.get('away_scores') is None: implied.append(f"{away} scores (implied by scoreline, NOT a filtered pick)")
+    if h_pred == 0 and d.get('home_scores') is None: implied.append(f"{home} no goal (implied by scoreline, NOT a filtered pick)")
+    if a_pred == 0 and d.get('away_scores') is None: implied.append(f"{away} no goal (implied by scoreline, NOT a filtered pick)")
+    if implied: sub = sub + '<br><span style="color:#94a3b8;font-weight:500">Scoreline adds: ' + '  |  '.join(implied) + '</span>'
     return headline, sub
 
 def _card_html(m, settled=False):
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
     f = m['filter']; picks = f['picks']; pred = f['scoreline']
     headline, sub = _action_line(m)
+    fixture = '<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">' + home + ' <span style="font-size:0.72rem;color:#38bdf8;background:#38bdf822;border:1px solid #38bdf855;padding:2px 7px;border-radius:999px">HOME</span>  vs  ' + away + ' <span style="font-size:0.72rem;color:#fbbf24;background:#f59e0b22;border:1px solid #f59e0b55;padding:2px 7px;border-radius:999px">AWAY</span></div>'
+    fixture_sub = '<div style="font-size:0.82rem;color:#94a3b8;margin-top:2px">Fixture: ' + home + ' (home) vs ' + away + ' (away)</div>'
     if settled and m.get('home_score') is not None:
-        top = '<div style="font-size:1.35rem;font-weight:800;color:#f1f5f9">' + f"{home} {m['home_score']}-{m['away_score']} {away}" + '</div><div style="font-size:0.95rem;color:#94a3b8">PREDICTED: ' + f"{pred[0]}-{pred[1]} - {headline.replace('PREDICT: ', '')}" + '</div>'
+        top = fixture + fixture_sub + '<div style="font-size:1.35rem;font-weight:800;color:#f1f5f9;margin-top:10px">' + f"{home} {m['home_score']}-{m['away_score']} {away}" + '</div><div style="font-size:0.95rem;color:#94a3b8">PREDICTED: ' + f"{pred[0]}-{pred[1]} - {headline.replace('PREDICT: ', '')}" + '</div>'
     else:
-        top = '<div style="font-size:1.45rem;font-weight:800;color:#f1f5f9">' + headline + '</div><div style="font-size:1rem;font-weight:600;color:#34d399;margin-top:6px">' + sub + '</div>'
+        top = fixture + fixture_sub + '<div style="font-size:1.45rem;font-weight:800;color:#f1f5f9;margin-top:10px">' + headline + '</div><div style="font-size:1rem;font-weight:600;color:#34d399;margin-top:6px">' + sub + '</div>'
     weak = '<div style="margin-top:8px"><span class="signal-pill" style="background:#f59e0b22;color:#fbbf24">WEAK TEST - ' + str(len(f['survivors'])) + '/5 survivors</span></div>' if f['weak_test'] else '<div style="margin-top:8px"><span class="signal-pill yes">' + str(len(f['survivors'])) + '/5 survivors</span></div>'
     take_rows = ''
     for p in picks:
