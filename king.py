@@ -15,6 +15,7 @@ Rules:
 - Performance settles per-signal only, never scoreline.
 Persistence: SQLite (king.db) via stdlib sqlite3.
 """
+import re
 import sqlite3
 import streamlit as st
 import pandas as pd
@@ -173,88 +174,89 @@ def _find_section(lines, keywords):
     return None
 
 def parse_filter_data(text: str) -> dict:
-    lines=text.splitlines()
-    sections={}
-    warnings=[]
-    def get_section(key, keywords):
-        idx=_find_section(lines, keywords)
+    """
+    ROBUST parser: does NOT depend on where the League label / average sits.
+    For each section block (from its header to the next header), the numbers
+    appear in order: A, B, (A)(B) average, League.
+    We extract all numbers in the block in order and assign them by position.
+    This handles BOTH layouts:
+      Layout 1: League label -> avg number -> league number
+      Layout 2: (A)(B) average -> avg number -> League label -> league number
+    Old line-based parser broke when the layout flipped, and read avg as league,
+    which forces almost every category to SKIP -> 0/5 for every match.
+    """
+    lines = text.splitlines()
+    sections = {}
+    warnings = []
+    # Section headers in order as they appear in the paste
+    HEADERS = [
+        ("home_scoring_avg", ["home scoring averages"]),
+        ("away_scoring_avg", ["away scoring averages"]),
+        ("goals_match", ["goals scored + conceded"]),
+        ("home_scoring_rate", ["home scoring rate"]),
+        ("away_scoring_rate", ["away scoring rate"]),
+        ("over_1_5", ["over 1.5"]),
+        ("over_2_5", ["over 2.5"]),
+        ("over_3_5", ["over 3.5"]),
+        ("btts", ["both-teams-scored", "both teams scored", "bts matches"]),
+    ]
+    # Find header line index for each section
+    header_idx = {}
+    for key, kws in HEADERS:
+        idx = _find_section(lines, kws)
         if idx is None:
             warnings.append(f"Section not found: {key}")
-            return None
-        # find (A) line, (B) line, average line, league line after idx
-        a=b=avg=league=None; avg_paste=None
-        j=idx+1
-        while j < len(lines) and j < idx+30:
-            low=_clean(lines[j]).lower()
-            if low.startswith("(a)"):
-                # next numeric line
-                k=j+1
-                while k < len(lines) and not _clean(lines[k]): k+=1
-                try: a=float(_clean(lines[k]).replace("%",""))
-                except Exception: pass
-            elif low.startswith("(b)"):
-                k=j+1
-                while k < len(lines) and not _clean(lines[k]): k+=1
-                try: b=float(_clean(lines[k]).replace("%",""))
-                except Exception: pass
-            elif "average" in low and "(a)" not in low and "(b)" not in low:
-                # the number after this line, or numbers in following lines until league
-                pass
-            elif "league" in low or "stats." in low:
-                # FIX: after the League label there are TWO numbers:
-                #   1st = (A)(B) average (from the paste)
-                #   2nd = League (the one the Filter must use)
-                # Old code took the 1st number as league -> compared A/B to the average.
-                # Correct: skip the 1st, take the 2nd as league. If only 1 number exists, use it.
-                nums_after=[]
-                k=j+1
-                while k < len(lines) and len(nums_after) < 2:
-                    ls2=_clean(lines[k])
-                    if not ls2:
-                        k+=1; continue
-                    try:
-                        nums_after.append(float(ls2.replace("%","")))
-                    except Exception:
-                        break
-                    k+=1
-                if len(nums_after) >= 2:
-                    avg_paste=nums_after[0]; league=nums_after[1]
-                elif len(nums_after) == 1:
-                    league=nums_after[0]
-                break
-            j+=1
-        # avg: use the paste's own (A)(B) average (1st number after League label) if we found it,
-        # else fall back to (a+b)/2
-        if 'avg_paste' in locals() and avg_paste is not None:
-            avg=avg_paste
-        elif a is not None and b is not None:
-            avg=(a+b)/2.0
-        sections[key]={"a":a,"b":b,"avg":avg,"league":league}
-        return sections[key]
-    get_section("home_scoring_avg", ["home scoring averages"])
-    get_section("away_scoring_avg", ["away scoring averages"])
-    get_section("goals_match", ["goals scored + conceded"])
-    get_section("home_scoring_rate", ["home scoring rate"])
-    get_section("away_scoring_rate", ["away scoring rate"])
-    get_section("over_1_5", ["over 1.5"])
-    get_section("over_2_5", ["over 2.5"])
-    get_section("over_3_5", ["over 3.5"])
-    get_section("btts", ["both-teams-scored", "both teams scored", "bts matches"])
-    # team names from (A) / (B) lines: first (A) line is home team, first (B) line is away team
-    home_team=away_team=None
+        else:
+            header_idx[key] = idx
+    # Sorted headers by position to delimit blocks
+    ordered = sorted(header_idx.items(), key=lambda kv: kv[1])
+    for pos, (key, idx) in enumerate(ordered):
+        end_idx = ordered[pos+1][1] if pos+1 < len(ordered) else len(lines)
+        block = "\n".join(lines[idx:end_idx])
+        # Numbers are ONLY on standalone value lines like "83%" or "2.67".
+        # Do NOT regex the whole block: "(A) ... over 1.5 at home" contains "1.5"
+        # in the label itself, which the old regex mistook for the (A) value.
+        block_lines = lines[idx+1:end_idx]
+        nums = []
+        for ln in block_lines:
+            s = _clean(ln)
+            if re.fullmatch(r"\d+(?:\.\d+)?\s*%?", s):
+                try:
+                    nums.append(float(s.replace("%", "")))
+                except Exception:
+                    pass
+        # nums should be [A, B, avg, league]. If more than 4 (e.g. extra numbers), take first 4.
+        # If only 3, treat as [A, B, league] (no avg in paste).
+        a = b = avg = league = None
+        if len(nums) >= 4:
+            a, b, avg, league = nums[0], nums[1], nums[2], nums[3]
+        elif len(nums) == 3:
+            a, b, league = nums[0], nums[1], nums[2]
+            avg = (a + b) / 2.0 if a is not None and b is not None else None
+        elif len(nums) == 2:
+            a, b = nums[0], nums[1]
+        else:
+            warnings.append(f"Section {key}: found {len(nums)} numbers, expected 4 (A, B, avg, league)")
+        sections[key] = {"a": a, "b": b, "avg": avg, "league": league}
+    # Fill missing sections with None so downstream treats them as SKIP
+    for key, _ in HEADERS:
+        if key not in sections:
+            sections[key] = {"a": None, "b": None, "avg": None, "league": None}
+    # Team names: first (A) line = home, first (B) line = away
+    home_team = away_team = None
     for l in lines:
-        ls=_clean(l)
+        ls = _clean(l)
         if ls.startswith("(A)") and home_team is None:
-            home_team=ls[3:].replace("scored at home","").replace("conceded at home","").replace("scored","").strip().split("  ")[0].strip()
-            # keep full name before keywords
-            for kw in [" scored"," conceded"," over"," BTS"]:
-                if kw in home_team: home_team=home_team.split(kw)[0].strip()
+            tmp = ls[3:].strip()
+            for kw in [" scored", " conceded", " over", " BTS"]:
+                if kw in tmp: tmp = tmp.split(kw)[0].strip()
+            home_team = tmp
         if ls.startswith("(B)") and away_team is None:
-            away_team=ls[3:].strip()
-            for kw in [" conceded"," scored"," over"," BTS"]:
-                if kw in away_team: away_team=away_team.split(kw)[0].strip()
+            tmp = ls[3:].strip()
+            for kw in [" conceded", " scored", " over", " BTS"]:
+                if kw in tmp: tmp = tmp.split(kw)[0].strip()
+            away_team = tmp
         if home_team and away_team: break
-    # cleaner: use first (A)/(B) pair from Home scoring averages block
     return {"sections": sections, "home_team": home_team, "away_team": away_team, "warnings": warnings}
 
 # ---------------------------------------------------------------- filter rule
