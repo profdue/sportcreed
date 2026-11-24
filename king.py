@@ -15,14 +15,105 @@ Rules:
 - Performance settles per-signal only, never scoreline.
 Persistence: SQLite (king.db) via stdlib sqlite3.
 """
-import re
+import os
+import json
 import sqlite3
+import urllib.request
+import urllib.error
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "king.db"
+
+# ---------------------------------------------------------------- Supabase
+# Config: set in Streamlit Cloud > Settings > Secrets, or .env:
+#   SUPABASE_URL = "https://xyzcompany.supabase.co"
+#   SUPABASE_KEY = "your anon or service_role key"
+# If not set, app falls back to local SQLite king.db (same schema).
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or ""
+
+def _sb_configured():
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+def _sb_req(method, table, payload=None, query=""):
+    url = f"{SUPABASE_URL}/rest/v1/{table}{query}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("apikey", SUPABASE_KEY)
+    req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
+    req.add_header("Content-Type", "application/json")
+    if method in ("POST", "PATCH"):
+        req.add_header("Prefer", "return=representation")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = r.read().decode()
+            return json.loads(body) if body.strip() else []
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Supabase {method} {table} failed {e.code}: {e.read().decode()[:500]}")
+
+def _sb_save_match(facts, filt, raw_paste):
+    m = _sb_req("POST", "matches", {
+        "home_team": facts.get("home_team"), "away_team": facts.get("away_team"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "raw_paste": raw_paste, "decision": filt["decision"],
+        "decision_reason": filt.get("decision_reason", ""),
+        "main_pick_key": (filt["main_pick"]["key"] if filt.get("main_pick") else None),
+        "main_pick_label": (filt["main_pick"]["label"] if filt.get("main_pick") else None),
+        "main_pick_decision": (filt["main_pick"]["decision"] if filt.get("main_pick") else None),
+        "main_pick_margin_pct": (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None),
+        "survivors_count": len(filt["survivors"]),
+    })[0]
+    mid = m["id"]
+    for pr in filt["picks"]:
+        _sb_req("POST", "picks", {"match_id": mid, "category_key": pr["key"], "label": pr["label"],
+            "field": pr["field"], "a_pct": pr["a"], "b_pct": pr["b"], "league_pct": pr["league"],
+            "avg_pct": pr.get("avg"), "decision": pr["decision"], "margin_pct": pr.get("margin_pct"),
+            "is_main": 1 if (filt.get("main_pick") and pr["key"]==filt["main_pick"]["key"]) else 0,
+            "is_implied": 0, "implied_note": None})
+    for field, note in (filt.get("implied_notes") or {}).items():
+        _sb_req("POST", "picks", {"match_id": mid, "category_key": field, "label": FIELD_LABEL.get(field, field),
+            "field": field, "a_pct": None, "b_pct": None, "league_pct": None, "avg_pct": None,
+            "decision": "YES" if filt["derived"].get(field) else "NO", "margin_pct": None,
+            "is_main": 0, "is_implied": 1, "implied_note": note})
+    for key, sec in facts["sections"].items():
+        _sb_req("POST", "raw_sections", {"match_id": mid, "section_key": key,
+            "a_val": sec.get("a"), "b_val": sec.get("b"), "avg_val": sec.get("avg"), "league_val": sec.get("league")})
+    return mid
+
+def _sb_load_matches(pending_only=False, settled_only=False):
+    matches = _sb_req("GET", "matches", query="?select=*&order=id.desc")
+    picks_all = _sb_req("GET", "picks", query="?select=*&order=id.asc")
+    out = []
+    for m in matches:
+        if pending_only and m.get("home_score") is not None: continue
+        if settled_only and m.get("home_score") is None: continue
+        if m.get("is_deleted"): continue
+        m = dict(m)
+        m["picks"] = [dict(x) for x in picks_all if x.get("match_id")==m["id"]]
+        out.append(m)
+    return out
+
+def _sb_settle(match_id, home_score, away_score):
+    picks = _sb_req("GET", "picks", query=f"?select=*&match_id=eq.{match_id}&is_implied=eq.0&order=id.asc")
+    for r in picks:
+        if r["decision"] == "SKIP":
+            outcome = None
+        else:
+            f = r["field"]
+            if f == "home_scores": actual = home_score > 0
+            elif f == "away_scores": actual = away_score > 0
+            elif f == "over_1_5": actual = (home_score+away_score) > 1.5
+            elif f == "over_2_5": actual = (home_score+away_score) > 2.5
+            elif f == "btts": actual = (home_score>0 and away_score>0)
+            else: actual = None
+            outcome = (1 if (actual == (r["decision"]=="YES")) else 0) if actual is not None else None
+        _sb_req("PATCH", "picks", {"outcome": outcome}, query=f"?id=eq.{r['id']}")
+    _sb_req("PATCH", "matches", {"home_score": home_score, "away_score": away_score,
+        "settled_at": datetime.now(timezone.utc).isoformat()}, query=f"?id=eq.{match_id}")
+
 PROVEN = {
     "home_scoring_rate": "7/8 (87.5%)",
     "away_scoring_rate": "10/10 (100%)",
@@ -88,6 +179,11 @@ def get_db():
     return conn
 
 def save_match(facts, filt, raw_paste):
+    if _sb_configured():
+        try:
+            return _sb_save_match(facts, filt, raw_paste)
+        except Exception as e:
+            st.warning(f'Supabase save failed, fell back to local king.db: {e}')
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -115,6 +211,11 @@ def save_match(facts, filt, raw_paste):
     return mid
 
 def settle_match_db(match_id, home_score, away_score):
+    if _sb_configured():
+        try:
+            _sb_settle(match_id, home_score, away_score); return
+        except Exception as e:
+            st.warning(f'Supabase settle failed, fell back to local king.db: {e}')
     conn = get_db(); cur = conn.cursor()
     cur.execute("SELECT * FROM picks WHERE match_id=? AND is_implied=0", (match_id,))
     rows = cur.fetchall()
@@ -136,6 +237,11 @@ def settle_match_db(match_id, home_score, away_score):
     conn.commit(); conn.close()
 
 def load_matches(pending_only=False, settled_only=False):
+    if _sb_configured():
+        try:
+            return _sb_load_matches(pending_only, settled_only)
+        except Exception as e:
+            st.warning(f'Supabase load failed, fell back to local king.db: {e}')
     conn = get_db(); cur = conn.cursor()
     q = "SELECT * FROM matches WHERE is_deleted=0"
     if pending_only: q += " AND home_score IS NULL"
@@ -174,89 +280,88 @@ def _find_section(lines, keywords):
     return None
 
 def parse_filter_data(text: str) -> dict:
-    """
-    ROBUST parser: does NOT depend on where the League label / average sits.
-    For each section block (from its header to the next header), the numbers
-    appear in order: A, B, (A)(B) average, League.
-    We extract all numbers in the block in order and assign them by position.
-    This handles BOTH layouts:
-      Layout 1: League label -> avg number -> league number
-      Layout 2: (A)(B) average -> avg number -> League label -> league number
-    Old line-based parser broke when the layout flipped, and read avg as league,
-    which forces almost every category to SKIP -> 0/5 for every match.
-    """
-    lines = text.splitlines()
-    sections = {}
-    warnings = []
-    # Section headers in order as they appear in the paste
-    HEADERS = [
-        ("home_scoring_avg", ["home scoring averages"]),
-        ("away_scoring_avg", ["away scoring averages"]),
-        ("goals_match", ["goals scored + conceded"]),
-        ("home_scoring_rate", ["home scoring rate"]),
-        ("away_scoring_rate", ["away scoring rate"]),
-        ("over_1_5", ["over 1.5"]),
-        ("over_2_5", ["over 2.5"]),
-        ("over_3_5", ["over 3.5"]),
-        ("btts", ["both-teams-scored", "both teams scored", "bts matches"]),
-    ]
-    # Find header line index for each section
-    header_idx = {}
-    for key, kws in HEADERS:
-        idx = _find_section(lines, kws)
+    lines=text.splitlines()
+    sections={}
+    warnings=[]
+    def get_section(key, keywords):
+        idx=_find_section(lines, keywords)
         if idx is None:
             warnings.append(f"Section not found: {key}")
-        else:
-            header_idx[key] = idx
-    # Sorted headers by position to delimit blocks
-    ordered = sorted(header_idx.items(), key=lambda kv: kv[1])
-    for pos, (key, idx) in enumerate(ordered):
-        end_idx = ordered[pos+1][1] if pos+1 < len(ordered) else len(lines)
-        block = "\n".join(lines[idx:end_idx])
-        # Numbers are ONLY on standalone value lines like "83%" or "2.67".
-        # Do NOT regex the whole block: "(A) ... over 1.5 at home" contains "1.5"
-        # in the label itself, which the old regex mistook for the (A) value.
-        block_lines = lines[idx+1:end_idx]
-        nums = []
-        for ln in block_lines:
-            s = _clean(ln)
-            if re.fullmatch(r"\d+(?:\.\d+)?\s*%?", s):
-                try:
-                    nums.append(float(s.replace("%", "")))
-                except Exception:
-                    pass
-        # nums should be [A, B, avg, league]. If more than 4 (e.g. extra numbers), take first 4.
-        # If only 3, treat as [A, B, league] (no avg in paste).
-        a = b = avg = league = None
-        if len(nums) >= 4:
-            a, b, avg, league = nums[0], nums[1], nums[2], nums[3]
-        elif len(nums) == 3:
-            a, b, league = nums[0], nums[1], nums[2]
-            avg = (a + b) / 2.0 if a is not None and b is not None else None
-        elif len(nums) == 2:
-            a, b = nums[0], nums[1]
-        else:
-            warnings.append(f"Section {key}: found {len(nums)} numbers, expected 4 (A, B, avg, league)")
-        sections[key] = {"a": a, "b": b, "avg": avg, "league": league}
-    # Fill missing sections with None so downstream treats them as SKIP
-    for key, _ in HEADERS:
-        if key not in sections:
-            sections[key] = {"a": None, "b": None, "avg": None, "league": None}
-    # Team names: first (A) line = home, first (B) line = away
-    home_team = away_team = None
+            return None
+        # find (A) line, (B) line, average line, league line after idx
+        a=b=avg=league=None; avg_paste=None
+        j=idx+1
+        while j < len(lines) and j < idx+30:
+            low=_clean(lines[j]).lower()
+            if low.startswith("(a)"):
+                # next numeric line
+                k=j+1
+                while k < len(lines) and not _clean(lines[k]): k+=1
+                try: a=float(_clean(lines[k]).replace("%",""))
+                except Exception: pass
+            elif low.startswith("(b)"):
+                k=j+1
+                while k < len(lines) and not _clean(lines[k]): k+=1
+                try: b=float(_clean(lines[k]).replace("%",""))
+                except Exception: pass
+            elif "average" in low and "(a)" not in low and "(b)" not in low:
+                # the number after this line, or numbers in following lines until league
+                pass
+            elif "league" in low or "stats." in low:
+                # FIX: after the League label there are TWO numbers:
+                #   1st = (A)(B) average (from the paste)
+                #   2nd = League (the one the Filter must use)
+                # Old code took the 1st number as league -> compared A/B to the average.
+                # Correct: skip the 1st, take the 2nd as league. If only 1 number exists, use it.
+                nums_after=[]
+                k=j+1
+                while k < len(lines) and len(nums_after) < 2:
+                    ls2=_clean(lines[k])
+                    if not ls2:
+                        k+=1; continue
+                    try:
+                        nums_after.append(float(ls2.replace("%","")))
+                    except Exception:
+                        break
+                    k+=1
+                if len(nums_after) >= 2:
+                    avg_paste=nums_after[0]; league=nums_after[1]
+                elif len(nums_after) == 1:
+                    league=nums_after[0]
+                break
+            j+=1
+        # avg: use the paste's own (A)(B) average (1st number after League label) if we found it,
+        # else fall back to (a+b)/2
+        if 'avg_paste' in locals() and avg_paste is not None:
+            avg=avg_paste
+        elif a is not None and b is not None:
+            avg=(a+b)/2.0
+        sections[key]={"a":a,"b":b,"avg":avg,"league":league}
+        return sections[key]
+    get_section("home_scoring_avg", ["home scoring averages"])
+    get_section("away_scoring_avg", ["away scoring averages"])
+    get_section("goals_match", ["goals scored + conceded"])
+    get_section("home_scoring_rate", ["home scoring rate"])
+    get_section("away_scoring_rate", ["away scoring rate"])
+    get_section("over_1_5", ["over 1.5"])
+    get_section("over_2_5", ["over 2.5"])
+    get_section("over_3_5", ["over 3.5"])
+    get_section("btts", ["both-teams-scored", "both teams scored", "bts matches"])
+    # team names from (A) / (B) lines: first (A) line is home team, first (B) line is away team
+    home_team=away_team=None
     for l in lines:
-        ls = _clean(l)
+        ls=_clean(l)
         if ls.startswith("(A)") and home_team is None:
-            tmp = ls[3:].strip()
-            for kw in [" scored", " conceded", " over", " BTS"]:
-                if kw in tmp: tmp = tmp.split(kw)[0].strip()
-            home_team = tmp
+            home_team=ls[3:].replace("scored at home","").replace("conceded at home","").replace("scored","").strip().split("  ")[0].strip()
+            # keep full name before keywords
+            for kw in [" scored"," conceded"," over"," BTS"]:
+                if kw in home_team: home_team=home_team.split(kw)[0].strip()
         if ls.startswith("(B)") and away_team is None:
-            tmp = ls[3:].strip()
-            for kw in [" conceded", " scored", " over", " BTS"]:
-                if kw in tmp: tmp = tmp.split(kw)[0].strip()
-            away_team = tmp
+            away_team=ls[3:].strip()
+            for kw in [" conceded"," scored"," over"," BTS"]:
+                if kw in away_team: away_team=away_team.split(kw)[0].strip()
         if home_team and away_team: break
+    # cleaner: use first (A)/(B) pair from Home scoring averages block
     return {"sections": sections, "home_team": home_team, "away_team": away_team, "warnings": warnings}
 
 # ---------------------------------------------------------------- filter rule
@@ -399,7 +504,7 @@ def _filt_from_db_row(m):
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — The Filter Rule")
-st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split or = league → SKIP. Over 3.5 ignored. No exact score predicted. SQLite: king.db")
+st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split or = league → SKIP. Over 3.5 ignored. No exact score predicted. Backend: Supabase if SUPABASE_URL/KEY set, else SQLite king.db")
 
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 with tab_new:
@@ -415,7 +520,7 @@ with tab_new:
             mid = save_match(facts, filt, raw_in.strip())
             st.success(f"Saved to Pending (id {mid}) in king.db.")
 with tab_pending:
-    st.markdown("### Pending matches (from king.db)")
+    st.markdown("### Pending matches (from Supabase (or king.db fallback))")
     pending = load_matches(pending_only=True)
     if not pending: st.info("No pending matches.")
     for m in pending:
