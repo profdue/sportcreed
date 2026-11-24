@@ -1,401 +1,426 @@
+#!/usr/bin/env python3
+"""
+King_1.py — The Filter Rule (Both Agree vs League)
+
+ONLY logic in this file:
+  For each of 5 categories, compare (A) vs League and (B) vs League separately.
+    Both BEAT league  -> Predict YES (event happens)
+    Both BELOW league -> Predict NO  (event does NOT happen)
+    Split             -> SKIP (coin flip, do not predict)
+  Categories: Away Scoring Rate, Over 1.5, Over 2.5, BTTS, Home Scoring Rate
+  Over 3.5 is ALWAYS ignored (was 50% even when both agreed).
+  Goals averages (Home / Away scoring averages) are ONLY a tie-breaker
+  for the scoreline, never a filtered pick.
+
+Proven record when both agree (from conversation testing):
+  Away Scoring Rate 10/10, Over 1.5 7/7, Over 2.5 6/6, BTTS 5/5, Home Scoring Rate 7/8
+  Total 35/36 = 97%
+"""
 import re
+import math
 from datetime import datetime, timezone
 import streamlit as st
-from supabase import create_client
+import pandas as pd
 
-st.set_page_config(page_title="King — Lead / Defend / Equalize", page_icon="⚽", layout="wide")
-st.title("King — Lead / Defend / Equalize")
-st.caption("Step 1 scores first · Step 2 holds lead · Step 3 comes back · Step 4 shapes scoreline. Gaps decide, not Step 1 alone.")
+st.set_page_config(page_title="The Filter Rule", page_icon="⚽", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""
+<style>
+    .main { background-color: #0e1117; }
+    h1, h2, h3 { font-family: 'Poppins', sans-serif; letter-spacing: -0.02em; }
+    .match-card { background: linear-gradient(135deg, #1a1f2e 0%, #232a3d 100%); border-radius: 16px; padding: 22px 26px; margin-bottom: 16px; border-left: 4px solid #6366f1; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
+    .match-card.pick-home { border-left-color: #10b981; }
+    .match-card.pick-away { border-left-color: #f59e0b; }
+    .match-card.skip { border-left-color: #64748b; opacity: 0.9; }
+    .match-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin: 0 0 4px 0; }
+    .match-meta { font-size: 0.82rem; color: #94a3b8; margin-bottom: 14px; }
+    .pick-badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
+    .badge-yes { background: #06d6a022; color: #06d6a0; border: 1px solid #06d6a055; }
+    .badge-no { background: #ef444422; color: #fca5a5; border: 1px solid #ef444455; }
+    .badge-skip { background: #64748b22; color: #94a3b8; border: 1px solid #64748b55; }
+    .badge-win { background: #10b98122; color: #10b981; border: 1px solid #10b98155; }
+    .badge-loss { background: #ef444422; color: #ef4444; border: 1px solid #ef444455; }
+    .signal-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .signal-pill { font-size: 0.8rem; padding: 5px 11px; border-radius: 8px; background: #0f172a; color: #cbd5e1; border: 1px solid #1e293b; font-family: monospace; }
+    .signal-pill.yes { background: #10b98115; color: #34d399; border-color: #10b98140; }
+    .signal-pill.no { background: #ef444415; color: #fca5a5; border-color: #ef444440; }
+    .signal-pill.skip { background: #64748b15; color: #94a3b8; border-color: #64748b40; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { height: 44px; background-color: #1a1f2e; border-radius: 10px; padding: 0 18px; color: #94a3b8; }
+    .stTabs [aria-selected="true"] { background-color: #6366f1 !important; color: white !important; }
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_resource
-def get_supabase():
-    try:
-        url = st.secrets["supabase"]["url"]; key = st.secrets["supabase"]["key"]
-    except Exception:
-        url = st.secrets["SUPABASE_URL"]; key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+# ---------------------------------------------------------------- parsing
+def _clean(s: str) -> str:
+    return s.strip().strip("\ufeff\u200b\u200c\u200d\u00a0 ")
 
-def now_iso(): return datetime.now(timezone.utc).isoformat()
-def pct(s):
-    m = re.search(r"(\d+(?:\.\d+)?)\s*%", s or "")
-    return float(m.group(1)) if m else None
-
-# ---------- PARSER: source headings only, home split for home team, away split for away team ----------
-def parse_dump(t: str) -> dict:
-    f = {"raw": t}
-    # Teams: from "Monza" / "Fiorentina" header + "Monza (HOME)" / "Fiorentina (AWAY)" tables.
-    # This dump has no "X vs Y predictions" line, so take first two team names from Leading and Trailing blocks.
-    # Fallback: search "Monza" / "Fiorentina" style — use first "Team Stats" header pattern.
-    # Teams: (HOME)/(AWAY) is reliable in this format. "flagMonza vs Fiorentina 3:0" is NOT.
-    # Old code took the vs-line first and got home = "flagMonza".
-    hm = re.search(r"([A-Z][A-Za-zÀ-ÿ' \-\.]{2,40})\s+\(HOME\)", t)
-    am = re.search(r"([A-Z][A-Za-zÀ-ÿ' \-\.]{2,40})\s+\(AWAY\)", t)
-    if hm and am:
-        f["home_team"] = hm.group(1).strip()
-        f["away_team"] = am.group(1).strip()
-    else:
-        m = re.search(r"([A-Z][A-Za-zÀ-ÿ' \-\.]{2,40})\s+vs\s+([A-Z][A-Za-zÀ-ÿ' \-\.]{2,40})", t)
-        if m:
-            f["home_team"] = m.group(1).strip().replace("flag","").replace(" predictions","").strip()
-            f["away_team"] = m.group(2).strip().replace(" predictions","").strip()
-    for k in ("home_team","away_team"):
-        if f.get(k):
-            f[k] = re.sub(r"^flag", "", f[k]).strip()
-            f[k] = re.sub(r"\s+\d+:\d+.*$", "", f[k]).strip()
-    # --- ANCHOR: only parse Steps 1-3 from "Leading and Trailing" block, NOT from earlier sections ---
-    # Earlier in this dump, "% Scored first" appears in "Team Stats vs League Average" (40% / 20%)
-    # and in "Contextual averages" — those are NOT the source. Source is Leading and Trailing.
-    lt_idx = t.find("Leading and Trailing")
-    lt = t[lt_idx:] if lt_idx >= 0 else t
-    # Split LT into Home block (Monza Home) and Away block (Fiorentina Away)
-    home_block, away_block = lt, lt
-    # Home block: from "Monza" + "Home" in LT to "Fiorentina" + "Away"
-    if f.get("home_team") and f.get("away_team"):
-        hm2 = re.search(re.escape(f["home_team"]) + r"\s*\n\s*Home", lt)
-        am2 = re.search(re.escape(f["away_team"]) + r"\s*\n\s*Away", lt)
-        if hm2 and am2:
-            home_block = lt[hm2.start():am2.start()]
-            away_block = lt[am2.start():]
-    def pct_after(block: str, pat: str):
-        m = re.search(pat, block, re.I | re.S)
-        if not m: return None
-        seg = block[m.end():m.end()+600]
-        p = re.search(r"(\d+(?:\.\d+)?)\s*%", seg)
-        return float(p.group(1)) if p else None
-    def int_after(block: str, pat: str):
-        m = re.search(pat, block, re.I | re.S)
-        if not m: return None
-        seg = block[m.end():m.end()+300]
-        n = re.search(r"(\d+)", seg)
-        return int(n.group(1)) if n else None
-    # Step 1: OPENING GOALS > Team scored first — Home block vs Away block
-    f["step1_home"] = pct_after(home_block, r"Team scored first")
-    f["step1_away"] = pct_after(away_block, r"Team scored first")
-    # Step 2: DEFENDING THE LEAD > Lead-defending rate
-    f["step2_home"] = pct_after(home_block, r"Lead-defending rate")
-    f["step2_away"] = pct_after(away_block, r"Lead-defending rate")
-    # Step 3: EQUALIZING > Equalizing rate
-    f["step3_home"] = pct_after(home_block, r"Equalizing rate")
-    f["step3_away"] = pct_after(away_block, r"Equalizing rate")
-    # Raw counts
-    f["leads_home"] = int_after(home_block, r"Goals giving the lead")
-    f["leads_away"] = int_after(away_block, r"Goals giving the lead")
-    f["trails_home"] = int_after(home_block, r"Goals giving lead to opponent")
-    f["trails_away"] = int_after(away_block, r"Goals giving lead to opponent")
-    # Step 4: Contextual averages — Clean sheets / Failed to score (home split / away split)
-    # Use "Contextual averages" block if present, else Team Stats vs League Average
-    ctx_idx = t.find("Contextual averages")
-    ctx = t[ctx_idx:ctx_idx+2500] if ctx_idx >= 0 else t
-    # In this dump Contextual table is transposed, so fall back to explicit Home vs Away Stats table:
-    # "Clean sheets 20% 0%" and "Failed to score 20% 20%" under "Home vs Away Stats"
-    hvs_idx = t.find("Home vs Away Stats")
-    hvs = t[hvs_idx:hvs_idx+2000] if hvs_idx >= 0 else ""
-    def two_pcts(block, pat):
-        m = re.search(pat, block, re.I | re.S)
-        if not m: return None, None
-        seg = block[m.end():m.end()+400]
-        ps = re.findall(r"(\d+(?:\.\d+)?)\s*%", seg)
-        return (float(ps[0]), float(ps[1])) if len(ps) >= 2 else (None, None)
-    cs_h, cs_a = two_pcts(hvs, r"Clean sheets")
-    fs_h, fs_a = two_pcts(hvs, r"Failed to score")
-    f["cs_home"], f["cs_away"], f["fts_home"], f["fts_away"] = cs_h, cs_a, fs_h, fs_a
-    # PPG split — tie-breaker ONLY, never a pick. From Comparison block "points per game".
-    # Format there is: points per game <home> <league> / <away> <league> — take first two numbers in that block.
-    try:
-        _cmp_idx = t.find("Comparison with league average")
-        if _cmp_idx >= 0:
-            _cmp = t[_cmp_idx:_cmp_idx+1500]
-            _mppg = re.search(r"points per game\s*(\d+(?:\.\d+)?)", _cmp, re.I)
-            if _mppg:
-                # First number after "points per game" is the home team's PPG in that block;
-                # search a second occurrence for away. Keep it best-effort: only set if two values found.
-                _allppg = re.findall(r"points per game\s*(\d+(?:\.\d+)?)", _cmp, re.I)
-                if len(_allppg) >= 2:
-                    f["ppg_home"], f["ppg_away"] = float(_allppg[0]), float(_allppg[1])
-    except Exception:
-        pass
-    # Veto: conceded per game in split — from "Comparison with league average" / "Goals conceded per game"
-    # Monza home 1.80, Fiorentina away 2.40 in this dump
-    m = re.search(r"Goals conceded per game\s*(\d+(?:\.\d+)?)\s*\n?\s*(\d+(?:\.\d+)?)", t)
-    if m:
-        f["conceded_home"], f["conceded_away"] = float(m.group(1)), float(m.group(2))
-    else:
-        m2 = re.search(r"Avg Conceded\s*(\d+(?:\.\d+)?)", t)
-        if m2: f["conceded_home"] = float(m2.group(1))
-    return f
-
-# ---------- EVALUATION ----------
-def evaluate(f: dict):
-    home, away = f.get("home_team","Home"), f.get("away_team","Away")
-    steps = []
-    # Raw-count rule (ENFORCED, not just flagged):
-    # Step 2 is backed by leads, Step 3 by trails.
-    # If EITHER side in that step is on <3 leads/trails, that step is
-    # UNRELIABLE: winner=None, gap=0, it does NOT count toward the total.
-    # In particular a 0%/100% on <3 is ignored.
-    # Step 1 is on matches, not leads/trails, so it is not neutralised here.
-    reliability = {
-        1: (True, ""),
-        2: (not ((f.get("leads_home") is not None and f["leads_home"] < 3) or
-                  (f.get("leads_away") is not None and f["leads_away"] < 3)),
-            f"Step 2 on <3 leads (Home leads {f.get('leads_home')}, Away leads {f.get('leads_away')}) -> ignored"),
-        3: (not ((f.get("trails_home") is not None and f["trails_home"] < 3) or
-                  (f.get("trails_away") is not None and f["trails_away"] < 3)),
-            f"Step 3 on <3 trails (Home trails {f.get('trails_home')}, Away trails {f.get('trails_away')}) -> ignored"),
-    }
-    for i, (hk, ak, label) in enumerate([
-        ("step1_home","step1_away","Step 1 — Scores first"),
-        ("step2_home","step2_away","Step 2 — Holds lead"),
-        ("step3_home","step3_away","Step 3 — Comes back")], start=1):
-        h, a = f.get(hk), f.get(ak)
-        reliable, why = reliability[i]
-        if h is None or a is None:
-            steps.append({"step": i, "label": label, "home": h, "away": a, "winner": None, "gap": None, "status": "MISSING"})
-        elif not reliable:
-            steps.append({"step": i, "label": label, "home": h, "away": a, "winner": None, "gap": 0.0, "status": "UNRELIABLE", "note": why})
+def _nums_in_section(lines, start_idx, end_idx, want_pct: bool):
+    """Return numbers in order in a section. For pct sections, only % numbers.
+    For goals sections, only plain numbers (no %)."""
+    out = []
+    for i in range(start_idx, min(end_idx, len(lines))):
+        s = _clean(lines[i])
+        if not s:
+            continue
+        # skip labels that are section headers
+        low = s.lower()
+        if "league avg" in low or "(a) (b) average" in low or "average" in low and "league" in low:
+            continue
+        if want_pct:
+            for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%", s):
+                out.append(float(m.group(1)))
         else:
-            winner = "HOME" if h > a else ("AWAY" if a > h else "TIE")
-            gap = round(abs(h - a), 1)
-            steps.append({"step": i, "label": label, "home": h, "away": a, "winner": winner, "gap": gap, "status": "OK"})
-    # Totals: sum gaps where team wins the step. UNRELIABLE / MISSING / TIE add 0.
-    total_home = sum(s["gap"] for s in steps if s["winner"] == "HOME")
-    total_away = sum(s["gap"] for s in steps if s["winner"] == "AWAY")
-    net = round(abs(total_home - total_away), 1)
-    total_winner = "HOME" if total_home > total_away else ("AWAY" if total_away > total_home else "TIE")
-    # Alignment tiers
-    winners = [s["winner"] for s in steps if s["winner"] in ("HOME","AWAY")]
-    all_agree = len(set(winners)) == 1 and len(winners) == 3
-    if any(s["status"] == "MISSING" for s in steps):
-        tier = "NO BET"; tier_reason = "Missing Step 1/2/3 — cannot decide."
-    elif net <= 10:
-        tier = "DRAW / NO BET"; tier_reason = f"Total gaps within ~10 (Home {total_home} vs Away {total_away}, net {net}) — no clean winner."
-    elif all_agree and net >= 30:
-        tier = "LOCK"; tier_reason = f"All 3 steps agree ({total_winner}), net gap {net} large."
-    else:
-        tier = "LEAN"; tier_reason = f"Steps split, but {total_winner} wins total gap {total_home} vs {total_away} (net {net})."
-    _ignored = [s for s in steps if s.get("status") == "UNRELIABLE"]
-    if _ignored:
-        _names = ", ".join([f"Step {s['step']}" for s in _ignored])
-        tier_reason += f" IGNORED (not missing): {_names} — on <3 leads/trails, gap counted as 0. Decision rests on the remaining step(s) only."
-    # PPG tie-breaker ONLY: if Steps 1-3 are all tied/unreliable AND Step 4 is neutral.
-    # PPG is parsed from Comparison block if present (ppg_home / ppg_away). Otherwise no tie-break.
-    # It can only produce a LEAN, never a LOCK.
-    # (Applied after Step 4 shape is known, below — placeholder, resolved after shape.)
-    # Veto: favourite concedes >1.60 in split -> downgrade one tier, never upgrade
-    fav_team = home if total_winner == "HOME" else away if total_winner == "AWAY" else None
-    fav_conceded = f.get("conceded_home") if total_winner == "HOME" else f.get("conceded_away") if total_winner == "AWAY" else None
-    veto = bool(fav_conceded is not None and fav_conceded > 1.60)
-    if veto:
-        if tier == "LOCK": tier = "LEAN"
-        elif tier == "LEAN": tier = "DRAW / NO BET"
-        tier_reason += f" VETO: {fav_team} concedes {fav_conceded}/game in split (>1.60) — downgraded one tier."
-    # Raw-count flag: any Step 2/3 step UNRELIABLE
-    low_n = any(s.get("status") == "UNRELIABLE" for s in steps)
-    # Confidence
-    if tier in ("DRAW / NO BET","NO BET"): conf = "No bet"
-    elif all_agree and net >= 30 and not veto and not low_n: conf = "High"
-    elif net > 10 and not veto and not low_n: conf = "Medium"
-    else: conf = "Low"
-    # Step 4 shape: shapes scoreline, does NOT pick winner.
-    # Uses BOTH sides, not favourite-only.
-    cs_h, cs_a = f.get("cs_home"), f.get("cs_away")
-    fts_h, fts_a = f.get("fts_home"), f.get("fts_away")
-    if cs_h is not None and fts_a is not None and cs_h >= 50 and fts_a >= 40:
-        shape = "Home to-nil / low-score shape"
-    elif cs_a is not None and fts_h is not None and cs_a >= 50 and fts_h >= 40:
-        shape = "Away to-nil / low-score shape"
-    elif (cs_h is not None and cs_a is not None and fts_h is not None and fts_a is not None
-          and cs_h < 30 and cs_a < 30 and fts_h < 30 and fts_a < 30):
-        shape = "Both teams to score shape"
-    else:
-        shape = "Neutral shape — Step 4 does not pick winner"
-    # PPG tie-breaker, resolved now that shape is known
-    ppg_pick = None
-    all_tied_or_unreliable = all(s.get("status") in ("UNRELIABLE","MISSING") or s.get("winner") == "TIE" for s in steps) and net == 0
-    if all_tied_or_unreliable and shape.startswith("Neutral") and tier in ("DRAW / NO BET","NO BET"):
-        ph, pa = f.get("ppg_home"), f.get("ppg_away")
-        if ph is not None and pa is not None and ph != pa:
-            ppg_pick = "HOME" if ph > pa else "AWAY"
-            total_winner = ppg_pick
-            fav_team = home if ppg_pick == "HOME" else away
-            tier = "LEAN"; tier_reason += f" PPG tie-breaker only: Home PPG {ph} vs Away PPG {pa} -> {fav_team}. Lean, never Lock."
-            conf = "Low"
-    # Predicted script — from steps, not from PPG / total alone
-    s1w = next((s for s in steps if s["step"]==1), {})
-    s2w = next((s for s in steps if s["step"]==2), {})
-    s3w = next((s for s in steps if s["step"]==3), {})
-    if s1w.get("winner") == "HOME":
-        script = f"{home} scores first. "
-    elif s1w.get("winner") == "AWAY":
-        script = f"{away} scores first. "
-    else:
-        script = "No clear first scorer. "
-    if s3w.get("winner") == "HOME" and s1w.get("winner") == "AWAY":
-        script += f"{home} equalizes (Step 3). "
-    elif s3w.get("winner") == "AWAY" and s1w.get("winner") == "HOME":
-        script += f"{away} equalizes (Step 3). "
-    elif s2w.get("winner") == s1w.get("winner") and s1w.get("winner") in ("HOME","AWAY"):
-        script += "First scorer holds lead (Step 2). "
-    else:
-        script += "No clear second phase. "
-    script += f"{shape}."
-    return {"steps": steps, "total_home": round(total_home,1), "total_away": round(total_away,1),
-            "net": net, "total_winner": total_winner, "tier": tier, "tier_reason": tier_reason,
-            "veto": veto, "fav_conceded": fav_conceded, "low_n": low_n, "confidence": conf,
-            "shape": shape, "script": script, "fav_team": fav_team, "ppg_pick": ppg_pick}
+            # plain number line: e.g. "1.67" or "1.67" alone, ignore lines with % or letters (except pure numbers)
+            if "%" in s:
+                continue
+            if re.fullmatch(r"\d+(?:\.\d+)?", s):
+                out.append(float(s))
+    return out
 
-# ---------- UI ----------
-tab1, tab2, tab3 = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance"])
-with tab1:
-    dump = st.text_area("Paste the match data (Leading and Trailing + Contextual averages)", height=300)
-    if st.button("Evaluate", type="primary") and dump.strip():
-        f = parse_dump(dump); r = evaluate(f)
-        # ===== DECISION CARD — the bet, first, impossible to miss =====
-        _tier = r['tier']
-        _conf = r['confidence']
-        _winner = r['total_winner']
-        _winner_name = f.get('home_team') if _winner=='HOME' else (f.get('away_team') if _winner=='AWAY' else 'No winner')
-        if _tier == 'LOCK':
-            _bg, _border, _badge, _big, _action = '#0f5132','#198754','#198754','✅ LOCK — BET','BET: NO DRAW — ' + (_winner_name or '')
-        elif _tier == 'LEAN':
-            _bg, _border, _badge, _big, _action = '#664d03','#ffc107','#ffc107','⚠️ LEAN — SMALL BET','BET: NO DRAW — ' + (_winner_name or '')
-        elif _tier == 'DRAW / NO BET':
-            _bg, _border, _badge, _big, _action = '#842029','#dc3545','#dc3545','⛔ DRAW / NO BET','NO BET — SKIP THIS MATCH'
+# Section definitions: (key, header keywords, want_pct)
+SECTIONS = [
+    ("home_scoring_avg", ["home scoring averages"], False),
+    ("away_scoring_avg", ["away scoring averages"], False),
+    ("total_goals_avg", ["goals scored + conceded", "goals scored + conceded per match"], False),
+    ("home_scoring_rate", ["home scoring rate"], True),
+    ("away_scoring_rate", ["away scoring rate"], True),
+    ("over_1_5", ["over 1.5"], True),
+    ("over_2_5", ["over 2.5"], True),
+    ("over_3_5", ["over 3.5"], True),
+    ("btts", ["both-teams-scored", "both teams scored", "bts"], True),
+]
+
+def _find_section(lines, keywords):
+    for i, raw in enumerate(lines):
+        low = _clean(raw).lower()
+        if any(k in low for k in keywords):
+            # avoid matching "home scoring averages" when looking for "home scoring rate" etc.
+            # require exact intent: if keywords contain "rate", header must contain "rate"
+            return i
+    return None
+
+def parse_filter_data(text: str) -> dict:
+    lines = [_clean(ln) for ln in text.replace("\r\n", "\n").split("\n")]
+    # team names from first (A) / (B) lines
+    home_team, away_team = None, None
+    for raw in lines:
+        s = _clean(raw)
+        m = re.match(r"\(A\)\s*(.+?)\s+(?:scored|scoring|conceding|conceded)\b", s, re.I)
+        if m and not home_team:
+            home_team = m.group(1).strip()
+        m2 = re.match(r"\(B\)\s*(.+?)\s+(?:scored|scoring|conceding|conceded)\b", s, re.I)
+        if m2 and not away_team:
+            away_team = m2.group(1).strip()
+        if home_team and away_team:
+            break
+    # also support "Pre-match X vs Y" header
+    if not home_team:
+        for raw in lines:
+            m = re.match(r"^(?:pre-match\s+)?(.+?)\s+vs\.?\s+(.+?)\s*$", _clean(raw), re.I)
+            if m:
+                home_team, away_team = m.group(1).strip(), m.group(2).strip()
+                break
+    facts = {"home_team": home_team, "away_team": away_team, "sections": {}, "warnings": []}
+    # find section boundaries in order
+    # Build list of (key, start) sorted by appearance, using specific matching to avoid overlap
+    # We scan sequentially: use header detection per section in order of appearance in text
+    # Simpler: for each section, find its header index, then numbers until next header
+    header_idxs = []
+    for key, kws, want_pct in SECTIONS:
+        idx = None
+        for i, raw in enumerate(lines):
+            low = _clean(raw).lower()
+            # precise matching
+            if key == "home_scoring_avg" and "home scoring averages" in low:
+                idx = i; break
+            if key == "away_scoring_avg" and "away scoring averages" in low:
+                idx = i; break
+            if key == "total_goals_avg" and "goals scored + conceded" in low:
+                idx = i; break
+            if key == "home_scoring_rate" and "home scoring rate" in low:
+                idx = i; break
+            if key == "away_scoring_rate" and "away scoring rate" in low:
+                idx = i; break
+            if key == "over_1_5" and "over 1.5" in low:
+                idx = i; break
+            if key == "over_2_5" and "over 2.5" in low:
+                idx = i; break
+            if key == "over_3_5" and "over 3.5" in low:
+                idx = i; break
+            if key == "btts" and ("both-teams-scored" in low or "both teams" in low or ("bts" in low and "matches" in low)):
+                idx = i; break
+        if idx is not None:
+            header_idxs.append((idx, key, want_pct))
+    header_idxs.sort()
+    for pos, (idx, key, want_pct) in enumerate(header_idxs):
+        end = header_idxs[pos+1][0] if pos+1 < len(header_idxs) else len(lines)
+        nums = _nums_in_section(lines, idx+1, end, want_pct)
+        # Expected order in pasted data: A, B, (A)(B) average, League
+        # Some pastes put League label before League value, and average label before average value.
+        # _nums_in_section already skips label lines, so nums should be [A, B, avg, league]
+        if len(nums) >= 4:
+            a, b, avg, league = nums[0], nums[1], nums[2], nums[3]
+            facts["sections"][key] = {"a": a, "b": b, "avg": avg, "league": league}
+        elif len(nums) >= 2:
+            facts["sections"][key] = {"a": nums[0], "b": nums[1], "avg": None, "league": None}
+            facts["warnings"].append(f"{key}: only {len(nums)} numbers found, need A, B, avg, League.")
         else:
-            _bg, _border, _badge, _big, _action = '#842029','#dc3545','#dc3545','⛔ NO BET','NO BET — SKIP THIS MATCH'
-        _veto_txt = f"🚨 VETO APPLIED — downgraded (fav concedes {r['fav_conceded']}/game)" if r['veto'] else "No veto"
-        _lown_txt = "⚠️ LOW-N — key % on &lt;3 leads/trails" if r['low_n'] else "Sample OK"
-        st.markdown(f'''
-        <div style="border:3px solid {_border}; border-radius:16px; padding:20px 22px; background:{_bg}; color:white; margin:8px 0 16px 0;">
-          <div style="font-size:13px; letter-spacing:2px; opacity:0.85;">BETTING DECISION &nbsp;•&nbsp; {f.get('home_team','?')} vs {f.get('away_team','?')}</div>
-          <div style="font-size:36px; font-weight:900; line-height:1.1; margin:8px 0 4px 0;">{_big}</div>
-          <div style="font-size:20px; font-weight:700; margin-bottom:10px;">{_action}</div>
-          <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
-            <span style="background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:999px; font-weight:700;">Winner: {_winner_name} ({_winner})</span>
-            <span style="background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:999px; font-weight:700;">Total: {r['total_home']} vs {r['total_away']} &nbsp;•&nbsp; Net {r['net']}</span>
-            <span style="background:rgba(255,255,255,0.18); padding:6px 12px; border-radius:999px; font-weight:700;">Confidence: {_conf}</span>
-          </div>
-          <div style="font-size:14px; line-height:1.5; opacity:0.95;">{_veto_txt} &nbsp;•&nbsp; {_lown_txt}</div>
-          <div style="font-size:14px; line-height:1.5; margin-top:6px;"><b>Script:</b> {r['script']}</div>
-          <div style="font-size:13px; line-height:1.5; margin-top:4px; opacity:0.9;"><b>Shape (Step 4):</b> {r['shape']}</div>
-        </div>
-        ''', unsafe_allow_html=True)
-        st.markdown("**Why — Steps 1/2/3**")
-        for s in r["steps"]:
-            _w = s['winner'] if s.get('status') == 'OK' else (f"IGNORED (<3) — {s['home']}% vs {s['away']}%" if s.get('status') == 'UNRELIABLE' else 'MISSING')
-            _wc = '#198754' if _w=='HOME' else ('#fd7e14' if _w=='AWAY' else '#6c757d')
-            st.markdown(f"<div style='border-left:4px solid {_wc}; padding:6px 10px; margin:4px 0; background:#f8f9fa; border-radius:6px;'><b>{s['label']}</b> — Home {s['home']}% vs Away {s['away']}% → <b>{_w}</b> · Gap {s['gap']}" + (f"<br><span style='font-size:12px; color:#555;'>{s.get('note','')}</span>" if s.get('status') == 'UNRELIABLE' else "") + "</div>", unsafe_allow_html=True)
-        st.write(f"**Tier reason:** {r['tier_reason']}")
-        st.write(f"**Step 4 detail:** CS Home {f.get('cs_home')}% / Away {f.get('cs_away')}% · FTS Home {f.get('fts_home')}% / Away {f.get('fts_away')}%")
-        row = {"home_team": f.get("home_team"), "away_team": f.get("away_team"),
-               "tier": r["tier"],
-               "confidence": r["confidence"],
-               "decision": "NO DRAW" if r["tier"] in ("LOCK","LEAN") else "NO BET",
-               "checks": [{"name": s["label"], "status": s.get("status") or "MISSING", "winner": s["winner"], "detail": f"Home {s['home']}% vs Away {s['away']}% · Gap {s['gap']} · {s.get('note','') if s.get('status')=='UNRELIABLE' else s.get('status','')}"} for s in r["steps"]],
-               "parsed": {**f, **r}, "raw_dump": dump,
-               "all_data": {"parsed": f, "result": r, "tier": r["tier"], "confidence": r["confidence"]},
-               "extracted_at": now_iso()}
-        row = {k: v for k, v in row.items() if v is not None}
-        try:
-            sb = get_supabase()
-            ex = sb.table("matches").select("match_id").eq("home_team", f.get("home_team")).eq("away_team", f.get("away_team")).limit(1).execute()
-            if ex.data: st.info(f"Already stored (match_id {ex.data[0]['match_id']}). Delete first to re-save.")
-            else: sb.table("matches").insert(row).execute(); st.success("Saved — Step 1/2/3 + gaps + tier + script stored.")
-        except Exception as e: st.error(f"Insert failed: {e}")
-with tab2:
-    st.subheader("⏳ Pending — waiting for result")
-    try: data = get_supabase().table("matches").select("*").is_("home_score","null").order("extracted_at", desc=True).execute().data or []
-    except Exception as e: data=[]; st.error(str(e))
-    if not data: st.info("No pending matches.")
-    for m in data:
-        p = m.get("parsed") or {}
-        _tier = p.get("tier") or m.get("tier") or "?"
-        _conf = p.get("confidence") or m.get("confidence") or "?"
-        _winner = p.get("total_winner") or "?"
-        _wname = m.get("home_team") if _winner=="HOME" else (m.get("away_team") if _winner=="AWAY" else "No winner")
-        _sugg = f"BET: NO DRAW — {_wname}" if _tier in ("LOCK","LEAN") else "NO BET — SKIP"
-        _bg = "#0f5132" if _tier=="LOCK" else ("#664d03" if _tier=="LEAN" else "#842029")
-        _bd = "#198754" if _tier=="LOCK" else ("#ffc107" if _tier=="LEAN" else "#dc3545")
-        _steps = p.get("steps") or []
-        def _step_txt(x):
-            _st = x.get('status')
-            if _st == 'UNRELIABLE':
-                return f"{x.get('label','?')}: {x.get('home')}% vs {x.get('away')}% → IGNORED (<3)"
-            if _st == 'MISSING':
-                return f"{x.get('label','?')}: MISSING — not in dump"
-            return f"{x.get('label','?')}: {x.get('home')}% vs {x.get('away')}% → {x.get('winner') or 'TIE'}"
-        _steps_txt = " &nbsp;•&nbsp; ".join([_step_txt(x) for x in _steps]) if _steps else "Steps not stored"
-        _veto = "🚨 VETO" if p.get("veto") else "No veto"
-        _lown = "⚠️ LOW-N" if p.get("low_n") else "Sample OK"
-        st.markdown(f"""
-        <div style="border:2px solid {_bd}; border-radius:14px; padding:14px 16px; background:{_bg}; color:white; margin:10px 0;">
-          <div style="font-size:12px; letter-spacing:1.5px; opacity:0.85;">SUGGESTION &nbsp;•&nbsp; {m.get('home_team')} vs {m.get('away_team')}</div>
-          <div style="font-size:24px; font-weight:900; margin:6px 0 2px 0;">{_tier} — {_sugg}</div>
-          <div style="font-size:14px; margin-bottom:8px;">Winner: {_wname} ({_winner}) &nbsp;•&nbsp; Total: {p.get('total_home')} vs {p.get('total_away')} &nbsp;•&nbsp; Net {p.get('net')} &nbsp;•&nbsp; Confidence: {_conf}</div>
-          <div style="font-size:13px; opacity:0.95;">{_steps_txt}</div>
-          <div style="font-size:13px; margin-top:6px;"><b>Script:</b> {p.get('script','')}</div>
-          <div style="font-size:13px;"><b>Shape:</b> {p.get('shape','')} &nbsp;•&nbsp; {_veto} &nbsp;•&nbsp; {_lown}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        c1,c2,c3,c4 = st.columns([1,1,1,1])
-        hs=c1.number_input("Home score",min_value=0,step=1,key=f"h_{m['match_id']}")
-        aws=c2.number_input("Away score",min_value=0,step=1,key=f"a_{m['match_id']}")
-        if c3.button("✅ Settle",key=f"s_{m['match_id']}"):
-            res="HOME" if hs>aws else ("AWAY" if aws>hs else "DRAW")
-            get_supabase().table("matches").update({"home_score":int(hs),"away_score":int(aws),"result":res,"settled_at":now_iso()}).eq("match_id",m["match_id"]).execute(); st.rerun()
-        if c4.button("🗑 Delete",key=f"d_{m['match_id']}"):
-            get_supabase().table("matches").delete().eq("match_id",m["match_id"]).execute(); st.rerun()
-with tab3:
-    st.subheader("📊 Performance — did the suggestion work?")
-    st.caption("How we track it — frozen, no post-loss tuning: LOCK/LEAN = suggestion BET NO DRAW on the total winner. HIT = result is NOT a draw AND result = total winner. NO-DRAW HIT = result is NOT a draw (bet would have won even if winner was wrong). DRAW / NO BET = suggestion SKIP — never counted as win/loss, but we track what NO DRAW would have done, so we can see if the veto is costing us.")
-    try: data = get_supabase().table("matches").select("*").not_.is_("home_score","null").order("settled_at",desc=True).execute().data or []
-    except Exception as e: data=[]; st.error(str(e))
-    if not data: st.info("No settled matches yet.")
+            facts["warnings"].append(f"{key}: not found / no numbers.")
+    return facts
+
+# ---------------------------------------------------------------- filter rule
+# Only these 5 are used. Over 3.5 is ALWAYS ignored.
+FILTER_CATEGORIES = [
+    ("away_scoring_rate", "Away Scoring Rate", "Away team scores?", "away_scores"),
+    ("over_1_5", "Over 1.5 Goals", "Total > 1.5?", "over_1_5"),
+    ("over_2_5", "Over 2.5 Goals", "Total > 2.5?", "over_2_5"),
+    ("btts", "BTTS", "Both teams score?", "btts"),
+    ("home_scoring_rate", "Home Scoring Rate", "Home team scores?", "home_scores"),
+]
+# Proven hit rates when both agree (from conversation testing)
+PROVEN = {"away_scoring_rate": "10/10", "over_1_5": "7/7", "over_2_5": "6/6", "btts": "5/5", "home_scoring_rate": "7/8"}
+
+def _decide(a, league, b):
+    """Return (decision, a_beats, b_beats) where decision in YES/NO/SKIP"""
+    if a is None or b is None or league is None:
+        return "SKIP", None, None
+    # equality -> SKIP (neutral, not a beat, not below)
+    if a == league or b == league:
+        return "SKIP", (a > league), (b > league)
+    a_beats = a > league
+    b_beats = b > league
+    if a_beats and b_beats:
+        return "YES", True, True
+    if (not a_beats) and (not b_beats):
+        return "NO", False, False
+    return "SKIP", a_beats, b_beats
+
+def compute_filter_rule(facts: dict) -> dict:
+    picks = []
+    derived = {}  # home_scores, away_scores, over_1_5, over_2_5, btts -> True/False/None
+    for key, label, question, field in FILTER_CATEGORIES:
+        sec = facts["sections"].get(key)
+        if not sec:
+            picks.append({"key": key, "label": label, "question": question, "field": field, "a": None, "b": None, "league": None, "decision": "SKIP", "reason": "Section not found in paste."})
+            derived[field] = None
+            continue
+        dec, a_beats, b_beats = _decide(sec["a"], sec["league"], sec["b"])
+        if dec == "YES":
+            derived[field] = True
+            reason = f"Both BEAT league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> YES"
+        elif dec == "NO":
+            derived[field] = False
+            reason = f"Both BELOW league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> NO"
+        else:
+            derived[field] = None
+            a_txt = f"{sec['a']:g}% {'BEATS' if a_beats else 'BELOW' if a_beats is False else '='} league {sec['league']:g}%"
+            b_txt = f"{sec['b']:g}% {'BEATS' if b_beats else 'BELOW' if b_beats is False else '='} league {sec['league']:g}%"
+            reason = f"Split: A {a_txt} | B {b_txt} -> SKIP"
+        picks.append({"key": key, "label": label, "question": question, "field": field, "a": sec["a"], "b": sec["b"], "league": sec["league"], "avg": sec.get("avg"), "decision": dec, "reason": reason})
+    survivors = [p for p in picks if p["decision"] in ("YES", "NO")]
+    weak = len(survivors) < 3
+    scoreline, scoreline_reason = predict_scoreline(facts, derived)
+    return {"picks": picks, "derived": derived, "survivors": survivors, "weak_test": weak, "scoreline": scoreline, "scoreline_reason": scoreline_reason}
+
+def predict_scoreline(facts: dict, derived: dict):
+    # Expected goals from goals averages (tie-breaker ONLY)
+    h_avg = facts["sections"].get("home_scoring_avg", {}).get("avg")
+    a_avg = facts["sections"].get("away_scoring_avg", {}).get("avg")
+    # Fallback: use A values if avg missing
+    if h_avg is None:
+        h_avg = facts["sections"].get("home_scoring_avg", {}).get("a")
+    if a_avg is None:
+        a_avg = facts["sections"].get("away_scoring_avg", {}).get("a")
+    h_exp = h_avg if h_avg is not None else 1.0
+    a_exp = a_avg if a_avg is not None else 1.0
+    # Start from rounded expected goals
+    h = int(round(h_exp)); a = int(round(a_exp))
+    h = max(0, h); a = max(0, a)
+    def satisfies(hh, aa):
+        if derived.get("home_scores") is True and hh == 0: return False
+        if derived.get("home_scores") is False and hh != 0: return False
+        if derived.get("away_scores") is True and aa == 0: return False
+        if derived.get("away_scores") is False and aa != 0: return False
+        if derived.get("btts") is True and (hh == 0 or aa == 0): return False
+        if derived.get("btts") is False and (hh > 0 and aa > 0): return False
+        if derived.get("over_1_5") is True and (hh + aa) <= 1: return False
+        if derived.get("over_1_5") is False and (hh + aa) > 1: return False
+        if derived.get("over_2_5") is True and (hh + aa) <= 2: return False
+        if derived.get("over_2_5") is False and (hh + aa) > 2: return False
+        return True
+    # Search nearby scorelines (0..5 each) closest to expected goals that satisfy filter
+    best = None; best_dist = 1e9
+    for hh in range(0, 6):
+        for aa in range(0, 6):
+            if not satisfies(hh, aa):
+                continue
+            dist = abs(hh - h_exp) + abs(aa - a_exp)
+            # slight preference for lower total when tied (more common)
+            if dist < best_dist:
+                best_dist = dist; best = (hh, aa)
+    if best is None:
+        # No scoreline satisfies all (e.g. contradictory derived) -> fall back to expected, note conflict
+        return (h, a), f"Filter constraints conflict (no scoreline satisfies all survivors). Fallback to expected goals {h_exp:g}-{a_exp:g}. Treat as weak test."
+    hh, aa = best
+    return (hh, aa), f"Closest to expected goals {h_exp:g}-{a_exp:g} that satisfies all surviving picks."
+
+# ---------------------------------------------------------------- settling (filter only)
+def settle_filter(match: dict, home_score: int, away_score: int):
+    """Settle each surviving pick. Returns per-pick hit (1/0/None for SKIP)."""
+    results = {}
+    for p in match["filter"]["picks"]:
+        field = p["field"]; dec = p["decision"]
+        if dec == "SKIP":
+            results[field] = None; continue
+        if field == "home_scores":
+            actual = home_score > 0
+        elif field == "away_scores":
+            actual = away_score > 0
+        elif field == "over_1_5":
+            actual = (home_score + away_score) > 1.5
+        elif field == "over_2_5":
+            actual = (home_score + away_score) > 2.5
+        elif field == "btts":
+            actual = (home_score > 0 and away_score > 0)
+        else:
+            actual = None
+        if actual is None:
+            results[field] = None
+        else:
+            want = (dec == "YES")
+            results[field] = 1 if (actual == want) else 0
+    # scoreline hit
+    pred = match["filter"]["scoreline"]
+    results["_scoreline_hit"] = 1 if (pred[0] == home_score and pred[1] == away_score) else 0
+    # result (win/draw) hit: compare predicted winner vs actual winner
+    def winner(h, a):
+        return "home" if h > a else ("away" if a > h else "draw")
+    results["_result_hit"] = 1 if winner(pred[0], pred[1]) == winner(home_score, away_score) else 0
+    return results
+
+# ---------------------------------------------------------------- storage (session_state, no external DB)
+if "matches" not in st.session_state:
+    st.session_state.matches = []  # each: {id, home, away, filter, home_score, away_score, settled_at, per_pick}
+if "next_id" not in st.session_state:
+    st.session_state.next_id = 1
+
+def _card_html(m: dict, settled: bool = False) -> str:
+    home, away = m.get("home_team") or "?", m.get("away_team") or "?"
+    f = m["filter"]; picks = f["picks"]
+    pred = f["scoreline"]
+    title = f"{home} {m['home_score']}–{m['away_score']} {away}" if (settled and m.get("home_score") is not None) else f"{home} vs {away}"
+    meta = f"Predicted {pred[0]}-{pred[1]} · Survivors {len(f['survivors'])}/5" + (" · WEAK TEST (<3 survivors)" if f["weak_test"] else "")
+    rows = ""
+    for p in picks:
+        cls = "yes" if p["decision"] == "YES" else ("no" if p["decision"] == "NO" else "skip")
+        badge = p["decision"]
+        proven = PROVEN.get(p["key"], "")
+        extra = ""
+        if settled and m.get("per_pick") is not None:
+            hv = m["per_pick"].get(p["field"])
+            if hv is not None:
+                extra = f" → {'WIN' if hv==1 else 'LOSS'}"
+        rows += f'<span class="signal-pill {cls}">{p["label"]}: {badge} (A {p["a"]} vs Lg {p["league"]} | B {p["b"]} vs Lg {p["league"]}) [{proven}]{extra}</span>'
+    verdict = ""
+    if settled and m.get("per_pick") is not None:
+        pp = m["per_pick"]
+        verdict = f'<div class="signal-row"><span class="signal-pill">Scoreline: {"WIN" if pp.get("_scoreline_hit")==1 else "LOSS"} (pred {pred[0]}-{pred[1]})</span><span class="signal-pill">Result: {"WIN" if pp.get("_result_hit")==1 else "LOSS"}</span></div>'
+    return f'<div class="match-card"><div class="match-title">{title}</div><div class="match-meta">{meta}</div><div class="signal-row">{rows}</div><div class="match-meta" style="margin-top:10px">{f["scoreline_reason"]}</div>{verdict}</div>'
+
+# ---------------------------------------------------------------- UI
+st.title("⚽ The Filter Rule — Both Agree vs League")
+st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split → SKIP. Over 3.5 always ignored. Proven when both agree: 35/36 = 97%.")
+
+tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
+
+with tab_new:
+    st.markdown("### Paste the Teams scoring vs league average block")
+    st.caption("Paste the full block starting at 'Teams scoring vs league average'. Team names are read from the (A)/(B) lines.")
+    raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average\nHome scoring averages (per match)\n(A) Bragantino scored at home\n1.67\n(B) Vasco da Gama conceded away\n1.50\n...")
+    run = st.button("Run the Filter", type="primary")
+    if run and raw_in.strip():
+        facts = parse_filter_data(raw_in.strip())
+        filt = compute_filter_rule(facts)
+        if not facts.get("home_team"):
+            st.warning("Could not read team names from (A)/(B) lines. Check the paste includes '(A) <Team> scored...' lines.")
+        st.markdown("### The Filter Picks")
+        # show picks table
+        df = pd.DataFrame([{"Category": p["label"], "A": p["a"], "B": p["b"], "League": p["league"], "Decision": p["decision"], "Reason": p["reason"], "Proven (both agree)": PROVEN.get(p["key"], "")} for p in filt["picks"]])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        h, a = filt["scoreline"]
+        if filt["weak_test"]:
+            st.warning(f"WEAK TEST — only {len(filt['survivors'])}/5 survivors. Prediction is less reliable.")
+        st.success(f"**Predicted scoreline: {facts.get('home_team') or 'Home'} {h}-{a} {facts.get('away_team') or 'Away'}** — {filt['scoreline_reason']}")
+        for p in filt["picks"]:
+            if p["decision"] == "SKIP":
+                st.caption(f"SKIP {p['label']}: {p['reason']}")
+        # save
+        mid = st.session_state.next_id; st.session_state.next_id += 1
+        m = {"id": mid, "home_team": facts.get("home_team"), "away_team": facts.get("away_team"), "filter": filt, "home_score": None, "away_score": None, "settled_at": None, "per_pick": None, "created_at": datetime.now(timezone.utc).isoformat()}
+        # avoid duplicate unsaved? just append
+        st.session_state.matches.append(m)
+        st.success(f"Saved to Pending (id {mid}). Settle it in Pending tab.")
+
+with tab_pending:
+    st.markdown("### Pending matches")
+    pending = [m for m in st.session_state.matches if m.get("home_score") is None]
+    if not pending:
+        st.info("No pending matches.")
     else:
-        def _tier_of(m):
-            return (m.get("parsed") or {}).get("tier") or m.get("tier") or "?"
-        def _winner_of(m):
-            return (m.get("parsed") or {}).get("total_winner") or "?"
-        # --- Summary ---
-        _bets = [m for m in data if _tier_of(m) in ("LOCK","LEAN")]
-        _lock = [m for m in _bets if _tier_of(m)=="LOCK"]
-        _lean = [m for m in _bets if _tier_of(m)=="LEAN"]
-        _nobet = [m for m in data if _tier_of(m) in ("DRAW / NO BET","NO BET")]
-        def _hit(m): return m.get("result")!="DRAW" and m.get("result")==_winner_of(m)
-        def _nodraw_hit(m): return m.get("result")!="DRAW"
-        def _rate(lst, fn): return f"{sum(1 for m in lst if fn(m))}/{len(lst)} ({round(100*sum(1 for m in lst if fn(m))/len(lst)) if lst else 0}%)" if lst else "—"
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("LOCK/LEAN settled", len(_bets))
-        c2.metric("WINNER HIT (result = winner)", _rate(_bets, _hit))
-        c3.metric("NO-DRAW HIT (result ≠ DRAW)", _rate(_bets, _nodraw_hit))
-        c4.metric("NO BET settled (skipped)", len(_nobet))
-        # By tier
-        st.markdown("**By tier**")
-        for _t, _lst in [("LOCK",_lock),("LEAN",_lean)]:
-            if _lst:
-                st.write(f"**{_t}:** {len(_lst)} settled · Winner hit {_rate(_lst,_hit)} · No-draw hit {_rate(_lst,_nodraw_hit)}")
-        if _nobet:
-            st.write(f"**DRAW / NO BET (skipped):** {len(_nobet)} settled · NO DRAW would have hit {_rate(_nobet,_nodraw_hit)} · Of those, {sum(1 for m in _nobet if m.get('result')=='DRAW')} ended DRAW (skip was right), {sum(1 for m in _nobet if m.get('result')!='DRAW')} ended NOT DRAW (skip missed a NO DRAW win).")
-            st.caption("That last number is the veto cost — if it keeps growing, the veto is costing more than it saves.")
-        st.markdown("---")
-        st.markdown("**All settled — one card per match, suggestion vs actual**")
-        for m in data:
-            p=m.get("parsed") or {}
-            _tier=_tier_of(m); _winner=_winner_of(m)
-            _wname=m.get("home_team") if _winner=="HOME" else (m.get("away_team") if _winner=="AWAY" else "No winner")
-            _sugg=f"BET: NO DRAW — {_wname}" if _tier in ("LOCK","LEAN") else "NO BET — SKIP"
-            _res=m.get("result"); _score=f"{m.get('home_score')}-{m.get('away_score')}"
-            if _tier in ("LOCK","LEAN"):
-                _verdict = "✅ HIT — winner + no draw" if _hit(m) else ("🟡 HALF — no draw, wrong winner" if _nodraw_hit(m) else "❌ MISS — ended DRAW")
-                _bg="#0f5132" if _hit(m) else ("#664d03" if _nodraw_hit(m) else "#842029")
-            else:
-                _verdict = "✅ SKIP RIGHT — ended DRAW" if _res=="DRAW" else "⏭️ SKIPPED — ended NOT DRAW (would-have-won)"
-                _bg="#1a1a2e" if _res=="DRAW" else "#4a4a4a"
-            st.markdown(f"""
-            <div style="border:1px solid #444; border-radius:12px; padding:12px 14px; background:{_bg}; color:white; margin:8px 0;">
-              <div style="font-size:13px; opacity:0.85;">{_tier} &nbsp;•&nbsp; {_sugg} &nbsp;•&nbsp; Confidence: {p.get('confidence') or m.get('confidence') or '?'}</div>
-              <div style="font-size:18px; font-weight:800; margin:4px 0;">{m.get('home_team')} {_score} {m.get('away_team')} — Result: {_res} &nbsp;•&nbsp; {_verdict}</div>
-              <div style="font-size:13px;"><b>Suggested script:</b> {p.get('script','')}</div>
-              <div style="font-size:13px;"><b>Steps:</b> Total {p.get('total_home')} vs {p.get('total_away')} · Net {p.get('net')} &nbsp;•&nbsp; Shape: {p.get('shape','')} &nbsp;•&nbsp; Veto: {'YES' if p.get('veto') else 'No'} &nbsp;•&nbsp; Low-n: {'YES' if p.get('low_n') else 'No'}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        for m in pending:
+            st.markdown(_card_html(m, settled=False), unsafe_allow_html=True)
+            with st.expander("Enter result"):
+                c1, c2, c3 = st.columns([1, 1, 2])
+                with c1: hs = st.number_input("Home", min_value=0, step=1, key=f"h_{m['id']}")
+                with c2: aws = st.number_input("Away", min_value=0, step=1, key=f"a_{m['id']}")
+                with c3:
+                    st.write(""); st.write("")
+                    if st.button("Settle", key=f"s_{m['id']}", type="primary"):
+                        m["home_score"] = int(hs); m["away_score"] = int(aws)
+                        m["per_pick"] = settle_filter(m, int(hs), int(aws))
+                        m["settled_at"] = datetime.now(timezone.utc).isoformat()
+                        st.success("Settled."); st.rerun()
+                if st.button("Delete match", key=f"d_{m['id']}"):
+                    st.session_state.matches = [x for x in st.session_state.matches if x["id"] != m["id"]]
+                    st.success("Deleted."); st.rerun()
+
+with tab_perf:
+    st.markdown("### Performance — Filter picks only (both-agree picks, SKIP excluded)")
+    settled = [m for m in st.session_state.matches if m.get("home_score") is not None]
+    if not settled:
+        st.info("No settled matches yet.")
+    else:
+        # per-category stats
+        rows = []
+        for key, label, _, field in FILTER_CATEGORIES:
+            n = 0; wins = 0
+            for m in settled:
+                v = (m.get("per_pick") or {}).get(field)
+                if v is not None:
+                    n += 1; wins += v
+            rows.append({"Category": label, "n (both agree)": n, "Wins": wins, "Losses": n-wins, "Hit %": f"{(wins/n*100) if n else 0:.1f}%", "Proven": PROVEN.get(key, "")})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # scoreline / result
+        ns = len(settled); sc_wins = sum(1 for m in settled if (m.get("per_pick") or {}).get("_scoreline_hit")==1)
+        res_wins = sum(1 for m in settled if (m.get("per_pick") or {}).get("_result_hit")==1)
+        c1, c2, c3 = st.columns(3); c1.metric("Settled matches", ns); c2.metric("Exact scoreline", f"{sc_wins}/{ns}"); c3.metric("Result (W/D)", f"{res_wins}/{ns}")
+        st.markdown("### All settled")
+        for m in settled:
+            st.markdown(_card_html(m, settled=True), unsafe_allow_html=True)
+
+with tab_lab:
+    st.markdown("### 🧪 Lab — test without saving")
+    text_in = st.text_area("Text dump", height=340, label_visibility="collapsed", key="lab_input")
+    if text_in.strip():
+        facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
+        df = pd.DataFrame([{"Category": p["label"], "A": p["a"], "B": p["b"], "League": p["league"], "Decision": p["decision"], "Reason": p["reason"]} for p in filt["picks"]])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        h, a = filt["scoreline"]
+        st.success(f"Predicted: {facts.get('home_team') or 'Home'} {h}-{a} {facts.get('away_team') or 'Away'} — {filt['scoreline_reason']}")
+        if filt["weak_test"]:
+            st.warning(f"WEAK TEST — only {len(filt['survivors'])}/5 survivors.")
+        with st.expander("Parsed sections"):
+            st.json(facts["sections"])
+            if facts.get("warnings"):
+                for w in facts["warnings"]:
+                    st.write(f"- {w}")
