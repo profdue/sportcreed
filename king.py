@@ -181,6 +181,24 @@ def save_match(facts, filt, raw_paste):
     conn.commit(); conn.close()
     return mid
 
+
+def save_match_dedup(facts, filt, raw_paste):
+    """Auto-save on Generate, but never duplicate.
+    If the same raw paste (same teams + same numbers) is already in Pending/Settled, return (existing_id, True).
+    Otherwise save and return (new_id, False)."""
+    key = (raw_paste or "").strip()
+    try:
+        existing = load_matches()
+    except Exception:
+        existing = []
+    for m in existing:
+        if (m.get("raw_paste") or "").strip() == key:
+            return m["id"], True
+        # Fallback: same teams + same decision + same survivors, no raw stored (old rows)
+        if key and m.get("home_team")==facts.get("home_team") and m.get("away_team")==facts.get("away_team") and (m.get("raw_paste") or "").strip()==key:
+            return m["id"], True
+    return save_match(facts, filt, raw_paste), False
+
 def settle_match_db(match_id, home_score, away_score):
     if _sb_configured():
         try:
@@ -480,33 +498,34 @@ st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both
 tab_new, tab_pending, tab_perf, tab_lab, tab_sb = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
     st.markdown("### Paste the Teams scoring vs league average block")
-    st.caption("Evaluating does NOT save. Nothing is saved until you press Save to Pending.")
+    st.caption("Generate = auto-saves to Pending immediately. If the same paste was already saved, it says Already stored — no duplicate.")
     raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average")
     if st.button("Run the Filter", type="primary") and raw_in.strip():
         facts = parse_filter_data(raw_in.strip()); filt = compute_filter_rule(facts)
-        # Persist evaluation in session_state so Save survives the rerun.
-        # (Old code nested Save inside Run — Streamlit reruns, Run becomes False, Save vanished before its click was read.)
-        st.session_state["pending_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip()}
+        st.session_state["pending_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip(), "save_status": None, "save_id": None}
+        # Auto-save immediately on Generate (deduped)
+        try:
+            mid, dup = save_match_dedup(facts, filt, raw_in.strip())
+            st.session_state["pending_eval"]["save_status"] = "dup" if dup else "saved"
+            st.session_state["pending_eval"]["save_id"] = mid
+        except Exception as e:
+            st.session_state["pending_eval"]["save_status"] = "error"
+            st.session_state["pending_eval"]["save_error"] = str(e)
     ev = st.session_state.get("pending_eval")
     if ev:
         facts = ev["facts"]; filt = ev["filt"]
+        if ev.get("save_status") == "saved":
+            st.success(f"✅ Saved to Pending (id {ev.get('save_id')}) — in Supabase king_matches.")
+        elif ev.get("save_status") == "dup":
+            st.info(f"ℹ️ Already stored (id {ev.get('save_id')}) — not saved again. No duplicate created.")
+        elif ev.get("save_status") == "error":
+            st.error(f"Save FAILED: {ev.get('save_error')}")
         if not facts.get("home_team"): st.warning("Could not read team names from (A)/(B) lines.")
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
-        c_save, c_clear = st.columns([1, 1])
-        with c_save:
-            if st.button("Save to Pending", key="save_new", type="primary"):
-                try:
-                    mid = save_match(facts, filt, ev["raw"])
-                    st.session_state.pop("pending_eval", None)
-                    st.success(f"Saved to Pending (id {mid}) — check Supabase king_matches / Pending tab.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Save FAILED: {e}")
-        with c_clear:
-            if st.button("Clear", key="clear_new"):
-                st.session_state.pop("pending_eval", None)
-                st.rerun()
+        if st.button("Clear", key="clear_new"):
+            st.session_state.pop("pending_eval", None)
+            st.rerun()
 with tab_pending:
     st.markdown("### Pending matches (from king.db)")
     pending = load_matches(pending_only=True)
