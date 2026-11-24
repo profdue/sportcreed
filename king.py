@@ -13,7 +13,7 @@ Rules:
   Tie hierarchy: Away > Over 1.5 > Over 2.5 > BTTS > Home.
 - Evaluating does NOT save. Only "Save to Pending" saves.
 - Performance settles per-signal only, never scoreline.
-Persistence: SQLite (king.db) via stdlib sqlite3.
+Persistence: Supabase ONE table king_matches if SUPABASE_URL/KEY set, else SQLite king.db.
 """
 import os
 import json
@@ -27,17 +27,12 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "king.db"
 
-# ---------------------------------------------------------------- Supabase
-# Config: set in Streamlit Cloud > Settings > Secrets, or .env:
-#   SUPABASE_URL = "https://xyzcompany.supabase.co"
-#   SUPABASE_KEY = "your anon or service_role key"
-# If not set, app falls back to local SQLite king.db (same schema).
+# ---------------------------------------------------------------- Supabase — ONE TABLE: public.king_matches
+# Secrets: SUPABASE_URL, SUPABASE_KEY. If not set -> fallback to local SQLite king.db
 SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or ""
-
 def _sb_configured():
     return bool(SUPABASE_URL and SUPABASE_KEY)
-
 def _sb_req(method, table, payload=None, query=""):
     url = f"{SUPABASE_URL}/rest/v1/{table}{query}"
     data = json.dumps(payload).encode() if payload is not None else None
@@ -53,66 +48,42 @@ def _sb_req(method, table, payload=None, query=""):
             return json.loads(body) if body.strip() else []
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Supabase {method} {table} failed {e.code}: {e.read().decode()[:500]}")
-
 def _sb_save_match(facts, filt, raw_paste):
-    m = _sb_req("POST", "matches", {
-        "home_team": facts.get("home_team"), "away_team": facts.get("away_team"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_paste": raw_paste, "decision": filt["decision"],
-        "decision_reason": filt.get("decision_reason", ""),
-        "main_pick_key": (filt["main_pick"]["key"] if filt.get("main_pick") else None),
-        "main_pick_label": (filt["main_pick"]["label"] if filt.get("main_pick") else None),
-        "main_pick_decision": (filt["main_pick"]["decision"] if filt.get("main_pick") else None),
-        "main_pick_margin_pct": (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None),
-        "survivors_count": len(filt["survivors"]),
-    })[0]
-    mid = m["id"]
+    picks = []
     for pr in filt["picks"]:
-        _sb_req("POST", "picks", {"match_id": mid, "category_key": pr["key"], "label": pr["label"],
-            "field": pr["field"], "a_pct": pr["a"], "b_pct": pr["b"], "league_pct": pr["league"],
-            "avg_pct": pr.get("avg"), "decision": pr["decision"], "margin_pct": pr.get("margin_pct"),
-            "is_main": 1 if (filt.get("main_pick") and pr["key"]==filt["main_pick"]["key"]) else 0,
-            "is_implied": 0, "implied_note": None})
+        picks.append({"category_key": pr["key"], "label": pr["label"], "field": pr["field"], "a_pct": pr["a"], "b_pct": pr["b"], "league_pct": pr["league"], "avg_pct": pr.get("avg"), "decision": pr["decision"], "margin_pct": pr.get("margin_pct"), "is_main": 1 if (filt.get("main_pick") and pr["key"]==filt["main_pick"]["key"]) else 0, "is_implied": 0, "implied_note": None, "outcome": None})
     for field, note in (filt.get("implied_notes") or {}).items():
-        _sb_req("POST", "picks", {"match_id": mid, "category_key": field, "label": FIELD_LABEL.get(field, field),
-            "field": field, "a_pct": None, "b_pct": None, "league_pct": None, "avg_pct": None,
-            "decision": "YES" if filt["derived"].get(field) else "NO", "margin_pct": None,
-            "is_main": 0, "is_implied": 1, "implied_note": note})
-    for key, sec in facts["sections"].items():
-        _sb_req("POST", "raw_sections", {"match_id": mid, "section_key": key,
-            "a_val": sec.get("a"), "b_val": sec.get("b"), "avg_val": sec.get("avg"), "league_val": sec.get("league")})
-    return mid
-
+        picks.append({"category_key": field, "label": FIELD_LABEL.get(field, field), "field": field, "a_pct": None, "b_pct": None, "league_pct": None, "avg_pct": None, "decision": "YES" if filt["derived"].get(field) else "NO", "margin_pct": None, "is_main": 0, "is_implied": 1, "implied_note": note, "outcome": None})
+    row = _sb_req("POST", "king_matches", {"home_team": facts.get("home_team"), "away_team": facts.get("away_team"), "created_at": datetime.now(timezone.utc).isoformat(), "raw_paste": raw_paste, "decision": filt["decision"], "decision_reason": filt.get("decision_reason", ""), "main_pick_key": (filt["main_pick"]["key"] if filt.get("main_pick") else None), "main_pick_label": (filt["main_pick"]["label"] if filt.get("main_pick") else None), "main_pick_decision": (filt["main_pick"]["decision"] if filt.get("main_pick") else None), "main_pick_margin_pct": (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None), "survivors_count": len(filt["survivors"]), "picks": picks, "sections": facts.get("sections") or {}})[0]
+    return row["id"]
 def _sb_load_matches(pending_only=False, settled_only=False):
-    matches = _sb_req("GET", "matches", query="?select=*&order=id.desc")
-    picks_all = _sb_req("GET", "picks", query="?select=*&order=id.asc")
+    rows = _sb_req("GET", "king_matches", query="?select=*&order=id.desc")
     out = []
-    for m in matches:
+    for m in rows:
         if pending_only and m.get("home_score") is not None: continue
         if settled_only and m.get("home_score") is None: continue
         if m.get("is_deleted"): continue
-        m = dict(m)
-        m["picks"] = [dict(x) for x in picks_all if x.get("match_id")==m["id"]]
+        m = dict(m); m["picks"] = m.get("picks") or []
         out.append(m)
     return out
-
 def _sb_settle(match_id, home_score, away_score):
-    picks = _sb_req("GET", "picks", query=f"?select=*&match_id=eq.{match_id}&is_implied=eq.0&order=id.asc")
+    rows = _sb_req("GET", "king_matches", query=f"?select=*&id=eq.{match_id}")
+    if not rows: return
+    picks = rows[0].get("picks") or []
     for r in picks:
-        if r["decision"] == "SKIP":
-            outcome = None
+        if r.get("is_implied"): continue
+        if r.get("decision") == "SKIP":
+            r["outcome"] = None
         else:
-            f = r["field"]
+            f = r.get("field")
             if f == "home_scores": actual = home_score > 0
             elif f == "away_scores": actual = away_score > 0
             elif f == "over_1_5": actual = (home_score+away_score) > 1.5
             elif f == "over_2_5": actual = (home_score+away_score) > 2.5
             elif f == "btts": actual = (home_score>0 and away_score>0)
             else: actual = None
-            outcome = (1 if (actual == (r["decision"]=="YES")) else 0) if actual is not None else None
-        _sb_req("PATCH", "picks", {"outcome": outcome}, query=f"?id=eq.{r['id']}")
-    _sb_req("PATCH", "matches", {"home_score": home_score, "away_score": away_score,
-        "settled_at": datetime.now(timezone.utc).isoformat()}, query=f"?id=eq.{match_id}")
+            r["outcome"] = (1 if (actual == (r.get("decision")=="YES")) else 0) if actual is not None else None
+    _sb_req("PATCH", "king_matches", {"home_score": home_score, "away_score": away_score, "settled_at": datetime.now(timezone.utc).isoformat(), "picks": picks}, query=f"?id=eq.{match_id}")
 
 PROVEN = {
     "home_scoring_rate": "7/8 (87.5%)",
@@ -504,7 +475,7 @@ def _filt_from_db_row(m):
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — The Filter Rule")
-st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split or = league → SKIP. Over 3.5 ignored. No exact score predicted. Backend: Supabase if SUPABASE_URL/KEY set, else SQLite king.db")
+st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split or = league → SKIP. Over 3.5 ignored. No exact score predicted. SQLite: king.db")
 
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 with tab_new:
@@ -520,7 +491,7 @@ with tab_new:
             mid = save_match(facts, filt, raw_in.strip())
             st.success(f"Saved to Pending (id {mid}) in king.db.")
 with tab_pending:
-    st.markdown("### Pending matches (from Supabase (or king.db fallback))")
+    st.markdown("### Pending matches (from king.db)")
     pending = load_matches(pending_only=True)
     if not pending: st.info("No pending matches.")
     for m in pending:
