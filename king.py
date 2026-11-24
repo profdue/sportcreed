@@ -484,12 +484,29 @@ with tab_new:
     raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average")
     if st.button("Run the Filter", type="primary") and raw_in.strip():
         facts = parse_filter_data(raw_in.strip()); filt = compute_filter_rule(facts)
+        # Persist evaluation in session_state so Save survives the rerun.
+        # (Old code nested Save inside Run — Streamlit reruns, Run becomes False, Save vanished before its click was read.)
+        st.session_state["pending_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip()}
+    ev = st.session_state.get("pending_eval")
+    if ev:
+        facts = ev["facts"]; filt = ev["filt"]
         if not facts.get("home_team"): st.warning("Could not read team names from (A)/(B) lines.")
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
-        if st.button("Save to Pending", key="save_new"):
-            mid = save_match(facts, filt, raw_in.strip())
-            st.success(f"Saved to Pending (id {mid}) in king.db.")
+        c_save, c_clear = st.columns([1, 1])
+        with c_save:
+            if st.button("Save to Pending", key="save_new", type="primary"):
+                try:
+                    mid = save_match(facts, filt, ev["raw"])
+                    st.session_state.pop("pending_eval", None)
+                    st.success(f"Saved to Pending (id {mid}) — check Supabase king_matches / Pending tab.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Save FAILED: {e}")
+        with c_clear:
+            if st.button("Clear", key="clear_new"):
+                st.session_state.pop("pending_eval", None)
+                st.rerun()
 with tab_pending:
     st.markdown("### Pending matches (from king.db)")
     pending = load_matches(pending_only=True)
