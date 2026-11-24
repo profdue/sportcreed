@@ -304,59 +304,39 @@ if "matches" not in st.session_state:
 if "next_id" not in st.session_state:
     st.session_state.next_id = 1
 
-def _action_line(m):
-    f = m['filter']; d = f['derived']; pred = f['scoreline']
+def _decision(m):
+    f = m['filter']; h, a = f['scoreline']
     home, away = m.get('home_team') or 'Home', m.get('away_team') or 'Away'
-    h, a = pred
-    result = f"{home} WIN" if h > a else (f"{away} WIN" if a > h else 'DRAW')
-    headline = f"PREDICT: {home} {h}-{a} {away}  |  {result}"
-    bits = []
-    if d.get('home_scores') is True: bits.append(f"{home} SCORES")
-    elif d.get('home_scores') is False: bits.append(f"{home} NO GOAL")
-    if d.get('away_scores') is True: bits.append(f"{away} SCORES")
-    elif d.get('away_scores') is False: bits.append(f"{away} NO GOAL")
-    if d.get('btts') is True: bits.append('BTTS YES')
-    elif d.get('btts') is False: bits.append('BTTS NO')
-    if d.get('over_1_5') is True: bits.append('OVER 1.5')
-    elif d.get('over_1_5') is False: bits.append('UNDER 1.5')
-    if d.get('over_2_5') is True: bits.append('OVER 2.5')
-    elif d.get('over_2_5') is False: bits.append('UNDER 2.5')
-    sub = '  |  '.join(bits) if bits else 'No surviving picks - no bet'
-    h_pred, a_pred = pred
-    implied = []
-    if h_pred > 0 and d.get('home_scores') is None: implied.append(f"{home} scores (implied by scoreline, NOT a filtered pick)")
-    if a_pred > 0 and d.get('away_scores') is None: implied.append(f"{away} scores (implied by scoreline, NOT a filtered pick)")
-    if h_pred == 0 and d.get('home_scores') is None: implied.append(f"{home} no goal (implied by scoreline, NOT a filtered pick)")
-    if a_pred == 0 and d.get('away_scores') is None: implied.append(f"{away} no goal (implied by scoreline, NOT a filtered pick)")
-    if implied: sub = sub + '<br><span style="color:#94a3b8;font-weight:500">Scoreline adds: ' + '  |  '.join(implied) + '</span>'
-    return headline, sub
+    if f['weak_test']:
+        return ('NO BET', 'Weak test - do not bet', f"Only {len(f['survivors'])}/5 signals agree. Lean: {home} {h}-{a} {away}.")
+    winner = home if h > a else (away if a > h else 'Draw')
+    return ('BET', f"{winner}  {h}-{a}", 'Strong test - surviving signals agree.')
 
 def _card_html(m, settled=False):
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
     f = m['filter']; picks = f['picks']; pred = f['scoreline']
-    headline, sub = _action_line(m)
-    fixture = '<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">' + home + ' <span style="font-size:0.72rem;color:#38bdf8;background:#38bdf822;border:1px solid #38bdf855;padding:2px 7px;border-radius:999px">HOME</span>  vs  ' + away + ' <span style="font-size:0.72rem;color:#fbbf24;background:#f59e0b22;border:1px solid #f59e0b55;padding:2px 7px;border-radius:999px">AWAY</span></div>'
-    fixture_sub = '<div style="font-size:0.82rem;color:#94a3b8;margin-top:2px">Fixture: ' + home + ' (home) vs ' + away + ' (away)</div>'
+    action, action_main, action_sub = _decision(m)
+    fixture = '<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">' + home + ' <span style="font-size:0.72rem;color:#94a3b8">(HOME)</span>  vs  ' + away + ' <span style="font-size:0.72rem;color:#94a3b8">(AWAY)</span></div>'
     if settled and m.get('home_score') is not None:
-        top = fixture + fixture_sub + '<div style="font-size:1.35rem;font-weight:800;color:#f1f5f9;margin-top:10px">' + f"{home} {m['home_score']}-{m['away_score']} {away}" + '</div><div style="font-size:0.95rem;color:#94a3b8">PREDICTED: ' + f"{pred[0]}-{pred[1]} - {headline.replace('PREDICT: ', '')}" + '</div>'
+        head = fixture + '<div style="font-size:1rem;color:#94a3b8;margin-top:6px">Result: ' + f"{home} {m['home_score']}-{m['away_score']} {away}" + '  |  Predicted: ' + f"{pred[0]}-{pred[1]}" + '</div>'
     else:
-        top = fixture + fixture_sub + '<div style="font-size:1.45rem;font-weight:800;color:#f1f5f9;margin-top:10px">' + headline + '</div><div style="font-size:1rem;font-weight:600;color:#34d399;margin-top:6px">' + sub + '</div>'
-    weak = '<div style="margin-top:8px"><span class="signal-pill" style="background:#f59e0b22;color:#fbbf24">WEAK TEST - ' + str(len(f['survivors'])) + '/5 survivors</span></div>' if f['weak_test'] else '<div style="margin-top:8px"><span class="signal-pill yes">' + str(len(f['survivors'])) + '/5 survivors</span></div>'
+        banner_color = '#ef4444' if action=='NO BET' else '#10b981'
+        banner_bg = '#ef444422' if action=='NO BET' else '#10b98122'
+        head = fixture + '<div style="margin-top:10px;background:' + banner_bg + ';border:1px solid ' + banner_color + ';border-radius:12px;padding:14px 16px">' + '<div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:' + banner_color + '">DECISION: ' + action + '</div>' + '<div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">' + action_main + '</div>' + '<div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">' + action_sub + '</div></div>'
     take_rows = ''
     for p in picks:
         if p['decision'] == 'SKIP': continue
-        cls = 'yes' if p['decision'] == 'YES' else 'no'
-        take_rows += '<span class="signal-pill ' + cls + '">TAKE ' + p['label'] + ': ' + p['decision'] + ' - A ' + format(p['a'], 'g') + '% vs Lg ' + format(p['league'], 'g') + '% | B ' + format(p['b'], 'g') + '% vs Lg ' + format(p['league'], 'g') + '%</span>'
-    if not take_rows: take_rows = '<span class="signal-pill skip">No surviving picks</span>'
-    skip_rows = ''
-    for p in picks:
-        if p['decision'] != 'SKIP': continue
-        skip_rows += '<span class="signal-pill skip">SKIP ' + p['label'] + ': ' + p['reason'] + '</span>'
+        label = {'Home Scoring Rate':'Home scores','Away Scoring Rate':'Away scores','Over 1.5 Goals':'Total over 1.5','Over 2.5 Goals':'Total over 2.5','BTTS':'Both score'}.get(p['label'], p['label'])
+        val = 'YES' if p['decision']=='YES' else 'NO'
+        take_rows += '<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">' + label + '</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">' + val + '</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">' + format(p['a'],'g') + '% vs league ' + format(p['league'],'g') + '%  |  ' + format(p['b'],'g') + '% vs league ' + format(p['league'],'g') + '%</td></tr>'
+    if not take_rows: take_rows = '<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
+    skipped = [p['label'] for p in picks if p['decision']=='SKIP']
+    skipped_line = 'Skipped (split, not used): ' + ', '.join(skipped) if skipped else 'Nothing skipped.'
     verdict = ''
     if settled and m.get('per_pick') is not None:
         pp = m['per_pick']
-        verdict = '<div class="signal-row"><span class="signal-pill">Scoreline: ' + ('WIN' if pp.get('_scoreline_hit')==1 else 'LOSS') + '</span><span class="signal-pill">Result: ' + ('WIN' if pp.get('_result_hit')==1 else 'LOSS') + '</span></div>'
-    return '<div class="match-card">' + top + weak + '<div style="font-size:0.78rem;color:#94a3b8;margin-top:14px;font-weight:700">TAKE - WHY</div><div class="signal-row">' + take_rows + '</div><div style="font-size:0.78rem;color:#64748b;margin-top:12px;font-weight:700">SKIPPED - SPLIT, DO NOT BET</div><div class="signal-row">' + (skip_rows if skip_rows else '<span class="signal-pill skip">None skipped</span>') + '</div><div style="font-size:0.82rem;color:#94a3b8;margin-top:10px">' + f['scoreline_reason'] + '</div>' + verdict + '</div>'
+        verdict = '<div style="margin-top:10px;font-size:0.85rem;color:#94a3b8">Scoreline: ' + ('WIN' if pp.get('_scoreline_hit')==1 else 'LOSS') + '  |  Result: ' + ('WIN' if pp.get('_result_hit')==1 else 'LOSS') + '</div>'
+    return '<div class="match-card">' + head + '<div style="margin-top:14px;font-size:0.78rem;letter-spacing:0.06em;font-weight:700;color:#94a3b8">SIGNALS THAT AGREE</div><table style="margin-top:4px">' + take_rows + '</table><div style="margin-top:10px;font-size:0.82rem;color:#64748b">' + skipped_line + '</div>' + verdict + '</div>'
 
 # ---------------------------------------------------------------- UI
 st.title("⚽ The Filter Rule — Both Agree vs League")
