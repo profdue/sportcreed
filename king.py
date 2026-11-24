@@ -477,7 +477,7 @@ st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;bord
 st.title("⚽ King — The Filter Rule")
 st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split or = league → SKIP. Over 3.5 ignored. No exact score predicted. SQLite: king.db")
 
-tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
+tab_new, tab_pending, tab_perf, tab_lab, tab_sb = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
     st.markdown("### Paste the Teams scoring vs league average block")
     st.caption("Evaluating does NOT save. Nothing is saved until you press Save to Pending.")
@@ -542,3 +542,28 @@ with tab_lab:
         with st.expander("Parsed sections"):
             st.json(facts["sections"])
             for w in facts.get("warnings", []): st.write(f"- {w}")
+
+with tab_sb:
+    st.markdown("### Supabase — why is data not saving?")
+    st.write(f"**SUPABASE_URL set:** {'YES — ' + (SUPABASE_URL[:35] + '...') if SUPABASE_URL else 'NO ❌ — add it in Streamlit Secrets'}")
+    st.write(f"**SUPABASE_KEY set:** {'YES — len ' + str(len(SUPABASE_KEY)) if SUPABASE_KEY else 'NO ❌ — add it in Streamlit Secrets'}")
+    st.write(f"**Backend in use:** {'Supabase `king_matches`' if _sb_configured() else 'Local SQLite king.db (NOT Supabase — this is why nothing appears in Supabase)'}")
+    st.caption("If Backend says SQLite, your Secrets are not reaching the app. Secrets need a reboot to apply.")
+    if st.button("Test Supabase connection", type="primary"):
+        if not _sb_configured():
+            st.error("Secrets missing. Add SUPABASE_URL + SUPABASE_KEY in Streamlit > Settings > Secrets, then Reboot.")
+        else:
+            try:
+                rows = _sb_req("GET", "king_matches", query="?select=id&limit=1")
+                st.success(f"Connected ✅ Table king_matches exists. Rows found: {len(rows)}")
+                # Try a test write + delete
+                test = _sb_req("POST", "king_matches", {"home_team": "__TEST__", "away_team": "__TEST__", "decision": "TEST", "picks": [], "sections": {}})[0]
+                tid = test["id"]
+                _sb_req("DELETE", "king_matches", query=f"?id=eq.{tid}")
+                st.success(f"Write + delete test PASSED ✅ (test id {tid} created then deleted). Saves should work.")
+            except Exception as e:
+                st.error(f"FAILED ❌: {e}")
+                st.caption("Copy this exact error — it tells us if it's: table missing (404 / PGRST205), RLS blocked (401/403), wrong URL, or wrong key.")
+    st.markdown("#### Most common causes")
+    st.markdown("- **1. Old king.py still deployed** — you must replace the file on Streamlit and Reboot. If the Supabase tab is missing, you are on the old file.\n- **2. Secrets not set / not rebooted** — Streamlit only reads Secrets on reboot.\n- **3. Table not created** — run supabase_single_table.sql in Supabase SQL Editor. Error will say table not found / PGRST205.\n- **4. Wrong key** — use the `anon public` key from Supabase Settings > API, full string, no quotes, no spaces.\n- **5. RLS blocked** — if the policy `king_all` was not created, anon writes are blocked. Re-run the SQL file.\n- **6. Local SQLite looks like saving** — on Streamlit Cloud, king.db is wiped on reboot, so saves disappear. That is why it looks like 'not saved'.")
+
