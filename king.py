@@ -182,7 +182,7 @@ def parse_filter_data(text: str) -> dict:
             warnings.append(f"Section not found: {key}")
             return None
         # find (A) line, (B) line, average line, league line after idx
-        a=b=avg=league=None
+        a=b=avg=league=None; avg_paste=None
         j=idx+1
         while j < len(lines) and j < idx+30:
             low=_clean(lines[j]).lower()
@@ -201,14 +201,33 @@ def parse_filter_data(text: str) -> dict:
                 # the number after this line, or numbers in following lines until league
                 pass
             elif "league" in low or "stats." in low:
+                # FIX: after the League label there are TWO numbers:
+                #   1st = (A)(B) average (from the paste)
+                #   2nd = League (the one the Filter must use)
+                # Old code took the 1st number as league -> compared A/B to the average.
+                # Correct: skip the 1st, take the 2nd as league. If only 1 number exists, use it.
+                nums_after=[]
                 k=j+1
-                while k < len(lines) and not _clean(lines[k]): k+=1
-                try: league=float(_clean(lines[k]).replace("%",""))
-                except Exception: pass
+                while k < len(lines) and len(nums_after) < 2:
+                    ls2=_clean(lines[k])
+                    if not ls2:
+                        k+=1; continue
+                    try:
+                        nums_after.append(float(ls2.replace("%","")))
+                    except Exception:
+                        break
+                    k+=1
+                if len(nums_after) >= 2:
+                    avg_paste=nums_after[0]; league=nums_after[1]
+                elif len(nums_after) == 1:
+                    league=nums_after[0]
                 break
             j+=1
-        # avg: numeric lines between (A)/(B) block and league that are not a/b/league - best effort: (a+b)/2 if both present
-        if a is not None and b is not None:
+        # avg: use the paste's own (A)(B) average (1st number after League label) if we found it,
+        # else fall back to (a+b)/2
+        if 'avg_paste' in locals() and avg_paste is not None:
+            avg=avg_paste
+        elif a is not None and b is not None:
             avg=(a+b)/2.0
         sections[key]={"a":a,"b":b,"avg":avg,"league":league}
         return sections[key]
