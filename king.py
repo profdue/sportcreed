@@ -472,29 +472,13 @@ with tab_pending:
                 if st.button("Settle", key=f"s_{m['id']}", type="primary"):
                     settle_match_db(m['id'], int(hs), int(aws)); st.success("Settled."); st.rerun()
 with tab_perf:
-    st.markdown("### Performance — per-signal only, SKIP excluded")
+    # Performance = cards only. No per-signal table, no metrics text, no headings.
+    # The table used to sit above the cards, so if it failed the DB cards below it never rendered.
+    st.markdown("### Performance")
     settled = load_matches(settled_only=True)
-    if not settled: st.info("No settled matches yet.")
+    if not settled:
+        st.info("No settled matches yet.")
     else:
-        rows=[]
-        for key, label, _, field in FILTER_CATEGORIES:
-            n=wins=0
-            for m in settled:
-                for p in m["picks"]:
-                    if p["field"]==field and not p.get("is_implied") and p.get("outcome") is not None:
-                        n+=1; wins+=p["outcome"]
-            rows.append({"Category": label, "n (both agree)": n, "Wins": wins, "Losses": n-wins, "Hit %": f"{(wins/n*100) if n else 0:.1f}%", "Proven": PROVEN.get(key,"")})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        # Main Pick hit rate
-        mp=[m for m in settled if m.get("main_pick_key")]
-        mp_wins=0; mp_n=0
-        for m in mp:
-            for p in m["picks"]:
-                if p.get("is_main") and p.get("outcome") is not None:
-                    mp_n+=1; mp_wins+=p["outcome"]
-        st.metric("Settled matches", len(settled))
-        st.metric("Main Pick hit rate", f"{mp_wins}/{mp_n} = {(mp_wins/mp_n*100) if mp_n else 0:.1f}%")
-        st.markdown("### All settled")
         for m in settled:
             filt=_filt_from_db_row(m)
             st.markdown(_card_html(m, filt, settled=True), unsafe_allow_html=True)
