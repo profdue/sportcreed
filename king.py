@@ -376,22 +376,28 @@ def compute_filter_rule(facts: dict) -> dict:
 
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
-    # Compact card, as in the live app screenshot:
-    #   Fixture line, then one DECISION box (BET green / CONFLICT amber / WEAK red),
-    #   then an ALSO: UNDER box when an Over NO survivor exists,
-    #   then MAIN PICK + OTHERS table, then Skipped line.
+    # MINIMAL card: fixture + one decision box. Nothing else.
+    # Minimal: no section title, no legend line, no detail rows, no skipped line.
+    # The table is what made the card too tall. All signals are still computed and still
+    # settle in Performance - they are just not printed on the card.
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
     picks=filt['picks']; main=filt.get('main_pick')
     fixture=f'<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">{home} <span style="font-size:0.72rem;color:#94a3b8">(HOME)</span> vs {away} <span style="font-size:0.72rem;color:#94a3b8">(AWAY)</span></div>'
     if settled and m.get('home_score') is not None:
-        head=fixture+f'<div style="font-size:1rem;color:#94a3b8;margin-top:6px">Result: {home} {m["home_score"]}-{m["away_score"]} {away}</div>'
+        # Settled: fixture + result + Main outcome only. No table.
+        _main_outcome=''
+        if main:
+            for _r in (m.get("picks") or []):
+                if _r.get("is_main") and _r.get("outcome") is not None:
+                    _main_outcome=f'<div style="font-size:0.88rem;color:#94a3b8;margin-top:4px">Main: {LABEL.get(main["label"], main["label"])} {main["decision"]} \u2014 {"WIN" if _r["outcome"]==1 else "LOSS"}</div>'
+                    break
+        head=fixture+f'<div style="font-size:1rem;color:#94a3b8;margin-top:6px">Result: {home} {m["home_score"]}-{m["away_score"]} {away}</div>{_main_outcome}'
     else:
         if filt['decision']=="BET":
             ml=LABEL.get(main['label'], main['label']) if main else '-'
             mv='YES' if main['decision']=='YES' else 'NO'
             head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">BET \u2022 MAIN</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} \u2014 {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Strongest signal today: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
-            # UNDER callout: an Over NO survivor is a bet in its own right - never buried in Others.
-            # Prefer UNDER 2.5 over UNDER 1.5 when both exist. Main Pick rule is unchanged.
+            # UNDER callout stays: it is a bet, not table clutter. One box, same style.
             _unders=[x for x in filt['picks'] if x['field'] in ('over_1_5','over_2_5') and x['decision']=='NO' and not (main and x['key']==main['key'])]
             _unders.sort(key=lambda x: 0 if x['field']=='over_2_5' else 1)
             if _unders:
@@ -403,34 +409,7 @@ def _card_html(m, filt, settled=False):
             head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">NO BET \u2022 CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
         else:
             head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">NO BET \u2022 WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
-    rows=''
-    if main and filt['decision']=="BET":
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0;font-weight:700">{LABEL.get(main["label"], main["label"])} MAIN</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:800">{"YES" if main["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{main["a"]:g}% vs league {main["league"]:g}% | {main["b"]:g}% vs league {main["league"]:g}% - margin {main["margin_pct"]:.1f}%</td></tr>'
-    for p in picks:
-        if p['decision']=="SKIP": continue
-        if main and p['key']==main['key']: continue
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{LABEL.get(p["label"], p["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if p["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{p["a"]:g}% vs league {p["league"]:g}% | {p["b"]:g}% vs league {p["league"]:g}% - margin {p.get("margin_pct",0):.1f}%</td></tr>'
-    for field, note in (filt.get('implied_notes') or {}).items():
-        v=filt['derived'].get(field)
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{FIELD_LABEL.get(field,field)}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if v else "NO"} *</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{note} - proved by another pick</td></tr>'
-    if not rows: rows='<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
-    # Skipped = direct SKIP *and* not filled by implied logic. A category filled by implied logic
-    # (e.g. Home scores proved by BTTS YES) must NOT also appear in Skipped - that was the
-    # second contradiction in the ENPPI card: Home scores listed as both implied and skipped.
-    _implied_fields=set((filt.get('implied_notes') or {}).keys())
-    skipped=[FIELD_LABEL.get(p['field'], p['label']) for p in picks if p['decision']=='SKIP' and p['field'] not in _implied_fields]  # screenshot style: 'Total over 1.5', not 'Over 1.5 Goals'
-    skipped_line='Skipped (split / neutral, not used): '+', '.join(skipped) if skipped else 'Nothing skipped.'
-    verdict=''
-    if settled:
-        parts=[]
-        for p in (m.get("picks") or []):
-            if p.get("is_implied"): continue
-            if p.get("outcome") is not None:
-                parts.append(f"{LABEL.get(p['label'], p['label'])}: {'WIN' if p['outcome']==1 else 'LOSS'}")
-        if parts: verdict='<div style="margin-top:10px;font-size:0.85rem;color:#94a3b8">'+'  |  '.join(parts)+'</div>'
-    legend='<div style="margin-top:6px;font-size:0.82rem;color:#94a3b8">First number = home-team side (A) | Second = away-team side (B) | * = proved by another pick | Margin = avg relative distance from league | = league is neutral, not BELOW</div>'
-    title='MAIN PICK + OTHERS' if (main and filt['decision']=="BET") else 'SIGNALS THAT AGREE'
-    return f'<div class="match-card">{head}<div style="margin-top:14px;font-size:0.78rem;letter-spacing:0.06em;font-weight:700;color:#94a3b8">{title}</div>{legend}<table style="margin-top:4px">{rows}</table><div style="margin-top:10px;font-size:0.82rem;color:#64748b">{skipped_line}</div>{verdict}</div>'
+    return f'<div class="match-card">{head}</div>'
 
 def _filt_from_db_row(m):
     picks=[]
@@ -526,6 +505,3 @@ with tab_lab:
         facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
-        with st.expander("Parsed sections"):
-            st.json(facts["sections"])
-            for w in facts.get("warnings", []): st.write(f"- {w}")
