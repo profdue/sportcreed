@@ -676,10 +676,10 @@ with tab_perf:
             if want == "UNDER": return 1 if (hs + aws) <= 2.5 else 0
             return None
         _m1, _m2, _m3 = st.columns(3)
-        for _col, _sig, _want, _lbl in [(_m1, "ALL_GREEN", "OVER", "ALL GREEN → Over"), (_m2, "ALL_GREEN", "BTTS", "ALL GREEN → BTTS"), (_m3, "ALL_RED", "UNDER", "ALL RED → Under")]:
+        for _col, _sig, _want, _avg_lbl in [(_m1, "ALL_GREEN", "OVER", "ALL GREEN → Over"), (_m2, "ALL_GREEN", "BTTS", "ALL GREEN → BTTS"), (_m3, "ALL_RED", "UNDER", "ALL RED → Under")]:
             ss = [m for m in settled if _row_avg_signal(m)[0] == _sig]
             outs = [o for o in [_avg_out(m, _want) for m in ss] if o is not None]
-            with _col: st.markdown(_mini(_lbl, f"{sum(outs)}/{len(outs)}" if outs else "—", f"{(sum(outs)/len(outs)*100) if outs else 0:.1f}% · monitoring only"), unsafe_allow_html=True)
+            with _col: st.markdown(_mini(_avg_lbl, f"{sum(outs)}/{len(outs)}" if outs else "—", f"{(sum(outs)/len(outs)*100) if outs else 0:.1f}% · monitoring only"), unsafe_allow_html=True)
         st.markdown("#### All settled")
         _g1, _g2 = st.columns(2)
         for _i, m in enumerate(settled):
