@@ -302,14 +302,9 @@ def compute_filter_rule(facts: dict) -> dict:
     picks=[]; derived={}
     for key, label, question, field in FILTER_CATEGORIES:
         sec=facts["sections"].get(key)
-        def _is_num(x):
-            try: float(x); return True
-            except Exception: return False
-        if not sec or not _is_num(sec.get("a")) or not _is_num(sec.get("b")) or not _is_num(sec.get("league")):
+        if not sec or sec.get("a") is None or sec.get("b") is None or sec.get("league") is None:
             picks.append({"key":key,"label":label,"question":question,"field":field,"a":None,"b":None,"league":None,"decision":"SKIP","reason":"Section not found in paste."})
             derived[field]=None; continue
-        try: sec = dict(sec, a=float(sec["a"]), b=float(sec["b"]), league=float(sec["league"]))
-        except Exception: sec = dict(sec, a=None, b=None, league=None)
         dec=_decide(sec["a"], sec["league"], sec["b"])
         if dec=="YES":
             derived[field]=True; reason=f"Both BEAT league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> YES"
@@ -695,8 +690,7 @@ with tab_lab:
     st.markdown("### Lab — test without saving")
     text_in = st.text_area("Text dump", height=180, label_visibility="collapsed", key="lab_input")
     if text_in.strip():
-        try: facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
-        except Exception as _e: st.error(f"Lab could not read that paste: {_e}"); st.stop()
+        facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
         with st.expander("Parsed sections"):
