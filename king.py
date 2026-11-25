@@ -291,15 +291,25 @@ def _decide(a, league, b):
     return "SKIP"
 
 def _lbl(v, lg):
-    return f"{v:g}% BEATS league {lg:g}%" if v > lg else f"{v:g}% BELOW league {lg:g}%" if v < lg else f"{v:g}% = league {lg:g}% (neutral)"
+    # Lab must never crash on a missing / non-numeric value: return neutral text instead.
+    try:
+        fv = float(v); fl = float(lg)
+    except Exception:
+        return "missing (neutral)"
+    return f"{fv:g}% BEATS league {fl:g}%" if fv > fl else f"{fv:g}% BELOW league {fl:g}%" if fv < fl else f"{fv:g}% = league {fl:g}% (neutral)"
 
 def compute_filter_rule(facts: dict) -> dict:
     picks=[]; derived={}
     for key, label, question, field in FILTER_CATEGORIES:
         sec=facts["sections"].get(key)
-        if not sec or sec.get("a") is None or sec.get("b") is None or sec.get("league") is None:
+        def _is_num(x):
+            try: float(x); return True
+            except Exception: return False
+        if not sec or not _is_num(sec.get("a")) or not _is_num(sec.get("b")) or not _is_num(sec.get("league")):
             picks.append({"key":key,"label":label,"question":question,"field":field,"a":None,"b":None,"league":None,"decision":"SKIP","reason":"Section not found in paste."})
             derived[field]=None; continue
+        try: sec = dict(sec, a=float(sec["a"]), b=float(sec["b"]), league=float(sec["league"]))
+        except Exception: sec = dict(sec, a=None, b=None, league=None)
         dec=_decide(sec["a"], sec["league"], sec["b"])
         if dec=="YES":
             derived[field]=True; reason=f"Both BEAT league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> YES"
@@ -685,7 +695,8 @@ with tab_lab:
     st.markdown("### Lab — test without saving")
     text_in = st.text_area("Text dump", height=180, label_visibility="collapsed", key="lab_input")
     if text_in.strip():
-        facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
+        try: facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
+        except Exception as _e: st.error(f"Lab could not read that paste: {_e}"); st.stop()
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
         with st.expander("Parsed sections"):
