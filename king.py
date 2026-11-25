@@ -525,52 +525,111 @@ def _avg_breakdown(m):
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
-    picks=filt['picks']; main=filt.get('main_pick')
-    fixture=f'<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">{home} vs {away}</div>'
-    if settled and m.get('home_score') is not None:
-        head=fixture+f'<div style="font-size:1rem;color:#94a3b8;margin-top:6px">Result: {home} {m["home_score"]}-{m["away_score"]} {away}</div>'
+    picks = filt['picks']; main = filt.get('main_pick')
+    hs, aws = m.get('home_score'), m.get('away_score')
+    is_settled = settled and hs is not None and aws is not None
+    total = (hs + aws) if is_settled else None
+    # outcome lookup from stored picks
+    outcome = {}
+    for r in (m.get('picks') or []):
+        if not r.get('is_implied'):
+            outcome[r.get('field')] = r.get('outcome')
+    # --- header ---
+    if is_settled:
+        score_badge = f'<span style="background:#0b1220;border:1px solid #334155;border-radius:999px;padding:4px 12px;font-size:0.95rem;font-weight:800;color:#f1f5f9">{home} {hs} - {aws} {away}</span>'
+        head = f'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9">{home} <span style="color:#64748b;font-weight:600">vs</span> {away}</div>{score_badge}</div>'
     else:
-        if filt['decision']=="BET":
-            ml=LABEL.get(main['label'], main['label']) if main else '-'
-            mv='YES' if main['decision']=='YES' else 'NO'
-            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">DECISION: BET &nbsp;|&nbsp; MAIN PICK</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} - {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Strongest signal today: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
-        elif filt['decision']=="NO BET - WEAK NO":
-            head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">DECISION: NO BET — WEAK NO</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak NO - not a bet. Strong NO only (40%+).</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
-        elif filt['decision']=="NO BET - CONFLICT":
-            head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">DECISION: NO BET — CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
+        head = f'<div style="font-size:1.25rem;font-weight:800;color:#f1f5f9">{home} <span style="color:#64748b;font-weight:600">vs</span> {away}</div>'
+    # --- decision banner ---
+    dec = filt['decision']
+    if dec == 'BET' and main:
+        ml = LABEL.get(main['label'], main['label']); mv = 'YES' if main['decision'] == 'YES' else 'NO'
+        banner = f'<div style="margin-top:12px;background:#065f46;border-radius:12px;padding:14px 16px"><div style="font-size:0.7rem;letter-spacing:0.1em;font-weight:800;color:#a7f3d0">BET &nbsp;|&nbsp; MAIN PICK</div><div style="font-size:1.45rem;font-weight:900;color:#fff;margin-top:2px">{ml} — {mv}</div><div style="font-size:0.88rem;color:#d1fae5;margin-top:2px">Biggest margin among survivors: {main["margin_pct"]:.1f}%. This is the only bet in this match.</div></div>'
+    elif dec == 'NO BET - WEAK NO':
+        banner = f'<div style="margin-top:12px;background:#78350f;border-radius:12px;padding:14px 16px"><div style="font-size:0.7rem;letter-spacing:0.1em;font-weight:800;color:#fde68a">NO BET — WEAK NO</div><div style="font-size:1.05rem;font-weight:800;color:#fff;margin-top:2px">Weak NO — not a bet. Strong NO only (40%+).</div><div style="font-size:0.85rem;color:#fef3c7;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
+    elif dec == 'NO BET - CONFLICT':
+        banner = f'<div style="margin-top:12px;background:#78350f;border-radius:12px;padding:14px 16px"><div style="font-size:0.7rem;letter-spacing:0.1em;font-weight:800;color:#fde68a">NO BET — CONFLICT</div><div style="font-size:1.05rem;font-weight:800;color:#fff;margin-top:2px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.85rem;color:#fef3c7;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
+    else:
+        banner = f'<div style="margin-top:12px;background:#7f1d1d;border-radius:12px;padding:14px 16px"><div style="font-size:0.7rem;letter-spacing:0.1em;font-weight:800;color:#fecaca">NO BET — WEAK</div><div style="font-size:1.05rem;font-weight:800;color:#fff;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div><div style="font-size:0.85rem;color:#fecaca;margin-top:2px">Pass. Do not bet, do not force a pick.</div></div>'
+    # --- average strip ---
+    _avg = filt.get('avg_signal') or 'MIXED'
+    if _avg == 'ALL_GREEN':
+        if is_settled:
+            over_hit = 'WIN' if total > 2.5 else 'LOSS'
+            btts_hit = 'WIN' if (hs > 0 and aws > 0) else 'LOSS'
+            avg_html = f'<div style="margin-top:12px;background:#052e16;border:1px solid #16a34a;border-radius:10px;padding:10px 12px;font-size:0.88rem;color:#dcfce7"><b>Average: ALL GREEN — monitoring only</b> &nbsp; Over 2.5: <b>{over_hit}</b> (total {total}) &nbsp;|&nbsp; BTTS: <b>{btts_hit}</b> &nbsp; <span style="color:#86efac">Not a bet.</span></div>'
         else:
-            head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">DECISION: NO BET — WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
-    _avg = filt.get("avg_signal") or "MIXED"
-    if _avg=="ALL_GREEN": _avg_txt = "Average Signal: ALL GREEN — MONITOR ONLY: Over 2.5 YES + BTTS YES (monitoring, not a bet)"
-    elif _avg=="ALL_RED": _avg_txt = "Average Signal: ALL RED — MONITOR ONLY: Under 2.5 (monitoring, not a bet)"
+            avg_html = f'<div style="margin-top:12px;background:#052e16;border:1px solid #16a34a;border-radius:10px;padding:10px 12px;font-size:0.88rem;color:#dcfce7"><b>Average: ALL GREEN — monitoring only</b> &nbsp; Watching Over 2.5 YES + BTTS YES. Not a bet.</div>'
+    elif _avg == 'ALL_RED':
+        if is_settled:
+            under_hit = 'WIN' if total <= 2.5 else 'LOSS'
+            avg_html = f'<div style="margin-top:12px;background:#450a0a;border:1px solid #dc2626;border-radius:10px;padding:10px 12px;font-size:0.88rem;color:#fee2e2"><b>Average: ALL RED — monitoring only</b> &nbsp; Under 2.5: <b>{under_hit}</b> (total {total}) &nbsp; <span style="color:#fca5a5">Not a bet.</span></div>'
+        else:
+            avg_html = f'<div style="margin-top:12px;background:#450a0a;border:1px solid #dc2626;border-radius:10px;padding:10px 12px;font-size:0.88rem;color:#fee2e2"><b>Average: ALL RED — monitoring only</b> &nbsp; Watching Under 2.5. Not a bet.</div>'
     else:
-        _g, _r, _e, _neut = _avg_breakdown(m) if m.get("sections") else (filt.get("avg_green_count",0), 0, 0, [])
-        _avg_txt = f"Average Signal: MIXED ({_g} green, {_r} red, {_e} neutral) — no lean" + (f" — neutral: {', '.join(_neut)}" if _neut else "")
-    _avg_color = "#10b981" if _avg=="ALL_GREEN" else ("#ef4444" if _avg=="ALL_RED" else "#94a3b8")
-    rows=f'<tr><td colspan="3" style="padding:8px 10px;background:#0b1220;border:1px solid #1e293b;border-radius:8px;color:{_avg_color};font-weight:700;font-size:0.88rem">{_avg_txt}</td></tr>'
-    if main and filt['decision']=="BET":
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0;font-weight:700">MAIN: {LABEL.get(main["label"], main["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:800">{"YES" if main["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{main["a"]:g}% vs league {main["league"]:g}% | {main["b"]:g}% vs league {main["league"]:g}% - margin {main["margin_pct"]:.1f}%</td></tr>'
+        _g, _r, _e, _neut = _avg_breakdown(m) if m.get('sections') else (filt.get('avg_green_count', 0), 0, 0, [])
+        avg_html = f'<div style="margin-top:12px;background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;font-size:0.88rem;color:#94a3b8"><b style="color:#e2e8f0">Average: MIXED</b> &nbsp; {_g} green, {_r} red, {_e} neutral — no lean.' + (f' &nbsp; Neutral: {", ".join(_neut)}' if _neut else '') + '</div>'
+    # --- pick rows ---
+    def _actual(field):
+        if not is_settled: return None
+        if field == 'home_scores': return f'Home scored {hs}' if hs > 0 else 'Home scored 0'
+        if field == 'away_scores': return f'Away scored {aws}' if aws > 0 else 'Away scored 0'
+        if field == 'over_1_5': return f'Total {total} — over 1.5' if total > 1.5 else f'Total {total} — under 1.5'
+        if field == 'over_2_5': return f'Total {total} — over 2.5' if total > 2.5 else f'Total {total} — under 2.5'
+        if field == 'btts': return 'Both scored' if (hs > 0 and aws > 0) else 'Not both scored'
+        return None
+    def _need(field, d):
+        mp = {'home_scores': 'Needs Home to score' if d == 'YES' else 'Needs Home to blank', 'away_scores': 'Needs Away to score' if d == 'YES' else 'Needs Away to blank', 'over_1_5': 'Needs 2+ goals' if d == 'YES' else 'Needs 0-1 goals', 'over_2_5': 'Needs 3+ goals' if d == 'YES' else 'Needs 0-2 goals', 'btts': 'Needs both to score' if d == 'YES' else 'Needs at least one blank'}
+        return mp.get(field, '')
+    rows = ''
+    ordered = []
+    if main and dec == 'BET': ordered.append(main)
     for p in picks:
-        if p['decision']=="SKIP": continue
-        if main and p['key']==main['key']: continue
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{LABEL.get(p["label"], p["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if p["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{p["a"]:g}% vs league {p["league"]:g}% | {p["b"]:g}% vs league {p["league"]:g}% - margin {p.get("margin_pct",0):.1f}%</td></tr>'
+        if p['decision'] == 'SKIP': continue
+        if main and p['key'] == main['key'] and dec == 'BET': continue
+        ordered.append(p)
+    for p in ordered:
+        is_main_row = (main and p['key'] == main['key'] and dec == 'BET')
+        label = LABEL.get(p['label'], p['label'])
+        d = p['decision']
+        pill_dec = f'<span style="background:{"#065f46" if d=="YES" else "#7f1d1d"};color:#fff;border-radius:999px;padding:3px 10px;font-size:0.82rem;font-weight:800">{d}</span>'
+        # why
+        a, b, lg = p.get('a'), p.get('b'), p.get('league')
+        if a is not None and b is not None and lg is not None:
+            if d == 'YES': why = f'Both beat league — Home side {a:g}% &gt; {lg:g}% and Away side {b:g}% &gt; {lg:g}%.'
+            elif d == 'NO': why = f'Both below league — Home side {a:g}% &lt; {lg:g}% and Away side {b:g}% &lt; {lg:g}%.'
+            else: why = ''
+        else: why = ''
+        margin_txt = f"Margin {p.get('margin_pct',0):.1f}%"
+        if is_settled:
+            oc = outcome.get(p.get('field'))
+            if oc == 1: verdict = '<span style="background:#16a34a;color:#fff;border-radius:999px;padding:4px 12px;font-size:0.82rem;font-weight:900">WIN</span>'
+            elif oc == 0: verdict = '<span style="background:#dc2626;color:#fff;border-radius:999px;padding:4px 12px;font-size:0.82rem;font-weight:900">LOSS</span>'
+            else: verdict = '<span style="color:#94a3b8">—</span>'
+            actual = _actual(p.get('field')) or ''
+            second = f'<div style="font-size:0.84rem;color:#cbd5e1;margin-top:2px">Actual: {actual} → {verdict}</div>'
+        else:
+            second = f'<div style="font-size:0.84rem;color:#94a3b8;margin-top:2px">{_need(p.get("field"), d)} &nbsp;·&nbsp; {margin_txt}</div>'
+            verdict = ''
+        badge = '<span style="background:#f59e0b;color:#111827;border-radius:999px;padding:2px 8px;font-size:0.68rem;font-weight:900;margin-left:6px">MAIN</span>' if is_main_row else ''
+        rows += f'<div style="border:1px solid #1e293b;border-radius:10px;padding:10px 12px;margin-top:8px;background:#0f172a"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="font-weight:800;color:#f1f5f9">{label}{badge}</div><div style="display:flex;gap:8px;align-items:center">{pill_dec}{verdict if is_settled else ""}</div></div><div style="font-size:0.85rem;color:#94a3b8;margin-top:4px">{why}</div>{second}</div>'
+    # implied
     for field, note in (filt.get('implied_notes') or {}).items():
-        v=filt['derived'].get(field)
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{FIELD_LABEL.get(field,field)}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if v else "NO"} *</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{note} - proved by another pick</td></tr>'
-    if not rows: rows='<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
-    skipped=[p['label'] for p in picks if p['decision']=='SKIP']
-    skipped_line='Skipped (split / neutral, not used): '+', '.join(skipped) if skipped else 'Nothing skipped.'
-    verdict=''
-    if settled:
-        parts=[]
-        for p in (m.get("picks") or []):
-            if p.get("is_implied"): continue
-            if p.get("outcome") is not None:
-                parts.append(f"{LABEL.get(p['label'], p['label'])}: {'WIN' if p['outcome']==1 else 'LOSS'}")
-        if parts: verdict='<div style="margin-top:10px;font-size:0.85rem;color:#94a3b8">'+'  |  '.join(parts)+'</div>'
-    legend='<div style="margin-top:6px;font-size:0.82rem;color:#94a3b8">First number = home-team side (A) | Second = away-team side (B) | * = proved by another pick | Margin = avg relative distance from league | = league is neutral, not BELOW</div>'
-    title='MAIN PICK + OTHERS' if (main and filt['decision']=="BET") else 'SIGNALS THAT AGREE'
-    return f'<div class="match-card">{head}<div style="margin-top:14px;font-size:0.78rem;letter-spacing:0.06em;font-weight:700;color:#94a3b8">{title}</div>{legend}<table style="margin-top:4px">{rows}</table><div style="margin-top:10px;font-size:0.82rem;color:#64748b">{skipped_line}</div>{verdict}</div>'
+        v = filt['derived'].get(field)
+        rows += f'<div style="border:1px dashed #334155;border-radius:10px;padding:8px 12px;margin-top:8px"><div style="font-size:0.85rem;color:#94a3b8">{FIELD_LABEL.get(field,field)} — {"YES" if v else "NO"} <span style="color:#64748b">* implied, never counted</span></div><div style="font-size:0.82rem;color:#64748b">{note}</div></div>'
+    skipped = [p['label'] for p in picks if p['decision'] == 'SKIP']
+    if skipped:
+        skip_html = f'<div style="margin-top:10px;font-size:0.82rem;color:#64748b">Skipped — split or = league, so not a signal: {", ".join(skipped)}</div>'
+    else:
+        skip_html = ''
+    # summary line for settled
+    summary = ''
+    if is_settled:
+        wins = sum(1 for v in outcome.values() if v == 1); losses = sum(1 for v in outcome.values() if v == 0)
+        summary = f'<div style="margin-top:10px;font-size:0.88rem;color:#e2e8f0"><b>Settled: {wins} WIN, {losses} LOSS</b> &nbsp;·&nbsp; Result {hs}-{aws}, total {total} goals.</div>'
+    return f'<div class="match-card">{head}{banner}{avg_html}<div style="margin-top:12px;font-size:0.72rem;letter-spacing:0.08em;font-weight:800;color:#94a3b8">WHY EACH PICK WAS MADE</div>{rows}{skip_html}{summary}</div>'
+
+
 
 def _filt_from_db_row(m):
     picks=[]
