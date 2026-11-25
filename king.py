@@ -465,6 +465,28 @@ def compute_filter_rule(facts: dict) -> dict:
             "main_pick":main_pick,"implied_notes":implied_notes,
             "avg_signal":avg_signal,"avg_green_count":avg_green_count}
 
+
+def _avg_signal_from_sections(sections):
+    """Backfill: old rows were saved before avg_signal existed. Recompute from stored sections."""
+    if not sections: return "MIXED", 0
+    _keys = ["home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts"]
+    _states=[]
+    for _k in _keys:
+        _s = sections.get(_k)
+        if _s and _s.get("avg") is not None and _s.get("league") is not None:
+            if _s["avg"] > _s["league"]: _states.append("G")
+            elif _s["avg"] < _s["league"]: _states.append("R")
+            else: _states.append("=")
+    if _states and all(s=="G" for s in _states): return "ALL_GREEN", _states.count("G")
+    if _states and all(s=="R" for s in _states): return "ALL_RED", _states.count("G")
+    return "MIXED", _states.count("G")
+
+def _row_avg_signal(m):
+    stored = m.get("avg_signal")
+    if stored in ("ALL_GREEN","ALL_RED"): return stored, (m.get("avg_green_count") or 0)
+    # stored is MIXED / None / missing -> recompute from sections (fixes Pohang-type old rows)
+    return _avg_signal_from_sections(m.get("sections") or {})
+
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
@@ -527,7 +549,7 @@ def _filt_from_db_row(m):
     return {"picks":picks,"derived":{},"survivors":[p for p in picks if p["decision"] in ("YES","NO")],
             "weak_test": m.get("decision")=="NO BET - WEAK","conflicts":[],"decision":m.get("decision") or "BET",
             "decision_reason":m.get("decision_reason") or "","main_pick":main,"implied_notes":implied,
-            "avg_signal":m.get("avg_signal") or "MIXED","avg_green_count":m.get("avg_green_count") or 0}
+            "avg_signal":_row_avg_signal(m)[0],"avg_green_count":_row_avg_signal(m)[1]}
 
 # ---------------------------------------------------------------- UI
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
@@ -629,7 +651,7 @@ with tab_perf:
             return None
         for sig, desc in [("ALL_GREEN","ALL_GREEN -> Over 2.5 YES only"),("ALL_RED","ALL_RED -> Under 2.5 only")]:
             for bucket_name, subset in [("MAIN", main_settled), ("WEAK", weak_settled)]:
-                ss=[m for m in subset if (m.get("avg_signal") or "MIXED")==sig]
+                ss=[m for m in subset if _row_avg_signal(m)[0]==sig]
                 outs=[_avg_outcome(m, sig) for m in ss]; outs=[o for o in outs if o is not None]
                 if outs: st.write(f"{sig} / {bucket_name}: {sum(outs)}/{len(outs)} = {sum(outs)/len(outs)*100:.1f}% — {desc} (n={len(outs)})")
                 else: st.write(f"{sig} / {bucket_name}: no settled games yet")
