@@ -52,9 +52,16 @@ def _sb_save_match(facts, filt, raw_paste):
     picks = []
     for pr in filt["picks"]:
         picks.append({"category_key": pr["key"], "label": pr["label"], "field": pr["field"], "a_pct": pr["a"], "b_pct": pr["b"], "league_pct": pr["league"], "avg_pct": pr.get("avg"), "decision": pr["decision"], "margin_pct": pr.get("margin_pct"), "is_main": 1 if (filt.get("main_pick") and pr["key"]==filt["main_pick"]["key"]) else 0, "is_implied": 0, "implied_note": None, "outcome": None})
+    _is_weak_save = filt["decision"] != "BET"
     for field, note in (filt.get("implied_notes") or {}).items():
-        picks.append({"category_key": field, "label": FIELD_LABEL.get(field, field), "field": field, "a_pct": None, "b_pct": None, "league_pct": None, "avg_pct": None, "decision": "YES" if filt["derived"].get(field) else "NO", "margin_pct": None, "is_main": 0, "is_implied": 1, "implied_note": note, "outcome": None})
-    row = _sb_req("POST", "king_matches", {"home_team": facts.get("home_team"), "away_team": facts.get("away_team"), "created_at": datetime.now(timezone.utc).isoformat(), "raw_paste": raw_paste, "decision": filt["decision"], "decision_reason": filt.get("decision_reason", ""), "main_pick_key": (filt["main_pick"]["key"] if filt.get("main_pick") else None), "main_pick_label": (filt["main_pick"]["label"] if filt.get("main_pick") else None), "main_pick_decision": (filt["main_pick"]["decision"] if filt.get("main_pick") else None), "main_pick_margin_pct": (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None), "survivors_count": len(filt["survivors"]), "picks": picks, "sections": facts.get("sections") or {}})[0]
+        picks.append({"category_key": field, "label": FIELD_LABEL.get(field, field), "field": field, "a_pct": None, "b_pct": None, "league_pct": None, "avg_pct": None, "decision": "YES" if filt["derived"].get(field) else "NO", "margin_pct": None, "is_main": 0, "is_implied": 1, "implied_note": note, "outcome": None, "is_counted": 0, "bucket": ("WEAK" if _is_weak_save else "MAIN")})
+    # tag direct picks with bucket / counted flag: WEAK direct picks count ONLY in Weak bucket, never in Main
+    for _pr in picks:
+        if not _pr.get("is_implied"):
+            _pr["is_counted"] = 0 if _is_weak_save else 1
+            _pr["bucket"] = "WEAK" if _is_weak_save else "MAIN"
+    is_weak = filt["decision"] != "BET"
+    row = _sb_req("POST", "king_matches", {"home_team": facts.get("home_team"), "away_team": facts.get("away_team"), "created_at": datetime.now(timezone.utc).isoformat(), "raw_paste": raw_paste, "decision": filt["decision"], "decision_reason": filt.get("decision_reason", ""), "avg_signal": filt.get("avg_signal","MIXED"), "avg_green_count": filt.get("avg_green_count",0), "bucket": ("WEAK" if is_weak else "MAIN"), "is_counted_in_main": (0 if is_weak else 1), "main_pick_key": (filt["main_pick"]["key"] if filt.get("main_pick") else None), "main_pick_label": (filt["main_pick"]["label"] if filt.get("main_pick") else None), "main_pick_decision": (filt["main_pick"]["decision"] if filt.get("main_pick") else None), "main_pick_margin_pct": (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None), "survivors_count": len(filt["survivors"]), "picks": picks, "sections": facts.get("sections") or {}})[0]
     return row["id"]
 def _sb_load_matches(pending_only=False, settled_only=False):
     rows = _sb_req("GET", "king_matches", query="?select=*&order=id.desc")
@@ -110,7 +117,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     home_team TEXT, away_team TEXT,
-    created_at TEXT NOT NULL,
+    created_at TEXT NOT NULL, avg_signal TEXT DEFAULT 'MIXED', avg_green_count INTEGER DEFAULT 0, bucket TEXT DEFAULT 'MAIN', is_counted_in_main INTEGER DEFAULT 1,
     raw_paste TEXT,
     decision TEXT,               -- BET / NO BET - WEAK / NO BET - CONFLICT
     decision_reason TEXT,
@@ -146,6 +153,17 @@ def get_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # migrate old DBs: add new columns if missing
+    _cols = [r[1] for r in conn.execute("PRAGMA table_info(matches)").fetchall()]
+    for _c, _d in [("avg_signal","TEXT DEFAULT 'MIXED'"),("avg_green_count","INTEGER DEFAULT 0"),("bucket","TEXT DEFAULT 'MAIN'"),("is_counted_in_main","INTEGER DEFAULT 1")]:
+        if _c not in _cols:
+            conn.execute(f"ALTER TABLE matches ADD COLUMN {_c} {_d}")
+    try:
+        _pcols = [r[1] for r in conn.execute("PRAGMA table_info(picks)").fetchall()]
+        for _c, _d in [("is_counted","INTEGER DEFAULT 1"),("bucket","TEXT DEFAULT 'MAIN'")]:
+            if _c not in _pcols:
+                conn.execute(f"ALTER TABLE picks ADD COLUMN {_c} {_d}")
+    except Exception: pass
     conn.commit()
     return conn
 
@@ -158,12 +176,13 @@ def save_match(facts, filt, raw_paste):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO matches (home_team,away_team,created_at,raw_paste,decision,decision_reason,main_pick_key,main_pick_label,main_pick_decision,main_pick_margin_pct,survivors_count) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO matches (home_team,away_team,created_at,raw_paste,decision,decision_reason,main_pick_key,main_pick_label,main_pick_decision,main_pick_margin_pct,survivors_count,avg_signal,avg_green_count,bucket,is_counted_in_main) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (facts.get("home_team"), facts.get("away_team"), datetime.now(timezone.utc).isoformat(), raw_paste,
          filt["decision"], filt.get("decision_reason",""), (filt["main_pick"]["key"] if filt.get("main_pick") else None),
          (filt["main_pick"]["label"] if filt.get("main_pick") else None),
          (filt["main_pick"]["decision"] if filt.get("main_pick") else None),
-         (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None), len(filt["survivors"])))
+         (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None), len(filt["survivors"]),
+         filt.get("avg_signal","MIXED"), filt.get("avg_green_count",0), ("WEAK" if filt["decision"]!="BET" else "MAIN"), (0 if filt["decision"]!="BET" else 1)))
     mid = cur.lastrowid
     for p in filt["picks"]:
         cur.execute(
@@ -395,6 +414,20 @@ def compute_filter_rule(facts: dict) -> dict:
         if derived.get('btts') is None: derived['btts']=False; implied_notes['btts']='via one side NO'
     if derived.get('over_2_5') is True and derived.get('over_1_5') is None: derived['over_1_5']=True; implied_notes['over_1_5']='via Over 2.5 YES'
     if derived.get('over_1_5') is False and derived.get('over_2_5') is None: derived['over_2_5']=False; implied_notes['over_2_5']='via Over 1.5 NO'
+    # ---- Average Signal (A)(B) average column vs League, all 9 sections) ----
+    _avg_keys = ["home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts"]
+    _avg_states = []
+    for _k in _avg_keys:
+        _s = facts["sections"].get(_k)
+        if _s and _s.get("avg") is not None and _s.get("league") is not None:
+            if _s["avg"] > _s["league"]: _avg_states.append("G")
+            elif _s["avg"] < _s["league"]: _avg_states.append("R")
+            else: _avg_states.append("=")
+    _green_n = _avg_states.count("G"); _red_n = _avg_states.count("R")
+    if _avg_states and all(s=="G" for s in _avg_states): avg_signal="ALL_GREEN"
+    elif _avg_states and all(s=="R" for s in _avg_states): avg_signal="ALL_RED"
+    else: avg_signal="MIXED"
+    avg_green_count=_green_n
     survivors=[x for x in picks if x['decision'] in ("YES","NO")]
     weak=len(survivors) < 3
     # ---- coherence: direct picks that logically contradict ----
@@ -429,7 +462,8 @@ def compute_filter_rule(facts: dict) -> dict:
         decision_reason=f"Main Pick {LABEL.get(main_pick['label'], main_pick['label'])} {main_pick['decision']} at {main_pick['margin_pct']:.1f}% margin."
     return {"picks":picks,"derived":derived,"survivors":survivors,"weak_test":weak,
             "conflicts":conflicts,"decision":decision,"decision_reason":decision_reason,
-            "main_pick":main_pick,"implied_notes":implied_notes}
+            "main_pick":main_pick,"implied_notes":implied_notes,
+            "avg_signal":avg_signal,"avg_green_count":avg_green_count}
 
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
@@ -447,7 +481,12 @@ def _card_html(m, filt, settled=False):
             head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">DECISION: NO BET — CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
         else:
             head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">DECISION: NO BET — WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
-    rows=''
+    _avg = filt.get("avg_signal") or "MIXED"
+    if _avg=="ALL_GREEN": _avg_txt = "Average Signal: ALL GREEN — lean BTTS YES + Over 2.5 YES (lean, not a bet)"
+    elif _avg=="ALL_RED": _avg_txt = "Average Signal: ALL RED — lean Under 2.5 + BTTS NO (lean, not a bet)"
+    else: _avg_txt = f"Average Signal: MIXED ({filt.get('avg_green_count',0)}/9 averages green) — no lean"
+    _avg_color = "#10b981" if _avg=="ALL_GREEN" else ("#ef4444" if _avg=="ALL_RED" else "#94a3b8")
+    rows=f'<tr><td colspan="3" style="padding:8px 10px;background:#0b1220;border:1px solid #1e293b;border-radius:8px;color:{_avg_color};font-weight:700;font-size:0.88rem">{_avg_txt}</td></tr>'
     if main and filt['decision']=="BET":
         rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0;font-weight:700">MAIN: {LABEL.get(main["label"], main["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:800">{"YES" if main["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{main["a"]:g}% vs league {main["league"]:g}% | {main["b"]:g}% vs league {main["league"]:g}% - margin {main["margin_pct"]:.1f}%</td></tr>'
     for p in picks:
@@ -487,7 +526,8 @@ def _filt_from_db_row(m):
         if r.get("is_implied"): implied[r["field"]]=r.get("implied_note") or ""
     return {"picks":picks,"derived":{},"survivors":[p for p in picks if p["decision"] in ("YES","NO")],
             "weak_test": m.get("decision")=="NO BET - WEAK","conflicts":[],"decision":m.get("decision") or "BET",
-            "decision_reason":m.get("decision_reason") or "","main_pick":main,"implied_notes":implied}
+            "decision_reason":m.get("decision_reason") or "","main_pick":main,"implied_notes":implied,
+            "avg_signal":m.get("avg_signal") or "MIXED","avg_green_count":m.get("avg_green_count") or 0}
 
 # ---------------------------------------------------------------- UI
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
@@ -527,8 +567,11 @@ with tab_new:
             st.session_state.pop("pending_eval", None)
             st.rerun()
 with tab_pending:
-    st.markdown("### Pending matches (from king.db)")
+    st.markdown("### Pending matches")
+    _bf = st.radio("Bucket", ["All","MAIN (BET)","WEAK (pass)"], horizontal=True, key="pending_bucket")
     pending = load_matches(pending_only=True)
+    if _bf=="MAIN (BET)": pending=[m for m in pending if (m.get("bucket") or ("MAIN" if m.get("decision")=="BET" else "WEAK"))=="MAIN"]
+    elif _bf=="WEAK (pass)": pending=[m for m in pending if (m.get("bucket") or ("MAIN" if m.get("decision")=="BET" else "WEAK"))=="WEAK"]
     if not pending: st.info("No pending matches.")
     for m in pending:
         filt = _filt_from_db_row(m)
@@ -542,28 +585,57 @@ with tab_pending:
                 if st.button("Settle", key=f"s_{m['id']}", type="primary"):
                     settle_match_db(m['id'], int(hs), int(aws)); st.success("Settled."); st.rerun()
 with tab_perf:
-    st.markdown("### Performance — per-signal only, SKIP excluded")
+    st.markdown("### Performance — MAIN and WEAK never mixed. Implied (*) picks never counted.")
+    st.caption("MAIN = BET rows only (is_counted_in_main=1). WEAK = WEAK/CONFLICT rows only — direct survivors only, implied (*) display-only, outcome never counted in Main.")
     settled = load_matches(settled_only=True)
     if not settled: st.info("No settled matches yet.")
     else:
+        main_settled = [m for m in settled if (m.get("bucket") or ("MAIN" if m.get("decision")=="BET" else "WEAK"))=="MAIN"]
+        weak_settled = [m for m in settled if (m.get("bucket") or ("MAIN" if m.get("decision")=="BET" else "WEAK"))=="WEAK"]
+        st.markdown("#### MAIN count — BET only (this is the count you bet on)")
         rows=[]
         for key, label, _, field in FILTER_CATEGORIES:
             n=wins=0
-            for m in settled:
+            for m in main_settled:
                 for p in m["picks"]:
                     if p["field"]==field and not p.get("is_implied") and p.get("outcome") is not None:
                         n+=1; wins+=p["outcome"]
             rows.append({"Category": label, "n (both agree)": n, "Wins": wins, "Losses": n-wins, "Hit %": f"{(wins/n*100) if n else 0:.1f}%", "Proven": PROVEN.get(key,"")})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        # Main Pick hit rate
-        mp=[m for m in settled if m.get("main_pick_key")]
+        mp=[m for m in main_settled if m.get("main_pick_key")]
         mp_wins=0; mp_n=0
         for m in mp:
             for p in m["picks"]:
                 if p.get("is_main") and p.get("outcome") is not None:
                     mp_n+=1; mp_wins+=p["outcome"]
-        st.metric("Settled matches", len(settled))
-        st.metric("Main Pick hit rate", f"{mp_wins}/{mp_n} = {(mp_wins/mp_n*100) if mp_n else 0:.1f}%")
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Settled MAIN", len(main_settled)); c2.metric("Main Pick hit rate", f"{mp_wins}/{mp_n} = {(mp_wins/mp_n*100) if mp_n else 0:.1f}%"); c3.metric("Settled WEAK", len(weak_settled))
+        st.markdown("#### WEAK count — WEAK only (does the Average Signal rescue passes?)")
+        wrows=[]
+        for key, label, _, field in FILTER_CATEGORIES:
+            n=wins=0
+            for m in weak_settled:
+                for p in m["picks"]:
+                    if p["field"]==field and not p.get("is_implied") and p.get("outcome") is not None:
+                        n+=1; wins+=p["outcome"]
+            wrows.append({"Category (direct survivors only)": label, "n": n, "Wins": wins, "Losses": n-wins, "Hit %": f"{(wins/n*100) if n else 0:.1f}%"})
+        st.dataframe(pd.DataFrame(wrows), use_container_width=True, hide_index=True)
+        st.markdown("#### Average Signal test — WEAK + MAIN, settled only")
+        def _avg_outcome(m, want):
+            hs, aws = m.get("home_score"), m.get("away_score")
+            if hs is None or aws is None: return None
+            if want=="ALL_GREEN": return 1 if (hs>0 and aws>0) and (hs+aws)>2.5 else 0
+            if want=="ALL_RED": return 1 if (hs+aws)<=2.5 else 0
+            return None
+        for sig, desc in [("ALL_GREEN","ALL_GREEN -> BTTS YES + Over 2.5 YES"),("ALL_RED","ALL_RED -> Under 2.5")]:
+            for bucket_name, subset in [("MAIN", main_settled), ("WEAK", weak_settled)]:
+                ss=[m for m in subset if (m.get("avg_signal") or "MIXED")==sig]
+                outs=[_avg_outcome(m, sig) for m in ss]; outs=[o for o in outs if o is not None]
+                if outs: st.write(f"{sig} / {bucket_name}: {sum(outs)}/{len(outs)} = {sum(outs)/len(outs)*100:.1f}% — {desc} (n={len(outs)})")
+                else: st.write(f"{sig} / {bucket_name}: no settled games yet")
+        st.markdown("#### Pending by bucket")
+        _pend = load_matches(pending_only=True)
+        st.write(f"Pending MAIN: {sum(1 for m in _pend if (m.get('bucket') or ('MAIN' if m.get('decision')=='BET' else 'WEAK'))=='MAIN')} | Pending WEAK: {sum(1 for m in _pend if (m.get('bucket') or ('MAIN' if m.get('decision')=='BET' else 'WEAK'))=='WEAK')}")
         st.markdown("### All settled")
         for m in settled:
             filt=_filt_from_db_row(m)
@@ -600,6 +672,8 @@ with tab_sb:
             except Exception as e:
                 st.error(f"FAILED ❌: {e}")
                 st.caption("Copy this exact error — it tells us if it's: table missing (404 / PGRST205), RLS blocked (401/403), wrong URL, or wrong key.")
+    st.markdown("#### One-table SQL — add these columns if your king_matches already exists")
+    st.code("alter table public.king_matches add column if not exists avg_signal text default 'MIXED';\nalter table public.king_matches add column if not exists avg_green_count int default 0;\nalter table public.king_matches add column if not exists bucket text default 'MAIN';\nalter table public.king_matches add column if not exists is_counted_in_main int default 1;", language="sql")
     st.markdown("#### Most common causes")
     st.markdown("- **1. Old king.py still deployed** — you must replace the file on Streamlit and Reboot. If the Supabase tab is missing, you are on the old file.\n- **2. Secrets not set / not rebooted** — Streamlit only reads Secrets on reboot.\n- **3. Table not created** — run supabase_single_table.sql in Supabase SQL Editor. Error will say table not found / PGRST205.\n- **4. Wrong key** — use the `anon public` key from Supabase Settings > API, full string, no quotes, no spaces.\n- **5. RLS blocked** — if the policy `king_all` was not created, anon writes are blocked. Re-run the SQL file.\n- **6. Local SQLite looks like saving** — on Streamlit Cloud, king.db is wiped on reboot, so saves disappear. That is why it looks like 'not saved'.")
 
