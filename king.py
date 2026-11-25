@@ -414,7 +414,11 @@ def _card_html(m, filt, settled=False):
         v=filt['derived'].get(field)
         rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{FIELD_LABEL.get(field,field)}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if v else "NO"} *</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{note} - proved by another pick</td></tr>'
     if not rows: rows='<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
-    skipped=[FIELD_LABEL.get(p['field'], p['label']) for p in picks if p['decision']=='SKIP']  # screenshot style: 'Total over 1.5', not 'Over 1.5 Goals'
+    # Skipped = direct SKIP *and* not filled by implied logic. A category filled by implied logic
+    # (e.g. Home scores proved by BTTS YES) must NOT also appear in Skipped - that was the
+    # second contradiction in the ENPPI card: Home scores listed as both implied and skipped.
+    _implied_fields=set((filt.get('implied_notes') or {}).keys())
+    skipped=[FIELD_LABEL.get(p['field'], p['label']) for p in picks if p['decision']=='SKIP' and p['field'] not in _implied_fields]  # screenshot style: 'Total over 1.5', not 'Over 1.5 Goals'
     skipped_line='Skipped (split / neutral, not used): '+', '.join(skipped) if skipped else 'Nothing skipped.'
     verdict=''
     if settled:
@@ -439,9 +443,17 @@ def _filt_from_db_row(m):
     for p in picks:
         if p["key"]==m.get("main_pick_key"): main=p
     implied={}
+    derived={}
+    for pp in picks:
+        derived[pp["field"]] = True if pp["decision"]=="YES" else False if pp["decision"]=="NO" else None
     for r in m.get("picks") or []:
-        if r.get("is_implied"): implied[r["field"]]=r.get("implied_note") or ""
-    return {"picks":picks,"derived":{},"survivors":[p for p in picks if p["decision"] in ("YES","NO")],
+        if r.get("is_implied"):
+            implied[r["field"]]=r.get("implied_note") or ""
+            # Implied rows were saved with their true YES/NO decision - restore it.
+            # Without this, derived is empty and every implied row renders as NO (the ENPPI bug:
+            # Home scores NO * via BTTS YES, when BTTS YES must mean Home scores YES).
+            derived[r["field"]] = (r.get("decision")=="YES")
+    return {"picks":picks,"derived":derived,"survivors":[p for p in picks if p["decision"] in ("YES","NO")],
             "weak_test": m.get("decision")=="NO BET - WEAK","conflicts":[],"decision":m.get("decision") or "BET",
             "decision_reason":m.get("decision_reason") or "","main_pick":main,"implied_notes":implied}
 
