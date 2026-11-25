@@ -12,7 +12,16 @@ Rules:
   Margin = avg( (A-Lg)/Lg , (B-Lg)/Lg ), absolute value.
   Tie hierarchy: Away > Over 1.5 > Over 2.5 > BTTS > Home.
 - BET = Main YES (any margin) OR Main NO margin >=40% (Strong NO). Weak NO -> NO BET - WEAK NO, not counted in Main.
-- Monitoring (never a bet): ALL_GREEN strict 9/9 -> Over YES + BTTS YES. ALL_RED strict 0/9 -> Under only.
+- WEAK = Filter failed (<3 survivors, or Weak NO, or CONFLICT). WEAK is DATA COLLECTION ONLY, never a bet, never counted in BET Main.
+- WEAK RESCUE (Average Signal, AFTER Filter fails only; never used when Filter gives BET):
+  For each of the 9 Average rows compare Average vs League: Average > League = green, < League = red, = League = NEUTRAL.
+  Neutral does NOT break the lean. Only the opposite colour breaks it.
+  0 red + 1+ green + rest neutral = ALL_GREEN. 0 green + 1+ red + rest neutral = ALL_RED. Green and red both present = MIXED.
+  WEAK + ALL_RED -> Main under WEAK = Under 2.5 (the pick, singular).
+  WEAK + ALL_GREEN -> Main under WEAK = Over 2.5 YES, secondary = BTTS YES.
+  WEAK + MIXED -> no rescue, stays NO BET - WEAK.
+  Rescue lives in its own bucket (Main under WEAK), never mixed with BET Main.
+- Order, every time: Filter first. If Filter gives BET, stop - Average is never used. If Filter fails -> WEAK -> check Average -> rescue or no rescue.
 - Save: BET auto-saves. Non-rule asks Still save? first.
 - Performance settles per-signal only, never scoreline.
 Persistence: SQLite (king.db) via stdlib sqlite3.
@@ -377,7 +386,9 @@ def compute_filter_rule(facts: dict) -> dict:
             "main_pick":main_pick,"implied_notes":implied_notes,"avg_signal":_avg_sig,"avg_green_count":_avg_signal_from_sections(facts.get("sections") or {})[1],
             "weak_main":weak_main,"weak_secondary":weak_secondary}
 
-# ---------------------------------------------------------------- card (DB-shaped picks)
+# ---------------------------------------------------------------- Average Signal (single canonical definition)
+# Neutral (=) does NOT break an Average lean. Only the opposite colour breaks it.
+# Talleres rule: 8 red + 1 neutral + 0 green = ALL_RED in substance.
 def _avg_signal_from_sections(sections):
     keys=['home_scoring_avg','away_scoring_avg','goals_match','home_scoring_rate','away_scoring_rate','over_1_5','over_2_5','over_3_5','btts']
     stts=[]
@@ -385,35 +396,6 @@ def _avg_signal_from_sections(sections):
         s=(sections or {}).get(k)
         if s and s.get('avg') is not None and s.get('league') is not None:
             stts.append('G' if s['avg']>s['league'] else 'R' if s['avg']<s['league'] else '=')
-    # YOU TOLD ME: Talleres 8 red + 1 neutral + 0 green = ALL_RED in substance.
-    # Neutral (=) does NOT break an Average lean. Only the opposite colour breaks it.
-    if stts and 'R' not in stts and 'G' in stts: return 'ALL_GREEN',stts.count('G')
-    if stts and 'G' not in stts and 'R' in stts: return 'ALL_RED',0
-    return 'MIXED',stts.count('G')
-
-def _row_avg_signal(m):
-    return _avg_signal_from_sections(m.get('sections') or {})
-
-def _avg_breakdown(m):
-    secs=m.get('sections') or {}
-    g=r=e=0; neut=[]
-    for k in ['home_scoring_avg','away_scoring_avg','goals_match','home_scoring_rate','away_scoring_rate','over_1_5','over_2_5','over_3_5','btts']:
-        s=secs.get(k)
-        if not s or s.get('avg') is None or s.get('league') is None: continue
-        if s['avg']>s['league']: g+=1
-        elif s['avg']<s['league']: r+=1
-        else: e+=1; neut.append(k)
-    return g,r,e,neut
-
-def _avg_signal_from_sections(sections):
-    keys=['home_scoring_avg','away_scoring_avg','goals_match','home_scoring_rate','away_scoring_rate','over_1_5','over_2_5','over_3_5','btts']
-    stts=[]
-    for k in keys:
-        s=(sections or {}).get(k)
-        if s and s.get('avg') is not None and s.get('league') is not None:
-            stts.append('G' if s['avg']>s['league'] else 'R' if s['avg']<s['league'] else '=')
-    # YOU TOLD ME: Talleres 8 red + 1 neutral + 0 green = ALL_RED in substance.
-    # Neutral (=) does NOT break an Average lean. Only the opposite colour breaks it.
     if stts and 'R' not in stts and 'G' in stts: return 'ALL_GREEN',stts.count('G')
     if stts and 'G' not in stts and 'R' in stts: return 'ALL_RED',0
     return 'MIXED',stts.count('G')
@@ -457,17 +439,21 @@ def _card_html(m, filt, settled=False):
         banner = f'<div style="margin-top:8px;background:#78350f;border-radius:8px;padding:8px 10px;font-size:0.85rem;font-weight:800;color:#fef3c7">NO BET — CONFLICT &middot; Survivors contradict</div>'
     else:
         banner = f'<div style="margin-top:8px;background:#7f1d1d;border-radius:8px;padding:8px 10px;font-size:0.85rem;font-weight:800;color:#fecaca">NO BET — WEAK &middot; Only {len(filt["survivors"])}/5 agree</div>'
+    # Average display rule: BET -> show NOTHING about Average (Filter passed, Average never used).
+    # WEAK + rescue -> show the rescue basis. WEAK + MIXED -> show nothing (no rescue).
+    # The old "MONITORING ONLY" strip is removed: it contradicted the rescue strip on the same card.
+    # Average display rule: BET -> show NOTHING about Average (Filter passed, Average never used).
+    # WEAK + rescue -> show the rescue basis. WEAK + MIXED -> show nothing (no rescue).
+    # The old "MONITORING ONLY" strip is removed: it contradicted the rescue strip on the same card.
     _avg = filt.get('avg_signal') or 'MIXED'
-    if _avg == 'ALL_GREEN':
-        if is_settled:
-            avg_html = f'<div style="margin-top:6px;font-size:0.8rem;color:#86efac">Avg ALL GREEN — MONITORING ONLY, NOT A BET — Over: {"hit" if total > 2.5 else "missed"} (total {total}) &middot; BTTS: {"hit" if (hs > 0 and aws > 0) else "missed"}</div>'
-        else:
-            avg_html = '<div style="margin-top:6px;font-size:0.8rem;color:#86efac">Avg ALL GREEN — MONITORING ONLY, NOT A BET — Over YES + BTTS YES</div>'
+    _has_rescue = bool(filt.get('weak_main')) and dec != 'BET'
+    if dec == 'BET' or not _has_rescue:
+        avg_html = ''
+    elif _avg == 'ALL_GREEN':
+        _gc = filt.get('avg_green_count')
+        avg_html = f'<div style="margin-top:6px;font-size:0.8rem;color:#86efac">Average: ALL GREEN — {str(_gc) + " green, " if _gc is not None else ""}0 red, neutral does not break the lean — basis for WEAK rescue</div>'
     elif _avg == 'ALL_RED':
-        if is_settled:
-            avg_html = f'<div style="margin-top:6px;font-size:0.8rem;color:#fca5a5">Avg ALL RED — MONITORING ONLY, NOT A BET — Under: {"hit" if total <= 2.5 else "missed"} (total {total})</div>'
-        else:
-            avg_html = '<div style="margin-top:6px;font-size:0.8rem;color:#fca5a5">Avg ALL RED — MONITORING ONLY, NOT A BET — Under 2.5</div>'
+        avg_html = '<div style="margin-top:6px;font-size:0.8rem;color:#fca5a5">Average: ALL RED — 0 green, neutral does not break the lean — basis for WEAK rescue</div>'
     else:
         avg_html = ''
     # WEAK RESCUE strip: Main under WEAK (counts as Main, separate bucket from BET Main)
@@ -536,7 +522,10 @@ def _card_html(m, filt, settled=False):
     skip_html = f'<div style="font-size:0.78rem;color:#64748b;margin-top:4px">Skipped: {", ".join(skipped)}</div>' if skipped else ''
     _note = ''
     if is_settled and dec != 'BET':
-        _note = '<div style="font-size:0.76rem;color:#64748b;margin-top:4px">No bet placed — research only. Final score 1-1 used only to settle signals, never predicted.</div>' if (hs == 1 and aws == 1) else '<div style="font-size:0.76rem;color:#64748b;margin-top:4px">No bet placed — research only. Final score used only to settle signals, never predicted.</div>'
+        if filt.get('weak_main'):
+            _note = '<div style="font-size:0.76rem;color:#64748b;margin-top:4px">WEAK — data collection only. Final score used only to settle the WEAK Main, never predicted.</div>'
+        else:
+            _note = '<div style="font-size:0.76rem;color:#64748b;margin-top:4px">WEAK — data collection only, no rescue. Final score used only to settle signals, never predicted.</div>'
     return f'<div class="match-card">{head}{banner}{_rescue_html}{avg_html}<div style="margin-top:6px">{rows}</div>{implied}{skip_html}{_note}</div>'
 
 
@@ -544,6 +533,7 @@ def _filt_from_db_row(m):
     picks=[]
     for r in m.get("picks") or []:
         if r.get("is_implied"): continue
+        if r.get("is_main") in (2, 3): continue  # WEAK rescue rows: shown only in the WEAK MAIN row, never as Filter picks
         picks.append({"key":r["category_key"],"label":r["label"],"question":"","field":r["field"],
                       "a":r["a_pct"],"b":r["b_pct"],"league":r["league_pct"],"avg":r["avg_pct"],
                       "decision":r["decision"],"reason":"","margin_pct":r["margin_pct"] or 0,"margin":(r["margin_pct"] or 0)/100.0})
@@ -637,11 +627,11 @@ with tab_perf:
         mp_wins = mp_n = 0
         for m in settled:
             for p in m["picks"]:
-                if p.get("is_main") and p.get("outcome") is not None: mp_n += 1; mp_wins += p["outcome"]
+                if p.get("is_main") == 1 and p.get("outcome") is not None: mp_n += 1; mp_wins += p["outcome"]
         yes_n = yes_w = no_n = no_w = 0
         for m in main_settled:
             for p in m["picks"]:
-                if p.get("is_main") and p.get("outcome") is not None:
+                if p.get("is_main") == 1 and p.get("outcome") is not None:
                     if m.get("main_pick_decision") == "YES": yes_n += 1; yes_w += p["outcome"]
                     elif m.get("main_pick_decision") == "NO": no_n += 1; no_w += p["outcome"]
         def _mini(title, big, sub, color="#f1f5f9"):
@@ -667,7 +657,7 @@ with tab_perf:
                 for p in m["picks"]:
                     if p["field"] == field and not p.get("is_implied") and p.get("outcome") is not None: n += 1; wins += p["outcome"]
             with _cols[_i]: st.markdown(_mini(label.upper(), f"{wins}/{n}" if n else "—", f"{(wins/n*100) if n else 0:.1f}% · MAIN only"), unsafe_allow_html=True)
-        st.markdown("#### Monitoring — ALL_GREEN / ALL_RED only")
+        st.markdown("#### WEAK Average check — ALL_GREEN / ALL_RED, WEAK matches only (BET matches never used Average)")
         def _avg_out(m, want):
             hs, aws = m.get("home_score"), m.get("away_score")
             if hs is None or aws is None: return None
@@ -677,7 +667,8 @@ with tab_perf:
             return None
         _m1, _m2, _m3 = st.columns(3)
         for _col, _sig, _want, _avg_lbl in [(_m1, "ALL_GREEN", "OVER", "ALL GREEN → Over"), (_m2, "ALL_GREEN", "BTTS", "ALL GREEN → BTTS"), (_m3, "ALL_RED", "UNDER", "ALL RED → Under")]:
-            ss = [m for m in settled if _row_avg_signal(m)[0] == _sig]
+            # WEAK only: BET matches never used Average, so they must never feed Average stats.
+            ss = [m for m in settled if m.get("decision") != "BET" and _row_avg_signal(m)[0] == _sig]
             outs = [o for o in [_avg_out(m, _want) for m in ss] if o is not None]
             with _col: st.markdown(_mini(_avg_lbl, f"{sum(outs)}/{len(outs)}" if outs else "—", f"{(sum(outs)/len(outs)*100) if outs else 0:.1f}% · monitoring only"), unsafe_allow_html=True)
         st.markdown("#### All settled")
