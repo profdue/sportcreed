@@ -482,8 +482,8 @@ def _card_html(m, filt, settled=False):
         else:
             head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">DECISION: NO BET — WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
     _avg = filt.get("avg_signal") or "MIXED"
-    if _avg=="ALL_GREEN": _avg_txt = "Average Signal: ALL GREEN — lean BTTS YES + Over 2.5 YES (lean, not a bet)"
-    elif _avg=="ALL_RED": _avg_txt = "Average Signal: ALL RED — lean Under 2.5 + BTTS NO (lean, not a bet)"
+    if _avg=="ALL_GREEN": _avg_txt = "Average Signal: ALL GREEN — lean Over 2.5 YES (lean, not a bet)"
+    elif _avg=="ALL_RED": _avg_txt = "Average Signal: ALL RED — lean Under 2.5 (lean, not a bet)"
     else: _avg_txt = f"Average Signal: MIXED ({filt.get('avg_green_count',0)}/9 averages green) — no lean"
     _avg_color = "#10b981" if _avg=="ALL_GREEN" else ("#ef4444" if _avg=="ALL_RED" else "#94a3b8")
     rows=f'<tr><td colspan="3" style="padding:8px 10px;background:#0b1220;border:1px solid #1e293b;border-radius:8px;color:{_avg_color};font-weight:700;font-size:0.88rem">{_avg_txt}</td></tr>'
@@ -624,10 +624,10 @@ with tab_perf:
         def _avg_outcome(m, want):
             hs, aws = m.get("home_score"), m.get("away_score")
             if hs is None or aws is None: return None
-            if want=="ALL_GREEN": return 1 if (hs>0 and aws>0) and (hs+aws)>2.5 else 0
+            if want=="ALL_GREEN": return 1 if (hs+aws)>2.5 else 0
             if want=="ALL_RED": return 1 if (hs+aws)<=2.5 else 0
             return None
-        for sig, desc in [("ALL_GREEN","ALL_GREEN -> BTTS YES + Over 2.5 YES"),("ALL_RED","ALL_RED -> Under 2.5")]:
+        for sig, desc in [("ALL_GREEN","ALL_GREEN -> Over 2.5 YES only"),("ALL_RED","ALL_RED -> Under 2.5 only")]:
             for bucket_name, subset in [("MAIN", main_settled), ("WEAK", weak_settled)]:
                 ss=[m for m in subset if (m.get("avg_signal") or "MIXED")==sig]
                 outs=[_avg_outcome(m, sig) for m in ss]; outs=[o for o in outs if o is not None]
