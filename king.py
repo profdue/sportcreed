@@ -6,27 +6,19 @@ Rules:
 - Equality (= league) is NEUTRAL, not BELOW. Any side = league -> SKIP for that category.
 - Over 3.5 always ignored.
 - No scoreline / exact score is ever predicted.
+- UNDER callout: an Over 1.5 NO / Over 2.5 NO survivor is shown as its own highlighted ALSO: UNDER line on the card, never buried in Others. Main Pick rule is unchanged.
+- ABSOLUTE GATE (Tromso rule): a relative NO only counts if Avg is at/below the LOW ceiling for that category;
+  a relative YES only counts if Avg is above LOW. Below league but above LOW (e.g. 86% Over 1.5 vs 87% league)
+  is NOT a red - it is a high arena, downgraded to SKIP. This is what filters Tromso-type matches out of BET.
 - Weak test: <3 survivors -> NO BET.
 - Conflict test: direct survivors that logically contradict -> NO BET - CONFLICT.
 - Main Pick: biggest relative margin among survivors. History only breaks ties.
   Margin = avg( (A-Lg)/Lg , (B-Lg)/Lg ), absolute value.
   Tie hierarchy: Away > Over 1.5 > Over 2.5 > BTTS > Home.
-- BET = Main YES (any margin) OR Main NO margin >=40% (Strong NO). Weak NO -> NO BET - WEAK NO, not counted in Main.
-- WEAK = Filter failed (<3 survivors, or Weak NO, or CONFLICT). WEAK is DATA COLLECTION ONLY, never a bet, never counted in BET Main.
-- WEAK RESCUE (Average Signal, AFTER Filter fails only; never used when Filter gives BET):
-  For each of the 9 Average rows compare Average vs League: Average > League = green, < League = red, = League = NEUTRAL.
-  Neutral does NOT break the lean. Only the opposite colour breaks it.
-  0 red + 1+ green + rest neutral = ALL_GREEN. 0 green + 1+ red + rest neutral = ALL_RED. Green and red both present = MIXED.
-  WEAK + ALL_RED -> Main under WEAK = Under 2.5 (the pick, singular).
-  WEAK + ALL_GREEN -> Main under WEAK = Over 2.5 YES, secondary = BTTS YES.
-  WEAK + MIXED -> no rescue, stays NO BET - WEAK.
-  Rescue lives in its own bucket (Main under WEAK), never mixed with BET Main.
-- Order, every time: Filter first. If Filter gives BET, stop - Average is never used. If Filter fails -> WEAK -> check Average -> rescue or no rescue.
-- Save: BET auto-saves. Non-rule asks Still save? first.
+- Evaluating does NOT save. Only "Save to Pending" saves.
 - Performance settles per-signal only, never scoreline.
 Persistence: SQLite (king.db) via stdlib sqlite3.
 """
-import re
 import sqlite3
 import streamlit as st
 import pandas as pd
@@ -49,6 +41,21 @@ FILTER_CATEGORIES = [
     ("btts", "BTTS", "Do both teams score?", "btts"),
 ]
 HIER = {"away_scoring_rate": 0, "over_1_5": 1, "over_2_5": 2, "btts": 3, "home_scoring_rate": 4}
+
+# --- Absolute gate (the Tromso rule) ---
+# A relative call (below/above league) only counts if the ABSOLUTE level (Avg) agrees.
+# Below league alone is not enough: 86% Over 1.5 in an 87% league is a HIGH arena, not a red.
+# LOW = ceiling for a "true low" arena in that category. A NO only counts if Avg is at/below LOW;
+# a YES only counts if Avg is above LOW. Otherwise the pick is downgraded to SKIP.
+# Values are per-category because base rates differ: Over 1.5 lives near 80%, Over 2.5 / BTTS near 55%,
+# so one universal 70 would call a 65% Over 2.5 "red" when it is actually high.
+ABSOLUTE_LOW = {
+    "home_scoring_rate": 70.0,  # % - no Home-rate league in our 71 ever went below 71
+    "away_scoring_rate": 65.0,  # % - 70 is still average for Away rate
+    "over_1_5": 70.0,           # % - league median ~79
+    "over_2_5": 50.0,           # % - league median ~57, max 68; 70 would be HIGH here
+    "btts": 50.0,                # % - league median ~56, max 61; 70 would be HIGH here
+}
 LABEL = {"Home Scoring Rate": "Home scores", "Away Scoring Rate": "Away scores",
          "Over 1.5 Goals": "Total over 1.5", "Over 2.5 Goals": "Total over 2.5", "BTTS": "Both score"}
 FIELD_LABEL = {"home_scores": "Home scores", "away_scores": "Away scores",
@@ -119,16 +126,6 @@ def save_match(facts, filt, raw_paste):
         cur.execute(
             "INSERT INTO picks (match_id,category_key,label,field,a_pct,b_pct,league_pct,avg_pct,decision,margin_pct,is_main,is_implied,implied_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (mid, field, lbl, field, None, None, None, None, "YES" if filt["derived"].get(field) else "NO", None, 0, 1, note))
-    if filt.get("weak_main"):
-        _wm = filt["weak_main"]
-        cur.execute(
-            "INSERT INTO picks (match_id,category_key,label,field,a_pct,b_pct,league_pct,avg_pct,decision,margin_pct,is_main,is_implied,implied_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (mid, _wm["key"], _wm["label"], _wm["field"], None, None, None, None, _wm["decision"], 0.0, 2, 0, "WEAK RESCUE - Main under WEAK"))
-    if filt.get("weak_secondary"):
-        _ws = filt["weak_secondary"]
-        cur.execute(
-            "INSERT INTO picks (match_id,category_key,label,field,a_pct,b_pct,league_pct,avg_pct,decision,margin_pct,is_main,is_implied,implied_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (mid, _ws["key"], _ws["label"], _ws["field"], None, None, None, None, _ws["decision"], 0.0, 3, 0, "WEAK RESCUE - secondary"))
     for key, sec in facts["sections"].items():
         cur.execute("INSERT INTO raw_sections (match_id,section_key,a_val,b_val,avg_val,league_val) VALUES (?,?,?,?,?,?)",
                     (mid, key, sec.get("a"), sec.get("b"), sec.get("avg"), sec.get("league")))
@@ -165,13 +162,6 @@ def load_matches(pending_only=False, settled_only=False):
     rows = [dict(r) for r in cur.execute(q).fetchall()]
     for m in rows:
         m["picks"] = [dict(r) for r in cur.execute("SELECT * FROM picks WHERE match_id=? ORDER BY id", (m["id"],)).fetchall()]
-        try:
-            secs = {}
-            for r in cur.execute("SELECT * FROM raw_sections WHERE match_id=?", (m["id"],)).fetchall():
-                secs[r["section_key"]] = {"a": r["a_val"], "b": r["b_val"], "avg": r["avg_val"], "league": r["league_val"]}
-            m["sections"] = secs
-        except Exception:
-            m["sections"] = {}
     conn.close()
     return rows
 
@@ -284,28 +274,30 @@ def parse_filter_data(text: str) -> dict:
                 if kw in away_team: away_team=away_team.split(kw)[0].strip()
         if home_team and away_team: break
     # cleaner: use first (A)/(B) pair from Home scoring averages block
-    home_team=re.sub(r"\s+", " ", re.sub(r"\s*\((HOME|AWAY|home|away)\)\s*", " ", home_team or "")).strip(" -") if home_team else home_team
-    away_team=re.sub(r"\s+", " ", re.sub(r"\s*\((HOME|AWAY|home|away)\)\s*", " ", away_team or "")).strip(" -") if away_team else away_team
     return {"sections": sections, "home_team": home_team, "away_team": away_team, "warnings": warnings}
 
 # ---------------------------------------------------------------- filter rule
-def _decide(a, league, b):
+def _decide(a, league, b, avg=None, key=None):
     # Equality is NEUTRAL. Only strict > / strict < counts.
+    # ABSOLUTE GATE: a relative call only stands if the absolute level (Avg) agrees.
+    #   NO needs Avg at/below LOW (true low arena). YES needs Avg above LOW (not a low arena
+    #   beating an even lower league). Otherwise downgraded to SKIP.
+    #   Tromso Over 1.5: 86/86 vs 87 -> candidate NO, but Avg 86 > LOW 70 -> SKIP, not NO.
     if a is None or b is None or league is None:
         return "SKIP"
+    low = ABSOLUTE_LOW.get(key) if key else None
     if a > league and b > league:
+        if low is not None and avg is not None and avg <= low:
+            return "SKIP"
         return "YES"
     if a < league and b < league:
+        if low is not None and avg is not None and avg > low:
+            return "SKIP"
         return "NO"
     return "SKIP"
 
 def _lbl(v, lg):
-    # Lab must never crash on a missing / non-numeric value: return neutral text instead.
-    try:
-        fv = float(v); fl = float(lg)
-    except Exception:
-        return "missing (neutral)"
-    return f"{fv:g}% BEATS league {fl:g}%" if fv > fl else f"{fv:g}% BELOW league {fl:g}%" if fv < fl else f"{fv:g}% = league {fl:g}% (neutral)"
+    return f"{v:g}% BEATS league {lg:g}%" if v > lg else f"{v:g}% BELOW league {lg:g}%" if v < lg else f"{v:g}% = league {lg:g}% (neutral)"
 
 def compute_filter_rule(facts: dict) -> dict:
     picks=[]; derived={}
@@ -314,14 +306,25 @@ def compute_filter_rule(facts: dict) -> dict:
         if not sec or sec.get("a") is None or sec.get("b") is None or sec.get("league") is None:
             picks.append({"key":key,"label":label,"question":question,"field":field,"a":None,"b":None,"league":None,"decision":"SKIP","reason":"Section not found in paste."})
             derived[field]=None; continue
-        dec=_decide(sec["a"], sec["league"], sec["b"])
+        dec=_decide(sec["a"], sec["league"], sec["b"], avg=sec.get("avg"), key=key)
         if dec=="YES":
             derived[field]=True; reason=f"Both BEAT league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> YES"
         elif dec=="NO":
             derived[field]=False; reason=f"Both BELOW league ({sec['a']:g}% vs {sec['league']:g}% and {sec['b']:g}% vs {sec['league']:g}%) -> NO"
         else:
             derived[field]=None
-            reason=f"Split: A {_lbl(sec['a'], sec['league'])} | B {_lbl(sec['b'], sec['league'])} -> SKIP"
+            # If both sides were on the same side of league but the absolute gate blocked it,
+            # say so - otherwise a Tromso-type downgrade looks like an ordinary split.
+            _low = ABSOLUTE_LOW.get(key)
+            if sec["a"] is not None and sec["b"] is not None and _low is not None and sec.get("avg") is not None:
+                if sec["a"] < sec["league"] and sec["b"] < sec["league"] and sec["avg"] > _low:
+                    reason=f"Below league but Avg {sec['avg']:g}% above LOW {_low:g}% - high arena, not a true NO -> SKIP"
+                elif sec["a"] > sec["league"] and sec["b"] > sec["league"] and sec["avg"] <= _low:
+                    reason=f"Above league but Avg {sec['avg']:g}% at/below LOW {_low:g}% - low arena, not a true YES -> SKIP"
+                else:
+                    reason=f"Split: A {_lbl(sec['a'], sec['league'])} | B {_lbl(sec['b'], sec['league'])} -> SKIP"
+            else:
+                reason=f"Split: A {_lbl(sec['a'], sec['league'])} | B {_lbl(sec['b'], sec['league'])} -> SKIP"
         picks.append({"key":key,"label":label,"question":question,"field":field,"a":sec["a"],"b":sec["b"],"league":sec["league"],"avg":sec.get("avg"),"decision":dec,"reason":reason})
     # implied (only fills None, never overrides a direct pick)
     implied_notes={}
@@ -366,174 +369,67 @@ def compute_filter_rule(facts: dict) -> dict:
     else:
         ranked=sorted(survivors, key=lambda pp: (-pp['margin'], HIER.get(pp['key'],99)))
         main_pick=ranked[0]
-        if main_pick["decision"]=="NO" and main_pick["margin_pct"]<40.0:
-            decision="NO BET - WEAK NO"; decision_reason="Weak NO - Strong NO only (40%+). Not a bet."
-        else:
-            decision_reason=f"Main Pick {LABEL.get(main_pick['label'], main_pick['label'])} {main_pick['decision']} at {main_pick['margin_pct']:.1f}% margin."
-    _avg_sig = _avg_signal_from_sections(facts.get("sections") or {})[0]
-    # WEAK RESCUE: Filter failed -> check Average. If ALL_RED / ALL_GREEN, it counts as MAIN UNDER WEAK.
-    weak_main = None; weak_secondary = None
-    if decision != "BET":
-        if _avg_sig == "ALL_RED":
-            weak_main = {"key":"over_2_5","label":"Over 2.5 Goals","field":"over_2_5","decision":"NO","margin_pct":0.0}
-            decision_reason += " | WEAK RESCUE: ALL_RED -> Main under WEAK = Under 2.5."
-        elif _avg_sig == "ALL_GREEN":
-            weak_main = {"key":"over_2_5","label":"Over 2.5 Goals","field":"over_2_5","decision":"YES","margin_pct":0.0}
-            weak_secondary = {"key":"btts","label":"BTTS","field":"btts","decision":"YES","margin_pct":0.0}
-            decision_reason += " | WEAK RESCUE: ALL_GREEN -> Main under WEAK = Over 2.5 YES, secondary BTTS YES."
+        decision_reason=f"Main Pick {LABEL.get(main_pick['label'], main_pick['label'])} {main_pick['decision']} at {main_pick['margin_pct']:.1f}% margin."
     return {"picks":picks,"derived":derived,"survivors":survivors,"weak_test":weak,
             "conflicts":conflicts,"decision":decision,"decision_reason":decision_reason,
-            "main_pick":main_pick,"implied_notes":implied_notes,"avg_signal":_avg_sig,"avg_green_count":_avg_signal_from_sections(facts.get("sections") or {})[1],
-            "weak_main":weak_main,"weak_secondary":weak_secondary}
+            "main_pick":main_pick,"implied_notes":implied_notes}
 
-# ---------------------------------------------------------------- Average Signal (single canonical definition)
-# Neutral (=) does NOT break an Average lean. Only the opposite colour breaks it.
-# Talleres rule: 8 red + 1 neutral + 0 green = ALL_RED in substance.
-def _avg_signal_from_sections(sections):
-    keys=['home_scoring_avg','away_scoring_avg','goals_match','home_scoring_rate','away_scoring_rate','over_1_5','over_2_5','over_3_5','btts']
-    stts=[]
-    for k in keys:
-        s=(sections or {}).get(k)
-        if s and s.get('avg') is not None and s.get('league') is not None:
-            stts.append('G' if s['avg']>s['league'] else 'R' if s['avg']<s['league'] else '=')
-    if stts and 'R' not in stts and 'G' in stts: return 'ALL_GREEN',stts.count('G')
-    if stts and 'G' not in stts and 'R' in stts: return 'ALL_RED',0
-    return 'MIXED',stts.count('G')
-
-def _row_avg_signal(m):
-    return _avg_signal_from_sections(m.get('sections') or {})
-
-def _avg_breakdown(m):
-    secs=m.get('sections') or {}
-    g=r=e=0; neut=[]
-    for k in ['home_scoring_avg','away_scoring_avg','goals_match','home_scoring_rate','away_scoring_rate','over_1_5','over_2_5','over_3_5','btts']:
-        s=secs.get(k)
-        if not s or s.get('avg') is None or s.get('league') is None: continue
-        if s['avg']>s['league']: g+=1
-        elif s['avg']<s['league']: r+=1
-        else: e+=1; neut.append(k)
-    return g,r,e,neut
-
+# ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
-    picks = filt['picks']; main = filt.get('main_pick')
-    hs, aws = m.get('home_score'), m.get('away_score')
-    is_settled = settled and hs is not None and aws is not None
-    total = (hs + aws) if is_settled else None
-    outcome = {}
-    for r in (m.get('picks') or []):
-        if not r.get('is_implied'):
-            outcome[r.get('field')] = r.get('outcome')
-    # header: one line
-    if is_settled:
-        head = f'<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:1rem;font-weight:800;color:#f1f5f9">{home} <span style="color:#64748b">vs</span> {away}</div><span style="background:#0b1220;border:1px solid #334155;border-radius:999px;padding:2px 10px;font-size:0.85rem;font-weight:800">{hs}-{aws} &middot; {total} goals</span></div>'
+    picks=filt['picks']; main=filt.get('main_pick')
+    fixture=f'<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">{home} <span style="font-size:0.72rem;color:#94a3b8">(HOME)</span> vs {away} <span style="font-size:0.72rem;color:#94a3b8">(AWAY)</span></div>'
+    if settled and m.get('home_score') is not None:
+        head=fixture+f'<div style="font-size:1rem;color:#94a3b8;margin-top:6px">Result: {home} {m["home_score"]}-{m["away_score"]} {away}</div>'
     else:
-        head = f'<div style="font-size:1rem;font-weight:800;color:#f1f5f9">{home} <span style="color:#64748b">vs</span> {away}</div>'
-    dec = filt['decision']
-    if dec == 'BET' and main:
-        ml = LABEL.get(main['label'], main['label']); mv = 'YES' if main['decision'] == 'YES' else 'NO'
-        banner = f'<div style="margin-top:8px;background:#065f46;border-radius:8px;padding:8px 10px;display:flex;justify-content:space-between;align-items:center"><span style="font-size:0.85rem;font-weight:900;color:#fff">BET &middot; MAIN {ml} — {mv}</span><span style="font-size:0.78rem;color:#d1fae5">{main["margin_pct"]:.1f}% margin</span></div>'
-    elif dec == 'NO BET - WEAK NO':
-        banner = f'<div style="margin-top:8px;background:#78350f;border-radius:8px;padding:8px 10px;font-size:0.85rem;font-weight:800;color:#fef3c7">NO BET — WEAK NO &middot; Strong NO only (40%+)</div>'
-    elif dec == 'NO BET - CONFLICT':
-        banner = f'<div style="margin-top:8px;background:#78350f;border-radius:8px;padding:8px 10px;font-size:0.85rem;font-weight:800;color:#fef3c7">NO BET — CONFLICT &middot; Survivors contradict</div>'
-    else:
-        banner = f'<div style="margin-top:8px;background:#7f1d1d;border-radius:8px;padding:8px 10px;font-size:0.85rem;font-weight:800;color:#fecaca">NO BET — WEAK &middot; Only {len(filt["survivors"])}/5 agree</div>'
-    # Average display rule: BET -> show NOTHING about Average (Filter passed, Average never used).
-    # WEAK + rescue -> show the rescue basis. WEAK + MIXED -> show nothing (no rescue).
-    # The old "MONITORING ONLY" strip is removed: it contradicted the rescue strip on the same card.
-    # Average display rule: BET -> show NOTHING about Average (Filter passed, Average never used).
-    # WEAK + rescue -> show the rescue basis. WEAK + MIXED -> show nothing (no rescue).
-    # The old "MONITORING ONLY" strip is removed: it contradicted the rescue strip on the same card.
-    _avg = filt.get('avg_signal') or 'MIXED'
-    _has_rescue = bool(filt.get('weak_main')) and dec != 'BET'
-    if dec == 'BET' or not _has_rescue:
-        avg_html = ''
-    elif _avg == 'ALL_GREEN':
-        _gc = filt.get('avg_green_count')
-        avg_html = f'<div style="margin-top:6px;font-size:0.8rem;color:#86efac">Average: ALL GREEN — {str(_gc) + " green, " if _gc is not None else ""}0 red, neutral does not break the lean — basis for WEAK rescue</div>'
-    elif _avg == 'ALL_RED':
-        avg_html = '<div style="margin-top:6px;font-size:0.8rem;color:#fca5a5">Average: ALL RED — 0 green, neutral does not break the lean — basis for WEAK rescue</div>'
-    else:
-        avg_html = ''
-    # WEAK RESCUE strip: Main under WEAK (counts as Main, separate bucket from BET Main)
-    _wm = filt.get('weak_main'); _ws = filt.get('weak_secondary')
-    _rescue_html = ''
-    if _wm and dec != 'BET':
-        _wm_label = LABEL.get(_wm.get('label'), _wm.get('label'))
-        _wm_disp = 'Under 2.5' if (_wm.get('field') == 'over_2_5' and _wm.get('decision') == 'NO') else f"{_wm_label} — {_wm.get('decision')}"
-        _rescue_html = f'<div style="margin-top:6px;background:#312e81;border:1px solid #6366f1;border-radius:8px;padding:8px 10px;font-size:0.85rem;font-weight:800;color:#e0e7ff">WEAK RESCUE — MAIN UNDER WEAK: {_wm_disp} &nbsp; <span style="font-weight:600;color:#c7d2fe">Counts as Main under WEAK, not BET Main.</span></div>'
-        if _ws:
-            _ws_label = LABEL.get(_ws.get('label'), _ws.get('label'))
-            _rescue_html += f'<div style="font-size:0.78rem;color:#a5b4fc;margin-top:2px">Secondary rescue: {_ws_label} — {_ws.get("decision")}</div>'
-    # picks as compact rows: one line each
-    rows = ''
-    ordered = []
-    if main and dec == 'BET': ordered.append(main)
+        if filt['decision']=="BET":
+            ml=LABEL.get(main['label'], main['label']) if main else '-'
+            mv='YES' if main['decision']=='YES' else 'NO'
+            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">DECISION: BET &nbsp;|&nbsp; MAIN PICK</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} - {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Strongest signal today: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
+            # UNDER callout: an Over NO survivor is a bet in its own right (Under 1.5 / Under 2.5).
+            # It must never be buried as just another row in Others - show it as a second highlighted line.
+            # Main Pick is unchanged: this is an additional featured pick, not a second Main.
+            # Prefer UNDER 2.5 over UNDER 1.5 when both are NO survivors: 2.5 is the bettable one.
+            _unders=[x for x in filt['picks'] if x['field'] in ('over_1_5','over_2_5') and x['decision']=='NO' and not (main and x['key']==main['key'])]
+            _unders.sort(key=lambda x: 0 if x['field']=='over_2_5' else 1)
+            if _unders:
+                _up=_unders[0]
+                _under = 'UNDER 1.5' if _up['field']=='over_1_5' else 'UNDER 2.5'
+                _over_lbl = '1.5' if _up['field']=='over_1_5' else '2.5'
+                head += f'<div style="margin-top:8px;background:#0ea5e922;border:1px solid #0ea5e9;border-radius:12px;padding:12px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#38bdf8">ALSO: {_under}</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:2px">{_under} — Over {_over_lbl} NO</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Margin {_up.get("margin_pct",0):.1f}% — both sides below league, Avg at/below LOW. Settles as its own WIN/LOSS.</div></div>'
+        elif filt['decision']=="NO BET - CONFLICT":
+            head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">DECISION: NO BET — CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
+        else:
+            head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">DECISION: NO BET — WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
+    rows=''
+    if main and filt['decision']=="BET":
+        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0;font-weight:700">MAIN: {LABEL.get(main["label"], main["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:800">{"YES" if main["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{main["a"]:g}% vs league {main["league"]:g}% | {main["b"]:g}% vs league {main["league"]:g}% - margin {main["margin_pct"]:.1f}%</td></tr>'
     for p in picks:
-        if p['decision'] == 'SKIP': continue
-        if main and p['key'] == main['key'] and dec == 'BET': continue
-        ordered.append(p)
-    for p in ordered:
-        is_main_row = (main and p['key'] == main['key'] and dec == 'BET')
-        label = LABEL.get(p['label'], p['label'])
-        d = p['decision']
-        a, b, lg = p.get('a'), p.get('b'), p.get('league')
-        if a is not None and b is not None and lg is not None:
-            why = f'Both {"beat" if d=="YES" else "below"} league: {a:g}% / {b:g}% vs {lg:g}%'
-        else: why = ''
-        if is_settled:
-            oc = outcome.get(p.get('field'))
-            is_bet_card = (dec == 'BET')
-            if oc == 1: verdict = '<span style="background:#16a34a;color:#fff;border-radius:999px;padding:1px 8px;font-size:0.72rem;font-weight:900">WIN</span>' if is_bet_card else '<span style="background:#334155;color:#cbd5e1;border-radius:999px;padding:1px 8px;font-size:0.72rem;font-weight:800">hit — research</span>'
-            elif oc == 0: verdict = '<span style="background:#dc2626;color:#fff;border-radius:999px;padding:1px 8px;font-size:0.72rem;font-weight:900">LOSS</span>' if is_bet_card else '<span style="background:#334155;color:#cbd5e1;border-radius:999px;padding:1px 8px;font-size:0.72rem;font-weight:800">missed — research</span>'
-            else: verdict = ''
-            if p.get('field') == 'home_scores': act = f'Home {hs}'
-            elif p.get('field') == 'away_scores': act = f'Away {aws}'
-            elif p.get('field') in ('over_1_5','over_2_5'): act = f'Total {total}'
-            elif p.get('field') == 'btts': act = 'Both scored' if (hs > 0 and aws > 0) else 'Not both'
-            else: act = ''
-            right = f'{act} {verdict}'
-        else:
-            right = f'{p.get("margin_pct",0):.1f}%'
-        main_tag = ' <span style="color:#f59e0b;font-size:0.68rem;font-weight:900">MAIN</span>' if is_main_row else ''
-        rows += f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1e293b"><div><span style="font-weight:700;font-size:0.85rem;color:#f1f5f9">{label}{main_tag}</span> <span style="font-size:0.8rem;color:#94a3b8">{why}</span></div><div style="display:flex;gap:8px;align-items:center;white-space:nowrap"><span style="background:{"#065f46" if d=="YES" else "#7f1d1d"};color:#fff;border-radius:999px;padding:1px 8px;font-size:0.75rem;font-weight:800">{d}</span><span style="font-size:0.8rem;color:#cbd5e1">{right}</span></div></div>'
-    # WEAK Main row (settled: hit/missed as Main under WEAK, never WIN/LOSS bet pill confusion - use Main pill)
-    if _wm and dec != 'BET':
-        _wm_label2 = LABEL.get(_wm.get('label'), _wm.get('label'))
-        _wm_disp2 = 'Under 2.5' if (_wm.get('field') == 'over_2_5' and _wm.get('decision') == 'NO') else f"{_wm_label2} — {_wm.get('decision')}"
-        if is_settled:
-            # outcome from stored picks where is_main==2
-            _oc = None
-            for _r in (m.get('picks') or []):
-                if _r.get('is_main') == 2: _oc = _r.get('outcome')
-            if _oc == 1: _vp = '<span style="background:#6366f1;color:#fff;border-radius:999px;padding:1px 8px;font-size:0.72rem;font-weight:900">HIT — WEAK MAIN</span>'
-            elif _oc == 0: _vp = '<span style="background:#334155;color:#cbd5e1;border-radius:999px;padding:1px 8px;font-size:0.72rem;font-weight:800">MISSED — WEAK MAIN</span>'
-            else: _vp = ''
-            rows += f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1e293b;background:#1e1b4b;border-radius:6px;padding:5px 8px"><div><span style="font-weight:800;font-size:0.85rem;color:#e0e7ff">{_wm_disp2} <span style="color:#a5b4fc;font-size:0.68rem;font-weight:900">WEAK MAIN</span></span> <span style="font-size:0.8rem;color:#a5b4fc">Average rescue — counts as Main under WEAK</span></div><div style="display:flex;gap:8px;align-items:center">{_vp}</div></div>'
-        else:
-            rows += f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 8px;background:#1e1b4b;border-radius:6px"><div><span style="font-weight:800;font-size:0.85rem;color:#e0e7ff">{_wm_disp2} <span style="color:#a5b4fc;font-size:0.68rem;font-weight:900">WEAK MAIN</span></span></div><div style="font-size:0.8rem;color:#c7d2fe">Needs: {"0-2 goals" if _wm_disp2=="Under 2.5" else "3+ goals"}</div></div>'
-    implied = ''
+        if p['decision']=="SKIP": continue
+        if main and p['key']==main['key']: continue
+        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{LABEL.get(p["label"], p["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if p["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{p["a"]:g}% vs league {p["league"]:g}% | {p["b"]:g}% vs league {p["league"]:g}% - margin {p.get("margin_pct",0):.1f}%</td></tr>'
     for field, note in (filt.get('implied_notes') or {}).items():
-        v = filt['derived'].get(field)
-        implied += f'<div style="font-size:0.76rem;color:#64748b;padding:2px 0">* {FIELD_LABEL.get(field,field)} {"YES" if v else "NO"} — implied by logic ({note}), never counted, never a pick</div>'
-    _implied_fields = set((filt.get('implied_notes') or {}).keys())
-    skipped = [p['label'] for p in picks if p['decision'] == 'SKIP' and p.get('field') not in _implied_fields]
-    skip_html = f'<div style="font-size:0.78rem;color:#64748b;margin-top:4px">Skipped: {", ".join(skipped)}</div>' if skipped else ''
-    _note = ''
-    if is_settled and dec != 'BET':
-        if filt.get('weak_main'):
-            _note = '<div style="font-size:0.76rem;color:#64748b;margin-top:4px">WEAK — data collection only. Final score used only to settle the WEAK Main, never predicted.</div>'
-        else:
-            _note = '<div style="font-size:0.76rem;color:#64748b;margin-top:4px">WEAK — data collection only, no rescue. Final score used only to settle signals, never predicted.</div>'
-    return f'<div class="match-card">{head}{banner}{_rescue_html}{avg_html}<div style="margin-top:6px">{rows}</div>{implied}{skip_html}{_note}</div>'
-
+        v=filt['derived'].get(field)
+        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{FIELD_LABEL.get(field,field)}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if v else "NO"} *</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{note} - proved by another pick</td></tr>'
+    if not rows: rows='<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
+    skipped=[p['label'] for p in picks if p['decision']=='SKIP']
+    skipped_line='Skipped (split / neutral, not used): '+', '.join(skipped) if skipped else 'Nothing skipped.'
+    verdict=''
+    if settled:
+        parts=[]
+        for p in (m.get("picks") or []):
+            if p.get("is_implied"): continue
+            if p.get("outcome") is not None:
+                parts.append(f"{LABEL.get(p['label'], p['label'])}: {'WIN' if p['outcome']==1 else 'LOSS'}")
+        if parts: verdict='<div style="margin-top:10px;font-size:0.85rem;color:#94a3b8">'+'  |  '.join(parts)+'</div>'
+    legend='<div style="margin-top:6px;font-size:0.82rem;color:#94a3b8">First number = home-team side (A) | Second = away-team side (B) | * = proved by another pick | Margin = avg relative distance from league | = league is neutral, not BELOW</div>'
+    title='MAIN PICK + OTHERS' if (main and filt['decision']=="BET") else 'SIGNALS THAT AGREE'
+    return f'<div class="match-card">{head}<div style="margin-top:14px;font-size:0.78rem;letter-spacing:0.06em;font-weight:700;color:#94a3b8">{title}</div>{legend}<table style="margin-top:4px">{rows}</table><div style="margin-top:10px;font-size:0.82rem;color:#64748b">{skipped_line}</div>{verdict}</div>'
 
 def _filt_from_db_row(m):
     picks=[]
     for r in m.get("picks") or []:
         if r.get("is_implied"): continue
-        if r.get("is_main") in (2, 3): continue  # WEAK rescue rows: shown only in the WEAK MAIN row, never as Filter picks
         picks.append({"key":r["category_key"],"label":r["label"],"question":"","field":r["field"],
                       "a":r["a_pct"],"b":r["b_pct"],"league":r["league_pct"],"avg":r["avg_pct"],
                       "decision":r["decision"],"reason":"","margin_pct":r["margin_pct"] or 0,"margin":(r["margin_pct"] or 0)/100.0})
@@ -543,73 +439,38 @@ def _filt_from_db_row(m):
     implied={}
     for r in m.get("picks") or []:
         if r.get("is_implied"): implied[r["field"]]=r.get("implied_note") or ""
-    _wm = None; _ws = None
-    for r in m.get("picks") or []:
-        if r.get("is_main") == 2: _wm = {"key":r["category_key"],"label":r["label"],"field":r["field"],"decision":r["decision"],"margin_pct":0.0}
-        if r.get("is_main") == 3: _ws = {"key":r["category_key"],"label":r["label"],"field":r["field"],"decision":r["decision"],"margin_pct":0.0}
     return {"picks":picks,"derived":{},"survivors":[p for p in picks if p["decision"] in ("YES","NO")],
             "weak_test": m.get("decision")=="NO BET - WEAK","conflicts":[],"decision":m.get("decision") or "BET",
-            "decision_reason":m.get("decision_reason") or "","main_pick":main,"weak_main":_wm,"weak_secondary":_ws,"implied_notes":implied,"avg_signal":_row_avg_signal(m)[0],"avg_green_count":_row_avg_signal(m)[1]}
+            "decision_reason":m.get("decision_reason") or "","main_pick":main,"implied_notes":implied}
 
 # ---------------------------------------------------------------- UI
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
-st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:10px 12px;margin:6px 0}</style>", unsafe_allow_html=True)
+st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — The Filter Rule")
-st.caption("Only logic: (A) vs League AND (B) vs League. Both beat → YES. Both below → NO. Split or = league → SKIP. Over 3.5 ignored. No exact score predicted. SQLite: king.db")
+st.caption("Only logic: (A) vs League AND (B) vs League, gated by absolute level (Avg must agree). Both beat → YES. Both below → NO. Split, = league, or Avg disagrees → SKIP. Over 3.5 ignored. No exact score predicted. SQLite: king.db")
 
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 with tab_new:
     st.markdown("### Paste the Teams scoring vs league average block")
-    st.caption("BET auto-saves. Non-rule asks Still save? first — you may not know beforehand which will meet the rule.")
-    raw_in = st.text_area("Input", height=220, label_visibility="collapsed", placeholder="Teams scoring vs league average")
+    st.caption("Evaluating does NOT save. Nothing is saved until you press Save to Pending.")
+    raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average")
     if st.button("Run the Filter", type="primary") and raw_in.strip():
         facts = parse_filter_data(raw_in.strip()); filt = compute_filter_rule(facts)
-        st.session_state["pending_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip(), "save_status": None, "save_id": None}
-        if filt["decision"] == "BET":
-            try:
-                mid = save_match(facts, filt, raw_in.strip())
-                st.session_state["pending_eval"]["save_status"] = "saved"; st.session_state["pending_eval"]["save_id"] = mid
-            except Exception as e:
-                st.session_state["pending_eval"]["save_status"] = "error"; st.session_state["pending_eval"]["save_error"] = str(e)
-        else:
-            st.session_state["pending_eval"]["save_status"] = "needs_confirm"
-    ev = st.session_state.get("pending_eval")
-    if ev:
-        facts = ev["facts"]; filt = ev["filt"]
-        if ev.get("save_status") == "saved":
-            st.success(f"Saved to Pending (id {ev.get('save_id')}).")
-        elif ev.get("save_status") == "error":
-            st.error(f"Save FAILED: {ev.get('save_error')}")
-        elif ev.get("save_status") == "needs_confirm":
-            st.warning(f"This match does NOT meet the rule — {filt.get('decision')}. It will NOT count in Main. Still save for monitoring?")
-            _c1, _c2 = st.columns(2)
-            with _c1:
-                if st.button("Yes, still save", type="primary", key="confirm_save_yes"):
-                    try:
-                        mid = save_match(facts, filt, ev["raw"])
-                        st.session_state["pending_eval"]["save_status"] = "saved"; st.session_state["pending_eval"]["save_id"] = mid; st.rerun()
-                    except Exception as e:
-                        st.session_state["pending_eval"]["save_status"] = "error"; st.session_state["pending_eval"]["save_error"] = str(e); st.rerun()
-            with _c2:
-                if st.button("No, don't save", key="confirm_save_no"):
-                    st.session_state["pending_eval"]["save_status"] = "skipped"; st.rerun()
-        elif ev.get("save_status") == "skipped":
-            st.info("Not saved — you chose not to save this non-rule match.")
         if not facts.get("home_team"): st.warning("Could not read team names from (A)/(B) lines.")
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
-        if st.button("Clear", key="clear_new"):
-            st.session_state.pop("pending_eval", None); st.rerun()
+        if st.button("Save to Pending", key="save_new"):
+            mid = save_match(facts, filt, raw_in.strip())
+            st.success(f"Saved to Pending (id {mid}) in king.db.")
 with tab_pending:
     st.markdown("### Pending matches (from king.db)")
     pending = load_matches(pending_only=True)
     if not pending: st.info("No pending matches.")
-    _pc1, _pc2 = st.columns(2)
-    for _i, m in enumerate(pending):
+    for m in pending:
         filt = _filt_from_db_row(m)
-        with (_pc1 if _i % 2 == 0 else _pc2):
-            st.markdown(_card_html(m, filt, settled=False), unsafe_allow_html=True)
-        with st.expander("Enter result"):
+        st.markdown(_card_html(m, filt, settled=False), unsafe_allow_html=True)
+        with st.expander(f"Enter result — {m.get('home_team') or '?'} vs {m.get('away_team') or '?'}"):
+            st.write(f"Result for: **{m.get('home_team') or '?'} vs {m.get('away_team') or '?'}** — {m.get('decision') or ''} | Main: {m.get('main_pick_label') or '-'} {m.get('main_pick_decision') or ''}")
             c1, c2, c3 = st.columns([1,1,2])
             with c1: hs = st.number_input("Home", min_value=0, step=1, key=f"h_{m['id']}")
             with c2: aws = st.number_input("Away", min_value=0, step=1, key=f"a_{m['id']}")
@@ -618,68 +479,35 @@ with tab_pending:
                 if st.button("Settle", key=f"s_{m['id']}", type="primary"):
                     settle_match_db(m['id'], int(hs), int(aws)); st.success("Settled."); st.rerun()
 with tab_perf:
-    st.markdown("### Performance — MAIN and WEAK never mixed")
+    st.markdown("### Performance — per-signal only, SKIP excluded")
     settled = load_matches(settled_only=True)
     if not settled: st.info("No settled matches yet.")
     else:
-        main_settled = [m for m in settled if m.get("decision") == "BET"]
-        weak_settled = [m for m in settled if m.get("decision") != "BET"]
-        mp_wins = mp_n = 0
-        for m in settled:
-            for p in m["picks"]:
-                if p.get("is_main") == 1 and p.get("outcome") is not None: mp_n += 1; mp_wins += p["outcome"]
-        yes_n = yes_w = no_n = no_w = 0
-        for m in main_settled:
-            for p in m["picks"]:
-                if p.get("is_main") == 1 and p.get("outcome") is not None:
-                    if m.get("main_pick_decision") == "YES": yes_n += 1; yes_w += p["outcome"]
-                    elif m.get("main_pick_decision") == "NO": no_n += 1; no_w += p["outcome"]
-        def _mini(title, big, sub, color="#f1f5f9"):
-            return f'<div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px"><div style="font-size:0.68rem;letter-spacing:0.08em;color:#94a3b8;font-weight:800">{title}</div><div style="font-size:1.3rem;font-weight:900;color:{color};margin-top:2px">{big}</div><div style="font-size:0.78rem;color:#94a3b8">{sub}</div></div>'
-        # WEAK Main (Average rescue) - separate bucket, never mixed with BET Main
-        _wm_n = _wm_w = 0
-        for m in settled:
-            for pp in m["picks"]:
-                if pp.get("is_main") == 2 and pp.get("outcome") is not None: _wm_n += 1; _wm_w += pp["outcome"]
-        _k1, _k2, _k3, _k4 = st.columns(4)
-        with _k1: st.markdown(_mini("MAIN PICK", f"{mp_wins}/{mp_n}" if mp_n else "—", f"{(mp_wins/mp_n*100) if mp_n else 0:.1f}% hit · {len(main_settled)} settled", "#4ade80"), unsafe_allow_html=True)
-        with _k2: st.markdown(_mini("YES MAIN", f"{yes_w}/{yes_n}" if yes_n else "—", f"{(yes_w/yes_n*100) if yes_n else 0:.1f}% · any margin", "#4ade80"), unsafe_allow_html=True)
-        with _k3: st.markdown(_mini("STRONG NO MAIN", f"{no_w}/{no_n}" if no_n else "—", f"{(no_w/no_n*100) if no_n else 0:.1f}% · 40%+", "#fbbf24"), unsafe_allow_html=True)
-        with _k4: st.markdown(_mini("SETTLED", f"{len(settled)}", f"MAIN {len(main_settled)} · WEAK {len(weak_settled)}", "#f1f5f9"), unsafe_allow_html=True)
-        _w1, _w2 = st.columns(2)
-        with _w1: st.markdown(_mini("WEAK MAIN (Average rescue)", f"{_wm_w}/{_wm_n}" if _wm_n else "—", f"{(_wm_w/_wm_n*100) if _wm_n else 0:.1f}% · ALL_RED Under + ALL_GREEN Over", "#a5b4fc"), unsafe_allow_html=True)
-        with _w2: st.markdown(_mini("WEAK RESCUE RATE", f"{_wm_n}/{len(weak_settled)}" if weak_settled else "—", "WEAK games that got a rescue Main", "#a5b4fc"), unsafe_allow_html=True)
-        st.markdown("#### By category — small cards")
-        _cols = st.columns(5)
-        for _i, (key, label, _, field) in enumerate(FILTER_CATEGORIES):
-            n = wins = 0
-            for m in main_settled:
+        rows=[]
+        for key, label, _, field in FILTER_CATEGORIES:
+            n=wins=0
+            for m in settled:
                 for p in m["picks"]:
-                    if p["field"] == field and not p.get("is_implied") and p.get("outcome") is not None: n += 1; wins += p["outcome"]
-            with _cols[_i]: st.markdown(_mini(label.upper(), f"{wins}/{n}" if n else "—", f"{(wins/n*100) if n else 0:.1f}% · MAIN only"), unsafe_allow_html=True)
-        st.markdown("#### WEAK Average check — ALL_GREEN / ALL_RED, WEAK matches only (BET matches never used Average)")
-        def _avg_out(m, want):
-            hs, aws = m.get("home_score"), m.get("away_score")
-            if hs is None or aws is None: return None
-            if want == "OVER": return 1 if (hs + aws) > 2.5 else 0
-            if want == "BTTS": return 1 if (hs > 0 and aws > 0) else 0
-            if want == "UNDER": return 1 if (hs + aws) <= 2.5 else 0
-            return None
-        _m1, _m2, _m3 = st.columns(3)
-        for _col, _sig, _want, _avg_lbl in [(_m1, "ALL_GREEN", "OVER", "ALL GREEN → Over"), (_m2, "ALL_GREEN", "BTTS", "ALL GREEN → BTTS"), (_m3, "ALL_RED", "UNDER", "ALL RED → Under")]:
-            # WEAK only: BET matches never used Average, so they must never feed Average stats.
-            ss = [m for m in settled if m.get("decision") != "BET" and _row_avg_signal(m)[0] == _sig]
-            outs = [o for o in [_avg_out(m, _want) for m in ss] if o is not None]
-            with _col: st.markdown(_mini(_avg_lbl, f"{sum(outs)}/{len(outs)}" if outs else "—", f"{(sum(outs)/len(outs)*100) if outs else 0:.1f}% · monitoring only"), unsafe_allow_html=True)
-        st.markdown("#### All settled")
-        _g1, _g2 = st.columns(2)
-        for _i, m in enumerate(settled):
-            filt = _filt_from_db_row(m)
-            with (_g1 if _i % 2 == 0 else _g2):
-                st.markdown(_card_html(m, filt, settled=True), unsafe_allow_html=True)
+                    if p["field"]==field and not p.get("is_implied") and p.get("outcome") is not None:
+                        n+=1; wins+=p["outcome"]
+            rows.append({"Category": label, "n (both agree)": n, "Wins": wins, "Losses": n-wins, "Hit %": f"{(wins/n*100) if n else 0:.1f}%", "Proven": PROVEN.get(key,"")})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # Main Pick hit rate
+        mp=[m for m in settled if m.get("main_pick_key")]
+        mp_wins=0; mp_n=0
+        for m in mp:
+            for p in m["picks"]:
+                if p.get("is_main") and p.get("outcome") is not None:
+                    mp_n+=1; mp_wins+=p["outcome"]
+        st.metric("Settled matches", len(settled))
+        st.metric("Main Pick hit rate", f"{mp_wins}/{mp_n} = {(mp_wins/mp_n*100) if mp_n else 0:.1f}%")
+        st.markdown("### All settled")
+        for m in settled:
+            filt=_filt_from_db_row(m)
+            st.markdown(_card_html(m, filt, settled=True), unsafe_allow_html=True)
 with tab_lab:
     st.markdown("### Lab — test without saving")
-    text_in = st.text_area("Text dump", height=180, label_visibility="collapsed", key="lab_input")
+    text_in = st.text_area("Text dump", height=340, label_visibility="collapsed", key="lab_input")
     if text_in.strip():
         facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
