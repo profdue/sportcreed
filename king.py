@@ -358,8 +358,10 @@ def _avg_signal_from_sections(sections):
         s=(sections or {}).get(k)
         if s and s.get('avg') is not None and s.get('league') is not None:
             stts.append('G' if s['avg']>s['league'] else 'R' if s['avg']<s['league'] else '=')
-    if stts and all(x=='G' for x in stts): return 'ALL_GREEN',9
-    if stts and all(x=='R' for x in stts): return 'ALL_RED',0
+    # YOU TOLD ME: Talleres 8 red + 1 neutral + 0 green = ALL_RED in substance.
+    # Neutral (=) does NOT break an Average lean. Only the opposite colour breaks it.
+    if stts and 'R' not in stts and 'G' in stts: return 'ALL_GREEN',stts.count('G')
+    if stts and 'G' not in stts and 'R' in stts: return 'ALL_RED',0
     return 'MIXED',stts.count('G')
 
 def _row_avg_signal(m):
@@ -383,8 +385,10 @@ def _avg_signal_from_sections(sections):
         s=(sections or {}).get(k)
         if s and s.get('avg') is not None and s.get('league') is not None:
             stts.append('G' if s['avg']>s['league'] else 'R' if s['avg']<s['league'] else '=')
-    if stts and all(x=='G' for x in stts): return 'ALL_GREEN',9
-    if stts and all(x=='R' for x in stts): return 'ALL_RED',0
+    # YOU TOLD ME: Talleres 8 red + 1 neutral + 0 green = ALL_RED in substance.
+    # Neutral (=) does NOT break an Average lean. Only the opposite colour breaks it.
+    if stts and 'R' not in stts and 'G' in stts: return 'ALL_GREEN',stts.count('G')
+    if stts and 'G' not in stts and 'R' in stts: return 'ALL_RED',0
     return 'MIXED',stts.count('G')
 
 def _row_avg_signal(m):
@@ -473,8 +477,9 @@ def _card_html(m, filt, settled=False):
     implied = ''
     for field, note in (filt.get('implied_notes') or {}).items():
         v = filt['derived'].get(field)
-        implied += f'<div style="font-size:0.78rem;color:#64748b;padding:2px 0">{FIELD_LABEL.get(field,field)} {"YES" if v else "NO"} * implied — never counted</div>'
-    skipped = [p['label'] for p in picks if p['decision'] == 'SKIP']
+        implied += f'<div style="font-size:0.76rem;color:#64748b;padding:2px 0">* {FIELD_LABEL.get(field,field)} {"YES" if v else "NO"} — implied by logic ({note}), never counted, never a pick</div>'
+    _implied_fields = set((filt.get('implied_notes') or {}).keys())
+    skipped = [p['label'] for p in picks if p['decision'] == 'SKIP' and p.get('field') not in _implied_fields]
     skip_html = f'<div style="font-size:0.78rem;color:#64748b;margin-top:4px">Skipped: {", ".join(skipped)}</div>' if skipped else ''
     return f'<div class="match-card">{head}{banner}{avg_html}<div style="margin-top:6px">{rows}</div>{implied}{skip_html}</div>'
 
