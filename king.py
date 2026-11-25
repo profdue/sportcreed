@@ -376,6 +376,10 @@ def compute_filter_rule(facts: dict) -> dict:
 
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
+    # Compact card, as in the live app screenshot:
+    #   Fixture line, then one DECISION box (BET green / CONFLICT amber / WEAK red),
+    #   then an ALSO: UNDER box when an Over NO survivor exists,
+    #   then MAIN PICK + OTHERS table, then Skipped line.
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
     picks=filt['picks']; main=filt.get('main_pick')
     fixture=f'<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">{home} <span style="font-size:0.72rem;color:#94a3b8">(HOME)</span> vs {away} <span style="font-size:0.72rem;color:#94a3b8">(AWAY)</span></div>'
@@ -385,25 +389,23 @@ def _card_html(m, filt, settled=False):
         if filt['decision']=="BET":
             ml=LABEL.get(main['label'], main['label']) if main else '-'
             mv='YES' if main['decision']=='YES' else 'NO'
-            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">DECISION: BET &nbsp;|&nbsp; MAIN PICK</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} - {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Strongest signal today: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
-            # UNDER callout: an Over NO survivor is a bet in its own right (Under 1.5 / Under 2.5).
-            # It must never be buried as just another row in Others - show it as a second highlighted line.
-            # Main Pick is unchanged: this is an additional featured pick, not a second Main.
-            # Prefer UNDER 2.5 over UNDER 1.5 when both are NO survivors: 2.5 is the bettable one.
+            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">BET \u2022 MAIN</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} \u2014 {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Strongest signal today: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
+            # UNDER callout: an Over NO survivor is a bet in its own right - never buried in Others.
+            # Prefer UNDER 2.5 over UNDER 1.5 when both exist. Main Pick rule is unchanged.
             _unders=[x for x in filt['picks'] if x['field'] in ('over_1_5','over_2_5') and x['decision']=='NO' and not (main and x['key']==main['key'])]
             _unders.sort(key=lambda x: 0 if x['field']=='over_2_5' else 1)
             if _unders:
                 _up=_unders[0]
                 _under = 'UNDER 1.5' if _up['field']=='over_1_5' else 'UNDER 2.5'
                 _over_lbl = '1.5' if _up['field']=='over_1_5' else '2.5'
-                head += f'<div style="margin-top:8px;background:#0ea5e922;border:1px solid #0ea5e9;border-radius:12px;padding:12px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#38bdf8">ALSO: {_under}</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:2px">{_under} — Over {_over_lbl} NO</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Margin {_up.get("margin_pct",0):.1f}% — both sides below league, Avg at/below LOW. Settles as its own WIN/LOSS.</div></div>'
+                head += f'<div style="margin-top:8px;background:#0ea5e922;border:1px solid #0ea5e9;border-radius:12px;padding:12px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#38bdf8">ALSO: {_under}</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:2px">{_under} \u2014 Over {_over_lbl} NO</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Margin {_up.get("margin_pct",0):.1f}% \u2014 both sides below league, Avg at/below LOW. Settles as its own WIN/LOSS.</div></div>'
         elif filt['decision']=="NO BET - CONFLICT":
-            head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">DECISION: NO BET — CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
+            head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">NO BET \u2022 CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
         else:
-            head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">DECISION: NO BET — WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
+            head=fixture+f'<div style="margin-top:10px;background:#ef444422;border:1px solid #ef4444;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#ef4444">NO BET \u2022 WEAK</div><div style="font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px">Weak test - do not bet</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Only {len(filt["survivors"])}/5 signals agree. Not enough for a Main Pick.</div></div>'
     rows=''
     if main and filt['decision']=="BET":
-        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0;font-weight:700">MAIN: {LABEL.get(main["label"], main["label"])}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:800">{"YES" if main["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{main["a"]:g}% vs league {main["league"]:g}% | {main["b"]:g}% vs league {main["league"]:g}% - margin {main["margin_pct"]:.1f}%</td></tr>'
+        rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0;font-weight:700">{LABEL.get(main["label"], main["label"])} MAIN</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:800">{"YES" if main["decision"]=="YES" else "NO"}</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{main["a"]:g}% vs league {main["league"]:g}% | {main["b"]:g}% vs league {main["league"]:g}% - margin {main["margin_pct"]:.1f}%</td></tr>'
     for p in picks:
         if p['decision']=="SKIP": continue
         if main and p['key']==main['key']: continue
@@ -412,7 +414,7 @@ def _card_html(m, filt, settled=False):
         v=filt['derived'].get(field)
         rows+=f'<tr><td style="padding:6px 10px 6px 0;color:#e2e8f0">{FIELD_LABEL.get(field,field)}</td><td style="padding:6px 10px;color:#f1f5f9;font-weight:700">{"YES" if v else "NO"} *</td><td style="padding:6px 0;color:#94a3b8;font-size:0.85rem">{note} - proved by another pick</td></tr>'
     if not rows: rows='<tr><td colspan=3 style="color:#94a3b8">No signals agree.</td></tr>'
-    skipped=[p['label'] for p in picks if p['decision']=='SKIP']
+    skipped=[FIELD_LABEL.get(p['field'], p['label']) for p in picks if p['decision']=='SKIP']  # screenshot style: 'Total over 1.5', not 'Over 1.5 Goals'
     skipped_line='Skipped (split / neutral, not used): '+', '.join(skipped) if skipped else 'Nothing skipped.'
     verdict=''
     if settled:
