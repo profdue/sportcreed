@@ -550,7 +550,7 @@ st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;bord
 st.title("⚽ King — The Filter Rule")
 st.caption("100% Logic: Only bet when Main is YES (29/29) and Main passes its OWN 100% gate. Over 2.5 Main needs Avg >= 70 & League >= 50. BTTS Main needs League >= 60 or Avg 60-70. Side signals never veto Main. SQLite: king.db")
 
-tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
+tab_new, tab_pending, tab_perf, tab_lab, tab_supabase = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
     st.markdown("### Paste the Teams scoring vs league average block")
     st.caption("Evaluating does NOT save. Nothing is saved until you press Save to Pending.")
