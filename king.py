@@ -24,6 +24,7 @@ One Over per match. Over agreement vetoes Under. No implied picks. No margin Mai
 Persistence: Supabase king_matches (SQLite fallback).
 """
 import sqlite3
+import re
 import os, json, urllib.request, urllib.error
 import streamlit as st
 from datetime import datetime, timezone
@@ -251,58 +252,94 @@ def load_matches(pending_only=False, settled_only=False):
 def parse_filter_data(raw: str) -> dict:
     lines = [l for l in raw.splitlines()]
     def _clean(s): return " ".join(s.strip().split())
+    def _pure_num(s):
+        s2 = s.strip().replace("%", "").strip()
+        try:
+            return float(s2)
+        except Exception:
+            return None
     sections = {}; warnings = []
-    def get_section(key, needles):
-        a = b = avg = league = None
+    # Headers in order, to bound each section block
+    HEADERS = [
+        ("home_scoring_avg", ["home scoring averages"]),
+        ("away_scoring_avg", ["away scoring averages"]),
+        ("goals_match", ["goals scored + conceded"]),
+        ("home_scoring_rate", ["home scoring rate"]),
+        ("away_scoring_rate", ["away scoring rate"]),
+        ("over_1_5", ["over 1.5"]),
+        ("over_2_5", ["over 2.5"]),
+        ("over_3_5", ["over 3.5"]),
+        ("btts", ["both-teams-scored", "both teams scored", "bts matches"]),
+    ]
+    # Find header index for each key
+    header_idx = {}
+    for key, needles in HEADERS:
         for idx, l in enumerate(lines):
-            ls = _clean(l).lower()
-            if any(n in ls for n in needles):
-                # scan next lines for A/B/Avg/League numbers
-                for j in range(idx, min(idx+12, len(lines))):
-                    ll = _clean(lines[j])
-                    low = ll.lower()
-                    try:
-                        if low.startswith("(a)"):
-                            # first number after (A) ... is a
-                            import re
-                            nums = re.findall(r"-?\d+(?:\.\d+)?", ll[3:])
-                            if nums: a = float(nums[0])
-                        elif low.startswith("(b)"):
-                            import re
-                            nums = re.findall(r"-?\d+(?:\.\d+)?", ll[3:])
-                            if nums: b = float(nums[0])
-                        elif "avg" in low and "league" not in low:
-                            import re
-                            nums = re.findall(r"-?\d+(?:\.\d+)?", ll)
-                            if nums: avg = float(nums[-1])
-                        elif "league" in low:
-                            import re
-                            nums = re.findall(r"-?\d+(?:\.\d+)?", ll)
-                            if len(nums) >= 2:
-                                avg = float(nums[0]); league = float(nums[1])
-                            elif len(nums) == 1:
-                                league = float(nums[0])
-                    except Exception: pass
-                break
-        if a is None and b is None and avg is None and league is None:
-            warnings.append(key)
+            if any(n in _clean(l).lower() for n in needles):
+                header_idx[key] = idx; break
+    for key, needles in HEADERS:
+        a = b = avg = league = None
+        if key not in header_idx:
+            warnings.append(key); sections[key] = {"a": None, "b": None, "avg": None, "league": None}; continue
+        idx = header_idx[key]
+        # End = next header after idx, or idx+20
+        ends = [v for v in header_idx.values() if v > idx]
+        end_idx = min(ends) if ends else min(idx+20, len(lines))
+        end_idx = min(end_idx, idx+20)
+        block = lines[idx+1:end_idx]
+        # Walk block: (A) label -> number on same line (unless Over) or next pure-number line
+        # (B) label -> same, League/Avg label -> next two pure numbers
+        i = 0
+        is_over = key.startswith("over_")
+        while i < len(block):
+            ll = _clean(block[i]); low = ll.lower()
+            if low.startswith("(a)") and not low.startswith("(a) (b)"):
+                if a is None:
+                    if not is_over:
+                        nums = re.findall(r"-?\d+(?:\.\d+)?", ll[3:])
+                        # ignore numbers that are part of "scoring rate" etc? (A) lines have no numbers except Over threshold, so this is safe for non-Over
+                        if nums: a = float(nums[0])
+                    if a is None:
+                        # next pure-number line
+                        for k in range(i+1, min(i+3, len(block))):
+                            v = _pure_num(block[k])
+                            if v is not None: a = v; i = k; break
+            elif low.startswith("(b)"):
+                if b is None:
+                    if not is_over:
+                        nums = re.findall(r"-?\d+(?:\.\d+)?", ll[3:])
+                        if nums: b = float(nums[0])
+                    if b is None:
+                        for k in range(i+1, min(i+3, len(block))):
+                            v = _pure_num(block[k])
+                            if v is not None: b = v; i = k; break
+            elif "league" in low:
+                nums = re.findall(r"-?\d+(?:\.\d+)?", ll)
+                # League label lines like "League Avg home scoring" have no numbers, or "stats.league_..." have no numbers
+                # If numbers present on same line (old format), use them
+                if len(nums) >= 2:
+                    avg = float(nums[0]); league = float(nums[1])
+                elif len(nums) == 1 and "avg" not in low:
+                    league = float(nums[0])
+                else:
+                    # next two pure-number lines: Avg then League
+                    vals = []
+                    for k in range(i+1, min(i+4, len(block))):
+                        v = _pure_num(block[k])
+                        if v is not None: vals.append(v)
+                        if len(vals) >= 2: break
+                    if len(vals) >= 2:
+                        avg = vals[0]; league = vals[1]; i = i + len(vals)
+                    elif len(vals) == 1 and league is None:
+                        league = vals[0]
+            i += 1
         if avg is None and a is not None and b is not None:
             avg = (a+b)/2.0
         sections[key] = {"a": a, "b": b, "avg": avg, "league": league}
-        return sections[key]
-    get_section("home_scoring_avg", ["home scoring averages"])
-    get_section("away_scoring_avg", ["away scoring averages"])
-    get_section("goals_match", ["goals scored + conceded"])
-    get_section("home_scoring_rate", ["home scoring rate"])
-    get_section("away_scoring_rate", ["away scoring rate"])
-    get_section("over_1_5", ["over 1.5"])
-    get_section("over_2_5", ["over 2.5"])
-    get_section("over_3_5", ["over 3.5"])
-    get_section("btts", ["both-teams-scored", "both teams scored", "bts matches"])
     home_team = away_team = None
     for l in lines:
         ls = _clean(l)
-        if ls.startswith("(A)") and home_team is None:
+        if ls.startswith("(A)") and home_team is None and "(B)" not in ls:
             home_team = ls[3:].strip()
             for kw in [" scored", " conceded", " over", " BTS"]:
                 if kw in home_team: home_team = home_team.split(kw)[0].strip()
@@ -315,9 +352,9 @@ def parse_filter_data(raw: str) -> dict:
 
 # ---------------- Agreement ----------------
 def _status(sec, key):
-    """Return agree-high / agree-low / disagree / neutral / missing, with absolute gate."""
+    """Return agree-high / agree-low / disagree / neutral / not in paste, with absolute gate."""
     if not sec or sec.get("a") is None or sec.get("b") is None or sec.get("league") is None:
-        return "missing"
+        return "not in paste"
     a, b, lg, avg = sec["a"], sec["b"], sec["league"], sec.get("avg")
     if a == lg or b == lg:
         return "neutral"
