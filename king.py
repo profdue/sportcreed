@@ -178,6 +178,9 @@ def _find_existing(home, away, raw_paste):
     row = cur.execute("SELECT id FROM matches WHERE is_deleted=0 AND home_team=? AND away_team=? AND raw_paste=? ORDER BY id DESC LIMIT 1", (home, away, raw_paste)).fetchone()
     conn.close(); return row[0] if row else None
 
+# Alias kept for UI calls
+_find_existing_match = _find_existing
+
 def _picks_to_json(filt):
     out = []
     for pr in filt["picks"]:
