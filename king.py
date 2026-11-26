@@ -479,12 +479,20 @@ with tab_new:
     raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average")
     if st.button("Run the Filter", type="primary") and raw_in.strip():
         facts = parse_filter_data(raw_in.strip()); filt = compute_filter_rule(facts)
+        # Persist the evaluation in session_state. Streamlit buttons are momentary:
+        # on the next rerun "Run" is False again, so a Save button nested inside
+        # the Run block never survives to be clicked — that is why Pending stayed empty.
+        st.session_state["last_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip()}
+    if st.session_state.get("last_eval"):
+        ev = st.session_state["last_eval"]; facts = ev["facts"]; filt = ev["filt"]
         if not facts.get("home_team"): st.warning("Could not read team names from (A)/(B) lines.")
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
         if st.button("Save to Pending", key="save_new"):
-            mid = save_match(facts, filt, raw_in.strip())
-            st.success(f"Saved to Pending (id {mid}) in king.db.")
+            mid = save_match(facts, filt, ev["raw"])
+            st.session_state.pop("last_eval", None)
+            st.success(f"Saved to Pending (id {mid}) in king.db. Open Pending to see it.")
+            st.rerun()
 with tab_pending:
     st.markdown("### Pending matches (from king.db)")
     pending = load_matches(pending_only=True)
