@@ -1,6 +1,7 @@
 
 """
-king.py — The Filter Rule
+king.py — The Filter Rule — 100% Logic
+100% Logic (29/29 Main YES): Only bet when Main is YES. Only Main gate counts. Side signals never veto Main.
 Rules:
 - Only (A) vs League AND (B) vs League. Both beat -> YES. Both below -> NO. Else SKIP.
 - Equality (= league) is NEUTRAL, not BELOW. Any side = league -> SKIP for that category.
@@ -49,6 +50,25 @@ HIER = {"away_scoring_rate": 0, "over_1_5": 1, "over_2_5": 2, "btts": 3, "home_s
 # a YES only counts if Avg is above LOW. Otherwise the pick is downgraded to SKIP.
 # Values are per-category because base rates differ: Over 1.5 lives near 80%, Over 2.5 / BTTS near 55%,
 # so one universal 70 would call a 65% Over 2.5 "red" when it is actually high.
+
+def _main_passes_100_gate(pick, derived):
+    if pick["decision"] != "YES":
+        return False
+    avg = pick.get("avg"); lg = pick.get("league"); f = pick["field"]
+    if f == "home_scores": return True
+    if f == "over_1_5": return True
+    if f == "over_2_5": return (avg is not None and lg is not None and avg >= 70 and lg >= 50)
+    if f == "btts": return (lg is not None and lg >= 60) or (avg is not None and 60 <= avg <= 70)
+    if f == "away_scores": return derived.get("btts") is True
+    return False
+
+def _main_gate_reason(pick, derived):
+    f = pick["field"]; avg = pick.get("avg"); lg = pick.get("league")
+    if f == "over_2_5": return f"Over 2.5 YES needs Avg >= 70 AND League >= 50. Got Avg {avg:g}% / League {lg:g}%."
+    if f == "btts": return f"BTTS YES needs League >= 60 OR Avg 60-70. Got Avg {avg:g}% / League {lg:g}%."
+    if f == "away_scores": return "Away YES needs BTTS also YES."
+    return ""
+
 ABSOLUTE_LOW = {
     "home_scoring_rate": 70.0,  # % - no Home-rate league in our 71 ever went below 71
     "away_scoring_rate": 65.0,  # % - 70 is still average for Away rate
@@ -356,23 +376,30 @@ def compute_filter_rule(facts: dict) -> dict:
         conflicts.append("Home NO + Away NO needs BTTS NO, but BTTS is YES")
     # de-duplicate preserving order
     seen=set(); conflicts=[c for c in conflicts if not (c in seen or seen.add(c))]
-    # ---- margin + Main Pick ----
+    # ---- margin + Main Pick — 100% Logic ----
     for x in survivors:
         lg=x['league'] if x['league'] else 1
         x['margin']=abs(((x['a']-lg)/lg + (x['b']-lg)/lg)/2.0)
         x['margin_pct']=x['margin']*100.0
     main_pick=None; decision="BET"; decision_reason=""
+    yes_survivors=[x for x in survivors if x['decision']=="YES"]
+    gate_pass=[x for x in yes_survivors if _main_passes_100_gate(x, derived)]
+    gate_fail=[x for x in yes_survivors if not _main_passes_100_gate(x, derived)]
     if weak:
         decision="NO BET - WEAK"; decision_reason=f"Only {len(survivors)}/5 signals agree. Not enough for a Main Pick."
     elif conflicts:
         decision="NO BET - CONFLICT"; decision_reason="; ".join(conflicts)
+    elif not yes_survivors:
+        decision="NO BET - MAIN NO"; decision_reason="No YES signal. Main NO is 24/30 (80.0%) — not a 100% bet."
+    elif not gate_pass:
+        decision="NO BET - NOT 100%"; decision_reason="Main YES exists but none clears its own 100% gate: " + "; ".join(f"{LABEL.get(x['label'], x['label'])} YES — {_main_gate_reason(x, derived)}" for x in gate_fail)
     else:
-        ranked=sorted(survivors, key=lambda pp: (-pp['margin'], HIER.get(pp['key'],99)))
+        ranked=sorted(gate_pass, key=lambda pp: (-pp['margin'], HIER.get(pp['key'],99)))
         main_pick=ranked[0]
-        decision_reason=f"Main Pick {LABEL.get(main_pick['label'], main_pick['label'])} {main_pick['decision']} at {main_pick['margin_pct']:.1f}% margin."
+        decision_reason=f"100% Main: {LABEL.get(main_pick['label'], main_pick['label'])} YES. Side signals do not veto Main."
     return {"picks":picks,"derived":derived,"survivors":survivors,"weak_test":weak,
             "conflicts":conflicts,"decision":decision,"decision_reason":decision_reason,
-            "main_pick":main_pick,"implied_notes":implied_notes}
+            "main_pick":main_pick,"implied_notes":implied_notes,"gate_pass":gate_pass,"gate_fail":gate_fail}
 
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
@@ -396,7 +423,7 @@ def _card_html(m, filt, settled=False):
         if filt['decision']=="BET":
             ml=LABEL.get(main['label'], main['label']) if main else '-'
             mv='YES' if main['decision']=='YES' else 'NO'
-            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">BET \u2022 MAIN</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} \u2014 {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Strongest signal today: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
+            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">BET \u2022 100% MAIN</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} \u2014 {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Main YES (29/29) + Main passes its own 100% gate. Side signals do not veto Main. Margin: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
             # UNDER callout stays: it is a bet, not table clutter. One box, same style.
             _unders=[x for x in filt['picks'] if x['field'] in ('over_1_5','over_2_5') and x['decision']=='NO' and not (main and x['key']==main['key'])]
             _unders.sort(key=lambda x: 0 if x['field']=='over_2_5' else 1)
@@ -405,6 +432,9 @@ def _card_html(m, filt, settled=False):
                 _under = 'UNDER 1.5' if _up['field']=='over_1_5' else 'UNDER 2.5'
                 _over_lbl = '1.5' if _up['field']=='over_1_5' else '2.5'
                 head += f'<div style="margin-top:8px;background:#0ea5e922;border:1px solid #0ea5e9;border-radius:12px;padding:12px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#38bdf8">ALSO: {_under}</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:2px">{_under} \u2014 Over {_over_lbl} NO</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Margin {_up.get("margin_pct",0):.1f}% \u2014 both sides below league, Avg at/below LOW. Settles as its own WIN/LOSS.</div></div>'
+        elif filt['decision'] in ("NO BET - NOT 100%", "NO BET - MAIN NO"):
+            _lbl2 = "NOT 100%" if filt['decision']=="NO BET - NOT 100%" else "MAIN NO"
+            head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">NO BET \u2022 {_lbl2} \u2022 MONITORING</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Not a 100% bet — do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
         elif filt['decision']=="NO BET - CONFLICT":
             head=fixture+f'<div style="margin-top:10px;background:#f59e0b22;border:1px solid #f59e0b;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#f59e0b">NO BET \u2022 CONFLICT</div><div style="font-size:1.1rem;font-weight:800;color:#f1f5f9;margin-top:4px">Survivors contradict each other. Do not bet.</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">{filt.get("decision_reason","")}</div></div>'
         else:
@@ -440,7 +470,7 @@ def _filt_from_db_row(m):
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — The Filter Rule")
-st.caption("Only logic: (A) vs League AND (B) vs League, gated by absolute level (Avg must agree). Both beat → YES. Both below → NO. Split, = league, or Avg disagrees → SKIP. Over 3.5 ignored. No exact score predicted. SQLite: king.db")
+st.caption("100% Logic: Only bet when Main is YES (29/29) and Main passes its OWN 100% gate. Over 2.5 Main needs Avg >= 70 & League >= 50. BTTS Main needs League >= 60 or Avg 60-70. Side signals never veto Main. SQLite: king.db")
 
 tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
 with tab_new:
