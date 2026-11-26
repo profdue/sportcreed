@@ -21,6 +21,7 @@ Rules:
 Persistence: SQLite (king.db) via stdlib sqlite3.
 """
 import sqlite3
+import os, json, urllib.request, urllib.error
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
@@ -401,6 +402,50 @@ def compute_filter_rule(facts: dict) -> dict:
             "conflicts":conflicts,"decision":decision,"decision_reason":decision_reason,
             "main_pick":main_pick,"implied_notes":implied_notes,"gate_pass":gate_pass,"gate_fail":gate_fail}
 
+
+# ---------------------------------------------------------------- analyst reason
+def _analyst_reason(main, picks):
+    """Analyst-style reason for the Main. Specific numbers, not generic margin talk."""
+    if not main:
+        return ""
+    a, b, lg, avg = main.get("a"), main.get("b"), main.get("league"), main.get("avg")
+    weaker = min(a, b) if a is not None and b is not None else None
+    by_field = {x["field"]: x for x in picks}
+    def _fmt(v):
+        return f"{v:g}%" if v is not None else "-"
+    # supporting signals, in analyst language
+    support = []
+    o15 = by_field.get("over_1_5"); o25 = by_field.get("over_2_5"); btts = by_field.get("btts")
+    hs = by_field.get("home_scores"); aws = by_field.get("away_scores")
+    if o15 and o15["decision"] == "YES" and main["field"] != "over_1_5":
+        support.append(f"the floor is there too — Over 1.5 at {_fmt(o15.get('avg'))} (league {_fmt(o15.get('league'))})")
+    if btts and btts["decision"] == "YES" and main["field"] != "btts":
+        support.append(f"both sides score — BTTS {_fmt(btts.get('avg'))} in a {_fmt(btts.get('league'))} league")
+    if hs and hs["decision"] == "YES" and main["field"] != "home_scores":
+        support.append(f"home scores {_fmt(hs.get('avg'))}")
+    if aws and aws["decision"] == "YES" and main["field"] != "away_scores":
+        support.append(f"away scores {_fmt(aws.get('avg'))}")
+    tail = (" Support — " + "; ".join(support) + ".") if support else ""
+    f = main["field"]
+    if f == "over_2_5":
+        return (f"Over 2.5 is the bet because both sides live up there in absolute terms — A {_fmt(a)}, B {_fmt(b)}, Avg {_fmt(avg)} — in a league that itself goes over 2.5 {_fmt(lg)} of the time. "
+                f"The weaker side is still {_fmt(weaker)}, so this is not one team carrying the number. This is a high-scoring environment, not a low league beaten on margin.{tail} "
+                f"Main YES is 29/29 in this shape.")
+    if f == "btts":
+        return (f"BTTS is the bet because both attacks are real — A {_fmt(a)}, B {_fmt(b)}, Avg {_fmt(avg)} — against a league that sees both score {_fmt(lg)} of the time. "
+                f"The weaker side is {_fmt(weaker)}, so neither attack is a passenger. Both teams have to be kept honest here.{tail} "
+                f"Main YES is 29/29 in this shape.")
+    if f == "home_scores":
+        return (f"Home scores is the bet because the home attack is outright — A {_fmt(a)} against a league rate of {_fmt(lg)}, Avg {_fmt(avg)}. "
+                f"This is not a league-inflated number, the home side scores on its own. Home YES in this shape is 26/26.{tail}")
+    if f == "away_scores":
+        return (f"Away scores is the bet because the away side scores on the road — B {_fmt(b)} against a league rate of {_fmt(lg)}, Avg {_fmt(avg)} — and BTTS is also YES, so the away goal does not need a clean sheet to land. "
+                f"The away attack travels.{tail} Main YES is 29/29 in this shape.")
+    if f == "over_1_5":
+        return (f"Over 1.5 is the bet because the floor is high — A {_fmt(a)}, B {_fmt(b)}, Avg {_fmt(avg)} in a league that clears 1.5 {_fmt(lg)} of the time. "
+                f"You only need two goals, and both sides live above the league on that floor. Over 1.5 YES in this shape is 24/24.{tail}")
+    return f"Main YES is 29/29 in this shape."
+
 # ---------------------------------------------------------------- card (DB-shaped picks)
 def _card_html(m, filt, settled=False):
     # MINIMAL card: fixture + one decision box. Nothing else.
@@ -423,7 +468,7 @@ def _card_html(m, filt, settled=False):
         if filt['decision']=="BET":
             ml=LABEL.get(main['label'], main['label']) if main else '-'
             mv='YES' if main['decision']=='YES' else 'NO'
-            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">BET \u2022 100% MAIN</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} \u2014 {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Main YES (29/29) + Main passes its own 100% gate. Side signals do not veto Main. Margin: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
+            head=fixture+f'<div style="margin-top:10px;background:#10b98122;border:1px solid #10b981;border-radius:12px;padding:14px 16px"><div style="font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#10b981">BET \u2022 100% MAIN</div><div style="font-size:1.4rem;font-weight:800;color:#f1f5f9;margin-top:4px">{ml} \u2014 {mv}</div><div style="font-size:0.88rem;color:#94a3b8;margin-top:2px">Analyst: {_analyst_reason(main, picks)} Margin: {main["margin_pct"]:.1f}% above/below league on average. History only breaks ties.</div></div>'
             # UNDER callout stays: it is a bet, not table clutter. One box, same style.
             _unders=[x for x in filt['picks'] if x['field'] in ('over_1_5','over_2_5') and x['decision']=='NO' and not (main and x['key']==main['key'])]
             _unders.sort(key=lambda x: 0 if x['field']=='over_2_5' else 1)
@@ -466,13 +511,46 @@ def _filt_from_db_row(m):
             "weak_test": m.get("decision")=="NO BET - WEAK","conflicts":[],"decision":m.get("decision") or "BET",
             "decision_reason":m.get("decision_reason") or "","main_pick":main,"implied_notes":implied}
 
+
+# ---------------------------------------------------------------- Supabase connection test
+def _supabase_cfg():
+    url = os.environ.get("SUPABASE_URL") or ""
+    key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_ANON_KEY") or ""
+    try:
+        if hasattr(st, "secrets"):
+            url = url or st.secrets.get("SUPABASE_URL", "")
+            key = key or st.secrets.get("SUPABASE_KEY", "") or st.secrets.get("SUPABASE_ANON_KEY", "")
+    except Exception:
+        pass
+    return (url or "").rstrip("/"), key
+
+def _supabase_test(url, key):
+    """GET king_matches via Supabase REST. Returns (ok, status, detail). Stdlib only."""
+    if not url or not key:
+        return (False, "NOT CONFIGURED", "Set SUPABASE_URL and SUPABASE_KEY (or SUPABASE_ANON_KEY) in env / Streamlit secrets.")
+    req_url = f"{url}/rest/v1/king_matches?select=id,home_team,away_team,decision,created_at&order=id.desc&limit=1"
+    req = urllib.request.Request(req_url, headers={"apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", "ignore")
+            try:
+                rows = json.loads(body)
+            except Exception:
+                rows = []
+            return (True, f"CONNECTED — HTTP {resp.status}", f"king_matches reachable. Latest row: {rows[0] if rows else 'table exists, 0 rows'}. Full body: {body[:600]}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")[:600]
+        return (False, f"HTTP {e.code}", body or "No body returned.")
+    except Exception as e:
+        return (False, "CONNECTION FAILED", str(e))
+
 # ---------------------------------------------------------------- UI
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — The Filter Rule")
 st.caption("100% Logic: Only bet when Main is YES (29/29) and Main passes its OWN 100% gate. Over 2.5 Main needs Avg >= 70 & League >= 50. BTTS Main needs League >= 60 or Avg 60-70. Side signals never veto Main. SQLite: king.db")
 
-tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab"])
+tab_new, tab_pending, tab_perf, tab_lab = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
     st.markdown("### Paste the Teams scoring vs league average block")
     st.caption("Evaluating does NOT save. Nothing is saved until you press Save to Pending.")
@@ -527,3 +605,20 @@ with tab_lab:
         facts = parse_filter_data(text_in.strip()); filt = compute_filter_rule(facts)
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
+
+with tab_supabase:
+    st.markdown("### Supabase connection test")
+    st.caption("This tab only tests the connection. It does not save, settle, or move matches. SQLite (king.db) is still where this app saves.")
+    url, key = _supabase_cfg()
+    st.write(f"**URL configured:** {'Yes' if url else 'No'} — `{url or 'not set'}`")
+    st.write(f"**Key configured:** {'Yes — hidden' if key else 'No — not set'}")
+    st.write(f"**Table tested:** `king_matches`")
+    if st.button("Test Supabase connection", type="primary"):
+        ok, status, detail = _supabase_test(url, key)
+        if ok:
+            st.success(status)
+        else:
+            st.error(status)
+        st.code(detail)
+        if not url or not key:
+            st.info("Set SUPABASE_URL and SUPABASE_KEY in your environment or Streamlit secrets, then press Test again. Example secret names: SUPABASE_URL = https://xyz.supabase.co , SUPABASE_KEY = your anon key.")
