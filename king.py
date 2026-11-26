@@ -454,7 +454,7 @@ def _card_html(m, filt, settled=False):
     # settle in Performance - they are just not printed on the card.
     home, away = m.get('home_team') or '?', m.get('away_team') or '?'
     picks=filt['picks']; main=filt.get('main_pick')
-    fixture=f'<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">{home} <span style="font-size:0.72rem;color:#94a3b8">(HOME)</span> vs {away} <span style="font-size:0.72rem;color:#94a3b8">(AWAY)</span></div>'
+    fixture=f'<div style="font-size:1.15rem;font-weight:700;color:#f1f5f9">{home} vs {away}</div>'
     if settled and m.get('home_score') is not None:
         # Settled: fixture + result + Main outcome only. No table.
         _main_outcome=''
@@ -557,20 +557,42 @@ with tab_new:
     raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average")
     if st.button("Run the Filter", type="primary") and raw_in.strip():
         facts = parse_filter_data(raw_in.strip()); filt = compute_filter_rule(facts)
-        # Persist the evaluation in session_state. Streamlit buttons are momentary:
-        # on the next rerun "Run" is False again, so a Save button nested inside
-        # the Run block never survives to be clicked — that is why Pending stayed empty.
-        st.session_state["last_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip()}
+        st.session_state["last_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip(), "auto_saved_id": None, "auto_save_msg": ""}
+        # Auto-save: BET meets the logic, so it saves on its own. Non-BET asks below.
+        if filt.get("decision") == "BET":
+            conn = get_db(); cur = conn.cursor()
+            existing = cur.execute("SELECT id FROM matches WHERE is_deleted=0 AND home_team=? AND away_team=? AND raw_paste=? ORDER BY id DESC LIMIT 1",
+                                    (facts.get("home_team"), facts.get("away_team"), raw_in.strip())).fetchone()
+            conn.close()
+            if existing:
+                st.session_state["last_eval"]["auto_saved_id"] = existing[0]
+                st.session_state["last_eval"]["auto_save_msg"] = f"Already in Pending (id {existing[0]}). Not saved twice."
+            else:
+                mid = save_match(facts, filt, raw_in.strip())
+                st.session_state["last_eval"]["auto_saved_id"] = mid
+                st.session_state["last_eval"]["auto_save_msg"] = f"Auto-saved to Pending (id {mid})."
     if st.session_state.get("last_eval"):
         ev = st.session_state["last_eval"]; facts = ev["facts"]; filt = ev["filt"]
         if not facts.get("home_team"): st.warning("Could not read team names from (A)/(B) lines.")
         tmp = {"home_team": facts.get("home_team"), "away_team": facts.get("away_team")}
         st.markdown(_card_html(tmp, filt, settled=False), unsafe_allow_html=True)
-        if st.button("Save to Pending", key="save_new"):
-            mid = save_match(facts, filt, ev["raw"])
-            st.session_state.pop("last_eval", None)
-            st.success(f"Saved to Pending (id {mid}) in king.db. Open Pending to see it.")
-            st.rerun()
+        if filt.get("decision") == "BET":
+            if ev.get("auto_save_msg"):
+                st.success(ev["auto_save_msg"] + " Open Pending to see it.")
+        else:
+            st.info("Does not meet the logic — not auto-saved. Save it anyway for monitoring?")
+            if st.button("Save anyway to Pending", key="save_new"):
+                conn = get_db(); cur = conn.cursor()
+                existing = cur.execute("SELECT id FROM matches WHERE is_deleted=0 AND home_team=? AND away_team=? AND raw_paste=? ORDER BY id DESC LIMIT 1",
+                                        (facts.get("home_team"), facts.get("away_team"), ev["raw"])).fetchone()
+                conn.close()
+                if existing:
+                    st.success(f"Already in Pending (id {existing[0]}). Not saved twice.")
+                else:
+                    mid = save_match(facts, filt, ev["raw"])
+                    st.success(f"Saved to Pending (id {mid}) in king.db. Open Pending to see it.")
+                st.session_state.pop("last_eval", None)
+                st.rerun()
 with tab_pending:
     st.markdown("### Pending matches (from king.db)")
     pending = load_matches(pending_only=True)
