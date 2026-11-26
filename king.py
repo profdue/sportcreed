@@ -126,7 +126,7 @@ def get_db():
     conn.commit()
     return conn
 
-def save_match(facts, filt, raw_paste):
+def _sqlite_save_match(facts, filt, raw_paste):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -153,7 +153,7 @@ def save_match(facts, filt, raw_paste):
     conn.commit(); conn.close()
     return mid
 
-def settle_match_db(match_id, home_score, away_score):
+def _sqlite_settle_match_db(match_id, home_score, away_score):
     conn = get_db(); cur = conn.cursor()
     cur.execute("SELECT * FROM picks WHERE match_id=? AND is_implied=0", (match_id,))
     rows = cur.fetchall()
@@ -174,7 +174,7 @@ def settle_match_db(match_id, home_score, away_score):
                 (home_score, away_score, datetime.now(timezone.utc).isoformat(), match_id))
     conn.commit(); conn.close()
 
-def load_matches(pending_only=False, settled_only=False):
+def _sqlite_load_matches(pending_only=False, settled_only=False):
     conn = get_db(); cur = conn.cursor()
     q = "SELECT * FROM matches WHERE is_deleted=0"
     if pending_only: q += " AND home_score IS NULL"
@@ -185,6 +185,87 @@ def load_matches(pending_only=False, settled_only=False):
         m["picks"] = [dict(r) for r in cur.execute("SELECT * FROM picks WHERE match_id=? ORDER BY id", (m["id"],)).fetchall()]
     conn.close()
     return rows
+
+
+
+def _find_existing_match(home, away, raw_paste):
+    ok, url, key = _sb_available()
+    if ok:
+        from urllib.parse import quote as _q
+        q = f"/rest/v1/king_matches?select=id&home_team=eq.{_q(str(home or ''))}&away_team=eq.{_q(str(away or ''))}&raw_paste=eq.{_q(raw_paste)}&is_deleted=eq.0&order=id.desc&limit=1"
+        good, _, rows = _sb_request("GET", q, key, url)
+        if good and rows: return rows[0]["id"]
+        return None
+    conn = get_db(); cur = conn.cursor()
+    row = cur.execute("SELECT id FROM matches WHERE is_deleted=0 AND home_team=? AND away_team=? AND raw_paste=? ORDER BY id DESC LIMIT 1", (home, away, raw_paste)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+# ---------------------------------------------------------------- Supabase store (king_matches, single table)
+# Pending = same row with home_score NULL. Settled = SAME row updated with scores.
+# No duplicate: same home + away + raw_paste returns the existing row, never inserts twice.
+def save_match(facts, filt, raw_paste):
+    ok, url, key = _sb_available()
+    if not ok:
+        return _sqlite_save_match(facts, filt, raw_paste)
+    home, away = facts.get("home_team"), facts.get("away_team")
+    # duplicate check: same match + same paste, not deleted
+    from urllib.parse import quote as _q
+    q = f"/rest/v1/king_matches?select=id&home_team=eq.{_q(str(home or ''))}&away_team=eq.{_q(str(away or ''))}&raw_paste=eq.{_q(raw_paste)}&is_deleted=eq.0&order=id.desc&limit=1"
+    good, _, rows = _sb_request("GET", q, key, url)
+    if good and rows:
+        return rows[0]["id"]
+    body = {"home_team": home, "away_team": away, "raw_paste": raw_paste,
+            "decision": filt["decision"], "decision_reason": filt.get("decision_reason", ""),
+            "main_pick_key": (filt["main_pick"]["key"] if filt.get("main_pick") else None),
+            "main_pick_label": (filt["main_pick"]["label"] if filt.get("main_pick") else None),
+            "main_pick_decision": (filt["main_pick"]["decision"] if filt.get("main_pick") else None),
+            "main_pick_margin_pct": (filt["main_pick"]["margin_pct"] if filt.get("main_pick") else None),
+            "survivors_count": len(filt["survivors"]),
+            "home_score": None, "away_score": None, "settled_at": None, "is_deleted": 0,
+            "picks": _picks_to_json(filt), "sections": facts.get("sections") or {}}
+    good2, status, rows2 = _sb_request("POST", "/rest/v1/king_matches", key, url, body)
+    if good2 and rows2:
+        return rows2[0]["id"]
+    # Supabase write failed — fall back to SQLite so the match is not lost
+    return _sqlite_save_match(facts, filt, raw_paste)
+
+def load_matches(pending_only=False, settled_only=False):
+    ok, url, key = _sb_available()
+    if not ok:
+        return _sqlite_load_matches(pending_only=pending_only, settled_only=settled_only)
+    q = "/rest/v1/king_matches?select=*&is_deleted=eq.0&order=id.desc&limit=1000"
+    if pending_only: q += "&home_score=is.null"
+    if settled_only: q += "&home_score=not.is.null"
+    good, _, rows = _sb_request("GET", q, key, url)
+    if not good:
+        return _sqlite_load_matches(pending_only=pending_only, settled_only=settled_only)
+    return [_row_to_match(r) for r in (rows or [])]
+
+def settle_match_db(match_id, home_score, away_score):
+    ok, url, key = _sb_available()
+    if not ok:
+        return _sqlite_settle_match_db(match_id, home_score, away_score)
+    # fetch the SAME row, compute per-pick outcomes, update SAME row (no new row, no duplicate)
+    good, _, rows = _sb_request("GET", f"/rest/v1/king_matches?select=*&id=eq.{match_id}&limit=1", key, url)
+    if not good or not rows:
+        return _sqlite_settle_match_db(match_id, home_score, away_score)
+    row = rows[0]; picks = row.get("picks") or []
+    for r in picks:
+        if r.get("is_implied"): continue
+        if r.get("decision") == "SKIP":
+            r["outcome"] = None; continue
+        f = r.get("field")
+        if f == "home_scores": actual = home_score > 0
+        elif f == "away_scores": actual = away_score > 0
+        elif f == "over_1_5": actual = (home_score + away_score) > 1.5
+        elif f == "over_2_5": actual = (home_score + away_score) > 2.5
+        elif f == "btts": actual = (home_score > 0 and away_score > 0)
+        else: actual = None
+        r["outcome"] = (1 if (actual == (r.get("decision") == "YES")) else 0) if actual is not None else None
+    body = {"home_score": home_score, "away_score": away_score,
+            "settled_at": datetime.now(timezone.utc).isoformat(), "picks": picks}
+    _sb_request("PATCH", f"/rest/v1/king_matches?id=eq.{match_id}", key, url, body)
 
 # ---------------------------------------------------------------- parsing
 def _clean(s: str) -> str:
@@ -544,11 +625,61 @@ def _supabase_test(url, key):
     except Exception as e:
         return (False, "CONNECTION FAILED", str(e))
 
+
+def _sb_headers(key):
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json", "Content-Type": "application/json", "Prefer": "return=representation"}
+
+def _sb_request(method, path, key, url, body=None):
+    req = urllib.request.Request(f"{url}{path}", data=(json.dumps(body).encode("utf-8") if body is not None else None),
+                                 headers=_sb_headers(key), method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+            try: return (True, resp.status, json.loads(raw) if raw else [])
+            except Exception: return (True, resp.status, raw)
+    except urllib.error.HTTPError as e:
+        return (False, e.code, e.read().decode("utf-8", "ignore")[:800])
+    except Exception as e:
+        return (False, 0, str(e))
+
+def _sb_available():
+    url, key = _supabase_cfg()
+    return bool(url and key), url, key
+
+def _picks_to_json(filt):
+    out = []
+    for pr in filt["picks"]:
+        out.append({"category_key": pr["key"], "label": pr["label"], "field": pr["field"],
+                    "a_pct": pr.get("a"), "b_pct": pr.get("b"), "league_pct": pr.get("league"), "avg_pct": pr.get("avg"),
+                    "decision": pr["decision"], "margin_pct": pr.get("margin_pct"),
+                    "is_main": 1 if (filt.get("main_pick") and pr["key"] == filt["main_pick"]["key"]) else 0,
+                    "is_implied": 0, "implied_note": None, "outcome": None})
+    for field, note in (filt.get("implied_notes") or {}).items():
+        out.append({"category_key": field, "label": FIELD_LABEL.get(field, field), "field": field,
+                    "a_pct": None, "b_pct": None, "league_pct": None, "avg_pct": None,
+                    "decision": "YES" if filt["derived"].get(field) else "NO", "margin_pct": None,
+                    "is_main": 0, "is_implied": 1, "implied_note": note, "outcome": None})
+    return out
+
+def _row_to_match(row):
+    # Supabase king_matches row -> same shape as SQLite load_matches (m["picks"] list)
+    picks = row.get("picks") or []
+    # normalise keys for _filt_from_db_row
+    norm = []
+    for r in picks:
+        norm.append({"category_key": r.get("category_key"), "label": r.get("label"), "field": r.get("field"),
+                     "a_pct": r.get("a_pct"), "b_pct": r.get("b_pct"), "league_pct": r.get("league_pct"), "avg_pct": r.get("avg_pct"),
+                     "decision": r.get("decision"), "margin_pct": r.get("margin_pct"),
+                     "is_main": r.get("is_main", 0), "is_implied": r.get("is_implied", 0),
+                     "implied_note": r.get("implied_note"), "outcome": r.get("outcome")})
+    m = dict(row); m["picks"] = norm
+    return m
+
 # ---------------------------------------------------------------- UI
 st.set_page_config(page_title="King — The Filter Rule", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — The Filter Rule")
-st.caption("100% Logic: Only bet when Main is YES (29/29) and Main passes its OWN 100% gate. Over 2.5 Main needs Avg >= 70 & League >= 50. BTTS Main needs League >= 60 or Avg 60-70. Side signals never veto Main. SQLite: king.db")
+st.caption("100% Logic: Only bet when Main is YES (29/29) and Main passes its OWN 100% gate. Over 2.5 Main needs Avg >= 70 & League >= 50. BTTS Main needs League >= 60 or Avg 60-70. Side signals never veto Main. Store: Supabase king_matches (SQLite fallback if Supabase not configured).")
 
 tab_new, tab_pending, tab_perf, tab_lab, tab_supabase = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
@@ -560,17 +691,14 @@ with tab_new:
         st.session_state["last_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip(), "auto_saved_id": None, "auto_save_msg": ""}
         # Auto-save: BET meets the logic, so it saves on its own. Non-BET asks below.
         if filt.get("decision") == "BET":
-            conn = get_db(); cur = conn.cursor()
-            existing = cur.execute("SELECT id FROM matches WHERE is_deleted=0 AND home_team=? AND away_team=? AND raw_paste=? ORDER BY id DESC LIMIT 1",
-                                    (facts.get("home_team"), facts.get("away_team"), raw_in.strip())).fetchone()
-            conn.close()
+            existing = _find_existing_match(facts.get("home_team"), facts.get("away_team"), raw_in.strip())
             if existing:
-                st.session_state["last_eval"]["auto_saved_id"] = existing[0]
-                st.session_state["last_eval"]["auto_save_msg"] = f"Already in Pending (id {existing[0]}). Not saved twice."
+                st.session_state["last_eval"]["auto_saved_id"] = existing
+                st.session_state["last_eval"]["auto_save_msg"] = f"Stored — already in Pending (id {existing})."
             else:
                 mid = save_match(facts, filt, raw_in.strip())
                 st.session_state["last_eval"]["auto_saved_id"] = mid
-                st.session_state["last_eval"]["auto_save_msg"] = f"Auto-saved to Pending (id {mid})."
+                st.session_state["last_eval"]["auto_save_msg"] = f"Auto-saved to Pending (id {mid}) in Supabase king_matches."
     if st.session_state.get("last_eval"):
         ev = st.session_state["last_eval"]; facts = ev["facts"]; filt = ev["filt"]
         if not facts.get("home_team"): st.warning("Could not read team names from (A)/(B) lines.")
@@ -581,20 +709,18 @@ with tab_new:
                 st.success(ev["auto_save_msg"] + " Open Pending to see it.")
         else:
             st.info("Does not meet the logic — not auto-saved. Save it anyway for monitoring?")
+            if ev.get("stored_msg"):
+                st.success(ev["stored_msg"])
             if st.button("Save anyway to Pending", key="save_new"):
-                conn = get_db(); cur = conn.cursor()
-                existing = cur.execute("SELECT id FROM matches WHERE is_deleted=0 AND home_team=? AND away_team=? AND raw_paste=? ORDER BY id DESC LIMIT 1",
-                                        (facts.get("home_team"), facts.get("away_team"), ev["raw"])).fetchone()
-                conn.close()
+                existing = _find_existing_match(facts.get("home_team"), facts.get("away_team"), ev["raw"])
                 if existing:
-                    st.success(f"Already in Pending (id {existing[0]}). Not saved twice.")
+                    st.session_state["last_eval"]["stored_msg"] = f"Stored — already in Pending (id {existing})."
                 else:
                     mid = save_match(facts, filt, ev["raw"])
-                    st.success(f"Saved to Pending (id {mid}) in king.db. Open Pending to see it.")
-                st.session_state.pop("last_eval", None)
-                st.rerun()
+                    st.session_state["last_eval"]["stored_msg"] = f"Stored — saved to Pending (id {mid}) in Supabase king_matches."
+                st.rerun()  # rerun keeps last_eval, so the prediction card stays visible
 with tab_pending:
-    st.markdown("### Pending matches (from king.db)")
+    st.markdown("### Pending matches (from Supabase king_matches — home_score empty)")
     pending = load_matches(pending_only=True)
     if not pending: st.info("No pending matches.")
     for m in pending:
@@ -630,7 +756,7 @@ with tab_lab:
 
 with tab_supabase:
     st.markdown("### Supabase connection test")
-    st.caption("This tab only tests the connection. It does not save, settle, or move matches. SQLite (king.db) is still where this app saves.")
+    st.caption("This tab tests the connection. Saving / Pending / Performance all use Supabase king_matches when configured (SQLite king.db is only a fallback if Supabase is not configured).")
     url, key = _supabase_cfg()
     st.write(f"**URL configured:** {'Yes' if url else 'No'} — `{url or 'not set'}`")
     st.write(f"**Key configured:** {'Yes — hidden' if key else 'No — not set'}")
