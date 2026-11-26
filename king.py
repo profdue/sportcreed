@@ -440,6 +440,7 @@ def compute_agreement(facts: dict) -> dict:
 compute_filter_rule = compute_agreement
 
 # ---------------- Card ----------------
+# Same display card as the last green code — green = BET, red = NO BET. Only the logic underneath changed to agreement.
 def _card_html(m, filt, settled=False):
     home = m.get("home_team") or "?"; away = m.get("away_team") or "?"
     fixture = f"{home} vs {away}"
@@ -447,10 +448,11 @@ def _card_html(m, filt, settled=False):
         hs = m.get("home_score"); aws = m.get("away_score")
         fixture += f" — {hs}-{aws}" if hs is not None and aws is not None else ""
     dec = filt.get("decision") or "NO BET"
-    color = "#22c55e" if dec == "BET" else "#ef4444"
+    is_bet = dec == "BET"
+    color = "#22c55e" if is_bet else "#ef4444"
+    bg = "#22c55e22" if is_bet else "#ef444422"
     main = filt.get("main_pick")
     main_txt = f"{main['label']} YES" if main else "No agreement — NO BET"
-    # picks lines
     lines = []
     for p in filt.get("picks") or []:
         is_main = main and p["key"] == main["key"] and p["decision"] == "YES"
@@ -462,7 +464,7 @@ def _card_html(m, filt, settled=False):
         lines.append(f"<div style='display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #1e293b'><span style='color:#e2e8f0'>{p['label']}</span><span style='color:{bcol};font-weight:700'>{badge}{outcome}</span></div><div style='font-size:0.82rem;color:#94a3b8;margin-bottom:4px'>{p.get('reason','')}</div>")
     agree = filt.get("agreement") or {}
     agree_txt = " · ".join([f"{k}: {v}" for k, v in agree.items() if k in ("home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts")]) if agree else ""
-    head = f"<div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • AGREEMENT</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:0.95rem;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.85rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div>"
+    head = f"<div style='background:{bg};border:1px solid {color};border-radius:12px;padding:14px 16px'><div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • AGREEMENT</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:1.05rem;font-weight:700;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div></div>"
     return f"<div class='match-card'>{head}<div style='margin-top:10px'>{''.join(lines)}</div><div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Agreement: {agree_txt}</div></div>"
 
 def _filt_from_db_row(m):
