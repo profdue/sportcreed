@@ -6,7 +6,7 @@ Gate 3 Winner 1X / X2 (HIGH+LOW, asymmetric) | Gate 4 Team to Score (asymmetric)
 Gate 5 Under / Skip | Priority: Gate 0 > Margin (except BTTS/Over 1.5) > Thresholds
 Home: Pool alone is YES. Away: Rate(full) alone is YES, Pool alone is LEAN.
 Rate(full) for Away = Away Rate Avg >= 70 AND Over 1.5 Avg >= 80.
-Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
+Burnley fix (74 matches): Triple-fail (Avg<1.0 AND B<1.0 AND Rate>=70) = NO for that side + BTTS NO. Single-fail = LEAN, not NO. Away GO = Rate(full) OR Absolute GO. Over 1.5 margin<0 + Goals>=2.0 + Rate>=70 = LEAN, not NO. Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
 """
 import sqlite3
 import re
@@ -385,6 +385,12 @@ def compute_agreement(facts: dict) -> dict:
     over25_margin = _margin("over_2_5"); btts_margin = _margin("btts")
     over35_margin = _margin("over_3_5"); over15_margin = _margin("over_1_5")
     rate_full = (ar.get("avg") is not None and ar.get("avg") >= 70 and o15.get("avg") is not None and o15.get("avg") >= 80)
+    # Burnley triple-fail: Avg<1.0 AND B<1.0 AND Rate>=70 together. Single-fail is LEAN, triple-fail is NO. Burnley 0-2 is the 1st example (0/1), single-fails still score 56-62%.
+    home_triple = (hg.get("avg") is not None and hg.get("avg") < 1.0 and hg.get("b") is not None and hg.get("b") < 1.0 and hr.get("avg") is not None and hr.get("avg") >= 70)
+    away_triple = (ag.get("avg") is not None and ag.get("avg") < 1.0 and ag.get("b") is not None and ag.get("b") < 1.0 and ar.get("avg") is not None and ar.get("avg") >= 70)
+    # Absolute GO: Avg>=1.2 + A>=1.0 + B>=1.0 + Rate>=70. Home GO 42/44 95%, Away GO 31/34 91% on 74.
+    home_abs_go = (hg.get("avg") is not None and hg.get("avg") >= 1.2 and hg.get("a") is not None and hg.get("a") >= 1.0 and hg.get("b") is not None and hg.get("b") >= 1.0 and hr.get("avg") is not None and hr.get("avg") >= 70)
+    away_abs_go = (ag.get("avg") is not None and ag.get("avg") >= 1.2 and ag.get("a") is not None and ag.get("a") >= 1.0 and ag.get("b") is not None and ag.get("b") >= 1.0 and ar.get("avg") is not None and ar.get("avg") >= 70)
     hr_avg = hr.get("avg"); ar_avg = ar.get("avg")
     picks = []
     def _add(key, field, label, decision, confidence, reason, a=None, b=None, league=None, avg=None):
@@ -411,6 +417,7 @@ def compute_agreement(facts: dict) -> dict:
     # Over 1.5 — no downgrade, no raise
     if over15_margin is None: o15_dec, o15_conf, o15_reason = "SKIP", "Low", "Over 1.5 not in paste."
     elif over15_margin >= 0: o15_dec, o15_conf, o15_reason = "YES", "Highest", f"Gate 1 — over15_margin {over15_margin:+.0f} >= 0. Over 1.5 YES, Highest. Do NOT downgrade if margin <+10. Do NOT raise to +10."
+    elif (tot.get("avg") is not None and tot.get("avg") >= 2.0 and o15.get("avg") is not None and o15.get("avg") >= 70): o15_dec, o15_conf, o15_reason = "LEAN", "Medium", f"Burnley fix — over15_margin {over15_margin:+.0f} < 0 but Goals Avg {_fmt(tot.get('avg'),False)} >= 2.0 + Over 1.5 Rate {_fmt(o15.get('avg'))} >= 70. Over 1.5 LEAN, not NO. Burnley total was 2."
     else: o15_dec, o15_conf, o15_reason = "NO", "Medium", f"Gate 1 — over15_margin {over15_margin:+.0f} < 0. Over 1.5 NO."
     # Gate 2 Over 2.5 threshold — margin already decided, so threshold can only downgrade Over 2.5 confidence when margin <+10 (already Medium) — it never overrides a Gate 1 NO to YES, and never upgrades.
     # (Kept as a reason note: threshold agreement is recorded in the reason, decision stays with Gate 1.)
@@ -430,13 +437,24 @@ def compute_agreement(facts: dict) -> dict:
         o25_reason += " Combined margin >= +15 both — Over 2.5 + Over 3.5 + BTTS Highest."
         o35_reason += " Combined margin >= +15 both — Highest."
     # ---- Gate 2 BTTS ----
+    # Burnley veto FIRST: if either side triple-fails, BTTS is NO. It overrides Both Rates, Pool, Both Scorers, 80%, Combined. Single-fail does NOT veto.
+    btts_triple_veto = home_triple or away_triple
     btts_dec, btts_conf, btts_reason = "SKIP", "Low", "No BTTS gate fired."
+    if btts_triple_veto:
+        _side = "Home" if home_triple else "Away"
+        _avg_v = hg.get("avg") if home_triple else ag.get("avg")
+        _b_v = hg.get("b") if home_triple else ag.get("b")
+        _rate_v = hr.get("avg") if home_triple else ar.get("avg")
+        btts_dec, btts_conf = "NO", "Highest"
+        btts_reason = f"Burnley veto — {_side} triple-fail: Avg {_fmt(_avg_v,False)} < 1.0 + B {_fmt(_b_v,False)} < 1.0 + Rate {_fmt(_rate_v)} >= 70. BTTS NO. Burnley 0-2 is the 1st example. Single-fail alone does NOT veto."
     btts_agree_rates = (hr_avg is not None and ar_avg is not None and hr_avg >= 70 and ar_avg >= 70)
     btts_agree_pool = (home_pool is not None and home_pool >= 3.0 and ar_avg is not None and ar_avg >= 70)
     btts_both_scorers = (hr.get("a") is not None and ar.get("b") is not None and hr.get("a") >= 70 and ar.get("b") >= 70)
     btts_only_home = (hr_avg is not None and ar_avg is not None and hr_avg >= 70 and ar_avg < 70)
     btts_only_away = (hr_avg is not None and ar_avg is not None and ar_avg >= 70 and hr_avg < 70)
-    if btts_agree_rates:
+    if btts_triple_veto:
+        pass  # veto already set, do not let any other BTTS gate override it
+    elif btts_agree_rates:
         btts_dec, btts_conf = "YES", "Highest"
         btts_reason = f"Gate 2 — Both Rates >= 70 ({_fmt(hr_avg)} / {_fmt(ar_avg)}). BTTS YES, Highest. No margin filter. No downgrade if btts_margin <+10."
     elif btts_agree_pool:
@@ -453,7 +471,9 @@ def compute_agreement(facts: dict) -> dict:
         btts_reason = "Gate 2 — Only Away Rate >= 70. BTTS NO / LEAN NO."
     # 80% match gate — BTTS YES Highest, Over NOT automatic
     is_80 = (side80 >= 7 or avg80 >= 4)
-    if is_80 and btts_dec != "YES":
+    if btts_triple_veto:
+        pass  # veto holds, 80% does not override it
+    elif is_80 and btts_dec != "YES":
         btts_dec, btts_conf = "YES", "Highest"
         btts_reason = f"Gate 2 — 80% match (side80 {side80}, avg80 {avg80}). BTTS YES, Highest. Over is NOT automatic."
     elif is_80 and btts_dec == "YES":
@@ -467,15 +487,26 @@ def compute_agreement(facts: dict) -> dict:
                 btts_reason = f"Gate 1 — btts_margin {btts_margin:+.0f} >= 0 with no Rates / Pool agreement. BTTS NO / LEAN NO. Margin alone is not a BTTS pick (29% in file)."
             else:
                 btts_reason += f" BTTS margin {btts_margin:+.0f} does not override."
-    if combined:
+    if combined and not btts_triple_veto:
         btts_dec, btts_conf = "YES", "Highest"
         btts_reason += " Combined margin >= +15 both — BTTS Highest."
+    # Usable-output fallback: BTTS must never be SKIP when data is present. If no YES/NO gate fired, it is NO when either Rate < 60, else LEAN NO.
+    if btts_dec == "SKIP" and not btts_triple_veto:
+        if (hr_avg is not None and hr_avg < 60) or (ar_avg is not None and ar_avg < 60):
+            btts_dec, btts_conf = "NO", "Medium"
+            btts_reason = f"BTTS fallback — No YES gate fired + Rate < 60 (Home {_fmt(hr_avg)} / Away {_fmt(ar_avg)}). BTTS NO, not SKIP."
+        else:
+            btts_dec, btts_conf = "LEAN NO", "Medium"
+            btts_reason = f"BTTS fallback — No YES gate fired + Rates >= 60 but no agreement. BTTS LEAN NO, not SKIP."
     # 80% + Over: only if both pools >= 3.0 — add a note, Over decisions already come from Gate 1; do NOT add Over from 80% alone
     if is_80 and home_pool is not None and away_pool is not None and home_pool >= 3.0 and away_pool >= 3.0:
         btts_reason += " Both pools >= 3.0 — Over may be added via Gate 1, not from 80% alone."
     # ---- Gate 3 Winner ----
+    # Burnley: triple-fail side cannot win its DC. Home triple -> 1X NO. Away triple -> X2 NO.
     # 1X — Home: Pool alone is YES
-    if gate0_1x:
+    if home_triple and not gate0_1x:
+        x1_dec, x1_conf, x1_reason = "NO", "Highest", f"Burnley veto — Home triple-fail: Avg {_fmt(hg.get('avg'),False)} < 1.0 + B {_fmt(hg.get('b'),False)} < 1.0 + Rate {_fmt(hr.get('avg'))} >= 70. 1X NO. Burnley lost 0-2."
+    elif gate0_1x:
         x1_dec, x1_conf, x1_reason = "YES", "Highest", "Gate 0 — avgs_above == 8. 1X YES, Highest. Gate 0 1X beats Gate 3 No winner."
     elif home_pool is not None and away_pool is not None and home_pool >= 3.0 and away_pool < 3.0:
         x1_dec, x1_conf, x1_reason = "YES", "Highest", f"Gate 3 — Home Pool {home_pool:.2f} >= 3.0 + Away Pool {away_pool:.2f} < 3.0. 1X YES, Highest. 27 / 27 in file."
@@ -486,13 +517,21 @@ def compute_agreement(facts: dict) -> dict:
     else:
         # No winner rule: Both pools >= 3.0 (and not Gate 0 8/9) -> No 1X pick; avg80 >= 4 -> No winner (unless Gate 0)
         if home_pool is not None and away_pool is not None and home_pool >= 3.0 and away_pool >= 3.0:
-            x1_dec, x1_conf, x1_reason = "SKIP", "Low", "Gate 3 — Both pools >= 3.0. No winner pick. Both can score."
+            x1_dec, x1_conf, x1_reason = "LEAN NO", "Medium", "Gate 3 — Both pools >= 3.0. No winner edge. Both can score. 1X LEAN NO, not SKIP."
         elif avg80 >= 4:
-            x1_dec, x1_conf, x1_reason = "SKIP", "Low", "Gate 3 — avg80 >= 4. No winner pick."
+            x1_dec, x1_conf, x1_reason = "LEAN NO", "Medium", "Gate 3 — avg80 >= 4. No winner edge. 1X LEAN NO, not SKIP."
+        elif home_triple:
+            x1_dec, x1_conf, x1_reason = "NO", "Highest", "Burnley veto — Home triple-fails. 1X NO."
         else:
-            x1_dec, x1_conf, x1_reason = "SKIP", "Low", "Gate 3 — No 1X gate fired."
-    # X2 — Away: Pool alone is LEAN, Rate(full) must agree for YES
-    if away_pool is not None and home_pool is not None and away_pool >= 3.0 and home_pool < 3.0:
+            x1_dec, x1_conf, x1_reason = "LEAN NO", "Medium", "Gate 3 — No 1X gate fired + Home Pool < 3.0. 1X LEAN NO, not SKIP."
+    # X2 — Away: Pool alone is LEAN, Rate(full) OR Absolute GO must agree for YES
+    if away_triple and not gate0_1x:
+        x2_dec, x2_conf, x2_reason = "NO", "Highest", f"Burnley veto — Away triple-fail: Avg {_fmt(ag.get('avg'),False)} < 1.0 + B {_fmt(ag.get('b'),False)} < 1.0 + Rate {_fmt(ar.get('avg'))} >= 70. X2 NO."
+    elif away_abs_go and home_triple:
+        x2_dec, x2_conf, x2_reason = "YES", "High", f"Burnley fix — Away Absolute GO passes (Avg {_fmt(ag.get('avg'),False)} + A {_fmt(ag.get('a'),False)} + B {_fmt(ag.get('b'),False)} + Rate {_fmt(ar.get('avg'))}) + Home triple-fails. X2 YES, High. Burnley won 0-2."
+    elif away_abs_go and (home_pool is not None and home_pool < 3.0):
+        x2_dec, x2_conf, x2_reason = "YES", "High", f"Burnley fix — Away Absolute GO passes (Avg {_fmt(ag.get('avg'),False)} + Rate {_fmt(ar.get('avg'))}) + Home Pool {home_pool:.2f} < 3.0. X2 YES, High."
+    elif away_pool is not None and home_pool is not None and away_pool >= 3.0 and home_pool < 3.0:
         if rate_full:
             x2_dec, x2_conf, x2_reason = "YES", "High", f"Gate 3 — Away Pool {away_pool:.2f} >= 3.0 + Home Pool {home_pool:.2f} < 3.0 + Rate(full) (Away Rate {_fmt(ar_avg)} >= 70 + Over 1.5 {_fmt(o15.get('avg'))} >= 80). X2 YES, High."
         else:
@@ -501,37 +540,54 @@ def compute_agreement(facts: dict) -> dict:
         x2_dec, x2_conf, x2_reason = "LEAN", "Medium", "Gate 3 — Away Rate >= 70 + Home Rate < 70. X2 LEAN, Medium."
     else:
         if home_pool is not None and away_pool is not None and home_pool >= 3.0 and away_pool >= 3.0 and not gate0_1x and avgs_above != 9:
-            x2_dec, x2_conf, x2_reason = "SKIP", "Low", "Gate 3 — Both pools >= 3.0. No winner pick."
+            x2_dec, x2_conf, x2_reason = "LEAN NO", "Medium", "Gate 3 — Both pools >= 3.0. No winner edge. X2 LEAN NO, not SKIP."
         elif avg80 >= 4 and not gate0_1x:
-            x2_dec, x2_conf, x2_reason = "SKIP", "Low", "Gate 3 — avg80 >= 4. No winner pick."
+            x2_dec, x2_conf, x2_reason = "LEAN NO", "Medium", "Gate 3 — avg80 >= 4. No winner edge. X2 LEAN NO, not SKIP."
         else:
-            x2_dec, x2_conf, x2_reason = "SKIP", "Low", "Gate 3 — No X2 gate fired."
+            x2_dec, x2_conf, x2_reason = "LEAN NO", "Medium", "Gate 3 — No X2 gate fired + Away Pool < 3.0. X2 LEAN NO, not SKIP."
     # Gate 0 9 -> No winner (already: 1X/X2 stay SKIP unless Gate 0 8; if avgs==9, force SKIP for winner)
     if gate0_over:
-        x1_dec, x1_conf, x1_reason = "SKIP", "Low", "Gate 0 — avgs_above == 9. No winner pick."
-        x2_dec, x2_conf, x2_reason = "SKIP", "Low", "Gate 0 — avgs_above == 9. No winner pick."
+        x1_dec, x1_conf, x1_reason = "LEAN NO", "Medium", "Gate 0 — avgs_above == 9. No winner edge. 1X LEAN NO."
+        x2_dec, x2_conf, x2_reason = "LEAN NO", "Medium", "Gate 0 — avgs_above == 9. No winner edge. X2 LEAN NO."
     # ---- Gate 4 Team to Score (asymmetric) ----
+    # Burnley: triple-fail = NO, not SKIP. Absolute GO = YES.
     # Home: Pool alone is YES
-    if home_pool is not None and home_pool >= 3.0:
+    if home_triple:
+        hs_dec, hs_conf, hs_reason = "NO", "Highest", f"Burnley veto — Home triple-fail: Avg {_fmt(hg.get('avg'),False)} < 1.0 + B {_fmt(hg.get('b'),False)} < 1.0 + Rate {_fmt(hr.get('avg'))} >= 70. Home Scores NO. Burnley scored 0."
+    elif home_abs_go:
+        hs_dec, hs_conf, hs_reason = "YES", "Highest", f"Burnley fix — Home Absolute GO passes (Avg {_fmt(hg.get('avg'),False)} + A {_fmt(hg.get('a'),False)} + B {_fmt(hg.get('b'),False)} + Rate {_fmt(hr.get('avg'))}). Home Scores YES, Highest."
+    elif home_pool is not None and home_pool >= 3.0:
         hs_dec, hs_conf, hs_reason = "YES", "High", f"Gate 4 — Home Pool {home_pool:.2f} >= 3.0. Home Scores YES, High. 95% in file."
     elif hr.get("a") is not None and hr.get("b") is not None and hr.get("a") >= 70 and hr.get("b") >= 70:
         hs_dec, hs_conf, hs_reason = "YES", "High", f"Gate 4 — Home Rate A {_fmt(hr.get('a'))} >= 70 + Away Conceding B {_fmt(hr.get('b'))} >= 70. Home Scores YES, High."
+    elif hg.get("avg") is not None and hg.get("avg") < 1.2:
+        hs_dec, hs_conf, hs_reason = "NO", "Medium", f"Gate 4 — Home Avg {_fmt(hg.get('avg'),False)} < 1.2 + Pool < 3.0 + Rates fail. Home Scores NO, not SKIP. Usable output."
     else:
-        hs_dec, hs_conf, hs_reason = "SKIP", "Low", "Gate 4 — No Home Scores gate fired."
-    # Away: Rate(full) alone is YES. Pool adds nothing.
-    if rate_full:
+        hs_dec, hs_conf, hs_reason = "LEAN NO", "Medium", "Gate 4 — Pool < 3.0 + Rates fail + Avg >= 1.2. Home Scores LEAN NO."
+    # Away: Rate(full) OR Absolute GO is YES. Pool alone is LEAN. Triple-fail is NO.
+    if away_triple:
+        as_dec, as_conf, as_reason = "NO", "Highest", f"Burnley veto — Away triple-fail: Avg {_fmt(ag.get('avg'),False)} < 1.0 + B {_fmt(ag.get('b'),False)} < 1.0 + Rate {_fmt(ar.get('avg'))} >= 70. Away Scores NO."
+    elif rate_full:
         as_dec, as_conf, as_reason = "YES", "Highest", f"Gate 4 — Rate(full) passes (Away Rate {_fmt(ar_avg)} >= 70 + Over 1.5 {_fmt(o15.get('avg'))} >= 80). Away Scores YES, Highest. Pool does not matter."
+    elif away_abs_go:
+        as_dec, as_conf, as_reason = "YES", "Highest", f"Burnley fix — Away Absolute GO passes (Avg {_fmt(ag.get('avg'),False)} + A {_fmt(ag.get('a'),False)} + B {_fmt(ag.get('b'),False)} + Rate {_fmt(ar.get('avg'))} >= 70). Away Scores YES, Highest. Burnley scored 2."
     elif away_pool is not None and away_pool >= 3.0:
         as_dec, as_conf, as_reason = "LEAN", "Medium", f"Gate 4 — Rate(full) fails but Away Pool {away_pool:.2f} >= 3.0. Away Scores LEAN, Medium. Conflict bucket 67%. LEAN, not No Pick."
+    elif ag.get("avg") is not None and ag.get("avg") < 1.2:
+        as_dec, as_conf, as_reason = "NO", "Medium", f"Gate 4 — Away Avg {_fmt(ag.get('avg'),False)} < 1.2 + Rate(full) fails + Pool < 3.0. Away Scores NO, not SKIP. Usable output."
     else:
-        as_dec, as_conf, as_reason = "SKIP", "Low", "Gate 4 — Rate(full) fails and Away Pool < 3.0. No pick."
+        as_dec, as_conf, as_reason = "LEAN NO", "Medium", "Gate 4 — Rate(full) fails + Pool < 3.0 + Avg >= 1.2. Away Scores LEAN NO."
     # ---- Gate 5 Under / Skip ----
     if hr_avg is not None and ar_avg is not None and hr_avg < 70 and ar_avg < 70:
         un_dec, un_conf, un_reason = "YES", "Highest", f"Gate 5 — Home Rate {_fmt(hr_avg)} < 70 + Away Rate {_fmt(ar_avg)} < 70. Under 2.5 YES, Highest. Over 0 / 6 in file."
     elif bt.get("avg") is not None and o25.get("avg") is not None and bt.get("avg") < 50 and o25.get("avg") < 60:
         un_dec, un_conf, un_reason = "LEAN", "Medium", "Gate 5 — BTTS Avg < 50 + Over 2.5 Avg < 60. Under 2.5 LEAN."
+    elif btts_triple_veto and tot.get("avg") is not None and tot.get("avg") < 2.5 and o25_dec == "NO":
+        un_dec, un_conf, un_reason = "LEAN", "Medium", "Burnley fix — BTTS NO via triple-fail + Goals Avg < 2.5 + Over 2.5 NO. Under 2.5 LEAN. Burnley total was 2."
+    elif o25_dec == "NO" and tot.get("avg") is not None and tot.get("avg") < 2.5:
+        un_dec, un_conf, un_reason = "LEAN", "Medium", "Gate 5 — Over 2.5 NO + Goals Avg < 2.5. Under 2.5 LEAN."
     else:
-        un_dec, un_conf, un_reason = "SKIP", "Low", "Gate 5 — No Under gate fired."
+        un_dec, un_conf, un_reason = "NO", "Medium", "Gate 5 — No Under gate fired + Over 2.5 not NO. Under 2.5 NO, not SKIP. Usable output."
     # ---- Assemble picks (design: same card order, now 9 markets) ----
     _add("over_1_5", "over_1_5", "Total over 1.5", o15_dec, o15_conf, o15_reason, o15.get("a"), o15.get("b"), o15.get("league"), o15.get("avg"))
     _add("over_2_5", "over_2_5", "Total over 2.5", o25_dec, o25_conf, o25_reason, o25.get("a"), o25.get("b"), o25.get("league"), o25.get("avg"))
@@ -553,6 +609,8 @@ def compute_agreement(facts: dict) -> dict:
         "over_3_5": f"margin {over35_margin:+.0f}" if over35_margin is not None else "not in paste",
         "btts": f"margin {btts_margin:+.0f}" if btts_margin is not None else "not in paste",
         "rate_full": "passes" if rate_full else "fails",
+        "home_triple": "YES — NO" if home_triple else "no",
+        "away_triple": "YES — NO" if away_triple else "no",
         "avg80": str(avg80), "side80": str(side80),
     }
     # Main for accumulator — one per match, YES only (LEAN never a main pick). Priority: Gate 0 1X > Over 3.5 > Over 2.5 > Over 1.5 > Home > Away > 1X > X2 > BTTS > Under
