@@ -4,11 +4,11 @@ king.py — Portfolio Logic + Frozen Mixed Extremes fallback (frozen).
 Portfolio: Two independent families must agree for a Main. One family = evidence, two = decision.
 Signals: Over 1.5 Rate>=70, Over 2.5 Rate>=50, Over 3.5 Rate>=35, BTTS Rate>=50,
 Home Avg>=1.2, Away Avg>=1.2. Direction: 5-6 NOs=Under, 6 YESs=Over, 3-4=Split.
-Under Main = Under Direction + Negative Lock (Away Rate<=60 OR Over 2.5 Rate<=40).
-Home Main = Home Lock (Rate>=85 OR Avg>=1.8 OR MIN>League+Rate>=70) + Home Win Lock
+Under Main = Under Direction + Quiet-game check (Away Rate<=60 OR Over 2.5 Rate<=40).
+Home Main = Home-scores check (Rate>=85 OR Avg>=1.8 OR MIN>League+Rate>=70) + Home-does-not-lose check
   (Rate>=80+Away Rate<60 OR Gap>=0.5+Home Only).
 Away Main = BTTS Rate>=60 + Away Avg>=1.2 + Gap<=-0.3 (bet Away scores, never Away win alone).
-Over = given if 6 YESs + Both dist. Triple proven = Goals>=3.25 AND O15>=87 AND O25>=67. Triple -> Main Over 2.5. Not triple -> Main Over 1.5.
+Over = given if 6 YESs + Both dist. Triple Over check = Goals>=3.25 AND O15>=87 AND O25>=67. Triple -> Main Over 2.5. Not triple -> Main Over 1.5.
 No Main on split direction, fighting families, or single family only.
 FROZEN MIXED EXTREMES (fallback only): applies ONLY when match is Mixed (core 6 Avg vs League
 not all above and not all below) AND Portfolio gives No Main. Priority: Over > Under > BTTS NO > BTTS YES.
@@ -17,6 +17,10 @@ not all above and not all below) AND Portfolio gives No Main. Priority: Over > U
  BTTS YES extreme: BTTS Avg>=60 -> Main Both score YES.
  BTTS NO extreme: BTTS Avg<=33 -> Main Both score NO. 38-40% is SKIP, not NO. No tightening.
 Backtest (Mixed 75): Over 6/6, Under 10/11, BTTS YES 18/21, BTTS NO 5/5. None meets lock bar (>=10 bets + lower bound >=80%).
+Proven Lock (LOCK badge): Total Goals Avg - 2.5 >= +0.70 AND O25 Rate - 50 >= +15.
+Backtest on all colours: 18/18 in our logic. When it fires, Main = Over 2.5 LOCK, top priority.
+Everything else is MAIN, explicitly 'Not a lock', even when two checks agree.
+Language: checks, not locks, inside a Main. Story = concise: '[Home] is ___ while [Away] is ___' (max 3 sentences, numbers only).
 Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
 """
 import sqlite3
@@ -431,7 +435,7 @@ def compute_agreement(facts: dict) -> dict:
     both_dist = (dist == "Both" and btts_rate is not None and btts_rate >= 60)
     # ---- Over rule (user rule): every Over given becomes Over 1.5 unless triple proven ----
     # Over GIVEN = Over Direction (6 YESs) + Both Distribution (Both + BTTS>=60)
-    # TRIPLE PROVEN = Goals>=3.25 AND O15>=87 AND O25>=67 (ALL three, AND not OR)
+    # TRIPLE OVER CHECK = Goals>=3.25 AND O15>=87 AND O25>=67 (ALL three, AND not OR)
     # Triple -> Main Over 2.5. Not triple -> Main Over 1.5. No new matches, no extra tier.
     over_given = bool(over_dir and both_dist)
     triple_proven = bool(
@@ -439,7 +443,36 @@ def compute_agreement(facts: dict) -> dict:
         and (o15_rate is not None and o15_rate >= 87)
         and (o25_rate is not None and o25_rate >= 67)
     )
-    over15_lock = triple_proven  # kept for agreement display: Lock = Triple Proven
+    over15_lock = triple_proven  # kept for agreement display: Lock = Triple Over check
+    # ---- Concise story (max 3 sentences) + Proven Lock ----
+    _home_team = facts.get("home_team") or "Home"
+    _away_team = facts.get("away_team") or "Away"
+    # Story uses each side's OWN line (A), not the Avg — Forest 0.60, not 1.10.
+    _home_scored = hg.get("a")   # Forest scored at home
+    _home_conceded = ag.get("a")  # Forest conceded at home
+    _home_rate_own = hr.get("a")  # Forest scoring rate at home
+    _away_scored = ag.get("b")   # Chelsea scored away
+    _away_conceded = hg.get("b")  # Chelsea conceded away
+    _away_rate_own = ar.get("b")  # Chelsea scoring rate away
+    _goals_league = tot.get("league")
+    def _word(scored, rate):
+        if scored is None: return "no clear scoring line"
+        if scored < 1.0 and (rate is not None and rate < 50): return "dead"
+        if scored < 1.2: return "low-scoring"
+        if scored >= 1.8: return "strong"
+        return "steady"
+    _hw = _word(_home_scored, _home_rate_own)
+    _aw = _word(_away_scored, _away_rate_own)
+    _story = (
+        f"{_home_team} at home is {_hw}: scores {_fmt(_home_scored, False)}, concedes {_fmt(_home_conceded, False)}, scores in {_fmt(_home_rate_own)}. "
+        f"{_away_team} away is {_aw}: scores {_fmt(_away_scored, False)}, concedes {_fmt(_away_conceded, False)}, scores in {_fmt(_away_rate_own)}. "
+        f"Together: Total {_fmt(goals_avg, False)} (League {_fmt(_goals_league, False)}), Over 2.5 {_fmt(o25_rate)}, BTTS {_fmt(btts_rate)}."
+    )
+    # Proven Lock: 18/18 in our logic on all colours. Top priority when it fires.
+    _tot_margin = (goals_avg - 2.5) if goals_avg is not None else None
+    _o25_margin = (o25_rate - 50) if o25_rate is not None else None
+    _proven_lock = bool(_tot_margin is not None and _tot_margin >= 0.70 and _o25_margin is not None and _o25_margin >= 15)
+
     # ---- Decision: two independent families must agree ----
     under_main = bool(under_dir and neg_lock)
     home_main = bool(home_lock and home_win_lock)
@@ -454,10 +487,10 @@ def compute_agreement(facts: dict) -> dict:
     lean_over = False
     if home_main:
         main_key, main_label = "home_scores", "Home scores"
-        main_reason = f"Portfolio — Home Lock + Home Win Lock agree. Home Lock: Rate {_fmt(home_rate)} / Avg {_fmt(home_avg, False)} / MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}. Home Win Lock: Rate {_fmt(home_rate)} + Away Rate {_fmt(away_rate)} / Gap {_fmt(gap, False)} + Distribution {dist}. Two families agree — Main Home scores."
+        main_reason = f"Portfolio — Home-scores check + Home-does-not-lose check agree. Home-scores check: Rate {_fmt(home_rate)} / Avg {_fmt(home_avg, False)} / MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}. Home-does-not-lose check: Rate {_fmt(home_rate)} + Away Rate {_fmt(away_rate)} / Gap {_fmt(gap, False)} + Distribution {dist}. Two families agree — Main Home scores."
     elif under_main:
         main_key, main_label = "under_2_5", "Total under 2.5"
-        main_reason = f"Portfolio — Under Direction + Negative Lock agree. Direction: {no_count} NOs / {yes_count} YESs. Negative Lock: Away Rate {_fmt(away_rate)} <= 60 OR Over 2.5 Rate {_fmt(o25_rate)} <= 40. Two families agree — Main Under 2.5."
+        main_reason = f"Portfolio — Under Direction + Quiet-game check agree. Direction: {no_count} NOs / {yes_count} YESs. Quiet-game check: Away Rate {_fmt(away_rate)} <= 60 OR Over 2.5 Rate {_fmt(o25_rate)} <= 40. Two families agree — Main Under 2.5."
     elif away_main:
         main_key, main_label = "away_scores", "Away scores"
         main_reason = f"Portfolio — Away via BTTS + Away Distribution agree. BTTS Rate {_fmt(btts_rate)} >= 60 (Away scores). Away Avg {_fmt(away_avg, False)} >= 1.2 + Gap {_fmt(gap, False)} <= -0.3. Two families agree — Main Away scores (never Away win alone)."
@@ -465,7 +498,7 @@ def compute_agreement(facts: dict) -> dict:
         # YOUR RULE: Over given -> Over 1.5 unless triple proven -> Over 2.5
         if triple_proven:
             main_key, main_label = "over_2_5", "Total over 2.5"
-            main_reason = f"Portfolio — Over given + TRIPLE PROVEN. Direction: {yes_count} YESs. Both: Home Avg {_fmt(home_avg, False)} + Away Avg {_fmt(away_avg, False)} + BTTS Rate {_fmt(btts_rate)} >= 60. Triple: Goals Avg {_fmt(goals_avg, False)} >= 3.25 AND Over 1.5 Rate {_fmt(o15_rate)} >= 87 AND Over 2.5 Rate {_fmt(o25_rate)} >= 67. All three hold — Main Over 2.5."
+            main_reason = f"Portfolio — Over given + TRIPLE OVER CHECK. Direction: {yes_count} YESs. Both: Home Avg {_fmt(home_avg, False)} + Away Avg {_fmt(away_avg, False)} + BTTS Rate {_fmt(btts_rate)} >= 60. Triple: Goals Avg {_fmt(goals_avg, False)} >= 3.25 AND Over 1.5 Rate {_fmt(o15_rate)} >= 87 AND Over 2.5 Rate {_fmt(o25_rate)} >= 67. All three hold — Main Over 2.5."
         else:
             main_key, main_label = "over_1_5", "Total over 1.5"
             main_reason = f"Portfolio — Over given but NOT triple proven, so downgraded to Over 1.5. Direction: {yes_count} YESs. Both: Home Avg {_fmt(home_avg, False)} + Away Avg {_fmt(away_avg, False)} + BTTS Rate {_fmt(btts_rate)} >= 60. Triple fails: Goals Avg {_fmt(goals_avg, False)} / Over 1.5 Rate {_fmt(o15_rate)} / Over 2.5 Rate {_fmt(o25_rate)} — not all three >= 3.25 / 87 / 67. Main Over 1.5 (not Over 2.5)."
@@ -476,13 +509,24 @@ def compute_agreement(facts: dict) -> dict:
         if split_dir:
             main_reason = f"Portfolio — No Main. Direction is Split ({no_count} NOs / {yes_count} YESs). No pair of families agrees. A lock in a split match is a trap."
         elif under_dir and not neg_lock:
-            main_reason = f"Portfolio — No Main. Under Direction ({no_count} NOs) but no Negative Lock (Away Rate {_fmt(away_rate)}, Over 2.5 Rate {_fmt(o25_rate)}). One family only — LEAN Under, not Main."
+            main_reason = f"Portfolio — No Main. Under Direction ({no_count} NOs) but no Quiet-game check (Away Rate {_fmt(away_rate)}, Over 2.5 Rate {_fmt(o25_rate)}). One family only — LEAN Under, not Main."
         elif home_lock and not home_win_lock:
-            main_reason = f"Portfolio — No Main. Home Lock but no Home Win Lock (Gap {_fmt(gap, False)}, Distribution {dist}). One family only — LEAN Home scores, not Main."
+            main_reason = f"Portfolio — No Main. Home-scores check but no Home-does-not-lose check (Gap {_fmt(gap, False)}, Distribution {dist}). One family only — LEAN Home scores, not Main."
         elif away_via_btts and not away_dist:
             main_reason = f"Portfolio — No Main. BTTS Rate {_fmt(btts_rate)} >= 60 but Away Distribution fails (Away Avg {_fmt(away_avg, False)}, Gap {_fmt(gap, False)}). One family only."
         else:
             main_reason = f"Portfolio — No Main. Direction {no_count} NOs / {yes_count} YESs, Distribution {dist}, Winner {winner}. Families fight or only one agrees."
+    # Proven Lock overrides Portfolio Main (Over 2.5 LOCK, top priority).
+    if _proven_lock:
+        main_key, main_label = "over_2_5", "Total over 2.5"
+        main_reason = (
+            f"LOCK — Proven 18 / 18 in our logic on this rule (Total margin {_fmt(_tot_margin, False)} >= +0.70 AND O25 margin {_fmt(_o25_margin, False)} >= +15). "
+            f"{_story}"
+        )
+        _proven_lock_main = True
+    else:
+        _proven_lock_main = False
+
     # ---- FROZEN MIXED EXTREMES (fallback only) ----
     # Mixed = core 6 Avg vs League not all above and not all below. '=' counts as neither.
     # Fires ONLY if Portfolio gave No Main. Priority: Over > Under > BTTS NO > BTTS YES. One Main per match.
@@ -531,12 +575,12 @@ def compute_agreement(facts: dict) -> dict:
     # Over 1.5 / 2.5 / 3.5 / BTTS / Home / Away follow their signal directly (evidence for Direction)
     # Over 1.5 pick: Main when Over given but NOT triple proven (downgraded from Over 2.5)
     _o15_is_main = bool(over15_main and main_key == "over_1_5")
-    _o15_extreme_main = bool(_extreme_main_key == "over_2_5")
+    _o15_extreme_main = bool(_extreme_main_key == "over_2_5" or _proven_lock_main)
     _add("over_1_5", "over_1_5", "Total over 1.5", ("YES" if (_o15_is_main or _o15_extreme_main) else sig["over_1_5"]), "Highest" if (_o15_is_main or _o15_extreme_main) else ("Highest" if sig["over_1_5"] == "YES" else "Medium"),
          (f"Main — {main_reason}" if _o15_is_main else f"Signal — Over 1.5 Rate {_fmt(o15_rate)} {'>=' if sig['over_1_5'] == 'YES' else '<'} 70. {'YES' if sig['over_1_5'] == 'YES' else 'NO'}."),
          o15.get("a"), o15.get("b"), o15.get("league"), o15.get("avg"))
     # Over 2.5 pick: Main only when triple proven. If Over given but not triple, shown as LEAN (downgraded to Over 1.5), not Main.
-    _o25_is_main = bool((over25_main and main_key == "over_2_5") or (_extreme_main_key == "over_2_5"))
+    _o25_is_main = bool((over25_main and main_key == "over_2_5") or (_extreme_main_key == "over_2_5") or _proven_lock_main)
     _o25_downgraded = bool(over15_main and main_key == "over_1_5")
     _o25_dec = "YES" if _o25_is_main else ("LEAN" if (_o25_downgraded or lean_over) else sig["over_2_5"])
     _o25_conf = "Highest" if _o25_is_main else ("High" if (_o25_downgraded or lean_over) else "Medium")
@@ -574,17 +618,17 @@ def compute_agreement(facts: dict) -> dict:
     _add("x2", "x2", "X2 (Away does not lose)", x2_dec, x2_conf, x2_reason, ag.get("a"), ag.get("b"), ag.get("league"), ag.get("avg"))
     # Under 2.5 is the inverse of Over 2.5 signal, Main only when under_main fires
     _under_extreme_main = bool(_extreme_main_key == "under_2_5")
-    _under_is_main = bool(under_main or _under_extreme_main)
+    _under_is_main = bool((under_main or _under_extreme_main) and not _proven_lock_main)
     _add("under_2_5", "under_2_5", "Total under 2.5", ("YES" if _under_is_main else ("NO" if sig["over_2_5"] == "YES" else "YES")), "Highest" if _under_is_main else "Medium",
-         (f"Main — {main_reason}" if _under_is_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Negative Lock, or Frozen Mixed Extreme."),
+         (f"Main — {main_reason}" if _under_is_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Quiet-game check, or Frozen Mixed Extreme."),
          o25.get("a"), o25.get("b"), o25.get("league"), o25.get("avg"))
     agreement_detail = {
         "home_scoring_avg": f"Avg {_fmt(home_avg, False)} · MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}",
         "away_scoring_avg": f"Avg {_fmt(away_avg, False)} · MIN {_fmt(away_min, False)} vs League {_fmt(away_league, False)}",
         "goals_match": f"Direction {no_count} NOs / {yes_count} YESs · Distribution {dist} · Gap {_fmt(gap, False)} · Winner {winner}",
         "home_scoring_rate": f"Avg {_fmt(home_rate)} · Lock {'YES' if home_lock else 'NO'} · Win Lock {'YES' if home_win_lock else 'NO'}",
-        "away_scoring_rate": f"Avg {_fmt(away_rate)} · Neg Lock {'YES' if neg_lock else 'NO'} · BTTS>=60 {'YES' if away_via_btts else 'NO'}",
-        "over_1_5": f"Rate {_fmt(o15_rate)} · Triple Proven {'YES' if triple_proven else 'NO'} (Goals {_fmt(goals_avg, False)} / O15 {_fmt(o15_rate)} / O25 {_fmt(o25_rate)})",
+        "away_scoring_rate": f"Avg {_fmt(away_rate)} · Quiet-game check {'YES' if neg_lock else 'NO'} · BTTS>=60 {'YES' if away_via_btts else 'NO'}",
+        "over_1_5": f"Rate {_fmt(o15_rate)} · Triple Over check {'YES' if triple_proven else 'NO'} (Goals {_fmt(goals_avg, False)} / O15 {_fmt(o15_rate)} / O25 {_fmt(o25_rate)})",
         "over_2_5": f"Rate {_fmt(o25_rate)} · Over Dir {'YES' if over_dir else 'NO'} · Under Dir {'YES' if under_dir else 'NO'}",
         "over_3_5": f"Rate {_fmt(o35_rate)}",
         "btts": f"Rate {_fmt(btts_rate)} · Both Dist {'YES' if both_dist else 'NO'}",
@@ -598,7 +642,12 @@ def compute_agreement(facts: dict) -> dict:
         for p in picks:
             if p["key"] == main_key: main_pick = p; break
         decision = "BET"
-        decision_reason = f"Portfolio holds — two families agree. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). Other YES picks are evidence, not separate accumulator bets — do not put Home + Away + Over from the same match in one accumulator."
+        if _proven_lock_main:
+            decision_reason = f"LOCK — Proven 18 / 18 in our logic. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story}"
+        elif _extreme_main_key is not None:
+            decision_reason = f"MAIN — Not a lock. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story} Frozen Mixed Extreme fired."
+        else:
+            decision_reason = f"MAIN — Not a lock. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story} Two checks agree: {main_reason}"
         if lean_over: decision_reason += " Over Lean also fires — shown as LEAN, not Main."
     else:
         if lean_over:
@@ -607,7 +656,8 @@ def compute_agreement(facts: dict) -> dict:
             decision_reason = f"No Main. {main_reason}"
     yes_picks = [p for p in picks if p["decision"] == "YES"]
     return {"picks": picks, "agreement": agreement_detail, "decision": decision, "decision_reason": decision_reason,
-            "main_pick": main_pick, "survivors": yes_picks, "derived": {p["field"]: (True if p["decision"]=="YES" else None) for p in picks}}
+            "main_pick": main_pick, "survivors": yes_picks, "derived": {p["field"]: (True if p["decision"]=="YES" else None) for p in picks},
+            "story": _story, "is_proven_lock": bool(_proven_lock_main), "tot_margin": _tot_margin, "o25_margin": _o25_margin}
 
 # Backwards compat alias
 compute_filter_rule = compute_agreement
@@ -640,7 +690,9 @@ def _card_html(m, filt, settled=False):
         lines.append(f"<div style='display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #1e293b'><span style='color:#e2e8f0'>{p['label']}</span><span style='color:{bcol};font-weight:700'>{badge}{outcome}</span></div><div style='font-size:0.82rem;color:#94a3b8;margin-bottom:4px'>{p.get('reason','')}</div>")
     agree = filt.get("agreement") or {}
     agree_txt = " · ".join([f"{k}: {v}" for k, v in agree.items() if k in ("home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts")]) if agree else ""
-    head = f"<div style='background:{bg};border:1px solid {color};border-radius:12px;padding:14px 16px'><div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • PORTFOLIO</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:1.05rem;font-weight:700;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div></div>"
+    _is_lock = bool(filt.get("is_proven_lock"))
+    _status = "🔒 LOCK • Proven 18 / 18 in our logic" if _is_lock else ("MAIN • Not a lock" if is_bet else "NO BET • Not a lock")
+    head = f"<div style='background:{bg};border:1px solid {color};border-radius:12px;padding:14px 16px'><div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • PORTFOLIO • {_status}</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:1.05rem;font-weight:700;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div></div>"
     return f"<div class='match-card'>{head}<div style='margin-top:10px'>{''.join(lines)}</div><div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Agreement: {agree_txt}</div></div>"
 
 def _filt_from_db_row(m):
@@ -657,7 +709,8 @@ def _filt_from_db_row(m):
     return {"picks": picks, "agreement": {}, "decision": m.get("decision") or "BET",
             "decision_reason": m.get("decision_reason") or "", "main_pick": main,
             "survivors": [p for p in picks if p["decision"] == "YES"],
-            "derived": {pp["field"]: (True if pp["decision"]=="YES" else None) for pp in picks}}
+            "derived": {pp["field"]: (True if pp["decision"]=="YES" else None) for pp in picks},
+            "is_proven_lock": bool(m.get("decision_reason") or "").startswith("LOCK")}
 
 
 # ---------------- Performance summary (aggregate, same card design) ----------------
@@ -745,7 +798,7 @@ def _perf_summary_html(settled):
 st.set_page_config(page_title="King — Agreement", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
 st.title("⚽ King — Portfolio")
-st.caption("Portfolio logic — Two families must agree for a Main. Under = Direction + Negative Lock · Home = Lock + Win Lock · Away = BTTS + Distribution · Over given = 6 YESs + Both. Triple proven -> Over 2.5, else Over 1.5. Store: Supabase king_matches (SQLite fallback).")
+st.caption("Portfolio logic — Two families must agree for a Main. Under = Direction + Quiet-game check · Home = Lock + Win Lock · Away = BTTS + Distribution · Over given = 6 YESs + Both. Triple Over check -> Over 2.5, else Over 1.5. Store: Supabase king_matches (SQLite fallback).")
 
 tab_new, tab_pending, tab_perf, tab_lab, tab_supabase = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
