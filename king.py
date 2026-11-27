@@ -17,8 +17,11 @@ not all above and not all below) AND Portfolio gives No Main. Priority: Over > U
  BTTS YES extreme: BTTS Avg>=60 -> Main Both score YES.
  BTTS NO extreme: BTTS Avg<=33 -> Main Both score NO. 38-40% is SKIP, not NO. No tightening.
 Backtest (Mixed 75): Over 6/6, Under 10/11, BTTS YES 18/21, BTTS NO 5/5. None meets lock bar (>=10 bets + lower bound >=80%).
-Proven Lock (LOCK badge): Total Goals Avg - 2.5 >= +0.70 AND O25 Rate - 50 >= +15.
-Backtest on all colours: 18/18 in our logic. When it fires, Main = Over 2.5 LOCK, top priority.
+LOCK = 100% in our logic. Three LOCKs, kept separate, never merged:
+1) Over Proven Lock: Total Goals Avg - 2.5 >= +0.70 AND O25 Rate - 50 >= +15. 18/18. Main = Over 2.5 LOCK.
+2) All Red LOCK (Clean only): G0 on all 9 lines, Avg <= League on every line (level counts as red-side). 9/9 Under. Main = Under 2.5 LOCK.
+3) Under 3-Gate LOCK (Mixed only): Home Rate red + Over 1.5 red, AND O25 <= 40%, AND Total < 2.5. 5/5 Under. Main = Under 2.5 LOCK.
+All Red never applied to Mixed. 3-Gate never applied to Clean. The gates are strong.
 Everything else is MAIN, explicitly 'Not a lock', even when two checks agree.
 Language: checks, not locks, inside a Main. Story = concise: '[Home] is ___ while [Away] is ___' (max 3 sentences, numbers only).
 Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
@@ -472,6 +475,12 @@ def compute_agreement(facts: dict) -> dict:
     _tot_margin = (goals_avg - 2.5) if goals_avg is not None else None
     _o25_margin = (o25_rate - 50) if o25_rate is not None else None
     _proven_lock = bool(_tot_margin is not None and _tot_margin >= 0.70 and _o25_margin is not None and _o25_margin >= 15)
+    # All Red LOCK (Clean only): G0 on all 9 lines, Avg <= League everywhere. Level counts as red-side.
+    _all_red_keys = ["home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts"]
+    _all_red = bool(_all_red_keys and all((secs.get(_k) or {}).get("avg") is not None and (secs.get(_k) or {}).get("league") is not None and (secs.get(_k) or {}).get("avg") <= (secs.get(_k) or {}).get("league") for _k in _all_red_keys))
+    _under_lock_label = None; _under_lock_record = None
+    if _all_red:
+        _under_lock_label, _under_lock_record = "All Red", "9 / 9"
 
     # ---- Decision: two independent families must agree ----
     under_main = bool(under_dir and neg_lock)
@@ -526,6 +535,12 @@ def compute_agreement(facts: dict) -> dict:
         _proven_lock_main = True
     else:
         _proven_lock_main = False
+    # All Red LOCK overrides Portfolio Main (Clean only). Never applied to Mixed.
+    _under_lock_main = False
+    if _all_red and not _proven_lock_main:
+        main_key, main_label = "under_2_5", "Total under 2.5"
+        main_reason = f"LOCK — All Red 9 / 9 in our logic (G0 on all 9 lines, Avg <= League everywhere). {_story}"
+        _under_lock_main = True
 
     # ---- FROZEN MIXED EXTREMES (fallback only) ----
     # Mixed = core 6 Avg vs League not all above and not all below. '=' counts as neither.
@@ -540,6 +555,15 @@ def compute_agreement(facts: dict) -> dict:
         else:
             _core_cols.append(0)
     _is_mixed = bool(_core_cols) and not (all(c == 1 for c in _core_cols) or all(c == -1 for c in _core_cols))
+    # Under 3-Gate LOCK (Mixed only): Home Rate red + Over 1.5 red, AND O25 <= 40%, AND Total < 2.5. 5/5.
+    _home_rate_red = bool((secs.get("home_scoring_rate") or {}).get("avg") is not None and (secs.get("home_scoring_rate") or {}).get("league") is not None and (secs.get("home_scoring_rate") or {}).get("avg") <= (secs.get("home_scoring_rate") or {}).get("league"))
+    _o15_red = bool((secs.get("over_1_5") or {}).get("avg") is not None and (secs.get("over_1_5") or {}).get("league") is not None and (secs.get("over_1_5") or {}).get("avg") <= (secs.get("over_1_5") or {}).get("league"))
+    _gate_lock = bool(_is_mixed and not _all_red and _home_rate_red and _o15_red and o25_rate is not None and o25_rate <= 40 and goals_avg is not None and goals_avg < 2.5)
+    if _gate_lock and not _proven_lock_main and not _under_lock_main:
+        main_key, main_label = "under_2_5", "Total under 2.5"
+        main_reason = f"LOCK — Under 3-Gate 5 / 5 in our logic (Mixed only: Home Rate red + Over 1.5 red, O25 {_fmt(o25_rate)} <= 40, Total {_fmt(goals_avg, False)} < 2.5). {_story}"
+        _under_lock_label, _under_lock_record = "Under 3-Gate", "5 / 5"
+        _under_lock_main = True
     _over_extreme = bool(o25_rate is not None and o25_rate >= 70 and goals_avg is not None and goals_avg > 3.2)
     _under_extreme = bool(o25_rate is not None and o25_rate <= 40)
     _btts_yes_extreme = bool(btts_rate is not None and btts_rate >= 60)
@@ -618,9 +642,9 @@ def compute_agreement(facts: dict) -> dict:
     _add("x2", "x2", "X2 (Away does not lose)", x2_dec, x2_conf, x2_reason, ag.get("a"), ag.get("b"), ag.get("league"), ag.get("avg"))
     # Under 2.5 is the inverse of Over 2.5 signal, Main only when under_main fires
     _under_extreme_main = bool(_extreme_main_key == "under_2_5")
-    _under_is_main = bool((under_main or _under_extreme_main) and not _proven_lock_main)
+    _under_is_main = bool((under_main or _under_extreme_main or _under_lock_main) and not _proven_lock_main)
     _add("under_2_5", "under_2_5", "Total under 2.5", ("YES" if _under_is_main else ("NO" if sig["over_2_5"] == "YES" else "YES")), "Highest" if _under_is_main else "Medium",
-         (f"Main — {main_reason}" if _under_is_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Quiet-game check, or Frozen Mixed Extreme."),
+         (f"Main — {main_reason}" if _under_is_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Quiet-game check, an Under LOCK, or Frozen Mixed Extreme."),
          o25.get("a"), o25.get("b"), o25.get("league"), o25.get("avg"))
     agreement_detail = {
         "home_scoring_avg": f"Avg {_fmt(home_avg, False)} · MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}",
@@ -644,6 +668,8 @@ def compute_agreement(facts: dict) -> dict:
         decision = "BET"
         if _proven_lock_main:
             decision_reason = f"LOCK — Proven 18 / 18 in our logic. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story}"
+        elif _under_lock_main:
+            decision_reason = f"LOCK — {_under_lock_label} {_under_lock_record} in our logic. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story}"
         elif _extreme_main_key is not None:
             decision_reason = f"MAIN — Not a lock. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story} Frozen Mixed Extreme fired."
         else:
@@ -657,7 +683,9 @@ def compute_agreement(facts: dict) -> dict:
     yes_picks = [p for p in picks if p["decision"] == "YES"]
     return {"picks": picks, "agreement": agreement_detail, "decision": decision, "decision_reason": decision_reason,
             "main_pick": main_pick, "survivors": yes_picks, "derived": {p["field"]: (True if p["decision"]=="YES" else None) for p in picks},
-            "story": _story, "is_proven_lock": bool(_proven_lock_main), "tot_margin": _tot_margin, "o25_margin": _o25_margin}
+            "story": _story, "is_proven_lock": bool(_proven_lock_main or _under_lock_main),
+            "lock_label": ("Proven 18 / 18 in our logic" if _proven_lock_main else (f"{_under_lock_label} {_under_lock_record} in our logic" if _under_lock_main else None)),
+            "tot_margin": _tot_margin, "o25_margin": _o25_margin}
 
 # Backwards compat alias
 compute_filter_rule = compute_agreement
@@ -691,7 +719,7 @@ def _card_html(m, filt, settled=False):
     agree = filt.get("agreement") or {}
     agree_txt = " · ".join([f"{k}: {v}" for k, v in agree.items() if k in ("home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts")]) if agree else ""
     _is_lock = bool(filt.get("is_proven_lock"))
-    _status = "🔒 LOCK • Proven 18 / 18 in our logic" if _is_lock else ("MAIN • Not a lock" if is_bet else "NO BET • Not a lock")
+    _status = f"🔒 LOCK • {filt.get('lock_label') or 'Proven 18 / 18 in our logic'}" if _is_lock else ("MAIN • Not a lock" if is_bet else "NO BET • Not a lock")
     head = f"<div style='background:{bg};border:1px solid {color};border-radius:12px;padding:14px 16px'><div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • PORTFOLIO • {_status}</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:1.05rem;font-weight:700;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div></div>"
     return f"<div class='match-card'>{head}<div style='margin-top:10px'>{''.join(lines)}</div><div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Agreement: {agree_txt}</div></div>"
 
@@ -712,7 +740,8 @@ def _filt_from_db_row(m):
             "decision_reason": _reason if isinstance(_reason, str) else "", "main_pick": main,
             "survivors": [p for p in picks if p["decision"] == "YES"],
             "derived": {pp["field"]: (True if pp["decision"]=="YES" else None) for pp in picks},
-            "is_proven_lock": bool(isinstance(_reason, str) and _reason.startswith("LOCK"))}
+            "is_proven_lock": bool(isinstance(_reason, str) and _reason.startswith("LOCK")),
+            "lock_label": ("All Red 9 / 9 in our logic" if isinstance(_reason, str) and "All Red" in _reason else ("Under 3-Gate 5 / 5 in our logic" if isinstance(_reason, str) and "3-Gate" in _reason else ("Proven 18 / 18 in our logic" if isinstance(_reason, str) and _reason.startswith("LOCK") else None)))}
 
 
 # ---------------- Performance summary (aggregate, same card design) ----------------
