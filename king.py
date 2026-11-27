@@ -705,12 +705,14 @@ def _filt_from_db_row(m):
     main = None
     for p in picks:
         if p["key"] == m.get("main_pick_key"): main = p
-    # rebuild reason from decision
-    return {"picks": picks, "agreement": {}, "decision": m.get("decision") or "BET",
-            "decision_reason": m.get("decision_reason") or "", "main_pick": main,
+    # rebuild reason from decision — old DB rows can hold a bool in these fields; coerce, never crash
+    _dec = m.get("decision")
+    _reason = m.get("decision_reason")
+    return {"picks": picks, "agreement": {}, "decision": _dec if isinstance(_dec, str) and _dec else "BET",
+            "decision_reason": _reason if isinstance(_reason, str) else "", "main_pick": main,
             "survivors": [p for p in picks if p["decision"] == "YES"],
             "derived": {pp["field"]: (True if pp["decision"]=="YES" else None) for pp in picks},
-            "is_proven_lock": bool(m.get("decision_reason") or "").startswith("LOCK")}
+            "is_proven_lock": bool(isinstance(_reason, str) and _reason.startswith("LOCK"))}
 
 
 # ---------------- Performance summary (aggregate, same card design) ----------------
