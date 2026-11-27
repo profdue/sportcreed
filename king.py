@@ -586,6 +586,88 @@ def _filt_from_db_row(m):
             "survivors": [p for p in picks if p["decision"] == "YES"],
             "derived": {pp["field"]: (True if pp["decision"]=="YES" else None) for pp in picks}}
 
+
+# ---------------- Performance summary (aggregate, same card design) ----------------
+def _perf_summary_html(settled):
+    """Aggregate performance across ALL settled matches. Same card design, no new tabs."""
+    from collections import Counter, defaultdict
+    total = len(settled)
+    # Per-match aggregates
+    main_w = main_l = main_n = 0
+    bet_n = nobet_n = 0
+    by_main = defaultdict(lambda: [0, 0])  # label -> [wins, total]
+    by_dir = defaultdict(lambda: [0, 0])   # direction bucket -> [wins, total] for Main bets
+    by_pick = defaultdict(lambda: [0, 0])  # pick key -> [wins, total graded]
+    by_pick_label = {}
+    all_w = all_n = 0
+    main_results = []  # (label, won) newest first (settled is id DESC)
+    over_lean = [0, 0]
+    for m in settled:
+        filt = _filt_from_db_row(m)
+        dec = (filt.get("decision") or "").upper()
+        if dec == "BET": bet_n += 1
+        else: nobet_n += 1
+        picks = filt.get("picks") or []
+        # Direction from the 6 signals (exclude under_2_5, 1x, x2)
+        sig_keys = ["over_1_5", "over_2_5", "over_3_5", "btts", "home_scores", "away_scores"]
+        no_c = sum(1 for pp in picks if pp.get("key") in sig_keys and pp.get("decision") == "NO")
+        yes_c = sum(1 for pp in picks if pp.get("key") in sig_keys and pp.get("decision") == "YES")
+        if no_c >= 5: d_bucket = "Under Direction (5-6 NOs)"
+        elif yes_c == 6: d_bucket = "Over Direction (6 YESs)"
+        else: d_bucket = "Split (3-4 NOs)"
+        # Main outcome
+        main = filt.get("main_pick")
+        if main:
+            mo = main.get("outcome")
+            if mo is not None:
+                label = main.get("label") or main.get("key") or "Main"
+                by_main[label][1] += 1; by_dir[d_bucket][1] += 1
+                if mo == 1:
+                    main_w += 1; by_main[label][0] += 1; by_dir[d_bucket][0] += 1; main_results.append((label, 1))
+                else:
+                    main_l += 1; main_results.append((label, 0))
+            else:
+                main_n += 1
+        # Every graded pick
+        for pp in picks:
+            o = pp.get("outcome")
+            if o is None: continue
+            k = pp.get("key") or pp.get("field") or "?"
+            by_pick[k][1] += 1; by_pick_label[k] = pp.get("label") or k
+            all_w += (1 if o == 1 else 0); all_n += 1
+            if o == 1: by_pick[k][0] += 1
+            if k == "over_2_5" and pp.get("decision") == "LEAN":
+                over_lean[1] += 1; over_lean[0] += (1 if o == 1 else 0)
+    def _pct(w, n): return f"{(100.0*w/n):.0f}%" if n else "—"
+    main_total = main_w + main_l
+    main_pct = _pct(main_w, main_total)
+    # Last 10 Main results, newest first -> show oldest-to-newest so form reads left-to-right
+    last10 = main_results[:10][::-1]
+    form = "".join(["<span style='color:#22c55e;font-weight:800'>W </span>" if w else "<span style='color:#ef4444;font-weight:800'>L </span>" for _, w in last10]) or "—"
+    # Rows
+    def _row(label, w, n, bold=False):
+        b = "font-weight:800;" if bold else ""
+        return (f"<div style='display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #1e293b'>"
+                f"<span style='color:#e2e8f0;{b}'>{label}</span>"
+                f"<span style='color:#e2e8f0;{b}'>{w} / {n} &nbsp;·&nbsp; {_pct(w, n)}</span></div>")
+    main_rows = "".join(_row(f"Main — {k}", v[0], v[1]) for k, v in sorted(by_main.items(), key=lambda kv: -kv[1][1])) or _row("Main — none graded yet", 0, 0)
+    dir_rows = "".join(_row(f"Main in {k}", v[0], v[1]) for k, v in sorted(by_dir.items(), key=lambda kv: -kv[1][1])) or _row("Main by Direction — none yet", 0, 0)
+    pick_order = ["under_2_5", "home_scores", "away_scores", "over_2_5", "over_1_5", "over_3_5", "btts", "1x", "x2"]
+    pick_rows = "".join(_row(f"{by_pick_label.get(k, k)}", by_pick[k][0], by_pick[k][1]) for k in pick_order if k in by_pick)
+    pick_rows += "".join(_row(f"{by_pick_label.get(k, k)}", v[0], v[1]) for k, v in sorted(by_pick.items()) if k not in pick_order)
+    if not pick_rows: pick_rows = _row("Picks — none graded yet", 0, 0)
+    over_lean_row = _row("Over 2.5 LEAN only (not Main)", over_lean[0], over_lean[1]) if over_lean[1] else ""
+    head = (f"<div style='background:#22c55e22;border:1px solid #22c55e;border-radius:12px;padding:14px 16px'>"
+            f"<div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:#22c55e'>PERFORMANCE • ALL SETTLED MATCHES</div>"
+            f"<div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>Settled: {total} &nbsp;·&nbsp; Main: {main_w} / {main_total} — {main_pct}</div>"
+            f"<div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>Main losses: {main_l} &nbsp;·&nbsp; BET decisions: {bet_n} &nbsp;·&nbsp; NO BET decisions: {nobet_n} &nbsp;·&nbsp; All graded picks: {all_w} / {all_n} — {_pct(all_w, all_n)}</div>"
+            f"<div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>Last 10 Main (oldest → newest): {form}</div></div>")
+    body = (f"<div style='margin-top:10px'><div style='font-size:0.9rem;font-weight:800;color:#f1f5f9;margin:8px 0 2px'>By Main pick</div>{main_rows}"
+            f"<div style='font-size:0.9rem;font-weight:800;color:#f1f5f9;margin:10px 0 2px'>By Direction (Main bets only)</div>{dir_rows}"
+            f"<div style='font-size:0.9rem;font-weight:800;color:#f1f5f9;margin:10px 0 2px'>By pick (every graded pick, YES / NO / LEAN)</div>{pick_rows}{over_lean_row}</div>"
+            f"<div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Graded on Direction: Main Under = total ≤ 2, Main Home/Away = side scored 1+, Main Over = total 3+. Individual losses inside a winning Main do not change the Main result. Over LEAN is shown for monitoring, never counted as Main.</div>")
+    return f"<div class='match-card'>{head}{body}</div>"
+
 # ---------------- UI ----------------
 st.set_page_config(page_title="King — Agreement", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
@@ -647,6 +729,8 @@ with tab_perf:
     settled = load_matches(settled_only=True)
     if not settled: st.info("No settled matches yet.")
     else:
+        st.markdown(_perf_summary_html(settled), unsafe_allow_html=True)
+        st.markdown("### Per-match cards")
         for m in settled:
             filt = _filt_from_db_row(m)
             st.markdown(_card_html(m, filt, settled=True), unsafe_allow_html=True)
