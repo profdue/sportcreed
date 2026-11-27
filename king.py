@@ -1,7 +1,7 @@
 
 """
-king.py — Portfolio Logic (frozen).
-Two independent families must agree for a Main. One family = evidence, two = decision.
+king.py — Portfolio Logic + Frozen Mixed Extremes fallback (frozen).
+Portfolio: Two independent families must agree for a Main. One family = evidence, two = decision.
 Signals: Over 1.5 Rate>=70, Over 2.5 Rate>=50, Over 3.5 Rate>=35, BTTS Rate>=50,
 Home Avg>=1.2, Away Avg>=1.2. Direction: 5-6 NOs=Under, 6 YESs=Over, 3-4=Split.
 Under Main = Under Direction + Negative Lock (Away Rate<=60 OR Over 2.5 Rate<=40).
@@ -10,6 +10,13 @@ Home Main = Home Lock (Rate>=85 OR Avg>=1.8 OR MIN>League+Rate>=70) + Home Win L
 Away Main = BTTS Rate>=60 + Away Avg>=1.2 + Gap<=-0.3 (bet Away scores, never Away win alone).
 Over = given if 6 YESs + Both dist. Triple proven = Goals>=3.25 AND O15>=87 AND O25>=67. Triple -> Main Over 2.5. Not triple -> Main Over 1.5.
 No Main on split direction, fighting families, or single family only.
+FROZEN MIXED EXTREMES (fallback only): applies ONLY when match is Mixed (core 6 Avg vs League
+not all above and not all below) AND Portfolio gives No Main. Priority: Over > Under > BTTS NO > BTTS YES.
+ Over extreme: O25 Avg>=70 AND Total Goals Avg>3.2 -> Main Over 2.5.
+ Under extreme: O25 Avg<=40 ALONE (no second condition) -> Main Under 2.5.
+ BTTS YES extreme: BTTS Avg>=60 -> Main Both score YES.
+ BTTS NO extreme: BTTS Avg<=33 -> Main Both score NO. 38-40% is SKIP, not NO. No tightening.
+Backtest (Mixed 75): Over 6/6, Under 10/11, BTTS YES 18/21, BTTS NO 5/5. None meets lock bar (>=10 bets + lower bound >=80%).
 Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
 """
 import sqlite3
@@ -476,6 +483,47 @@ def compute_agreement(facts: dict) -> dict:
             main_reason = f"Portfolio — No Main. BTTS Rate {_fmt(btts_rate)} >= 60 but Away Distribution fails (Away Avg {_fmt(away_avg, False)}, Gap {_fmt(gap, False)}). One family only."
         else:
             main_reason = f"Portfolio — No Main. Direction {no_count} NOs / {yes_count} YESs, Distribution {dist}, Winner {winner}. Families fight or only one agrees."
+    # ---- FROZEN MIXED EXTREMES (fallback only) ----
+    # Mixed = core 6 Avg vs League not all above and not all below. '=' counts as neither.
+    # Fires ONLY if Portfolio gave No Main. Priority: Over > Under > BTTS NO > BTTS YES. One Main per match.
+    _core_keys = ["home_scoring_avg", "away_scoring_avg", "over_1_5", "over_2_5", "over_3_5", "btts"]
+    _core_cols = []
+    for _k in _core_keys:
+        _s = secs.get(_k) or {}
+        _a, _l = _s.get("avg"), _s.get("league")
+        if _a is not None and _l is not None:
+            _core_cols.append(1 if _a > _l else (-1 if _a < _l else 0))
+        else:
+            _core_cols.append(0)
+    _is_mixed = bool(_core_cols) and not (all(c == 1 for c in _core_cols) or all(c == -1 for c in _core_cols))
+    _over_extreme = bool(o25_rate is not None and o25_rate >= 70 and goals_avg is not None and goals_avg > 3.2)
+    _under_extreme = bool(o25_rate is not None and o25_rate <= 40)
+    _btts_yes_extreme = bool(btts_rate is not None and btts_rate >= 60)
+    _btts_no_extreme = bool(btts_rate is not None and btts_rate <= 33)
+    _extreme_main = None  # (key, label, decision, reason)
+    if _is_mixed and main_key is None:
+        if _over_extreme:
+            _extreme_main = ("over_2_5", "Total over 2.5", "YES",
+                f"Frozen Mixed Extreme — Over. Mixed, Portfolio No Main. O25 Rate {_fmt(o25_rate)} >= 70 AND Total Goals Avg {_fmt(goals_avg, False)} > 3.2. Main Over 2.5.")
+        elif _under_extreme:
+            _extreme_main = ("under_2_5", "Total under 2.5", "YES",
+                f"Frozen Mixed Extreme — Under. Mixed, Portfolio No Main. O25 Rate {_fmt(o25_rate)} <= 40 ALONE. No second condition. Main Under 2.5.")
+        elif _btts_no_extreme:
+            _extreme_main = ("btts", "Both score", "NO",
+                f"Frozen Mixed Extreme — BTTS NO. Mixed, Portfolio No Main. BTTS Rate {_fmt(btts_rate)} <= 33. 38-40% is SKIP, not NO. Main Both score NO.")
+        elif _btts_yes_extreme:
+            _extreme_main = ("btts", "Both score", "YES",
+                f"Frozen Mixed Extreme — BTTS YES. Mixed, Portfolio No Main. BTTS Rate {_fmt(btts_rate)} >= 60. Main Both score YES.")
+    if _extreme_main is not None:
+        main_key, main_label, _extreme_dec = _extreme_main[0], _extreme_main[1], _extreme_main[2]
+        main_reason = _extreme_main[3]
+        # Mark extreme so picks below can set the Main pick correctly (incl. BTTS NO).
+        _extreme_main_key = main_key
+        _extreme_main_dec = _extreme_dec
+    else:
+        _extreme_main_key = None
+        _extreme_main_dec = None
+
     # ---- Picks: 9 lines, all usable, no SKIP ----
     picks = []
     def _add(key, field, label, decision, confidence, reason, a=None, b=None, league=None, avg=None):
@@ -483,11 +531,12 @@ def compute_agreement(facts: dict) -> dict:
     # Over 1.5 / 2.5 / 3.5 / BTTS / Home / Away follow their signal directly (evidence for Direction)
     # Over 1.5 pick: Main when Over given but NOT triple proven (downgraded from Over 2.5)
     _o15_is_main = bool(over15_main and main_key == "over_1_5")
-    _add("over_1_5", "over_1_5", "Total over 1.5", ("YES" if _o15_is_main else sig["over_1_5"]), "Highest" if _o15_is_main else ("Highest" if sig["over_1_5"] == "YES" else "Medium"),
+    _o15_extreme_main = bool(_extreme_main_key == "over_2_5")
+    _add("over_1_5", "over_1_5", "Total over 1.5", ("YES" if (_o15_is_main or _o15_extreme_main) else sig["over_1_5"]), "Highest" if (_o15_is_main or _o15_extreme_main) else ("Highest" if sig["over_1_5"] == "YES" else "Medium"),
          (f"Main — {main_reason}" if _o15_is_main else f"Signal — Over 1.5 Rate {_fmt(o15_rate)} {'>=' if sig['over_1_5'] == 'YES' else '<'} 70. {'YES' if sig['over_1_5'] == 'YES' else 'NO'}."),
          o15.get("a"), o15.get("b"), o15.get("league"), o15.get("avg"))
     # Over 2.5 pick: Main only when triple proven. If Over given but not triple, shown as LEAN (downgraded to Over 1.5), not Main.
-    _o25_is_main = bool(over25_main and main_key == "over_2_5")
+    _o25_is_main = bool((over25_main and main_key == "over_2_5") or (_extreme_main_key == "over_2_5"))
     _o25_downgraded = bool(over15_main and main_key == "over_1_5")
     _o25_dec = "YES" if _o25_is_main else ("LEAN" if (_o25_downgraded or lean_over) else sig["over_2_5"])
     _o25_conf = "Highest" if _o25_is_main else ("High" if (_o25_downgraded or lean_over) else "Medium")
@@ -497,8 +546,10 @@ def compute_agreement(facts: dict) -> dict:
     _add("over_3_5", "over_3_5", "Total over 3.5", sig["over_3_5"], "Medium",
          f"Signal — Over 3.5 Rate {_fmt(o35_rate)} {'>=' if sig['over_3_5'] == 'YES' else '<'} 35. {'YES' if sig['over_3_5'] == 'YES' else 'NO'}. Never bet Over 3.5 alone.",
          o35.get("a"), o35.get("b"), o35.get("league"), o35.get("avg"))
-    _add("btts", "btts", "Both score", sig["btts"], "High" if sig["btts"] == "YES" else "Medium",
-         f"Signal — BTTS Rate {_fmt(btts_rate)} {'>=' if sig['btts'] == 'YES' else '<'} 50. {'YES' if sig['btts'] == 'YES' else 'NO'}. BTTS is evidence for Away scores, not a Main.",
+    _btts_extreme_main = bool(_extreme_main_key == "btts")
+    _btts_dec = (_extreme_main_dec if _btts_extreme_main else sig["btts"])
+    _add("btts", "btts", "Both score", _btts_dec, "Highest" if _btts_extreme_main else ("High" if sig["btts"] == "YES" else "Medium"),
+         (f"Main — {main_reason}" if _btts_extreme_main else f"Signal — BTTS Rate {_fmt(btts_rate)} {'>=' if sig['btts'] == 'YES' else '<'} 50. {'YES' if sig['btts'] == 'YES' else 'NO'}. BTTS is evidence for Away scores, not a Main."),
          bt.get("a"), bt.get("b"), bt.get("league"), bt.get("avg"))
     _add("home_scores", "home_scores", "Home scores", sig["home_scores"], "Highest" if home_main else ("High" if sig["home_scores"] == "YES" else "Medium"),
          (f"Main — {main_reason}" if home_main else f"Signal — Home Avg {_fmt(home_avg, False)} {'>=' if sig['home_scores'] == 'YES' else '<'} 1.2. {'YES' if sig['home_scores'] == 'YES' else 'NO'}."),
@@ -522,8 +573,10 @@ def compute_agreement(facts: dict) -> dict:
     _add("1x", "1x", "1X (Home does not lose)", x1_dec, x1_conf, x1_reason, hg.get("a"), hg.get("b"), hg.get("league"), hg.get("avg"))
     _add("x2", "x2", "X2 (Away does not lose)", x2_dec, x2_conf, x2_reason, ag.get("a"), ag.get("b"), ag.get("league"), ag.get("avg"))
     # Under 2.5 is the inverse of Over 2.5 signal, Main only when under_main fires
-    _add("under_2_5", "under_2_5", "Total under 2.5", ("YES" if under_main else ("NO" if sig["over_2_5"] == "YES" else "YES")), "Highest" if under_main else "Medium",
-         (f"Main — {main_reason}" if under_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Negative Lock."),
+    _under_extreme_main = bool(_extreme_main_key == "under_2_5")
+    _under_is_main = bool(under_main or _under_extreme_main)
+    _add("under_2_5", "under_2_5", "Total under 2.5", ("YES" if _under_is_main else ("NO" if sig["over_2_5"] == "YES" else "YES")), "Highest" if _under_is_main else "Medium",
+         (f"Main — {main_reason}" if _under_is_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Negative Lock, or Frozen Mixed Extreme."),
          o25.get("a"), o25.get("b"), o25.get("league"), o25.get("avg"))
     agreement_detail = {
         "home_scoring_avg": f"Avg {_fmt(home_avg, False)} · MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}",
@@ -545,7 +598,7 @@ def compute_agreement(facts: dict) -> dict:
         for p in picks:
             if p["key"] == main_key: main_pick = p; break
         decision = "BET"
-        decision_reason = f"Portfolio holds — two families agree. Main (accumulator, one per match): {main_label} YES ({main_pick.get('confidence','')}). Other YES picks are evidence, not separate accumulator bets — do not put Home + Away + Over from the same match in one accumulator."
+        decision_reason = f"Portfolio holds — two families agree. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). Other YES picks are evidence, not separate accumulator bets — do not put Home + Away + Over from the same match in one accumulator."
         if lean_over: decision_reason += " Over Lean also fires — shown as LEAN, not Main."
     else:
         if lean_over:
@@ -572,10 +625,10 @@ def _card_html(m, filt, settled=False):
     color = "#22c55e" if is_bet else "#ef4444"
     bg = "#22c55e22" if is_bet else "#ef444422"
     main = filt.get("main_pick")
-    main_txt = f"{main['label']} YES" if main else "No Main — NO BET"
+    main_txt = f"{main['label']} {main.get('decision') or 'YES'}" if main else "No Main — NO BET"
     lines = []
     for p in filt.get("picks") or []:
-        is_main = main and p["key"] == main["key"] and p["decision"] == "YES"
+        is_main = bool(main and p["key"] == main["key"] and p["decision"] == main.get("decision"))
         _d = p["decision"]
         badge = "MAIN" if is_main else ("YES" if _d == "YES" else ("LEAN" if _d in ("LEAN", "LEAN YES") else ("LEAN NO" if _d == "LEAN NO" else ("NO" if _d == "NO" else "—"))))
         bcol = "#22c55e" if _d == "YES" else ("#f59e0b" if _d in ("LEAN", "LEAN YES", "LEAN NO") else ("#ef4444" if _d == "NO" else "#64748b"))
