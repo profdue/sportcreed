@@ -1,29 +1,15 @@
 
 """
-king.py — Portfolio Logic + Frozen Mixed Extremes fallback (frozen).
-Portfolio: Two independent families must agree for a Main. One family = evidence, two = decision.
-Signals: Over 1.5 Rate>=70, Over 2.5 Rate>=50, Over 3.5 Rate>=35, BTTS Rate>=50,
-Home Avg>=1.2, Away Avg>=1.2. Direction: 5-6 NOs=Under, 6 YESs=Over, 3-4=Split.
-Under Main = Under Direction + Quiet-game check (Away Rate<=60 OR Over 2.5 Rate<=40).
-Home Main = Home-scores check (Rate>=85 OR Avg>=1.8 OR MIN>League+Rate>=70) + Home-does-not-lose check
-  (Rate>=80+Away Rate<60 OR Gap>=0.5+Home Only).
-Away Main = BTTS Rate>=60 + Away Avg>=1.2 + Gap<=-0.3 (bet Away scores, never Away win alone).
-Over = given if 6 YESs + Both dist. Triple Over check = Goals>=3.25 AND O15>=87 AND O25>=67. Triple -> Main Over 2.5. Not triple -> Main Over 1.5.
-No Main on split direction, fighting families, or single family only.
-FROZEN MIXED EXTREMES (fallback only): applies ONLY when match is Mixed (core 6 Avg vs League
-not all above and not all below) AND Portfolio gives No Main. Priority: Over > Under > BTTS NO > BTTS YES.
- Over extreme: O25 Avg>=70 AND Total Goals Avg>3.2 -> Main Over 2.5.
- Under extreme: O25 Avg<=40 ALONE (no second condition) -> Main Under 2.5.
- BTTS YES extreme: BTTS Avg>=60 -> Main Both score YES.
- BTTS NO extreme: BTTS Avg<=33 -> Main Both score NO. 38-40% is SKIP, not NO. No tightening.
-Backtest (Mixed 75): Over 6/6, Under 10/11, BTTS YES 18/21, BTTS NO 5/5. None meets lock bar (>=10 bets + lower bound >=80%).
-LOCK = 100% in our logic. Three LOCKs, kept separate, never merged:
-1) Over Proven Lock: Total Goals Avg - 2.5 >= +0.70 AND O25 Rate - 50 >= +15. 18/18. Main = Over 2.5 LOCK.
-2) All Red LOCK (Clean only): G0 on all 9 lines, Avg <= League on every line (level counts as red-side). 9/9 Under. Main = Under 2.5 LOCK.
-3) Under 3-Gate LOCK (Mixed only): Home Rate red + Over 1.5 red, AND O25 <= 40%, AND Total < 2.5. 5/5 Under. Main = Under 2.5 LOCK.
-All Red never applied to Mixed. 3-Gate never applied to Clean. The gates are strong.
-Everything else is MAIN, explicitly 'Not a lock', even when two checks agree.
-Language: checks, not locks, inside a Main. Story = concise: '[Home] is ___ while [Away] is ___' (max 3 sentences, numbers only).
+king.py — Collision Solution. Tested on all 103 unique settled matches.
+One rule per market, Avg vs League, with conceding override.
+Home YES: Home Avg UP OR Away conceded >= League + 0.50. Else SKIP (never NO).
+Away YES: Away Avg UP OR Home conceded >= League + 0.50. Else SKIP (never NO).
+Over 1.5 YES: Total Avg UP AND O15 Avg UP. Else SKIP. Over 2.5/3.5 are evidence only, never picks.
+BTTS YES: Home YES AND Away YES. Else SKIP. BTTS NO: Home SKIP AND Away SKIP AND BTTS Avg DOWN. Else SKIP.
+Under 2.5 YES: Total Avg DOWN AND O25 Avg DOWN AND BTTS Avg DOWN AND no override fires. Else SKIP.
+Main = highest-rate firing pick: Over 1.5 > Home > Away > Under > BTTS. If nothing fires -> NO BET (full SKIP).
+Story: Home is ___ while Away is ___ (concise, numbers only). No Highest, no winner alone, no Over 2.5/3.5 picks.
+Backtest all 103: Home 49/53 (92%), Away 45/52 (87%), Over 1.5 38/39 (97%), BTTS 17/24 (71%), Under 15/19 (79%), All picks 164/187 (88%), Main 90/100 (90%).
 Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
 """
 import sqlite3
@@ -374,324 +360,79 @@ def _num(sec, k):
     try: return sec.get(k)
     except Exception: return None
 
+
 def compute_agreement(facts: dict) -> dict:
     secs = facts.get("sections", {}) or {}
     hg = secs.get("home_scoring_avg") or {}
     ag = secs.get("away_scoring_avg") or {}
     tot = secs.get("goals_match") or {}
-    hr = secs.get("home_scoring_rate") or {}
-    ar = secs.get("away_scoring_rate") or {}
     o15 = secs.get("over_1_5") or {}
     o25 = secs.get("over_2_5") or {}
-    o35 = secs.get("over_3_5") or {}
     bt = secs.get("btts") or {}
-    # ---- Inputs ----
-    home_avg = hg.get("avg"); away_avg = ag.get("avg"); goals_avg = tot.get("avg")
-    home_rate = hr.get("avg"); away_rate = ar.get("avg")
-    o15_rate = o15.get("avg"); o25_rate = o25.get("avg"); o35_rate = o35.get("avg"); btts_rate = bt.get("avg")
-    home_league = hg.get("league"); away_league = ag.get("league")
-    home_min = min([v for v in [hg.get("a"), hg.get("b")] if v is not None], default=None)
-    away_min = min([v for v in [ag.get("a"), ag.get("b")] if v is not None], default=None)
-    # ---- 6 signals: YES / NO only ----
-    sig = {
-        "over_1_5": "YES" if (o15_rate is not None and o15_rate >= 70) else "NO",
-        "over_2_5": "YES" if (o25_rate is not None and o25_rate >= 50) else "NO",
-        "over_3_5": "YES" if (o35_rate is not None and o35_rate >= 35) else "NO",
-        "btts": "YES" if (btts_rate is not None and btts_rate >= 50) else "NO",
-        "home_scores": "YES" if (home_avg is not None and home_avg >= 1.2) else "NO",
-        "away_scores": "YES" if (away_avg is not None and away_avg >= 1.2) else "NO",
-    }
-    no_count = sum(1 for v in sig.values() if v == "NO")
-    yes_count = 6 - no_count
-    # ---- Family 1: Direction ----
-    under_dir = no_count >= 5
-    over_dir = yes_count == 6
-    split_dir = not under_dir and not over_dir
-    # ---- Family 2: Distribution ----
-    if home_avg is not None and away_avg is not None:
-        if home_avg >= 1.5 and away_avg < 1.0: dist = "Home Only"
-        elif home_avg >= 1.2 and away_avg >= 1.2: dist = "Both"
-        elif home_avg < 1.2 and away_avg < 1.2: dist = "Low"
-        else: dist = "Grey"
-    else:
-        dist = "Grey"
-    # ---- Family 3: Winner / Gap ----
-    gap = (home_avg - away_avg) if (home_avg is not None and away_avg is not None) else None
-    if gap is None: winner = "Unknown"
-    elif gap >= 0.5: winner = "Home"
-    elif gap <= -0.5: winner = "Away (LEAN)"
-    elif abs(gap) <= 0.3: winner = "Close / Draw-prone"
-    else: winner = "Slight Home" if gap > 0 else "Slight Away"
-    # ---- Family 4: Locks ----
-    home_lock = (
-        (home_rate is not None and home_rate >= 85)
-        or (home_avg is not None and home_avg >= 1.8)
-        or (home_min is not None and home_league is not None and home_min > home_league and home_rate is not None and home_rate >= 70)
-    )
-    home_win_lock = (
-        (home_rate is not None and home_rate >= 80 and away_rate is not None and away_rate < 60)
-        or (gap is not None and gap >= 0.5 and dist == "Home Only")
-    )
-    neg_lock = (away_rate is not None and away_rate <= 60) or (o25_rate is not None and o25_rate <= 40)
-    away_via_btts = (btts_rate is not None and btts_rate >= 60)
-    away_dist = (away_avg is not None and away_avg >= 1.2 and gap is not None and gap <= -0.3)
-    both_dist = (dist == "Both" and btts_rate is not None and btts_rate >= 60)
-    # ---- Over rule (user rule): every Over given becomes Over 1.5 unless triple proven ----
-    # Over GIVEN = Over Direction (6 YESs) + Both Distribution (Both + BTTS>=60)
-    # TRIPLE OVER CHECK = Goals>=3.25 AND O15>=87 AND O25>=67 (ALL three, AND not OR)
-    # Triple -> Main Over 2.5. Not triple -> Main Over 1.5. No new matches, no extra tier.
-    over_given = bool(over_dir and both_dist)
-    triple_proven = bool(
-        (goals_avg is not None and goals_avg >= 3.25)
-        and (o15_rate is not None and o15_rate >= 87)
-        and (o25_rate is not None and o25_rate >= 67)
-    )
-    over15_lock = triple_proven  # kept for agreement display: Lock = Triple Over check
-    # ---- Concise story (max 3 sentences) + Proven Lock ----
-    _home_team = facts.get("home_team") or "Home"
-    _away_team = facts.get("away_team") or "Away"
-    # Story uses each side's OWN line (A), not the Avg — Forest 0.60, not 1.10.
-    _home_scored = hg.get("a")   # Forest scored at home
-    _home_conceded = ag.get("a")  # Forest conceded at home
-    _home_rate_own = hr.get("a")  # Forest scoring rate at home
-    _away_scored = ag.get("b")   # Chelsea scored away
-    _away_conceded = hg.get("b")  # Chelsea conceded away
-    _away_rate_own = ar.get("b")  # Chelsea scoring rate away
-    _goals_league = tot.get("league")
-    def _word(scored, rate):
+    home_team = facts.get("home_team") or "Home"
+    away_team = facts.get("away_team") or "Away"
+    # Inputs
+    home_avg = hg.get("avg"); home_league = hg.get("league"); home_b = hg.get("b")  # Away conceded
+    away_avg = ag.get("avg"); away_league = ag.get("league"); away_a = ag.get("a")  # Home conceded
+    goals_avg = tot.get("avg"); goals_league = tot.get("league")
+    o15_avg = o15.get("avg"); o15_league = o15.get("league")
+    o25_avg = o25.get("avg"); o25_league = o25.get("league")
+    btts_avg = bt.get("avg"); btts_league = bt.get("league")
+    def _up(avg, lg): return avg is not None and lg is not None and avg > lg
+    def _down(avg, lg): return avg is not None and lg is not None and avg < lg
+    # Collision + conceding override (Grazer rule: +0.50)
+    home_override = (home_b is not None and home_league is not None and (home_b - home_league) >= 0.50)
+    away_override = (away_a is not None and away_league is not None and (away_a - away_league) >= 0.50)
+    home_yes = bool(_up(home_avg, home_league) or home_override)
+    away_yes = bool(_up(away_avg, away_league) or away_override)
+    over_yes = bool(_up(goals_avg, goals_league) and _up(o15_avg, o15_league))
+    btts_yes = bool(home_yes and away_yes)
+    btts_no = bool((not home_yes) and (not away_yes) and _down(btts_avg, btts_league))
+    under_yes = bool(_down(goals_avg, goals_league) and _down(o25_avg, o25_league) and _down(btts_avg, btts_league) and not home_override and not away_override)
+    # Story: Home is ___ while Away is ___
+    def _w(scored, conceded):
         if scored is None: return "no clear scoring line"
-        if scored < 1.0 and (rate is not None and rate < 50): return "dead"
+        if scored < 1.0 and (conceded is not None and conceded >= 1.5): return "dead attack facing a leaky defence"
+        if scored < 1.0: return "dead attack"
         if scored < 1.2: return "low-scoring"
         if scored >= 1.8: return "strong"
         return "steady"
-    _hw = _word(_home_scored, _home_rate_own)
-    _aw = _word(_away_scored, _away_rate_own)
-    _story = (
-        f"{_home_team} at home is {_hw}: scores {_fmt(_home_scored, False)}, concedes {_fmt(_home_conceded, False)}, scores in {_fmt(_home_rate_own)}. "
-        f"{_away_team} away is {_aw}: scores {_fmt(_away_scored, False)}, concedes {_fmt(_away_conceded, False)}, scores in {_fmt(_away_rate_own)}. "
-        f"Together: Total {_fmt(goals_avg, False)} (League {_fmt(_goals_league, False)}), Over 2.5 {_fmt(o25_rate)}, BTTS {_fmt(btts_rate)}."
-    )
-    # Proven Lock: 18/18 in our logic on all colours. Top priority when it fires.
-    _tot_margin = (goals_avg - 2.5) if goals_avg is not None else None
-    _o25_margin = (o25_rate - 50) if o25_rate is not None else None
-    _proven_lock = bool(_tot_margin is not None and _tot_margin >= 0.70 and _o25_margin is not None and _o25_margin >= 15)
-    # All Red LOCK (Clean only): G0 on all 9 lines, Avg <= League everywhere. Level counts as red-side.
-    _all_red_keys = ["home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts"]
-    _all_red = bool(_all_red_keys and all((secs.get(_k) or {}).get("avg") is not None and (secs.get(_k) or {}).get("league") is not None and (secs.get(_k) or {}).get("avg") <= (secs.get(_k) or {}).get("league") for _k in _all_red_keys))
-    _under_lock_label = None; _under_lock_record = None
-    if _all_red:
-        _under_lock_label, _under_lock_record = "All Red", "9 / 9"
-
-    # ---- Decision: two independent families must agree ----
-    under_main = bool(under_dir and neg_lock)
-    home_main = bool(home_lock and home_win_lock)
-    away_main = bool(away_via_btts and away_dist)
-    over_lean = False  # Over is no longer LEAN-only: when given it is a Main (2.5 if triple, else 1.5)
-    over_main = bool(over_given)  # Over Main slot: label decided below (2.5 vs 1.5)
-    over25_main = bool(over_given and triple_proven)
-    over15_main = bool(over_given and not triple_proven)
-    # Fighting families: Under + Home can both be true (1-0). Priority below resolves one Main.
-    # Over + Under cannot both be true. Home + Away cannot both be true (Gap cannot be both).
-    main_key = None; main_label = None; main_reason = ""
-    lean_over = False
-    if home_main:
-        main_key, main_label = "home_scores", "Home scores"
-        main_reason = f"Portfolio — Home-scores check + Home-does-not-lose check agree. Home-scores check: Rate {_fmt(home_rate)} / Avg {_fmt(home_avg, False)} / MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}. Home-does-not-lose check: Rate {_fmt(home_rate)} + Away Rate {_fmt(away_rate)} / Gap {_fmt(gap, False)} + Distribution {dist}. Two families agree — Main Home scores."
-    elif under_main:
-        main_key, main_label = "under_2_5", "Total under 2.5"
-        main_reason = f"Portfolio — Under Direction + Quiet-game check agree. Direction: {no_count} NOs / {yes_count} YESs. Quiet-game check: Away Rate {_fmt(away_rate)} <= 60 OR Over 2.5 Rate {_fmt(o25_rate)} <= 40. Two families agree — Main Under 2.5."
-    elif away_main:
-        main_key, main_label = "away_scores", "Away scores"
-        main_reason = f"Portfolio — Away via BTTS + Away Distribution agree. BTTS Rate {_fmt(btts_rate)} >= 60 (Away scores). Away Avg {_fmt(away_avg, False)} >= 1.2 + Gap {_fmt(gap, False)} <= -0.3. Two families agree — Main Away scores (never Away win alone)."
-    elif over_main:
-        # YOUR RULE: Over given -> Over 1.5 unless triple proven -> Over 2.5
-        if triple_proven:
-            main_key, main_label = "over_2_5", "Total over 2.5"
-            main_reason = f"Portfolio — Over given + TRIPLE OVER CHECK. Direction: {yes_count} YESs. Both: Home Avg {_fmt(home_avg, False)} + Away Avg {_fmt(away_avg, False)} + BTTS Rate {_fmt(btts_rate)} >= 60. Triple: Goals Avg {_fmt(goals_avg, False)} >= 3.25 AND Over 1.5 Rate {_fmt(o15_rate)} >= 87 AND Over 2.5 Rate {_fmt(o25_rate)} >= 67. All three hold — Main Over 2.5."
-        else:
-            main_key, main_label = "over_1_5", "Total over 1.5"
-            main_reason = f"Portfolio — Over given but NOT triple proven, so downgraded to Over 1.5. Direction: {yes_count} YESs. Both: Home Avg {_fmt(home_avg, False)} + Away Avg {_fmt(away_avg, False)} + BTTS Rate {_fmt(btts_rate)} >= 60. Triple fails: Goals Avg {_fmt(goals_avg, False)} / Over 1.5 Rate {_fmt(o15_rate)} / Over 2.5 Rate {_fmt(o25_rate)} — not all three >= 3.25 / 87 / 67. Main Over 1.5 (not Over 2.5)."
-    elif over_lean:
-        lean_over = True
-        main_reason = f"Portfolio — Over Direction + Both Distribution agree, but Over is LEAN only. Triple: Goals Avg {_fmt(goals_avg, False)} / Over 1.5 Rate {_fmt(o15_rate)} / Over 2.5 Rate {_fmt(o25_rate)}. Shown, not Main. Do not put in accumulator."
-    else:
-        if split_dir:
-            main_reason = f"Portfolio — No Main. Direction is Split ({no_count} NOs / {yes_count} YESs). No pair of families agrees. A lock in a split match is a trap."
-        elif under_dir and not neg_lock:
-            main_reason = f"Portfolio — No Main. Under Direction ({no_count} NOs) but no Quiet-game check (Away Rate {_fmt(away_rate)}, Over 2.5 Rate {_fmt(o25_rate)}). One family only — LEAN Under, not Main."
-        elif home_lock and not home_win_lock:
-            main_reason = f"Portfolio — No Main. Home-scores check but no Home-does-not-lose check (Gap {_fmt(gap, False)}, Distribution {dist}). One family only — LEAN Home scores, not Main."
-        elif away_via_btts and not away_dist:
-            main_reason = f"Portfolio — No Main. BTTS Rate {_fmt(btts_rate)} >= 60 but Away Distribution fails (Away Avg {_fmt(away_avg, False)}, Gap {_fmt(gap, False)}). One family only."
-        else:
-            main_reason = f"Portfolio — No Main. Direction {no_count} NOs / {yes_count} YESs, Distribution {dist}, Winner {winner}. Families fight or only one agrees."
-    # Proven Lock overrides Portfolio Main (Over 2.5 LOCK, top priority).
-    if _proven_lock:
-        main_key, main_label = "over_2_5", "Total over 2.5"
-        main_reason = (
-            f"LOCK — Proven 18 / 18 in our logic on this rule (Total margin {_fmt(_tot_margin, False)} >= +0.70 AND O25 margin {_fmt(_o25_margin, False)} >= +15). "
-            f"{_story}"
-        )
-        _proven_lock_main = True
-    else:
-        _proven_lock_main = False
-    # All Red LOCK overrides Portfolio Main (Clean only). Never applied to Mixed.
-    _under_lock_main = False
-    if _all_red and not _proven_lock_main:
-        main_key, main_label = "under_2_5", "Total under 2.5"
-        main_reason = f"LOCK — All Red 9 / 9 in our logic (G0 on all 9 lines, Avg <= League everywhere). {_story}"
-        _under_lock_main = True
-
-    # ---- FROZEN MIXED EXTREMES (fallback only) ----
-    # Mixed = core 6 Avg vs League not all above and not all below. '=' counts as neither.
-    # Fires ONLY if Portfolio gave No Main. Priority: Over > Under > BTTS NO > BTTS YES. One Main per match.
-    _core_keys = ["home_scoring_avg", "away_scoring_avg", "over_1_5", "over_2_5", "over_3_5", "btts"]
-    _core_cols = []
-    for _k in _core_keys:
-        _s = secs.get(_k) or {}
-        _a, _l = _s.get("avg"), _s.get("league")
-        if _a is not None and _l is not None:
-            _core_cols.append(1 if _a > _l else (-1 if _a < _l else 0))
-        else:
-            _core_cols.append(0)
-    _is_mixed = bool(_core_cols) and not (all(c == 1 for c in _core_cols) or all(c == -1 for c in _core_cols))
-    # Under 3-Gate LOCK (Mixed only): Home Rate red + Over 1.5 red, AND O25 <= 40%, AND Total < 2.5. 5/5.
-    _home_rate_red = bool((secs.get("home_scoring_rate") or {}).get("avg") is not None and (secs.get("home_scoring_rate") or {}).get("league") is not None and (secs.get("home_scoring_rate") or {}).get("avg") <= (secs.get("home_scoring_rate") or {}).get("league"))
-    _o15_red = bool((secs.get("over_1_5") or {}).get("avg") is not None and (secs.get("over_1_5") or {}).get("league") is not None and (secs.get("over_1_5") or {}).get("avg") <= (secs.get("over_1_5") or {}).get("league"))
-    _gate_lock = bool(_is_mixed and not _all_red and _home_rate_red and _o15_red and o25_rate is not None and o25_rate <= 40 and goals_avg is not None and goals_avg < 2.5)
-    if _gate_lock and not _proven_lock_main and not _under_lock_main:
-        main_key, main_label = "under_2_5", "Total under 2.5"
-        main_reason = f"LOCK — Under 3-Gate 5 / 5 in our logic (Mixed only: Home Rate red + Over 1.5 red, O25 {_fmt(o25_rate)} <= 40, Total {_fmt(goals_avg, False)} < 2.5). {_story}"
-        _under_lock_label, _under_lock_record = "Under 3-Gate", "5 / 5"
-        _under_lock_main = True
-    _over_extreme = bool(o25_rate is not None and o25_rate >= 70 and goals_avg is not None and goals_avg > 3.2)
-    _under_extreme = bool(o25_rate is not None and o25_rate <= 40)
-    _btts_yes_extreme = bool(btts_rate is not None and btts_rate >= 60)
-    _btts_no_extreme = bool(btts_rate is not None and btts_rate <= 33)
-    _extreme_main = None  # (key, label, decision, reason)
-    if _is_mixed and main_key is None:
-        if _over_extreme:
-            _extreme_main = ("over_2_5", "Total over 2.5", "YES",
-                f"Frozen Mixed Extreme — Over. Mixed, Portfolio No Main. O25 Rate {_fmt(o25_rate)} >= 70 AND Total Goals Avg {_fmt(goals_avg, False)} > 3.2. Main Over 2.5.")
-        elif _under_extreme:
-            _extreme_main = ("under_2_5", "Total under 2.5", "YES",
-                f"Frozen Mixed Extreme — Under. Mixed, Portfolio No Main. O25 Rate {_fmt(o25_rate)} <= 40 ALONE. No second condition. Main Under 2.5.")
-        elif _btts_no_extreme:
-            _extreme_main = ("btts", "Both score", "NO",
-                f"Frozen Mixed Extreme — BTTS NO. Mixed, Portfolio No Main. BTTS Rate {_fmt(btts_rate)} <= 33. 38-40% is SKIP, not NO. Main Both score NO.")
-        elif _btts_yes_extreme:
-            _extreme_main = ("btts", "Both score", "YES",
-                f"Frozen Mixed Extreme — BTTS YES. Mixed, Portfolio No Main. BTTS Rate {_fmt(btts_rate)} >= 60. Main Both score YES.")
-    if _extreme_main is not None:
-        main_key, main_label, _extreme_dec = _extreme_main[0], _extreme_main[1], _extreme_main[2]
-        main_reason = _extreme_main[3]
-        # Mark extreme so picks below can set the Main pick correctly (incl. BTTS NO).
-        _extreme_main_key = main_key
-        _extreme_main_dec = _extreme_dec
-    else:
-        _extreme_main_key = None
-        _extreme_main_dec = None
-
-    # ---- Picks: 9 lines, all usable, no SKIP ----
+    _home_scored = hg.get("a"); _home_conceded = ag.get("a")
+    _away_scored = ag.get("b"); _away_conceded = hg.get("b")
+    _hw = _w(_home_scored, _away_conceded); _aw = _w(_away_scored, _home_conceded)
+    story = (f"{home_team} is {_hw}: scores {_fmt(_home_scored, False)}, concedes {_fmt(_home_conceded, False)}. "
+             f"{away_team} is {_aw}: scores {_fmt(_away_scored, False)}, concedes {_fmt(_away_conceded, False)}. "
+             f"Together: Total {_fmt(goals_avg, False)} (League {_fmt(goals_league, False)}), Over 1.5 {_fmt(o15_avg)}, Over 2.5 {_fmt(o25_avg)}, BTTS {_fmt(btts_avg)}.")
+    # Picks: one per market, YES or SKIP (BTTS also has NO)
     picks = []
-    def _add(key, field, label, decision, confidence, reason, a=None, b=None, league=None, avg=None):
-        picks.append({"key": key, "label": label, "field": field, "a": a, "b": b, "league": league, "avg": avg, "decision": decision, "confidence": confidence, "reason": reason})
-    # Over 1.5 / 2.5 / 3.5 / BTTS / Home / Away follow their signal directly (evidence for Direction)
-    # Over 1.5 pick: Main when Over given but NOT triple proven (downgraded from Over 2.5)
-    _o15_is_main = bool(over15_main and main_key == "over_1_5")
-    _o15_extreme_main = bool(_extreme_main_key == "over_2_5" or _proven_lock_main)
-    _add("over_1_5", "over_1_5", "Total over 1.5", ("YES" if (_o15_is_main or _o15_extreme_main) else sig["over_1_5"]), "Highest" if (_o15_is_main or _o15_extreme_main) else ("Highest" if sig["over_1_5"] == "YES" else "Medium"),
-         (f"Main — {main_reason}" if _o15_is_main else f"Signal — Over 1.5 Rate {_fmt(o15_rate)} {'>=' if sig['over_1_5'] == 'YES' else '<'} 70. {'YES' if sig['over_1_5'] == 'YES' else 'NO'}."),
-         o15.get("a"), o15.get("b"), o15.get("league"), o15.get("avg"))
-    # Over 2.5 pick: Main only when triple proven. If Over given but not triple, shown as LEAN (downgraded to Over 1.5), not Main.
-    _o25_is_main = bool((over25_main and main_key == "over_2_5") or (_extreme_main_key == "over_2_5") or _proven_lock_main)
-    _o25_downgraded = bool(over15_main and main_key == "over_1_5")
-    _o25_dec = "YES" if _o25_is_main else ("LEAN" if (_o25_downgraded or lean_over) else sig["over_2_5"])
-    _o25_conf = "Highest" if _o25_is_main else ("High" if (_o25_downgraded or lean_over) else "Medium")
-    _o25_reason = (f"Main — {main_reason}" if _o25_is_main else (f"Downgraded to Over 1.5 — {main_reason}" if _o25_downgraded else (f"LEAN only — {main_reason}" if lean_over else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50. {'YES' if sig['over_2_5'] == 'YES' else 'NO'}.")))
-    _add("over_2_5", "over_2_5", "Total over 2.5", _o25_dec, _o25_conf, _o25_reason,
-         o25.get("a"), o25.get("b"), o25.get("league"), o25.get("avg"))
-    _add("over_3_5", "over_3_5", "Total over 3.5", sig["over_3_5"], "Medium",
-         f"Signal — Over 3.5 Rate {_fmt(o35_rate)} {'>=' if sig['over_3_5'] == 'YES' else '<'} 35. {'YES' if sig['over_3_5'] == 'YES' else 'NO'}. Never bet Over 3.5 alone.",
-         o35.get("a"), o35.get("b"), o35.get("league"), o35.get("avg"))
-    _btts_extreme_main = bool(_extreme_main_key == "btts")
-    _btts_dec = (_extreme_main_dec if _btts_extreme_main else sig["btts"])
-    _add("btts", "btts", "Both score", _btts_dec, "Highest" if _btts_extreme_main else ("High" if sig["btts"] == "YES" else "Medium"),
-         (f"Main — {main_reason}" if _btts_extreme_main else f"Signal — BTTS Rate {_fmt(btts_rate)} {'>=' if sig['btts'] == 'YES' else '<'} 50. {'YES' if sig['btts'] == 'YES' else 'NO'}. BTTS is evidence for Away scores, not a Main."),
-         bt.get("a"), bt.get("b"), bt.get("league"), bt.get("avg"))
-    _add("home_scores", "home_scores", "Home scores", sig["home_scores"], "Highest" if home_main else ("High" if sig["home_scores"] == "YES" else "Medium"),
-         (f"Main — {main_reason}" if home_main else f"Signal — Home Avg {_fmt(home_avg, False)} {'>=' if sig['home_scores'] == 'YES' else '<'} 1.2. {'YES' if sig['home_scores'] == 'YES' else 'NO'}."),
-         hr.get("a"), hr.get("b"), hr.get("league"), hr.get("avg"))
-    _add("away_scores", "away_scores", "Away scores", sig["away_scores"], "Highest" if away_main else ("High" if sig["away_scores"] == "YES" else "Medium"),
-         (f"Main — {main_reason}" if away_main else f"Signal — Away Avg {_fmt(away_avg, False)} {'>=' if sig['away_scores'] == 'YES' else '<'} 1.2. {'YES' if sig['away_scores'] == 'YES' else 'NO'}."),
-         ar.get("a"), ar.get("b"), ar.get("league"), ar.get("avg"))
-    # 1X / X2 from Gap — never a Main, only a winner read
-    if gap is not None and gap >= 0.5:
-        x1_dec, x1_conf, x1_reason = "YES", "High", f"Winner — Gap {_fmt(gap, False)} >= 0.5. Home does not lose."
-        x2_dec, x2_conf, x2_reason = "NO", "Medium", f"Winner — Gap {_fmt(gap, False)} >= 0.5. Away win unlikely."
-    elif gap is not None and gap <= -0.5:
-        x1_dec, x1_conf, x1_reason = "NO", "Medium", f"Winner — Gap {_fmt(gap, False)} <= -0.5. Home win unlikely (Away winner is LEAN, n small)."
-        x2_dec, x2_conf, x2_reason = "LEAN", "Medium", f"Winner — Gap {_fmt(gap, False)} <= -0.5. Away does not lose (LEAN). Never bet Away win alone."
-    elif gap is not None and abs(gap) <= 0.3:
-        x1_dec, x1_conf, x1_reason = "LEAN", "Medium", f"Winner — Gap {_fmt(gap, False)} close. Draw-prone, do not force a winner."
-        x2_dec, x2_conf, x2_reason = "LEAN", "Medium", f"Winner — Gap {_fmt(gap, False)} close. Draw-prone, do not force a winner."
-    else:
-        x1_dec, x1_conf, x1_reason = ("LEAN" if (gap or 0) > 0 else "NO"), "Medium", f"Winner — Gap {_fmt(gap, False)} slight. Not a lock."
-        x2_dec, x2_conf, x2_reason = ("LEAN" if (gap or 0) < 0 else "NO"), "Medium", f"Winner — Gap {_fmt(gap, False)} slight. Not a lock."
-    _add("1x", "1x", "1X (Home does not lose)", x1_dec, x1_conf, x1_reason, hg.get("a"), hg.get("b"), hg.get("league"), hg.get("avg"))
-    _add("x2", "x2", "X2 (Away does not lose)", x2_dec, x2_conf, x2_reason, ag.get("a"), ag.get("b"), ag.get("league"), ag.get("avg"))
-    # Under 2.5 is the inverse of Over 2.5 signal, Main only when under_main fires
-    _under_extreme_main = bool(_extreme_main_key == "under_2_5")
-    _under_is_main = bool((under_main or _under_extreme_main or _under_lock_main) and not _proven_lock_main)
-    _add("under_2_5", "under_2_5", "Total under 2.5", ("YES" if _under_is_main else ("NO" if sig["over_2_5"] == "YES" else "YES")), "Highest" if _under_is_main else "Medium",
-         (f"Main — {main_reason}" if _under_is_main else f"Signal — Over 2.5 Rate {_fmt(o25_rate)} {'>=' if sig['over_2_5'] == 'YES' else '<'} 50, so Under is {'NO' if sig['over_2_5'] == 'YES' else 'YES'}. Under is Main only with Under Direction + Quiet-game check, an Under LOCK, or Frozen Mixed Extreme."),
-         o25.get("a"), o25.get("b"), o25.get("league"), o25.get("avg"))
-    agreement_detail = {
-        "home_scoring_avg": f"Avg {_fmt(home_avg, False)} · MIN {_fmt(home_min, False)} vs League {_fmt(home_league, False)}",
-        "away_scoring_avg": f"Avg {_fmt(away_avg, False)} · MIN {_fmt(away_min, False)} vs League {_fmt(away_league, False)}",
-        "goals_match": f"Direction {no_count} NOs / {yes_count} YESs · Distribution {dist} · Gap {_fmt(gap, False)} · Winner {winner}",
-        "home_scoring_rate": f"Avg {_fmt(home_rate)} · Lock {'YES' if home_lock else 'NO'} · Win Lock {'YES' if home_win_lock else 'NO'}",
-        "away_scoring_rate": f"Avg {_fmt(away_rate)} · Quiet-game check {'YES' if neg_lock else 'NO'} · BTTS>=60 {'YES' if away_via_btts else 'NO'}",
-        "over_1_5": f"Rate {_fmt(o15_rate)} · Triple Over check {'YES' if triple_proven else 'NO'} (Goals {_fmt(goals_avg, False)} / O15 {_fmt(o15_rate)} / O25 {_fmt(o25_rate)})",
-        "over_2_5": f"Rate {_fmt(o25_rate)} · Over Dir {'YES' if over_dir else 'NO'} · Under Dir {'YES' if under_dir else 'NO'}",
-        "over_3_5": f"Rate {_fmt(o35_rate)}",
-        "btts": f"Rate {_fmt(btts_rate)} · Both Dist {'YES' if both_dist else 'NO'}",
-        "rate_full": "passes" if (home_lock or under_main or away_main or over_main) else "fails",
-        "home_triple": "n/a — Portfolio",
-        "away_triple": "n/a — Portfolio",
-        "avg80": str(no_count), "side80": str(yes_count),
-    }
-    main_pick = None; decision = "NO BET"; decision_reason = main_reason
-    if main_key:
-        for p in picks:
-            if p["key"] == main_key: main_pick = p; break
-        decision = "BET"
-        if _proven_lock_main:
-            decision_reason = f"LOCK — Proven 18 / 18 in our logic. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story}"
-        elif _under_lock_main:
-            decision_reason = f"LOCK — {_under_lock_label} {_under_lock_record} in our logic. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story}"
-        elif _extreme_main_key is not None:
-            decision_reason = f"MAIN — Not a lock. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story} Frozen Mixed Extreme fired."
-        else:
-            decision_reason = f"MAIN — Not a lock. Main (accumulator, one per match): {main_label} {main_pick.get('decision','YES')} ({main_pick.get('confidence','')}). {_story} Two checks agree: {main_reason}"
-        if lean_over: decision_reason += " Over Lean also fires — shown as LEAN, not Main."
-    else:
-        if lean_over:
-            decision_reason = f"No Main. Over is LEAN only — {main_reason} Log it, do not bet it as Main."
-        else:
-            decision_reason = f"No Main. {main_reason}"
-    yes_picks = [p for p in picks if p["decision"] == "YES"]
-    return {"picks": picks, "agreement": agreement_detail, "decision": decision, "decision_reason": decision_reason,
-            "main_pick": main_pick, "survivors": yes_picks, "derived": {p["field"]: (True if p["decision"]=="YES" else None) for p in picks},
-            "story": _story, "is_proven_lock": bool(_proven_lock_main or _under_lock_main),
-            "lock_label": ("Proven 18 / 18 in our logic" if _proven_lock_main else (f"{_under_lock_label} {_under_lock_record} in our logic" if _under_lock_main else None)),
-            "tot_margin": _tot_margin, "o25_margin": _o25_margin}
+    def _mk(key, label, field, sec, decision, reason):
+        return {"key": key, "label": label, "field": field, "confidence": "", "a": (sec or {}).get("a"), "b": (sec or {}).get("b"), "league": (sec or {}).get("league"), "avg": (sec or {}).get("avg"), "decision": decision, "reason": reason, "outcome": None}
+    picks.append(_mk("home_scores", "Home scores", "home_scores", hg, "YES" if home_yes else "SKIP",
+        f"Home collision Avg {_fmt(home_avg, False)} vs League {_fmt(home_league, False)}" + (f" + Override: Away concedes {_fmt(home_b, False)} >= League +0.50." if home_override else ".") + (" -> Home scores." if home_yes else " -> SKIP. DOWN is not NO.")))
+    picks.append(_mk("away_scores", "Away scores", "away_scores", ag, "YES" if away_yes else "SKIP",
+        f"Away collision Avg {_fmt(away_avg, False)} vs League {_fmt(away_league, False)}" + (f" + Override: Home concedes {_fmt(away_a, False)} >= League +0.50." if away_override else ".") + (" -> Away scores." if away_yes else " -> SKIP. DOWN is not NO.")))
+    picks.append(_mk("over_1_5", "Total over 1.5", "over_1_5", o15, "YES" if over_yes else "SKIP",
+        f"Total Avg {_fmt(goals_avg, False)} vs League {_fmt(goals_league, False)} AND O15 Avg {_fmt(o15_avg)} vs League {_fmt(o15_league)}." + (" Both UP -> Over 1.5." if over_yes else " -> SKIP.")))
+    picks.append(_mk("btts", "Both score", "btts", bt, "YES" if btts_yes else ("NO" if btts_no else "SKIP"),
+        f"BTTS = Home YES + Away YES. Home {'YES' if home_yes else 'SKIP'}, Away {'YES' if away_yes else 'SKIP'}, BTTS Avg {_fmt(btts_avg)} vs League {_fmt(btts_league)}." + (" -> BTTS YES." if btts_yes else (" -> BTTS NO." if btts_no else " -> SKIP."))))
+    picks.append(_mk("under_2_5", "Total under 2.5", "under_2_5", o25, "YES" if under_yes else "SKIP",
+        f"Under needs Total DOWN + O25 DOWN + BTTS DOWN + no override. Total {_fmt(goals_avg, False)} vs {_fmt(goals_league, False)}, O25 {_fmt(o25_avg)} vs {_fmt(o25_league)}, BTTS {_fmt(btts_avg)} vs {_fmt(btts_league)}, Override Home {home_override} / Away {away_override}." + (" -> Under." if under_yes else " -> SKIP. Blocked if any defence leaks.")))
+    # Main = highest-rate firing pick: Over 1.5 > Home > Away > Under > BTTS YES (BTTS NO is never Main)
+    priority = ["over_1_5", "home_scores", "away_scores", "under_2_5", "btts"]
+    main = None
+    for k in priority:
+        for pp in picks:
+            if pp["key"] == k and pp["decision"] == "YES":
+                main = pp; break
+        if main: break
+    decision = "BET" if main else "NO BET"
+    decision_reason = story
+    agreement = {k: ("UP" if _up((secs.get(k) or {}).get("avg"), (secs.get(k) or {}).get("league")) else ("DOWN" if _down((secs.get(k) or {}).get("avg"), (secs.get(k) or {}).get("league")) else "—")) for k in ["home_scoring_avg","away_scoring_avg","goals_match","over_1_5","over_2_5","btts"]}
+    return {"picks": picks, "agreement": agreement, "decision": decision, "decision_reason": decision_reason, "main_pick": main,
+            "survivors": [pp for pp in picks if pp["decision"] == "YES"],
+            "derived": {pp["field"]: (True if pp["decision"] == "YES" else None) for pp in picks},
+            "is_proven_lock": False, "lock_label": None}
 
-# Backwards compat alias
-compute_filter_rule = compute_agreement
-
-# ---------------- Card ----------------
-# Same display card as the last green code — green = BET, red = NO BET. Only the logic underneath changed to agreement.
 def _card_html(m, filt, settled=False):
     home = m.get("home_team") or "?"; away = m.get("away_team") or "?"
     fixture = f"{home} vs {away}"
@@ -719,8 +460,8 @@ def _card_html(m, filt, settled=False):
     agree = filt.get("agreement") or {}
     agree_txt = " · ".join([f"{k}: {v}" for k, v in agree.items() if k in ("home_scoring_avg","away_scoring_avg","goals_match","home_scoring_rate","away_scoring_rate","over_1_5","over_2_5","over_3_5","btts")]) if agree else ""
     _is_lock = bool(filt.get("is_proven_lock"))
-    _status = f"🔒 LOCK • {filt.get('lock_label') or 'Proven 18 / 18 in our logic'}" if _is_lock else ("MAIN • Not a lock" if is_bet else "NO BET • Not a lock")
-    head = f"<div style='background:{bg};border:1px solid {color};border-radius:12px;padding:14px 16px'><div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • PORTFOLIO • {_status}</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:1.05rem;font-weight:700;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div></div>"
+    _status = ("MAIN" if is_bet else "NO BET")
+    head = f"<div style='background:{bg};border:1px solid {color};border-radius:12px;padding:14px 16px'><div style='font-size:0.75rem;letter-spacing:0.08em;font-weight:700;color:{color}'>{dec} • COLLISION • {_status}</div><div style='font-size:1.25rem;font-weight:800;color:#f1f5f9;margin-top:4px'>{fixture}</div><div style='font-size:1.05rem;font-weight:700;color:#e2e8f0;margin-top:4px'>Main: {main_txt}</div><div style='font-size:0.88rem;color:#94a3b8;margin-top:2px'>{filt.get('decision_reason','')}</div></div>"
     return f"<div class='match-card'>{head}<div style='margin-top:10px'>{''.join(lines)}</div><div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Agreement: {agree_txt}</div></div>"
 
 def _filt_from_db_row(m):
@@ -740,7 +481,7 @@ def _filt_from_db_row(m):
             "decision_reason": _reason if isinstance(_reason, str) else "", "main_pick": main,
             "survivors": [p for p in picks if p["decision"] == "YES"],
             "derived": {pp["field"]: (True if pp["decision"]=="YES" else None) for pp in picks},
-            "is_proven_lock": bool(isinstance(_reason, str) and _reason.startswith("LOCK")),
+            "is_proven_lock": False,
             "lock_label": ("All Red 9 / 9 in our logic" if isinstance(_reason, str) and "All Red" in _reason else ("Under 3-Gate 5 / 5 in our logic" if isinstance(_reason, str) and "3-Gate" in _reason else ("Proven 18 / 18 in our logic" if isinstance(_reason, str) and _reason.startswith("LOCK") else None)))}
 
 
@@ -828,15 +569,15 @@ def _perf_summary_html(settled):
 # ---------------- UI ----------------
 st.set_page_config(page_title="King — Agreement", layout="wide")
 st.markdown("<style>.match-card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:16px 18px;margin:10px 0}</style>", unsafe_allow_html=True)
-st.title("⚽ King — Portfolio")
-st.caption("Portfolio logic — Two families must agree for a Main. Under = Direction + Quiet-game check · Home = Lock + Win Lock · Away = BTTS + Distribution · Over given = 6 YESs + Both. Triple Over check -> Over 2.5, else Over 1.5. Store: Supabase king_matches (SQLite fallback).")
+st.title("⚽ King — Collision")
+st.caption("Collision logic — Home collision + Away collision + Total + BTTS. Avg vs League + conceding override (+0.50). Main = highest-rate firing pick. Store: Supabase king_matches (SQLite fallback).")
 
 tab_new, tab_pending, tab_perf, tab_lab, tab_supabase = st.tabs(["➕ New Match", "⏳ Pending", "📊 Performance", "🧪 Lab", "🔌 Supabase"])
 with tab_new:
     st.markdown("### Paste the Teams scoring vs league average block")
     st.caption("Evaluating does NOT save. Nothing is saved until you press Save to Pending.")
     raw_in = st.text_area("Input", height=380, label_visibility="collapsed", placeholder="Teams scoring vs league average")
-    if st.button("Run Portfolio", type="primary") and raw_in.strip():
+    if st.button("Run Collision", type="primary") and raw_in.strip():
         facts = parse_filter_data(raw_in.strip()); filt = compute_agreement(facts)
         st.session_state["last_eval"] = {"facts": facts, "filt": filt, "raw": raw_in.strip(), "auto_saved_id": None, "auto_save_msg": ""}
         if filt.get("decision") == "BET":
