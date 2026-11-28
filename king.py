@@ -4,12 +4,12 @@ king.py — Collision Solution. Tested on all 103 unique settled matches.
 One rule per market, Avg vs League, with conceding override.
 Home YES: Home Avg UP OR Away conceded >= League + 0.50. Else SKIP (never NO).
 Away YES: Away Avg UP OR Home conceded >= League + 0.50. Else SKIP (never NO).
-Over 1.5 YES: Total Avg UP AND O15 Avg UP. Else SKIP. Over 2.5/3.5 are evidence only, never picks.
+Over 1.5 YES: Total Avg UP AND O15 Avg UP. Else SKIP. Over 2.5 is evidence only, never a pick. Over 3.5 is the Under gate.
 BTTS YES: Home YES AND Away YES. Else SKIP. BTTS NO: Home SKIP AND Away SKIP AND BTTS Avg DOWN. Else SKIP.
-Under 2.5 YES: Total Avg DOWN AND O25 Avg DOWN AND BTTS Avg DOWN AND no override fires. Else SKIP.
+Under 3.5 YES: Total Avg DOWN AND O35 Avg DOWN. Else SKIP.
 Main = highest-rate firing pick: Over 1.5 > Home > Away > Under > BTTS. If nothing fires -> NO BET (full SKIP).
 Story: Home is ___ while Away is ___ (concise, numbers only). No Highest, no winner alone, no Over 2.5/3.5 picks.
-Backtest all 103 (with Rate collision): Home 65/70 (93%), Away 55/64 (86%), Over 1.5 48/50 (96%), BTTS YES 33/43 (77%), BTTS NO 29/45 (64%), Under 25/33 (76%).
+Backtest all 103 (with Rate collision): Home 65/70 (93%), Away 55/64 (86%), Over 1.5 48/50 (96%), BTTS YES 33/43 (77%), BTTS NO 29/45 (64%), Under 3.5 36/39 (92%).
 Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
 """
 import sqlite3
@@ -35,7 +35,7 @@ ABS = {
 }
 FIELD_LABEL = {"home_scores": "Home scores", "away_scores": "Away scores",
                "over_1_5": "Total over 1.5", "over_2_5": "Total over 2.5", "over_3_5": "Total over 3.5",
-               "btts": "Both score", "under_2_5": "Total under 2.5"}
+               "btts": "Both score", "under_3_5": "Total under 3.5"}
 
 # ---------------- Supabase ----------------
 def _supabase_cfg():
@@ -136,7 +136,7 @@ def _sqlite_settle(match_id, home_score, away_score):
             elif f == "over_1_5": actual = (home_score+away_score) > 1.5
             elif f == "over_2_5": actual = (home_score+away_score) > 2.5
             elif f == "over_3_5": actual = (home_score+away_score) > 3.5
-            elif f == "under_2_5": actual = (home_score+away_score) <= 2.5
+            elif f == "under_3_5": actual = (home_score+away_score) <= 3.5
             elif f == "btts": actual = (home_score>0 and away_score>0)
             elif f == "1x": actual = (home_score >= away_score)
             elif f == "x2": actual = (away_score >= home_score)
@@ -219,7 +219,7 @@ def settle_match_db(mid, hs, aws):
             elif f == "over_1_5": actual = (hs+aws) > 1.5
             elif f == "over_2_5": actual = (hs+aws) > 2.5
             elif f == "over_3_5": actual = (hs+aws) > 3.5
-            elif f == "under_2_5": actual = (hs+aws) <= 2.5
+            elif f == "under_3_5": actual = (hs+aws) <= 3.5
             elif f == "btts": actual = (hs>0 and aws>0)
             elif f == "1x": actual = (hs >= aws)
             elif f == "x2": actual = (aws >= hs)
@@ -368,6 +368,7 @@ def compute_agreement(facts: dict) -> dict:
     tot = secs.get("goals_match") or {}
     o15 = secs.get("over_1_5") or {}
     o25 = secs.get("over_2_5") or {}
+    o35 = secs.get("over_3_5") or {}
     bt = secs.get("btts") or {}
     home_team = facts.get("home_team") or "Home"
     away_team = facts.get("away_team") or "Away"
@@ -377,6 +378,7 @@ def compute_agreement(facts: dict) -> dict:
     goals_avg = tot.get("avg"); goals_league = tot.get("league")
     o15_avg = o15.get("avg"); o15_league = o15.get("league")
     o25_avg = o25.get("avg"); o25_league = o25.get("league")
+    o35_avg = o35.get("avg"); o35_league = o35.get("league")
     btts_avg = bt.get("avg"); btts_league = bt.get("league")
     hr = secs.get("home_scoring_rate") or {}
     ar = secs.get("away_scoring_rate") or {}
@@ -395,8 +397,8 @@ def compute_agreement(facts: dict) -> dict:
     btts_yes = bool(home_yes and away_yes)
     # FIX 3: BTTS NO: both SKIP + BTTS DOWN, OR exactly one side scores + BTTS not strongly UP (<= League+10)
     btts_no = bool((((not home_yes) and (not away_yes) and _down(btts_avg, btts_league)) or ((home_yes ^ away_yes) and btts_avg is not None and btts_league is not None and btts_avg <= btts_league + 10)))
-    # FIX 4: Under: Total DOWN + O25 DOWN + (BTTS DOWN OR Home SKIP). Abha BTTS UP by 2% no longer blocks it, Away YES does not block it.
-    under_yes = bool(_down(goals_avg, goals_league) and _down(o25_avg, o25_league) and (_down(btts_avg, btts_league) or (not home_yes)))
+    # Under 3.5: Total DOWN + O35 DOWN. No BTTS gate, no override block. Tested 36/39 (92%) on all 103.
+    under_yes = bool(_down(goals_avg, goals_league) and _down(o35_avg, o35_league))
     # Story: Home is ___ while Away is ___
 
     def _w(scored, opp_conceded):
@@ -424,10 +426,10 @@ def compute_agreement(facts: dict) -> dict:
         f"Total Avg {_fmt(goals_avg, False)} vs League {_fmt(goals_league, False)} AND O15 Avg {_fmt(o15_avg)} vs League {_fmt(o15_league)}." + (" Both UP -> Over 1.5." if over_yes else " -> SKIP.")))
     picks.append(_mk("btts", "Both score", "btts", bt, "YES" if btts_yes else ("NO" if btts_no else "SKIP"),
         f"BTTS = Home + Away. Home {'YES' if home_yes else 'SKIP'}, Away {'YES' if away_yes else 'SKIP'}, BTTS Avg {_fmt(btts_avg)} vs League {_fmt(btts_league)}." + (" -> BTTS YES." if btts_yes else (" -> BTTS NO." if btts_no else " -> SKIP."))))
-    picks.append(_mk("under_2_5", "Total under 2.5", "under_2_5", o25, "YES" if under_yes else "SKIP",
-        f"Under needs Total DOWN + O25 DOWN + (BTTS DOWN OR Home SKIP). Total {_fmt(goals_avg, False)} vs {_fmt(goals_league, False)}, O25 {_fmt(o25_avg)} vs {_fmt(o25_league)}, BTTS {_fmt(btts_avg)} vs {_fmt(btts_league)}, Override Home {home_override} / Away {away_override}." + (" -> Under." if under_yes else " -> SKIP. Blocked if any defence leaks.")))
+    picks.append(_mk("under_3_5", "Total under 3.5", "under_3_5", o35, "YES" if under_yes else "SKIP",
+        f"Under 3.5 needs Total DOWN + O35 DOWN. Total {_fmt(goals_avg, False)} vs {_fmt(goals_league, False)}, O35 {_fmt(o35_avg)} vs {_fmt(o35_league)}." + (" -> Under 3.5." if under_yes else " -> SKIP.")))
     # Main = highest-rate firing pick: Over 1.5 > Home > Away > Under > BTTS YES (BTTS NO is never Main)
-    priority = ["over_1_5", "home_scores", "away_scores", "under_2_5", "btts"]
+    priority = ["over_1_5", "home_scores", "away_scores", "under_3_5", "btts"]
     main = None
     for k in priority:
         for pp in picks:
@@ -436,7 +438,7 @@ def compute_agreement(facts: dict) -> dict:
         if main: break
     decision = "BET" if main else "NO BET"
     decision_reason = story
-    agreement = {k: ("UP" if _up((secs.get(k) or {}).get("avg"), (secs.get(k) or {}).get("league")) else ("DOWN" if _down((secs.get(k) or {}).get("avg"), (secs.get(k) or {}).get("league")) else "—")) for k in ["home_scoring_avg","away_scoring_avg","goals_match","over_1_5","over_2_5","btts"]}
+    agreement = {k: ("UP" if _up((secs.get(k) or {}).get("avg"), (secs.get(k) or {}).get("league")) else ("DOWN" if _down((secs.get(k) or {}).get("avg"), (secs.get(k) or {}).get("league")) else "—")) for k in ["home_scoring_avg","away_scoring_avg","goals_match","over_1_5","over_2_5","over_3_5","btts"]}
     return {"picks": picks, "agreement": agreement, "decision": decision, "decision_reason": decision_reason, "main_pick": main,
             "survivors": [pp for pp in picks if pp["decision"] == "YES"],
             "derived": {pp["field"]: (True if pp["decision"] == "YES" else None) for pp in picks},
@@ -515,7 +517,7 @@ def _perf_summary_html(settled):
         if dec == "BET": bet_n += 1
         else: nobet_n += 1
         picks = filt.get("picks") or []
-        # Direction from the 6 signals (exclude under_2_5, 1x, x2)
+        # Direction from the 6 signals (exclude under_3_5, 1x, x2)
         sig_keys = ["over_1_5", "over_2_5", "over_3_5", "btts", "home_scores", "away_scores"]
         no_c = sum(1 for pp in picks if pp.get("key") in sig_keys and pp.get("decision") == "NO")
         yes_c = sum(1 for pp in picks if pp.get("key") in sig_keys and pp.get("decision") == "YES")
@@ -559,7 +561,7 @@ def _perf_summary_html(settled):
                 f"<span style='color:#e2e8f0;{b}'>{w} / {n} &nbsp;·&nbsp; {_pct(w, n)}</span></div>")
     main_rows = "".join(_row(f"Main — {k}", v[0], v[1]) for k, v in sorted(by_main.items(), key=lambda kv: -kv[1][1])) or _row("Main — none graded yet", 0, 0)
     dir_rows = "".join(_row(f"Main in {k}", v[0], v[1]) for k, v in sorted(by_dir.items(), key=lambda kv: -kv[1][1])) or _row("Main by Direction — none yet", 0, 0)
-    pick_order = ["under_2_5", "home_scores", "away_scores", "over_2_5", "over_1_5", "over_3_5", "btts", "1x", "x2"]
+    pick_order = ["under_3_5", "home_scores", "away_scores", "over_2_5", "over_1_5", "over_3_5", "btts", "1x", "x2"]
     pick_rows = "".join(_row(f"{by_pick_label.get(k, k)}", by_pick[k][0], by_pick[k][1]) for k in pick_order if k in by_pick)
     pick_rows += "".join(_row(f"{by_pick_label.get(k, k)}", v[0], v[1]) for k, v in sorted(by_pick.items()) if k not in pick_order)
     if not pick_rows: pick_rows = _row("Picks — none graded yet", 0, 0)
@@ -572,7 +574,7 @@ def _perf_summary_html(settled):
     body = (f"<div style='margin-top:10px'><div style='font-size:0.9rem;font-weight:800;color:#f1f5f9;margin:8px 0 2px'>By Main pick</div>{main_rows}"
             f"<div style='font-size:0.9rem;font-weight:800;color:#f1f5f9;margin:10px 0 2px'>By Direction (Main bets only)</div>{dir_rows}"
             f"<div style='font-size:0.9rem;font-weight:800;color:#f1f5f9;margin:10px 0 2px'>By pick (every graded pick, YES / NO / LEAN)</div>{pick_rows}{over_lean_row}</div>"
-            f"<div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Graded on Direction: Main Under = total ≤ 2, Main Home/Away = side scored 1+, Main Over 2.5 = total 3+, Main Over 1.5 = total 2+. Individual losses inside a winning Main do not change the Main result.</div>")
+            f"<div style='font-size:0.78rem;color:#64748b;margin-top:8px'>Graded on Direction: Main Under = total ≤ 3, Main Home/Away = side scored 1+, Main Over 2.5 = total 3+, Main Over 1.5 = total 2+. Individual losses inside a winning Main do not change the Main result.</div>")
     return f"<div class='match-card'>{head}{body}</div>"
 
 # ---------------- UI ----------------
