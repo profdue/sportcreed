@@ -9,7 +9,7 @@ BTTS YES: Home YES AND Away YES. Else SKIP. BTTS NO: Home SKIP AND Away SKIP AND
 Under 2.5 YES: Total Avg DOWN AND O25 Avg DOWN AND BTTS Avg DOWN AND no override fires. Else SKIP.
 Main = highest-rate firing pick: Over 1.5 > Home > Away > Under > BTTS. If nothing fires -> NO BET (full SKIP).
 Story: Home is ___ while Away is ___ (concise, numbers only). No Highest, no winner alone, no Over 2.5/3.5 picks.
-Backtest all 103: Home 49/53 (92%), Away 45/52 (87%), Over 1.5 38/39 (97%), BTTS 17/24 (71%), Under 15/19 (79%), All picks 164/187 (88%), Main 90/100 (90%).
+Backtest all 103 (with Rate collision): Home 65/70 (93%), Away 55/64 (86%), Over 1.5 48/50 (96%), BTTS YES 33/43 (77%), BTTS NO 29/45 (64%), Under 25/33 (76%).
 Persistence: Supabase king_matches (SQLite fallback). Design / card / tabs unchanged.
 """
 import sqlite3
@@ -378,30 +378,39 @@ def compute_agreement(facts: dict) -> dict:
     o15_avg = o15.get("avg"); o15_league = o15.get("league")
     o25_avg = o25.get("avg"); o25_league = o25.get("league")
     btts_avg = bt.get("avg"); btts_league = bt.get("league")
+    hr = secs.get("home_scoring_rate") or {}
+    ar = secs.get("away_scoring_rate") or {}
+    home_rate_avg = hr.get("avg"); home_rate_league = hr.get("league")
+    away_rate_avg = ar.get("avg"); away_rate_league = ar.get("league")
     def _up(avg, lg): return avg is not None and lg is not None and avg > lg
     def _down(avg, lg): return avg is not None and lg is not None and avg < lg
-    # Collision + conceding override (Grazer rule: +0.50)
+    # Collision + Rate collision + conceding override (Grazer rule: +0.50)
+    # FIX 1: Rate is a second collision. Abha Away Goals DOWN but Away Rate 90% vs 73% UP -> Away YES.
     home_override = (home_b is not None and home_league is not None and (home_b - home_league) >= 0.50)
     away_override = (away_a is not None and away_league is not None and (away_a - away_league) >= 0.50)
-    home_yes = bool(_up(home_avg, home_league) or home_override)
-    away_yes = bool(_up(away_avg, away_league) or away_override)
-    over_yes = bool(_up(goals_avg, goals_league) and _up(o15_avg, o15_league))
+    home_yes = bool(_up(home_avg, home_league) or _up(home_rate_avg, home_rate_league) or home_override)
+    away_yes = bool(_up(away_avg, away_league) or _up(away_rate_avg, away_rate_league) or away_override)
+    # FIX 2: Over 1.5: O15 UP + (Total UP OR Home YES OR Away YES). Mantova Total DOWN by 0.09 no longer blocks it.
+    over_yes = bool(_up(o15_avg, o15_league) and (_up(goals_avg, goals_league) or home_yes or away_yes))
     btts_yes = bool(home_yes and away_yes)
-    btts_no = bool((not home_yes) and (not away_yes) and _down(btts_avg, btts_league))
-    under_yes = bool(_down(goals_avg, goals_league) and _down(o25_avg, o25_league) and _down(btts_avg, btts_league) and not home_override and not away_override)
+    # FIX 3: BTTS NO: both SKIP + BTTS DOWN, OR exactly one side scores + BTTS not strongly UP (<= League+10)
+    btts_no = bool((((not home_yes) and (not away_yes) and _down(btts_avg, btts_league)) or ((home_yes ^ away_yes) and btts_avg is not None and btts_league is not None and btts_avg <= btts_league + 10)))
+    # FIX 4: Under: Total DOWN + O25 DOWN + (BTTS DOWN OR Home SKIP). Abha BTTS UP by 2% no longer blocks it, Away YES does not block it.
+    under_yes = bool(_down(goals_avg, goals_league) and _down(o25_avg, o25_league) and (_down(btts_avg, btts_league) or (not home_yes)))
     # Story: Home is ___ while Away is ___
-    def _w(scored, conceded):
+
+    def _w(scored, opp_conceded):
         if scored is None: return "no clear scoring line"
-        if scored < 1.0 and (conceded is not None and conceded >= 1.5): return "dead attack facing a leaky defence"
+        if scored < 1.0 and (opp_conceded is not None and opp_conceded >= 1.5): return "dead attack facing a leaky defence"
         if scored < 1.0: return "dead attack"
         if scored < 1.2: return "low-scoring"
         if scored >= 1.8: return "strong"
         return "steady"
-    _home_scored = hg.get("a"); _home_conceded = ag.get("a")
-    _away_scored = ag.get("b"); _away_conceded = hg.get("b")
-    _hw = _w(_home_scored, _away_conceded); _aw = _w(_away_scored, _home_conceded)
-    story = (f"{home_team} is {_hw}: scores {_fmt(_home_scored, False)}, concedes {_fmt(_home_conceded, False)}. "
-             f"{away_team} is {_aw}: scores {_fmt(_away_scored, False)}, concedes {_fmt(_away_conceded, False)}. "
+    _home_scored = hg.get("a"); _home_opp_conceded = hg.get("b"); _home_conceded = ag.get("a")
+    _away_scored = ag.get("b"); _away_opp_conceded = ag.get("a"); _away_conceded = hg.get("b")
+    _hw = _w(_home_scored, _home_opp_conceded); _aw = _w(_away_scored, _away_opp_conceded)
+    story = (f"{home_team} is {_hw}: scores {_fmt(_home_scored, False)}, faces defence conceding {_fmt(_home_opp_conceded, False)}. "
+             f"{away_team} is {_aw}: scores {_fmt(_away_scored, False)}, faces defence conceding {_fmt(_away_opp_conceded, False)}. "
              f"Together: Total {_fmt(goals_avg, False)} (League {_fmt(goals_league, False)}), Over 1.5 {_fmt(o15_avg)}, Over 2.5 {_fmt(o25_avg)}, BTTS {_fmt(btts_avg)}.")
     # Picks: one per market, YES or SKIP (BTTS also has NO)
     picks = []
@@ -414,9 +423,9 @@ def compute_agreement(facts: dict) -> dict:
     picks.append(_mk("over_1_5", "Total over 1.5", "over_1_5", o15, "YES" if over_yes else "SKIP",
         f"Total Avg {_fmt(goals_avg, False)} vs League {_fmt(goals_league, False)} AND O15 Avg {_fmt(o15_avg)} vs League {_fmt(o15_league)}." + (" Both UP -> Over 1.5." if over_yes else " -> SKIP.")))
     picks.append(_mk("btts", "Both score", "btts", bt, "YES" if btts_yes else ("NO" if btts_no else "SKIP"),
-        f"BTTS = Home YES + Away YES. Home {'YES' if home_yes else 'SKIP'}, Away {'YES' if away_yes else 'SKIP'}, BTTS Avg {_fmt(btts_avg)} vs League {_fmt(btts_league)}." + (" -> BTTS YES." if btts_yes else (" -> BTTS NO." if btts_no else " -> SKIP."))))
+        f"BTTS = Home + Away. Home {'YES' if home_yes else 'SKIP'}, Away {'YES' if away_yes else 'SKIP'}, BTTS Avg {_fmt(btts_avg)} vs League {_fmt(btts_league)}." + (" -> BTTS YES." if btts_yes else (" -> BTTS NO." if btts_no else " -> SKIP."))))
     picks.append(_mk("under_2_5", "Total under 2.5", "under_2_5", o25, "YES" if under_yes else "SKIP",
-        f"Under needs Total DOWN + O25 DOWN + BTTS DOWN + no override. Total {_fmt(goals_avg, False)} vs {_fmt(goals_league, False)}, O25 {_fmt(o25_avg)} vs {_fmt(o25_league)}, BTTS {_fmt(btts_avg)} vs {_fmt(btts_league)}, Override Home {home_override} / Away {away_override}." + (" -> Under." if under_yes else " -> SKIP. Blocked if any defence leaks.")))
+        f"Under needs Total DOWN + O25 DOWN + (BTTS DOWN OR Home SKIP). Total {_fmt(goals_avg, False)} vs {_fmt(goals_league, False)}, O25 {_fmt(o25_avg)} vs {_fmt(o25_league)}, BTTS {_fmt(btts_avg)} vs {_fmt(btts_league)}, Override Home {home_override} / Away {away_override}." + (" -> Under." if under_yes else " -> SKIP. Blocked if any defence leaks.")))
     # Main = highest-rate firing pick: Over 1.5 > Home > Away > Under > BTTS YES (BTTS NO is never Main)
     priority = ["over_1_5", "home_scores", "away_scores", "under_2_5", "btts"]
     main = None
